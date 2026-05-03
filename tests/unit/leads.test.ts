@@ -158,6 +158,42 @@ describe("extractEnrichment", () => {
     expect(result).not.toBeNull();
     expect(result!.firstName).toBe("Alice");
   });
+
+  it("passes through new Apollo coverage fields (name, personalEmails, mobilePhone, phoneNumbers, organizationId, organizationRawAddress, raw)", () => {
+    const metadata = {
+      firstName: "Diana",
+      lastName: "Prince",
+      name: "Diana Prince",
+      personalEmails: ["diana@personal.com", "wonder@gmail.com"],
+      mobilePhone: "+1-555-WONDER",
+      phoneNumbers: [
+        { rawNumber: "+1-555-WONDER", sanitizedNumber: "+15559663377", type: "mobile" },
+      ],
+      organizationId: "org-apollo-themyscira",
+      organizationName: "Themyscira Inc",
+      organizationRawAddress: "1 Paradise Island, Themyscira",
+      raw: {
+        first_name: "Diana",
+        last_name: "Prince",
+        personal_emails: ["diana@personal.com"],
+        mobile_phone: "+1-555-WONDER",
+        organization_id: "org-apollo-themyscira",
+      },
+    };
+
+    const result = extractEnrichment(metadata);
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe("Diana Prince");
+    expect(result!.personalEmails).toEqual(["diana@personal.com", "wonder@gmail.com"]);
+    expect(result!.mobilePhone).toBe("+1-555-WONDER");
+    expect(result!.phoneNumbers).toEqual([
+      { rawNumber: "+1-555-WONDER", sanitizedNumber: "+15559663377", type: "mobile" },
+    ]);
+    expect(result!.organizationId).toBe("org-apollo-themyscira");
+    expect(result!.organizationRawAddress).toBe("1 Paradise Island, Themyscira");
+    expect((result!.raw as Record<string, unknown>).personal_emails).toEqual(["diana@personal.com"]);
+    expect((result!.raw as Record<string, unknown>).mobile_phone).toBe("+1-555-WONDER");
+  });
 });
 
 // --- GET /orgs/leads with merged status ---
