@@ -34,10 +34,22 @@ export interface ApolloSearchParams {
   [key: string]: unknown;
 }
 
+export interface ApolloPhoneNumber {
+  rawNumber?: string;
+  sanitizedNumber?: string;
+  type?: string;
+  position?: number;
+  status?: string;
+  dncStatus?: string;
+  dncOtherInfo?: string;
+  dialerFlags?: Record<string, unknown>;
+}
+
 export interface ApolloPersonResult {
   id: string;
   email?: string;
   emailStatus?: string;
+  name?: string;
   firstName?: string;
   lastName?: string;
   title?: string;
@@ -55,6 +67,9 @@ export interface ApolloPersonResult {
   twitterUrl?: string;
   githubUrl?: string;
   facebookUrl?: string;
+  personalEmails?: string[];
+  mobilePhone?: string;
+  phoneNumbers?: ApolloPhoneNumber[];
   employmentHistory?: Array<{
     title?: string;
     organizationName?: string;
@@ -64,10 +79,12 @@ export interface ApolloPersonResult {
     current?: boolean;
   }>;
   // Organization details
+  organizationId?: string;
   organizationName?: string;
   organizationDomain?: string;
   organizationIndustry?: string;
   organizationSize?: string;
+  organizationRawAddress?: string;
   organizationRevenueUsd?: string;
   organizationWebsiteUrl?: string;
   organizationLogoUrl?: string;
@@ -113,6 +130,8 @@ export interface ApolloPersonResult {
   organizationNumSuborganizations?: number;
   organizationRetailLocationCount?: number;
   organizationAlexaRanking?: number;
+  // Verbatim Apollo person payload (snake_case, includes any field Apollo returns)
+  raw?: Record<string, unknown>;
   // Allow any additional fields Apollo adds in the future
   [key: string]: unknown;
 }

@@ -116,12 +116,24 @@ const TechnologySchema = z.object({
   category: z.string().nullable().optional(),
 });
 
+const PhoneNumberSchema = z.object({
+  rawNumber: z.string().nullable().optional(),
+  sanitizedNumber: z.string().nullable().optional(),
+  type: z.string().nullable().optional(),
+  position: z.number().nullable().optional(),
+  status: z.string().nullable().optional(),
+  dncStatus: z.string().nullable().optional(),
+  dncOtherInfo: z.string().nullable().optional(),
+  dialerFlags: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
 export const ApolloPersonDataSchema = z
   .object({
     // Person identifiers
     id: z.string().optional(),
     email: z.string().nullable().optional(),
     emailStatus: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
     firstName: z.string(),
     lastName: z.string(),
     title: z.string().nullable().optional(),
@@ -139,12 +151,17 @@ export const ApolloPersonDataSchema = z
     twitterUrl: z.string().nullable().optional(),
     githubUrl: z.string().nullable().optional(),
     facebookUrl: z.string().nullable().optional(),
+    personalEmails: z.array(z.string()).nullable().optional(),
+    mobilePhone: z.string().nullable().optional(),
+    phoneNumbers: z.array(PhoneNumberSchema).nullable().optional(),
     employmentHistory: z.array(EmploymentHistorySchema).optional(),
     // Organization details (flat, NOT nested)
+    organizationId: z.string().nullable().optional(),
     organizationName: z.string(),
     organizationDomain: z.string().nullable().optional(),
     organizationIndustry: z.string().nullable().optional(),
     organizationSize: z.string().nullable().optional(),
+    organizationRawAddress: z.string().nullable().optional(),
     organizationRevenueUsd: z.string().nullable().optional(),
     organizationWebsiteUrl: z.string().nullable().optional(),
     organizationLogoUrl: z.string().nullable().optional(),
@@ -179,6 +196,8 @@ export const ApolloPersonDataSchema = z
     organizationNumSuborganizations: z.number().nullable().optional(),
     organizationRetailLocationCount: z.number().nullable().optional(),
     organizationAlexaRanking: z.number().nullable().optional(),
+    // Verbatim Apollo person payload (snake_case, includes any field Apollo returns)
+    raw: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .openapi("ApolloPersonData", {
     description:
@@ -317,6 +336,12 @@ const LeadDetailSchema = z
           "'neutral' = ambiguous or informational. " +
           "null when no reply detected.",
       }),
+    statusReason: z.string().nullable().openapi({
+      description: "Why this lead was skipped or placed in its current status (e.g. 'already_contacted', 'bounced'). Only set for buffer leads.",
+    }),
+    statusDetails: z.string().nullable().openapi({
+      description: "Human-readable details about the status reason. Only set for buffer leads.",
+    }),
     lastDeliveredAt: z.string().nullable(),
     global: z.object({
       bounced: z.boolean(),

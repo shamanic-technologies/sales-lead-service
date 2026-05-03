@@ -158,6 +158,42 @@ describe("extractEnrichment", () => {
     expect(result).not.toBeNull();
     expect(result!.firstName).toBe("Alice");
   });
+
+  it("passes through new Apollo coverage fields (name, personalEmails, mobilePhone, phoneNumbers, organizationId, organizationRawAddress, raw)", () => {
+    const metadata = {
+      firstName: "Diana",
+      lastName: "Prince",
+      name: "Diana Prince",
+      personalEmails: ["diana@personal.com", "wonder@gmail.com"],
+      mobilePhone: "+1-555-WONDER",
+      phoneNumbers: [
+        { rawNumber: "+1-555-WONDER", sanitizedNumber: "+15559663377", type: "mobile" },
+      ],
+      organizationId: "org-apollo-themyscira",
+      organizationName: "Themyscira Inc",
+      organizationRawAddress: "1 Paradise Island, Themyscira",
+      raw: {
+        first_name: "Diana",
+        last_name: "Prince",
+        personal_emails: ["diana@personal.com"],
+        mobile_phone: "+1-555-WONDER",
+        organization_id: "org-apollo-themyscira",
+      },
+    };
+
+    const result = extractEnrichment(metadata);
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe("Diana Prince");
+    expect(result!.personalEmails).toEqual(["diana@personal.com", "wonder@gmail.com"]);
+    expect(result!.mobilePhone).toBe("+1-555-WONDER");
+    expect(result!.phoneNumbers).toEqual([
+      { rawNumber: "+1-555-WONDER", sanitizedNumber: "+15559663377", type: "mobile" },
+    ]);
+    expect(result!.organizationId).toBe("org-apollo-themyscira");
+    expect(result!.organizationRawAddress).toBe("1 Paradise Island, Themyscira");
+    expect((result!.raw as Record<string, unknown>).personal_emails).toEqual(["diana@personal.com"]);
+    expect((result!.raw as Record<string, unknown>).mobile_phone).toBe("+1-555-WONDER");
+  });
 });
 
 // --- GET /orgs/leads with merged status ---
@@ -338,6 +374,70 @@ describe("GET /orgs/leads", () => {
     const items = mockCheckDeliveryStatus.mock.calls[0][2];
     expect(items).toHaveLength(1);
     expect(items[0].email).toBe("alice@acme.com");
+  });
+
+  it("returns statusReason and statusDetails as null for served leads", async () => {
+    mockFindMany.mockResolvedValue([makeServedLead()]);
+
+    const app = createApp();
+    const res = await request(app).get("/orgs/leads");
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].statusReason).toBeNull();
+    expect(res.body.leads[0].statusDetails).toBeNull();
+  });
+
+  it("returns statusReason and statusDetails from buffer leads", async () => {
+    mockBufferFindMany.mockResolvedValue([{
+      id: "buf-1",
+      namespace: "apollo",
+      email: "bob@acme.com",
+      apolloPersonId: null,
+      data: null,
+      status: "skipped",
+      pushRunId: null,
+      brandIds: ["b1"],
+      campaignId: "c1",
+      orgId: "org-1",
+      userId: null,
+      workflowSlug: null,
+      featureSlug: null,
+      statusReason: "already_contacted",
+      statusDetails: "Contacted via campaign c0 on 2026-03-15",
+      createdAt: "2026-04-01T00:00:00Z",
+    }]);
+
+    const app = createApp();
+    const res = await request(app).get("/orgs/leads");
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].statusReason).toBe("already_contacted");
+    expect(res.body.leads[0].statusDetails).toBe("Contacted via campaign c0 on 2026-03-15");
+  });
+
+  it("returns statusReason and statusDetails as null when buffer lead has no values", async () => {
+    mockBufferFindMany.mockResolvedValue([{
+      id: "buf-2",
+      namespace: "apollo",
+      email: "carol@acme.com",
+      apolloPersonId: null,
+      data: null,
+      status: "buffered",
+      pushRunId: null,
+      brandIds: ["b1"],
+      campaignId: "c1",
+      orgId: "org-1",
+      userId: null,
+      workflowSlug: null,
+      featureSlug: null,
+      statusReason: null,
+      statusDetails: null,
+      createdAt: "2026-04-01T00:00:00Z",
+    }]);
+
+    const app = createApp();
+    const res = await request(app).get("/orgs/leads");
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].statusReason).toBeNull();
+    expect(res.body.leads[0].statusDetails).toBeNull();
   });
 
   it("still returns enrichment alongside status", async () => {

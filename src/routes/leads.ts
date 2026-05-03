@@ -214,6 +214,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         apolloPersonId: lead.apolloPersonId ?? null,
         emailStatus,
         enrichment,
+        statusReason: null,
+        statusDetails: null,
         ...deliveryStatus,
       };
     });
@@ -242,6 +244,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         status: row.status as "buffered" | "skipped" | "claimed",
         emailStatus,
         enrichment,
+        statusReason: row.statusReason ?? null,
+        statusDetails: row.statusDetails ?? null,
         ...DEFAULT_STATUS,
       };
     });

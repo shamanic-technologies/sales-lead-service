@@ -13,9 +13,10 @@ export async function cleanupTestData(): Promise<void> {
   await db.delete(idempotencyCache).where(eq(idempotencyCache.orgId, TEST_ORG_ID));
   await db.delete(cursors).where(eq(cursors.orgId, TEST_ORG_ID));
   await db.delete(leadBuffer).where(eq(leadBuffer.orgId, TEST_ORG_ID));
-  // Delete served_leads first (FK → leads), then lead_emails, then leads
+  // Delete served_leads for current org + any test @example.com emails from prior runs
   await db.delete(servedLeads).where(eq(servedLeads.orgId, TEST_ORG_ID));
-  // Clean up leads/lead_emails created during this test run
+  await sql`DELETE FROM served_leads WHERE email LIKE '%@example.com'`;
+  // Clean up leads/lead_emails created during test runs
   await sql`DELETE FROM lead_emails WHERE email LIKE '%@example.com'`;
   await sql`DELETE FROM leads WHERE id NOT IN (
     SELECT DISTINCT lead_id FROM served_leads WHERE lead_id IS NOT NULL
