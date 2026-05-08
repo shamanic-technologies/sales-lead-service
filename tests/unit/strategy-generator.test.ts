@@ -225,6 +225,18 @@ describe("strategy-generator", () => {
       expect(chatComplete).not.toHaveBeenCalled();
     });
 
+    it("throws fail-loud when orgId is missing", async () => {
+      await expect(
+        getCurrentStrategy({ ...baseCtx, orgId: "" } as StrategyContext),
+      ).rejects.toThrow(/orgId/);
+    });
+
+    it("throws fail-loud when campaignId is missing", async () => {
+      await expect(
+        getCurrentStrategy({ ...baseCtx, campaignId: "" } as StrategyContext),
+      ).rejects.toThrow(/campaignId/);
+    });
+
     it("generates and persists when no row exists yet", async () => {
       findFirst.mockResolvedValueOnce(null);
       apolloDryRun.mockResolvedValueOnce({ totalEntries: 1000, validationErrors: [] });
