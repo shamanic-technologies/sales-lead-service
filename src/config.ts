@@ -55,4 +55,4 @@ export const CHAT_SERVICE_API_KEY = required("CHAT_SERVICE_API_KEY");
 // --- Buffer / strategy tuning ---
 export const TARGET_BUFFER_SIZE = 20;
 export const MAX_STRATEGY_GENERATION_ROUNDS = 15;
-export const PULL_NEXT_TIMEOUT_MS = 60_000;
+export const PULL_NEXT_TIMEOUT_MS = 600_000;

@@ -255,6 +255,12 @@ async function persistOutcome(params: {
 export async function getCurrentStrategy(
   ctx: StrategyContext,
 ): Promise<{ strategy: ApolloSearchParams } | { exhausted: true; reason: string }> {
+  if (!ctx.orgId) {
+    throw new Error("[lead-service] getCurrentStrategy: orgId is required");
+  }
+  if (!ctx.campaignId) {
+    throw new Error("[lead-service] getCurrentStrategy: campaignId is required");
+  }
   const existing = await loadRow(ctx.orgId, ctx.campaignId);
 
   if (existing?.exhausted) {

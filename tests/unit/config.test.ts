@@ -42,4 +42,9 @@ describe("config", () => {
       process.env.APOLLO_SERVICE_API_KEY = original;
     }
   });
+
+  it("PULL_NEXT_TIMEOUT_MS is at least 600_000 to accommodate multi-round Pro strategy generation", async () => {
+    const config = await import("../../src/config.js");
+    expect(config.PULL_NEXT_TIMEOUT_MS).toBeGreaterThanOrEqual(600_000);
+  });
 });
