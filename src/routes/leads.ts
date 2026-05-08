@@ -2,7 +2,7 @@ import { Router } from "express";
 import { eq, and, sql, type SQL } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { db } from "../db/index.js";
-import { servedLeads, leadBuffer } from "../db/schema.js";
+import { leadsCampaigns, leads, leadContactMethods } from "../db/schema.js";
 import {
   checkDeliveryStatus,
   type StatusResult,
@@ -13,15 +13,6 @@ import {
 import { traceEvent } from "../lib/trace-event.js";
 
 const router = Router();
-
-export function extractEnrichment(metadata: unknown): Record<string, unknown> | null {
-  if (!metadata || typeof metadata !== "object") return null;
-  const m = metadata as Record<string, unknown>;
-  // Only return enrichment if at least one person field exists
-  if (!m.firstName && !m.lastName && !m.email) return null;
-  // Pass through all fields from Apollo — no filtering
-  return { ...m };
-}
 
 interface FlattenedStatus {
   contacted: boolean;
@@ -34,10 +25,7 @@ interface FlattenedStatus {
   replied: boolean;
   replyClassification: "positive" | "negative" | "neutral" | null;
   lastDeliveredAt: string | null;
-  global: {
-    bounced: boolean;
-    unsubscribed: boolean;
-  };
+  global: { bounced: boolean; unsubscribed: boolean };
 }
 
 function pickScoped(s: ScopedStatus | null | undefined) {
@@ -80,42 +68,19 @@ function mergeProviders(
   };
 }
 
-/**
- * Flatten status using campaign scope (when campaignId is provided).
- * Also checks brand + global for contacted flag.
- */
 export function flattenCampaignStatus(result: StatusResult): FlattenedStatus {
   const bc = result.broadcast;
   const tx = result.transactional;
-
-  const bcCampaign = pickScoped(bc?.campaign);
-  const txCampaign = pickScoped(tx?.campaign);
-  const merged = mergeProviders(bcCampaign, txCampaign);
-
-  // contacted: also true if brand or global says contacted
-  if (bc?.brand?.contacted || tx?.brand?.contacted) {
-    merged.contacted = true;
-  }
-
-  const global = mergeGlobal(bc?.global, tx?.global);
-
-  return { ...merged, global };
+  const merged = mergeProviders(pickScoped(bc?.campaign), pickScoped(tx?.campaign));
+  if (bc?.brand?.contacted || tx?.brand?.contacted) merged.contacted = true;
+  return { ...merged, global: mergeGlobal(bc?.global, tx?.global) };
 }
 
-/**
- * Flatten status using brand scope (when no campaignId — cross-campaign view).
- */
 export function flattenBrandStatus(result: StatusResult): FlattenedStatus {
   const bc = result.broadcast;
   const tx = result.transactional;
-
-  const bcBrand = pickScoped(bc?.brand);
-  const txBrand = pickScoped(tx?.brand);
-  const merged = mergeProviders(bcBrand, txBrand);
-
-  const global = mergeGlobal(bc?.global, tx?.global);
-
-  return { ...merged, global };
+  const merged = mergeProviders(pickScoped(bc?.brand), pickScoped(tx?.brand));
+  return { ...merged, global: mergeGlobal(bc?.global, tx?.global) };
 }
 
 const DEFAULT_STATUS: FlattenedStatus = {
@@ -126,133 +91,152 @@ const DEFAULT_STATUS: FlattenedStatus = {
 
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
   try {
-    if (req.runId) traceEvent(req.runId, { service: "lead-service", event: "leads-query-start", detail: `orgId=${req.orgId}` }, req.headers).catch(() => {});
-    const { brandId, campaignId, orgId, userId } = req.query;
+    if (req.runId) {
+      traceEvent(req.runId, { service: "lead-service", event: "leads-query-start", detail: `orgId=${req.orgId}` }, req.headers).catch(() => {});
+    }
 
-    // Build filter conditions for served_leads
-    const servedConditions: SQL[] = [eq(servedLeads.orgId, req.orgId!)];
-    // Build filter conditions for lead_buffer
-    const bufferConditions: SQL[] = [eq(leadBuffer.orgId, req.orgId!)];
-
+    const { brandId, campaignId, orgId: queryOrgId, userId } = req.query;
+    const conditions: SQL[] = [eq(leadsCampaigns.orgId, req.orgId!)];
     if (brandId && typeof brandId === "string") {
-      servedConditions.push(sql`${brandId} = ANY(${servedLeads.brandIds})`);
-      bufferConditions.push(sql`${brandId} = ANY(${leadBuffer.brandIds})`);
+      conditions.push(sql`${brandId} = ANY(${leadsCampaigns.brandIds})`);
     }
     if (campaignId && typeof campaignId === "string") {
-      servedConditions.push(eq(servedLeads.campaignId, campaignId));
-      bufferConditions.push(eq(leadBuffer.campaignId, campaignId));
+      conditions.push(eq(leadsCampaigns.campaignId, campaignId));
     }
-    if (orgId && typeof orgId === "string") {
-      servedConditions.push(eq(servedLeads.orgId, orgId));
-      bufferConditions.push(eq(leadBuffer.orgId, orgId));
+    if (queryOrgId && typeof queryOrgId === "string") {
+      conditions.push(eq(leadsCampaigns.orgId, queryOrgId));
     }
     if (userId && typeof userId === "string") {
-      servedConditions.push(eq(servedLeads.userId, userId));
-      bufferConditions.push(eq(leadBuffer.userId, userId));
+      conditions.push(eq(leadsCampaigns.userId, userId));
     }
 
-    // Get served leads and buffer entries in parallel
-    const [servedRows, bufferRows] = await Promise.all([
-      db.query.servedLeads.findMany({
-        where: and(...servedConditions),
-      }),
-      db.query.leadBuffer.findMany({
-        where: and(...bufferConditions),
-      }),
-    ]);
+    const rows = await db
+      .select({
+        id: leadsCampaigns.id,
+        leadId: leadsCampaigns.leadId,
+        campaignId: leadsCampaigns.campaignId,
+        orgId: leadsCampaigns.orgId,
+        userId: leadsCampaigns.userId,
+        brandIds: leadsCampaigns.brandIds,
+        status: leadsCampaigns.status,
+        statusReason: leadsCampaigns.statusReason,
+        statusDetails: leadsCampaigns.statusDetails,
+        parentRunId: leadsCampaigns.parentRunId,
+        runId: leadsCampaigns.runId,
+        servedAt: leadsCampaigns.servedAt,
+        workflowSlug: leadsCampaigns.workflowSlug,
+        featureSlug: leadsCampaigns.featureSlug,
+        leadApolloPersonId: leads.apolloPersonId,
+        leadFirstName: leads.firstName,
+        leadLastName: leads.lastName,
+        leadName: leads.name,
+        leadHeadline: leads.headline,
+        leadLinkedinUrl: leads.linkedinUrl,
+        leadCity: leads.city,
+        leadState: leads.state,
+        leadCountry: leads.country,
+        leadMetadata: leads.metadata,
+      })
+      .from(leadsCampaigns)
+      .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
+      .where(and(...conditions));
 
-    // Fetch delivery status from email-gateway (only for served leads)
+    // Fetch primary email per leadId in a single query
+    const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
+    const emailRows = leadIds.length === 0
+      ? []
+      : await db.execute<{ lead_id: string; value: string; status: string | null }>(sql`
+          SELECT DISTINCT ON (lead_id) lead_id, value, status
+          FROM lead_contact_methods
+          WHERE channel = 'email'
+            AND lead_id = ANY(${sql.raw(`ARRAY[${leadIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(",") || "NULL"}]::uuid[]`)})
+          ORDER BY lead_id, created_at DESC
+        `);
+    const emailByLead = new Map<string, { value: string; status: string | null }>();
+    for (const row of emailRows as unknown as Array<{ lead_id: string; value: string; status: string | null }>) {
+      emailByLead.set(row.lead_id, { value: row.value, status: row.status });
+    }
+
     const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
     const brandIdStr = typeof brandId === "string" ? brandId : undefined;
     const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
     const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
     const context = getServiceContext(req);
 
-    let statusMap = new Map<string, StatusResult>();
-
+    const statusMap = new Map<string, StatusResult>();
     if (hasScopeForStatus) {
-      // Group by first brandId since email-gateway scopes status per brand
       const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
-      for (const row of servedRows) {
-        if (!row.leadId) continue;
+      for (const row of rows) {
+        if (row.status !== "served") continue;
+        const email = emailByLead.get(row.leadId)?.value;
+        if (!email) continue;
         const primaryBrandId = row.brandIds[0] ?? "unknown";
         if (!groups.has(primaryBrandId)) {
           groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
         }
-        groups.get(primaryBrandId)!.items.push({ email: row.email });
+        groups.get(primaryBrandId)!.items.push({ email });
       }
-
       await Promise.all(
         Array.from(groups.values()).map(async (group) => {
-          const response = await checkDeliveryStatus(
-            group.brandId,
-            campaignIdStr,
-            group.items,
-            context,
-          );
-          for (const result of response.results) {
-            statusMap.set(result.email, result);
-          }
+          const response = await checkDeliveryStatus(group.brandId, campaignIdStr, group.items, context);
+          for (const result of response.results) statusMap.set(result.email, result);
         }),
       );
     }
 
-    // Map served leads
-    const enrichedServed = servedRows.map((lead) => {
-      const statusResult = statusMap.get(lead.email);
-      const deliveryStatus = hasScopeForStatus
+    const allLeads = rows.map((row) => {
+      const email = emailByLead.get(row.leadId);
+      const emailValue = email?.value ?? "";
+      const emailStatus = email?.status ?? null;
+      const statusResult = statusMap.get(emailValue);
+      const deliveryStatus = hasScopeForStatus && row.status === "served"
         ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
         : DEFAULT_STATUS;
 
-      const enrichment = extractEnrichment(lead.metadata);
-      const emailStatus = (enrichment?.emailStatus as string) ?? null;
-
-      return {
-        ...lead,
-        status: "served" as const,
-        leadId: lead.leadId ?? null,
-        apolloPersonId: lead.apolloPersonId ?? null,
-        emailStatus,
-        enrichment,
-        statusReason: null,
-        statusDetails: null,
-        ...deliveryStatus,
-      };
-    });
-
-    // Map buffer entries
-    const enrichedBuffer = bufferRows.map((row) => {
-      const enrichment = extractEnrichment(row.data);
-      const emailStatus = (enrichment?.emailStatus as string) ?? null;
+      const enrichment = row.leadFirstName || row.leadLastName || row.leadHeadline || row.leadMetadata
+        ? {
+            firstName: row.leadFirstName ?? undefined,
+            lastName: row.leadLastName ?? undefined,
+            name: row.leadName ?? undefined,
+            headline: row.leadHeadline ?? undefined,
+            linkedinUrl: row.leadLinkedinUrl ?? undefined,
+            city: row.leadCity ?? undefined,
+            state: row.leadState ?? undefined,
+            country: row.leadCountry ?? undefined,
+            ...(row.leadMetadata && typeof row.leadMetadata === "object"
+              ? (row.leadMetadata as Record<string, unknown>)
+              : {}),
+          }
+        : null;
 
       return {
         id: row.id,
-        leadId: null,
-        namespace: row.namespace,
-        email: row.email,
-        apolloPersonId: row.apolloPersonId ?? null,
-        metadata: row.data,
-        parentRunId: null,
-        runId: null,
-        brandIds: row.brandIds ?? [],
+        leadId: row.leadId,
+        namespace: "apollo",
+        email: emailValue,
+        apolloPersonId: row.leadApolloPersonId ?? null,
+        metadata: row.leadMetadata,
+        parentRunId: row.parentRunId,
+        runId: row.runId,
+        brandIds: row.brandIds,
         campaignId: row.campaignId,
         orgId: row.orgId,
         userId: row.userId ?? null,
         workflowSlug: row.workflowSlug ?? null,
         featureSlug: row.featureSlug ?? null,
-        servedAt: null,
-        status: row.status as "buffered" | "skipped" | "claimed",
+        servedAt: row.servedAt ? row.servedAt.toISOString() : null,
+        status: row.status as "buffered" | "skipped" | "claimed" | "served",
         emailStatus,
         enrichment,
         statusReason: row.statusReason ?? null,
         statusDetails: row.statusDetails ?? null,
-        ...DEFAULT_STATUS,
+        ...deliveryStatus,
       };
     });
 
-    const allLeads = [...enrichedServed, ...enrichedBuffer];
-
-    if (req.runId) traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${allLeads.length}`, data: { count: allLeads.length, served: enrichedServed.length, buffered: enrichedBuffer.length } }, req.headers).catch(() => {});
+    if (req.runId) {
+      traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${allLeads.length}`, data: { count: allLeads.length } }, req.headers).catch(() => {});
+    }
     res.json({ leads: allLeads });
   } catch (error) {
     console.error("[lead-service] Leads error:", error);

@@ -9,10 +9,10 @@ const ENDPOINT_MAPPING: Array<{
   {
     lead: { method: "POST", path: "/orgs/buffer/next" },
     downstream: [
-      { service: "apollo", method: "POST", path: "/search" },
       { service: "apollo", method: "POST", path: "/search/next" },
-      { service: "apollo", method: "POST", path: "/search/params" },
+      { service: "apollo", method: "POST", path: "/search/dry-run" },
       { service: "apollo", method: "POST", path: "/enrich" },
+      { service: "chat", method: "POST", path: "/complete" },
     ],
   },
   {
