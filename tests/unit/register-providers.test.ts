@@ -118,13 +118,12 @@ describe("registerProviders", () => {
       json: () =>
         Promise.resolve({
           requirements: [
-            { service: "apollo", method: "POST", path: "/search", provider: "apollo" },
             { service: "apollo", method: "POST", path: "/search/next", provider: "apollo" },
-            { service: "apollo", method: "POST", path: "/search/params", provider: "apollo" },
-            { service: "apollo", method: "POST", path: "/search/params", provider: "anthropic" },
+            { service: "apollo", method: "POST", path: "/search/dry-run", provider: "apollo" },
             { service: "apollo", method: "POST", path: "/enrich", provider: "apollo" },
+            { service: "chat", method: "POST", path: "/complete", provider: "google" },
           ],
-          providers: ["apollo", "anthropic"],
+          providers: ["apollo", "google"],
         }),
     });
 
@@ -138,21 +137,17 @@ describe("registerProviders", () => {
 
     await registerProviders();
 
-    // 1 query + N registration calls
-    // lead POST /buffer/next → apollo, anthropic (2 registrations)
-    // lead GET /stats → no requirements (apollo POST /stats had no requirements in response)
-    expect(mockFetch).toHaveBeenCalledTimes(3); // 1 query + 2 registrations
+    // 1 query + 2 registrations: lead POST /orgs/buffer/next → apollo, google
+    expect(mockFetch).toHaveBeenCalledTimes(3);
 
-    // Verify the query call includes all downstream endpoints
     const queryBody = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(queryBody.endpoints).toHaveLength(5);
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search" });
     expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search/next" });
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search/params" });
+    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search/dry-run" });
     expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/enrich" });
+    expect(queryBody.endpoints).toContainEqual({ service: "chat", method: "POST", path: "/complete" });
     expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/stats" });
 
-    // Verify registration calls have correct x-caller headers
     const registrationCalls = mockFetch.mock.calls.slice(1);
     const registeredPairs = registrationCalls.map(([url, opts]: [string, RequestInit & { headers: Record<string, string> }]) => ({
       provider: url.match(/\/keys\/platform\/(.+)\/decrypt/)?.[1],
@@ -162,7 +157,7 @@ describe("registerProviders", () => {
     }));
 
     expect(registeredPairs).toContainEqual({ provider: "apollo", method: "POST", path: "/orgs/buffer/next", service: "lead" });
-    expect(registeredPairs).toContainEqual({ provider: "anthropic", method: "POST", path: "/orgs/buffer/next", service: "lead" });
+    expect(registeredPairs).toContainEqual({ provider: "google", method: "POST", path: "/orgs/buffer/next", service: "lead" });
 
     logSpy.mockRestore();
   });
@@ -190,10 +185,10 @@ describe("registerProviders", () => {
       json: () =>
         Promise.resolve({
           requirements: [
-            { service: "apollo", method: "POST", path: "/search", provider: "apollo" },
-            { service: "apollo", method: "POST", path: "/search/params", provider: "anthropic" },
+            { service: "apollo", method: "POST", path: "/search/next", provider: "apollo" },
+            { service: "chat", method: "POST", path: "/complete", provider: "google" },
           ],
-          providers: ["apollo", "anthropic"],
+          providers: ["apollo", "google"],
         }),
     });
 

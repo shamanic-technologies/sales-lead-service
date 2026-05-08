@@ -120,6 +120,20 @@
       "when": 1775980800000,
       "tag": "0016_rename_status_reason_details",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1778457600000,
+      "tag": "0017_apollo_full_coverage",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1778544000000,
+      "tag": "0018_multi_strategy_cursor",
+      "breakpoints": true
     }
   ]
 }

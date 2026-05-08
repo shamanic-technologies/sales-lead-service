@@ -7,6 +7,7 @@ import { traceEvent } from "../lib/trace-event.js";
 import { BufferNextRequestSchema } from "../schemas.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
+import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 
 const router = Router();
 
@@ -77,17 +78,22 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, async (req: Authentic
 
   traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}` }, req.headers).catch(() => {});
 
+  const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
+
   try {
-    const result = await pullNext({
-      orgId: req.orgId!,
-      campaignId,
-      brandIds,
-      parentRunId: runId,
-      runId: serveRunId,
-      userId: req.userId ?? null,
-      workflowSlug,
-      featureSlug: req.featureSlug,
-    });
+    const result = await pullNext(
+      {
+        orgId: req.orgId!,
+        campaignId,
+        brandIds,
+        parentRunId: runId,
+        runId: serveRunId,
+        userId: req.userId ?? null,
+        workflowSlug,
+        featureSlug: req.featureSlug,
+      },
+      pullSignal,
+    );
 
     // Cache response keyed by caller's runId for idempotency
     if (Math.random() < 0.01) pruneExpiredIdempotencyCache();

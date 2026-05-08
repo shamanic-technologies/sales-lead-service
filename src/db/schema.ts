@@ -1,118 +1,183 @@
-import { pgTable, uuid, text, timestamp, uniqueIndex, index, jsonb } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  uuid,
+  text,
+  timestamp,
+  date,
+  integer,
+  numeric,
+  boolean,
+  uniqueIndex,
+  index,
+  jsonb,
+} from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
-// Leads — global identity registry (no org/brand/campaign scoping)
+// --- Leads — global identity registry ---
 export const leads = pgTable(
   "leads",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     apolloPersonId: text("apollo_person_id"),
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    name: text("name"),
+    linkedinUrl: text("linkedin_url"),
+    photoUrl: text("photo_url"),
+    headline: text("headline"),
+    city: text("city"),
+    state: text("state"),
+    country: text("country"),
+    seniority: text("seniority"),
+    departments: text("departments").array(),
+    subdepartments: text("subdepartments").array(),
+    functions: text("functions").array(),
+    twitterUrl: text("twitter_url"),
+    githubUrl: text("github_url"),
+    facebookUrl: text("facebook_url"),
     metadata: jsonb("metadata"),
+    enrichedAt: timestamp("enriched_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    uniqueIndex("idx_leads_apollo_person_id").on(table.apolloPersonId),
-  ]
+  (table) => [uniqueIndex("idx_leads_apollo_person_id").on(table.apolloPersonId)],
 );
 
-// Lead emails — email addresses belonging to a lead (1:N)
-export const leadEmails = pgTable(
-  "lead_emails",
+// --- Lead contact methods — polymorphic (email, phone, twitter, etc.) ---
+export const leadContactMethods = pgTable(
+  "lead_contact_methods",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     leadId: uuid("lead_id")
       .notNull()
       .references(() => leads.id, { onDelete: "cascade" }),
-    email: text("email").notNull(),
+    channel: text("channel").notNull(),
+    value: text("value").notNull(),
+    status: text("status"),
+    source: text("source").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("idx_lead_emails_lead_email").on(table.leadId, table.email),
-    uniqueIndex("idx_lead_emails_email").on(table.email),
-  ]
+    uniqueIndex("idx_lcm_lead_channel_value").on(table.leadId, table.channel, table.value),
+    uniqueIndex("idx_lcm_channel_value").on(table.channel, table.value),
+    index("idx_lcm_value").on(table.value),
+  ],
 );
 
-// Served leads — audit log of leads pulled from buffer (dedup now via email-gateway)
-export const servedLeads = pgTable(
-  "served_leads",
+// --- Organizations — global org registry ---
+export const organizations = pgTable(
+  "organizations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    leadId: uuid("lead_id").references(() => leads.id),
-    namespace: text("namespace").notNull(),
-    email: text("email").notNull(),
-    apolloPersonId: text("apollo_person_id"),
+    apolloOrganizationId: text("apollo_organization_id"),
+    name: text("name"),
+    primaryDomain: text("primary_domain"),
+    websiteUrl: text("website_url"),
+    industry: text("industry"),
+    estimatedNumEmployees: integer("estimated_num_employees"),
+    annualRevenue: numeric("annual_revenue"),
+    logoUrl: text("logo_url"),
+    shortDescription: text("short_description"),
+    linkedinUrl: text("linkedin_url"),
+    twitterUrl: text("twitter_url"),
+    facebookUrl: text("facebook_url"),
+    blogUrl: text("blog_url"),
+    crunchbaseUrl: text("crunchbase_url"),
+    foundedYear: integer("founded_year"),
+    city: text("city"),
+    state: text("state"),
+    country: text("country"),
+    streetAddress: text("street_address"),
+    postalCode: text("postal_code"),
+    technologyNames: text("technology_names").array(),
+    industries: text("industries").array(),
+    secondaryIndustries: text("secondary_industries").array(),
     metadata: jsonb("metadata"),
-    parentRunId: text("parent_run_id"),
-    runId: text("run_id"),
-    brandIds: text("brand_ids").array().notNull(),
-    campaignId: text("campaign_id").notNull(),
-    orgId: text("org_id").notNull(),
-    userId: text("user_id"),
-    workflowSlug: text("workflow_slug"),
-    featureSlug: text("feature_slug"),
-    servedAt: timestamp("served_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("idx_served_org_campaign_email").on(table.orgId, table.campaignId, table.email),
-    index("idx_served_brand_ids").using("gin", table.brandIds),
-    index("idx_served_campaign").on(table.campaignId),
-    index("idx_served_org_id").on(table.orgId),
-    index("idx_served_user_id").on(table.userId),
-  ]
+    uniqueIndex("idx_organizations_apollo_organization_id").on(table.apolloOrganizationId),
+  ],
 );
 
-// Lead buffer — temporary staging for leads not yet served
-export const leadBuffer = pgTable(
-  "lead_buffer",
+// --- Lead employment history (M:N leads <-> organizations) ---
+export const leadsOrganizations = pgTable(
+  "leads_organizations",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    namespace: text("namespace").notNull(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    title: text("title"),
+    startDate: date("start_date"),
+    endDate: date("end_date"),
+    current: boolean("current").notNull().default(false),
+    description: text("description"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_lo_lead_org_start").on(table.leadId, table.organizationId, table.startDate),
+    index("idx_lo_lead_current").on(table.leadId, table.current),
+  ],
+);
+
+// --- Leads ↔ campaigns: per-campaign lifecycle ---
+export const leadsCampaigns = pgTable(
+  "leads_campaigns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id),
     campaignId: text("campaign_id").notNull(),
-    email: text("email").notNull(),
-    apolloPersonId: text("apollo_person_id"),
-    data: jsonb("data"),
-    status: text("status").notNull().default("buffered"),
-    pushRunId: text("push_run_id"),
-    brandIds: text("brand_ids").array(),
     orgId: text("org_id").notNull(),
-    userId: text("user_id"),
-    workflowSlug: text("workflow_slug"),
-    featureSlug: text("feature_slug"),
+    brandIds: text("brand_ids").array().notNull(),
+    status: text("status").notNull().default("buffered"),
     statusReason: text("status_reason"),
     statusDetails: text("status_details"),
+    pushRunId: text("push_run_id"),
+    parentRunId: text("parent_run_id"),
+    runId: text("run_id"),
+    userId: text("user_id"),
+    workflowSlug: text("workflow_slug"),
+    featureSlug: text("feature_slug"),
+    servedAt: timestamp("served_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    index("idx_buffer_org_campaign_ns_status").on(table.orgId, table.campaignId, table.namespace, table.status),
-    index("idx_buffer_org_campaign_extid").on(table.orgId, table.campaignId, table.apolloPersonId),
-  ]
+    uniqueIndex("idx_lc_lead_campaign").on(table.leadId, table.campaignId),
+    index("idx_lc_org_campaign_status").on(table.orgId, table.campaignId, table.status),
+    index("idx_lc_brand_ids").using("gin", table.brandIds),
+    index("idx_lc_org").on(table.orgId),
+    index("idx_lc_campaign").on(table.campaignId),
+    index("idx_lc_user").on(table.userId),
+  ],
 );
 
-// Enrichments — global cache for Apollo enrichment data (no orgId)
-export const enrichments = pgTable(
-  "enrichments",
+// --- Apollo strategies per campaign (multi-strategy cursor) ---
+export const campaignsApolloStrategies = pgTable(
+  "campaigns_apollo_strategies",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    email: text("email"),
-    emailStatus: text("email_status"),
-    apolloPersonId: text("apollo_person_id"),
-    firstName: text("first_name"),
-    lastName: text("last_name"),
-    title: text("title"),
-    linkedinUrl: text("linkedin_url"),
-    organizationName: text("organization_name"),
-    organizationDomain: text("organization_domain"),
-    organizationIndustry: text("organization_industry"),
-    organizationSize: text("organization_size"),
-    responseRaw: jsonb("response_raw"),
-    enrichedAt: timestamp("enriched_at", { withTimezone: true }).notNull().defaultNow(),
+    orgId: text("org_id").notNull(),
+    campaignId: text("campaign_id").notNull(),
+    strategies: jsonb("strategies").notNull().default(sql`'[]'::jsonb`),
+    currentIndex: integer("current_index").notNull().default(0),
+    exhausted: boolean("exhausted").notNull().default(false),
+    exhaustionReason: text("exhaustion_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("idx_enrichments_email").on(table.email),
-    uniqueIndex("idx_enrichments_apollo_person_id").on(table.apolloPersonId),
-  ]
+    uniqueIndex("idx_cas_org_campaign").on(table.orgId, table.campaignId),
+  ],
 );
 
-// Idempotency cache — prevents duplicate lead consumption on retries
+// --- Idempotency cache (kept) ---
 export const idempotencyCache = pgTable(
   "idempotency_cache",
   {
@@ -122,38 +187,21 @@ export const idempotencyCache = pgTable(
     response: jsonb("response").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    uniqueIndex("idx_idempotency_key").on(table.idempotencyKey),
-  ]
+  (table) => [uniqueIndex("idx_idempotency_key").on(table.idempotencyKey)],
 );
 
-// Cursors — pagination state per org+namespace
-export const cursors = pgTable(
-  "cursors",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    orgId: text("org_id").notNull(),
-    namespace: text("namespace").notNull(),
-    state: jsonb("state"),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("idx_cursors_org_ns").on(table.orgId, table.namespace),
-  ]
-);
-
-// Type exports
-export type ServedLead = typeof servedLeads.$inferSelect;
-export type NewServedLead = typeof servedLeads.$inferInsert;
-export type LeadBufferRow = typeof leadBuffer.$inferSelect;
-export type NewLeadBufferRow = typeof leadBuffer.$inferInsert;
-export type Cursor = typeof cursors.$inferSelect;
-export type NewCursor = typeof cursors.$inferInsert;
-export type Enrichment = typeof enrichments.$inferSelect;
-export type NewEnrichment = typeof enrichments.$inferInsert;
-export type IdempotencyCacheRow = typeof idempotencyCache.$inferSelect;
-export type NewIdempotencyCacheRow = typeof idempotencyCache.$inferInsert;
+// --- Type exports ---
 export type Lead = typeof leads.$inferSelect;
 export type NewLead = typeof leads.$inferInsert;
-export type LeadEmail = typeof leadEmails.$inferSelect;
-export type NewLeadEmail = typeof leadEmails.$inferInsert;
+export type LeadContactMethod = typeof leadContactMethods.$inferSelect;
+export type NewLeadContactMethod = typeof leadContactMethods.$inferInsert;
+export type Organization = typeof organizations.$inferSelect;
+export type NewOrganization = typeof organizations.$inferInsert;
+export type LeadOrganization = typeof leadsOrganizations.$inferSelect;
+export type NewLeadOrganization = typeof leadsOrganizations.$inferInsert;
+export type LeadCampaign = typeof leadsCampaigns.$inferSelect;
+export type NewLeadCampaign = typeof leadsCampaigns.$inferInsert;
+export type CampaignApolloStrategies = typeof campaignsApolloStrategies.$inferSelect;
+export type NewCampaignApolloStrategies = typeof campaignsApolloStrategies.$inferInsert;
+export type IdempotencyCacheRow = typeof idempotencyCache.$inferSelect;
+export type NewIdempotencyCacheRow = typeof idempotencyCache.$inferInsert;

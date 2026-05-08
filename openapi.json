@@ -133,6 +133,10 @@
             "type": "string",
             "nullable": true
           },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
           "firstName": {
             "type": "string"
           },
@@ -201,6 +205,61 @@
             "type": "string",
             "nullable": true
           },
+          "personalEmails": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "mobilePhone": {
+            "type": "string",
+            "nullable": true
+          },
+          "phoneNumbers": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "rawNumber": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "sanitizedNumber": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "type": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "position": {
+                  "type": "number",
+                  "nullable": true
+                },
+                "status": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "dncStatus": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "dncOtherInfo": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "dialerFlags": {
+                  "type": "object",
+                  "nullable": true,
+                  "additionalProperties": {
+                    "nullable": true
+                  }
+                }
+              }
+            }
+          },
           "employmentHistory": {
             "type": "array",
             "items": {
@@ -232,6 +291,10 @@
               }
             }
           },
+          "organizationId": {
+            "type": "string",
+            "nullable": true
+          },
           "organizationName": {
             "type": "string"
           },
@@ -244,6 +307,10 @@
             "nullable": true
           },
           "organizationSize": {
+            "type": "string",
+            "nullable": true
+          },
+          "organizationRawAddress": {
             "type": "string",
             "nullable": true
           },
@@ -447,6 +514,13 @@
           "organizationAlexaRanking": {
             "type": "number",
             "nullable": true
+          },
+          "raw": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": {
+              "nullable": true
+            }
           }
         },
         "required": [
@@ -470,33 +544,6 @@
       "BufferNextRequest": {
         "type": "object",
         "properties": {}
-      },
-      "CursorGetResponse": {
-        "type": "object",
-        "properties": {
-          "state": {
-            "nullable": true
-          }
-        }
-      },
-      "CursorSetResponse": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "ok"
-        ]
-      },
-      "CursorSetRequest": {
-        "type": "object",
-        "properties": {
-          "state": {
-            "nullable": true
-          }
-        }
       },
       "LeadsResponse": {
         "type": "object",
@@ -548,7 +595,7 @@
               "claimed",
               "served"
             ],
-            "description": "Lead lifecycle status. 'buffered'/'skipped'/'claimed' = in lead_buffer, 'served' = pulled and served to a workflow."
+            "description": "Lead lifecycle status. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow."
           },
           "metadata": {
             "$ref": "#/components/schemas/ApolloPersonData"
@@ -1218,231 +1265,10 @@
         }
       }
     },
-    "/orgs/cursor/{namespace}": {
-      "get": {
-        "summary": "Get cursor state for a namespace",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "x-api-key",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "API key for authenticating requests"
-          },
-          {
-            "in": "header",
-            "name": "x-org-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Internal organization UUID from client-service"
-          },
-          {
-            "in": "header",
-            "name": "x-user-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Internal user UUID from client-service"
-          },
-          {
-            "in": "header",
-            "name": "x-run-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
-          },
-          {
-            "in": "header",
-            "name": "x-campaign-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Campaign identifier (auto-injected by workflow-service)"
-          },
-          {
-            "in": "header",
-            "name": "x-brand-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
-          },
-          {
-            "in": "header",
-            "name": "x-workflow-slug",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Workflow slug (auto-injected by workflow-service)"
-          },
-          {
-            "in": "header",
-            "name": "x-feature-slug",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Feature slug for tracking (propagated through the call chain)"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "namespace",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Cursor state",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CursorGetResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
-        }
-      },
-      "put": {
-        "summary": "Set cursor state for a namespace",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "x-api-key",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "API key for authenticating requests"
-          },
-          {
-            "in": "header",
-            "name": "x-org-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Internal organization UUID from client-service"
-          },
-          {
-            "in": "header",
-            "name": "x-user-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Internal user UUID from client-service"
-          },
-          {
-            "in": "header",
-            "name": "x-run-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
-          },
-          {
-            "in": "header",
-            "name": "x-campaign-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Campaign identifier (auto-injected by workflow-service)"
-          },
-          {
-            "in": "header",
-            "name": "x-brand-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
-          },
-          {
-            "in": "header",
-            "name": "x-workflow-slug",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Workflow slug (auto-injected by workflow-service)"
-          },
-          {
-            "in": "header",
-            "name": "x-feature-slug",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Feature slug for tracking (propagated through the call chain)"
-          },
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "namespace",
-            "in": "path"
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CursorSetRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Cursor updated",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CursorSetResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Unauthorized"
-          }
-        }
-      }
-    },
     "/orgs/leads": {
       "get": {
         "summary": "List leads with enrichment and delivery status",
-        "description": "Returns leads from both served_leads and lead_buffer tables. Each lead includes a 'status' field: 'served' (pulled from buffer), 'buffered'/'skipped'/'claimed' (still in buffer). Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). Buffer entries have delivery fields defaulted to false/null. Delivery status is fetched from email-gateway when brandId or campaignId is provided. With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). Without either: status fields default to false/null.",
+        "description": "Returns leads from leads_campaigns. Each lead includes a 'status' field: 'served' (pulled and served), 'buffered'/'skipped'/'claimed' (still pending). Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). Buffer entries have delivery fields defaulted to false/null. Delivery status is fetched from email-gateway when brandId or campaignId is provided. With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). Without either: status fields default to false/null.",
         "parameters": [
           {
             "in": "header",

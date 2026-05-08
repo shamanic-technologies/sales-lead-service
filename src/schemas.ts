@@ -116,12 +116,24 @@ const TechnologySchema = z.object({
   category: z.string().nullable().optional(),
 });
 
+const PhoneNumberSchema = z.object({
+  rawNumber: z.string().nullable().optional(),
+  sanitizedNumber: z.string().nullable().optional(),
+  type: z.string().nullable().optional(),
+  position: z.number().nullable().optional(),
+  status: z.string().nullable().optional(),
+  dncStatus: z.string().nullable().optional(),
+  dncOtherInfo: z.string().nullable().optional(),
+  dialerFlags: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
 export const ApolloPersonDataSchema = z
   .object({
     // Person identifiers
     id: z.string().optional(),
     email: z.string().nullable().optional(),
     emailStatus: z.string().nullable().optional(),
+    name: z.string().nullable().optional(),
     firstName: z.string(),
     lastName: z.string(),
     title: z.string().nullable().optional(),
@@ -139,12 +151,17 @@ export const ApolloPersonDataSchema = z
     twitterUrl: z.string().nullable().optional(),
     githubUrl: z.string().nullable().optional(),
     facebookUrl: z.string().nullable().optional(),
+    personalEmails: z.array(z.string()).nullable().optional(),
+    mobilePhone: z.string().nullable().optional(),
+    phoneNumbers: z.array(PhoneNumberSchema).nullable().optional(),
     employmentHistory: z.array(EmploymentHistorySchema).optional(),
     // Organization details (flat, NOT nested)
+    organizationId: z.string().nullable().optional(),
     organizationName: z.string(),
     organizationDomain: z.string().nullable().optional(),
     organizationIndustry: z.string().nullable().optional(),
     organizationSize: z.string().nullable().optional(),
+    organizationRawAddress: z.string().nullable().optional(),
     organizationRevenueUsd: z.string().nullable().optional(),
     organizationWebsiteUrl: z.string().nullable().optional(),
     organizationLogoUrl: z.string().nullable().optional(),
@@ -179,6 +196,8 @@ export const ApolloPersonDataSchema = z
     organizationNumSuborganizations: z.number().nullable().optional(),
     organizationRetailLocationCount: z.number().nullable().optional(),
     organizationAlexaRanking: z.number().nullable().optional(),
+    // Verbatim Apollo person payload (snake_case, includes any field Apollo returns)
+    raw: z.record(z.string(), z.unknown()).nullable().optional(),
   })
   .openapi("ApolloPersonData", {
     description:
@@ -250,26 +269,6 @@ const BufferNextResponseSchema = z
     ],
   });
 
-// --- Cursor ---
-
-export const CursorSetRequestSchema = z
-  .object({
-    state: z.unknown(),
-  })
-  .openapi("CursorSetRequest");
-
-const CursorGetResponseSchema = z
-  .object({
-    state: z.unknown(),
-  })
-  .openapi("CursorGetResponse");
-
-const CursorSetResponseSchema = z
-  .object({
-    ok: z.boolean(),
-  })
-  .openapi("CursorSetResponse");
-
 // --- Leads ---
 
 const LeadDetailSchema = z
@@ -285,7 +284,7 @@ const LeadDetailSchema = z
       description: "Email verification status from Apollo (verified, extrapolated, etc.)",
     }),
     status: z.enum(["buffered", "skipped", "claimed", "served"]).openapi({
-      description: "Lead lifecycle status. 'buffered'/'skipped'/'claimed' = in lead_buffer, 'served' = pulled and served to a workflow.",
+      description: "Lead lifecycle status. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow.",
     }),
     metadata: ApolloPersonDataSchema.nullable(),
     parentRunId: z.string().nullable(),
@@ -436,52 +435,11 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
-  path: "/orgs/cursor/{namespace}",
-  summary: "Get cursor state for a namespace",
-  request: {
-    params: z.object({ namespace: z.string() }),
-  },
-  parameters: AuthHeaders,
-  responses: {
-    200: {
-      description: "Cursor state",
-      content: { "application/json": { schema: CursorGetResponseSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "put",
-  path: "/orgs/cursor/{namespace}",
-  summary: "Set cursor state for a namespace",
-  request: {
-    params: z.object({ namespace: z.string() }),
-    body: {
-      content: { "application/json": { schema: CursorSetRequestSchema } },
-    },
-  },
-  parameters: AuthHeaders,
-  responses: {
-    200: {
-      description: "Cursor updated",
-      content: { "application/json": { schema: CursorSetResponseSchema } },
-    },
-    400: {
-      description: "Invalid request",
-      content: { "application/json": { schema: ErrorResponseSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "get",
   path: "/orgs/leads",
   summary: "List leads with enrichment and delivery status",
   description:
-    "Returns leads from both served_leads and lead_buffer tables. Each lead includes a 'status' field: " +
-    "'served' (pulled from buffer), 'buffered'/'skipped'/'claimed' (still in buffer). " +
+    "Returns leads from leads_campaigns. Each lead includes a 'status' field: " +
+    "'served' (pulled and served), 'buffered'/'skipped'/'claimed' (still pending). " +
     "Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status " +
     "(contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). " +
     "Buffer entries have delivery fields defaulted to false/null. " +

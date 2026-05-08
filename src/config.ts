@@ -48,3 +48,11 @@ export const FEATURES_SERVICE_API_KEY = required("FEATURES_SERVICE_API_KEY");
 
 export const WORKFLOW_SERVICE_URL = required("WORKFLOW_SERVICE_URL");
 export const WORKFLOW_SERVICE_API_KEY = required("WORKFLOW_SERVICE_API_KEY");
+
+export const CHAT_SERVICE_URL = required("CHAT_SERVICE_URL");
+export const CHAT_SERVICE_API_KEY = required("CHAT_SERVICE_API_KEY");
+
+// --- Buffer / strategy tuning ---
+export const TARGET_BUFFER_SIZE = 20;
+export const MAX_STRATEGY_GENERATION_ROUNDS = 15;
+export const PULL_NEXT_TIMEOUT_MS = 60_000;
