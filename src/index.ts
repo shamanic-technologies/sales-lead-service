@@ -9,7 +9,6 @@ import { db, sql } from "./db/index.js";
 import { PORT } from "./config.js";
 import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
-import cursorRoutes from "./routes/cursor.js";
 import leadsRoutes from "./routes/leads.js";
 import statsRoutes from "./routes/stats.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
@@ -34,7 +33,6 @@ app.get("/openapi.json", (_req, res) => {
 
 app.use(healthRoutes);
 app.use(bufferRoutes);
-app.use(cursorRoutes);
 app.use(leadsRoutes);
 app.use(statsRoutes);
 app.use(transferBrandRoutes);

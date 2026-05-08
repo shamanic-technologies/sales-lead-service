@@ -269,26 +269,6 @@ const BufferNextResponseSchema = z
     ],
   });
 
-// --- Cursor ---
-
-export const CursorSetRequestSchema = z
-  .object({
-    state: z.unknown(),
-  })
-  .openapi("CursorSetRequest");
-
-const CursorGetResponseSchema = z
-  .object({
-    state: z.unknown(),
-  })
-  .openapi("CursorGetResponse");
-
-const CursorSetResponseSchema = z
-  .object({
-    ok: z.boolean(),
-  })
-  .openapi("CursorSetResponse");
-
 // --- Leads ---
 
 const LeadDetailSchema = z
@@ -304,7 +284,7 @@ const LeadDetailSchema = z
       description: "Email verification status from Apollo (verified, extrapolated, etc.)",
     }),
     status: z.enum(["buffered", "skipped", "claimed", "served"]).openapi({
-      description: "Lead lifecycle status. 'buffered'/'skipped'/'claimed' = in lead_buffer, 'served' = pulled and served to a workflow.",
+      description: "Lead lifecycle status. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow.",
     }),
     metadata: ApolloPersonDataSchema.nullable(),
     parentRunId: z.string().nullable(),
@@ -455,52 +435,11 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
-  path: "/orgs/cursor/{namespace}",
-  summary: "Get cursor state for a namespace",
-  request: {
-    params: z.object({ namespace: z.string() }),
-  },
-  parameters: AuthHeaders,
-  responses: {
-    200: {
-      description: "Cursor state",
-      content: { "application/json": { schema: CursorGetResponseSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "put",
-  path: "/orgs/cursor/{namespace}",
-  summary: "Set cursor state for a namespace",
-  request: {
-    params: z.object({ namespace: z.string() }),
-    body: {
-      content: { "application/json": { schema: CursorSetRequestSchema } },
-    },
-  },
-  parameters: AuthHeaders,
-  responses: {
-    200: {
-      description: "Cursor updated",
-      content: { "application/json": { schema: CursorSetResponseSchema } },
-    },
-    400: {
-      description: "Invalid request",
-      content: { "application/json": { schema: ErrorResponseSchema } },
-    },
-    401: { description: "Unauthorized" },
-  },
-});
-
-registry.registerPath({
-  method: "get",
   path: "/orgs/leads",
   summary: "List leads with enrichment and delivery status",
   description:
-    "Returns leads from both served_leads and lead_buffer tables. Each lead includes a 'status' field: " +
-    "'served' (pulled from buffer), 'buffered'/'skipped'/'claimed' (still in buffer). " +
+    "Returns leads from leads_campaigns. Each lead includes a 'status' field: " +
+    "'served' (pulled and served), 'buffered'/'skipped'/'claimed' (still pending). " +
     "Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status " +
     "(contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). " +
     "Buffer entries have delivery fields defaulted to false/null. " +

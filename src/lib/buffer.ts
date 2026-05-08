@@ -1,59 +1,77 @@
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, count } from "drizzle-orm";
 import { db, sql as pgSql } from "../db/index.js";
-import { leadBuffer, enrichments } from "../db/schema.js";
-import { checkContacted, markServed, isAlreadyServedForBrand, checkRaceWindow } from "./dedup.js";
-import { resolveOrCreateLead, findLeadByApolloPersonId } from "./leads-registry.js";
-import { apolloSearchNext, apolloEnrich, apolloSearchParams } from "./apollo-client.js";
+import { leadsCampaigns, leadContactMethods, leads } from "../db/schema.js";
+import { TARGET_BUFFER_SIZE } from "../config.js";
+import {
+  apolloFetchPage,
+  apolloEnrich,
+  type ApolloPersonResult,
+  type ApolloSearchParams,
+} from "./apollo-client.js";
+import {
+  upsertLeadFromPerson,
+  recordEmploymentHistory,
+  upsertContactMethod,
+  leadHasEmail,
+  getPrimaryEmail,
+} from "./leads-registry.js";
+import {
+  checkContacted,
+  isAlreadyServedForBrand,
+  checkRaceWindow,
+} from "./dedup.js";
+import {
+  getCurrentStrategy,
+  advanceStrategyOrGenerate,
+  type StrategyContext,
+} from "./strategy-generator.js";
 import { fetchCampaign } from "./campaign-client.js";
 import { extractBrandFields } from "./brand-client.js";
 
-/** Valid Apollo email statuses — all others are skipped */
 const VALID_EMAIL_STATUSES = new Set(["verified", "extrapolated"]);
 
-/** Enrichment cache TTL: 6 months for found emails, 1 day for no-email results */
-const CACHE_TTL_EMAIL_FOUND_MS = 6 * 30 * 24 * 60 * 60 * 1000; // ~6 months
-const CACHE_TTL_NO_EMAIL_MS = 1 * 24 * 60 * 60 * 1000; // 1 day
+/** TTL for re-enriching a lead. */
+const CACHE_TTL_EMAIL_FOUND_MS = 6 * 30 * 24 * 60 * 60 * 1000;
+const CACHE_TTL_NO_EMAIL_MS = 1 * 24 * 60 * 60 * 1000;
 
-function isCacheFresh(enrichedAt: Date, hasEmail: boolean): boolean {
+function isCacheFresh(enrichedAt: Date | null, hasEmail: boolean): boolean {
+  if (!enrichedAt) return false;
   const ttl = hasEmail ? CACHE_TTL_EMAIL_FOUND_MS : CACHE_TTL_NO_EMAIL_MS;
   return Date.now() - enrichedAt.getTime() < ttl;
 }
 
-async function isInBuffer(orgId: string, campaignId: string, apolloPersonId: string): Promise<boolean> {
-  const row = await db.query.leadBuffer.findFirst({
-    where: and(
-      eq(leadBuffer.orgId, orgId),
-      eq(leadBuffer.campaignId, campaignId),
-      eq(leadBuffer.apolloPersonId, apolloPersonId)
-    ),
-  });
-  return !!row;
+async function bufferedCount(orgId: string, campaignId: string): Promise<number> {
+  const [row] = await db
+    .select({ c: count() })
+    .from(leadsCampaigns)
+    .where(
+      and(
+        eq(leadsCampaigns.orgId, orgId),
+        eq(leadsCampaigns.campaignId, campaignId),
+        eq(leadsCampaigns.status, "buffered"),
+      ),
+    );
+  return row?.c ?? 0;
 }
 
-const MAX_PAGES = 50;
-
-async function fillBufferFromSearch(params: {
+async function buildStrategyContext(params: {
   orgId: string;
   campaignId: string;
-  brandIds: string[];
+  brandIdCsv: string;
   pushRunId?: string | null;
   userId?: string | null;
   workflowSlug?: string;
   featureSlug?: string;
-}): Promise<{ filled: number }> {
-  const primaryBrandId = params.brandIds[0];
-  const brandIdCsv = params.brandIds.join(",");
-
+}): Promise<StrategyContext> {
   const serviceContext = {
     userId: params.userId ?? undefined,
     runId: params.pushRunId ?? undefined,
     campaignId: params.campaignId,
-    brandId: brandIdCsv,
+    brandId: params.brandIdCsv,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
   };
 
-  // Fetch campaign + brand fields in parallel for rich LLM context
   const [campaign, brandFields] = await Promise.all([
     fetchCampaign(params.campaignId, params.orgId, serviceContext),
     extractBrandFields(
@@ -62,7 +80,7 @@ async function fillBufferFromSearch(params: {
         { key: "elevator_pitch", description: "A short elevator pitch describing the brand" },
         { key: "industry", description: "The brand's primary industry vertical" },
         { key: "target_geography", description: "Priority geographic markets for outreach" },
-        { key: "ideal_lead_type", description: "Type of leads to target (journalists, editors, producers, executives...)" },
+        { key: "ideal_lead_type", description: "Type of leads to target" },
         { key: "target_job_titles", description: "Job titles to prioritize in outreach" },
         { key: "offerings", description: "Key products or services the brand offers" },
       ],
@@ -71,194 +89,243 @@ async function fillBufferFromSearch(params: {
     ),
   ]);
 
-  // Build rich context string from campaign, brand fields, and featureInputs
-  const contextParts: string[] = [];
-
-  if (campaign?.targetAudience) contextParts.push(`Target audience: ${campaign.targetAudience}`);
-  if (campaign?.targetOutcome) contextParts.push(`Expected outcome: ${campaign.targetOutcome}`);
-  if (campaign?.valueForTarget) contextParts.push(`Value for the audience: ${campaign.valueForTarget}`);
-
-  // Inject campaign featureInputs
+  const lines: string[] = [];
+  if (campaign?.targetAudience) lines.push(`Campaign target audience: ${campaign.targetAudience}`);
+  if (campaign?.targetOutcome) lines.push(`Campaign target outcome: ${campaign.targetOutcome}`);
+  if (campaign?.valueForTarget) lines.push(`Campaign value for target: ${campaign.valueForTarget}`);
   const featureInputs = campaign?.featureInputs;
   if (featureInputs && Object.keys(featureInputs).length > 0) {
-    contextParts.push(`Campaign context: ${JSON.stringify(featureInputs)}`);
+    lines.push(`Campaign featureInputs: ${JSON.stringify(featureInputs)}`);
   }
-
-  // Inject brand fields from extract-fields (convention 1)
   if (brandFields) {
     for (const field of brandFields) {
       if (field.value != null) {
         const label = field.key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
         const value = typeof field.value === "string" ? field.value : JSON.stringify(field.value);
-        contextParts.push(`${label}: ${value}`);
+        lines.push(`${label}: ${value}`);
       }
     }
   }
 
-  const context = contextParts.join("\n");
-
-  const { searchParams: validatedParams } = await apolloSearchParams({
-    context,
-    runId: params.pushRunId ?? "",
-    brandId: brandIdCsv,
-    campaignId: params.campaignId,
+  return {
     orgId: params.orgId,
+    userId: params.userId ?? null,
+    runId: params.pushRunId ?? null,
+    campaignId: params.campaignId,
+    brandId: params.brandIdCsv,
+    workflowSlug: params.workflowSlug,
+    featureSlug: params.featureSlug,
+    brandCampaignDescription: lines.join("\n"),
+  };
+}
+
+interface IngestParams {
+  orgId: string;
+  campaignId: string;
+  brandIds: string[];
+  pushRunId?: string | null;
+  userId?: string | null;
+  workflowSlug?: string;
+  featureSlug?: string;
+}
+
+/**
+ * Insert one Apollo person into the schema:
+ *   - upsert leads (by apolloPersonId)
+ *   - upsert organizations + employment history
+ *   - upsert email contact method (when present)
+ *   - insert leads_campaigns row (status='buffered')
+ * Returns true when a NEW leads_campaigns row was inserted (i.e. we added to buffer).
+ */
+async function ingestPerson(person: ApolloPersonResult, params: IngestParams, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return false;
+  if (!person.id) return false;
+
+  const leadId = await upsertLeadFromPerson(person, { enriched: false });
+  if (signal?.aborted) return false;
+
+  await recordEmploymentHistory({ leadId, person });
+  if (signal?.aborted) return false;
+
+  if (person.email) {
+    await upsertContactMethod({
+      leadId,
+      channel: "email",
+      value: person.email,
+      status: person.emailStatus ?? null,
+      source: "apollo",
+    });
+  }
+  if (signal?.aborted) return false;
+
+  // Idempotent: already a leads_campaigns row for (lead, campaign)? Skip insert.
+  const inserted = await db
+    .insert(leadsCampaigns)
+    .values({
+      leadId,
+      campaignId: params.campaignId,
+      orgId: params.orgId,
+      brandIds: params.brandIds,
+      status: "buffered",
+      pushRunId: params.pushRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      featureSlug: params.featureSlug ?? null,
+    })
+    .onConflictDoNothing()
+    .returning({ id: leadsCampaigns.id });
+
+  return inserted.length > 0;
+}
+
+export async function topUpApolloLeadBuffer(params: IngestParams, signal?: AbortSignal): Promise<{ filled: number }> {
+  const brandIdCsv = params.brandIds.join(",");
+  const ctx = await buildStrategyContext({
+    orgId: params.orgId,
+    campaignId: params.campaignId,
+    brandIdCsv,
+    pushRunId: params.pushRunId,
     userId: params.userId,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
   });
 
-  let totalFilled = 0;
+  let totalInserted = 0;
+  let freshStrategy = true;
+  let activeStrategy: ApolloSearchParams | null = null;
 
-  // Call apolloSearchNext in a loop — apollo-service manages pagination server-side.
-  for (let page = 1; page <= MAX_PAGES; page++) {
-    const result = await apolloSearchNext({
+  while (!signal?.aborted) {
+    const buffered = await bufferedCount(params.orgId, params.campaignId);
+    if (buffered + totalInserted >= TARGET_BUFFER_SIZE) {
+      return { filled: totalInserted };
+    }
+
+    if (!activeStrategy) {
+      const current = await getCurrentStrategy(ctx);
+      if ("exhausted" in current) {
+        console.log(
+          `[lead-service] topUp exhausted campaign=${params.campaignId} reason=${current.reason}`,
+        );
+        return { filled: totalInserted };
+      }
+      activeStrategy = current.strategy;
+      freshStrategy = true;
+    }
+
+    const page = await apolloFetchPage({
       campaignId: params.campaignId,
       brandId: brandIdCsv,
-      searchParams: validatedParams,
-      runId: params.pushRunId,
+      searchParams: freshStrategy ? activeStrategy : undefined,
+      runId: params.pushRunId ?? null,
       orgId: params.orgId,
-      userId: params.userId,
+      userId: params.userId ?? null,
       workflowSlug: params.workflowSlug,
       featureSlug: params.featureSlug,
     });
+    freshStrategy = false;
 
-    if (!result) {
-      console.warn(`[fillBuffer] apolloSearchNext returned null (network error)`);
-      break;
+    let pageInserted = 0;
+    for (const person of page.people) {
+      if (signal?.aborted) break;
+      const ok = await ingestPerson(person, params, signal);
+      if (ok) pageInserted++;
     }
+    totalInserted += pageInserted;
 
-    if (result.people.length === 0) {
-      console.log(`[fillBuffer] Apollo returned 0 people (done=${result.done}), stopping`);
-      break;
-    }
-
-    // Collect candidates from this page (not already in buffer)
-    const candidates: Array<{
-      data: Record<string, unknown>;
-      apolloPersonId?: string;
-      email?: string;
-      leadId?: string;
-    }> = [];
-
-    for (const person of result.people) {
-      // Skip if already in buffer
-      if (person.id && await isInBuffer(params.orgId, params.campaignId, person.id)) {
-        continue;
+    if (page.done || page.people.length === 0) {
+      const next = await advanceStrategyOrGenerate(ctx);
+      if ("exhausted" in next) {
+        console.log(
+          `[lead-service] topUp strategies exhausted campaign=${params.campaignId} reason=${next.reason}`,
+        );
+        return { filled: totalInserted };
       }
-
-      let email = person.email || undefined;
-      let emailStatus = person.emailStatus || undefined;
-      let leadId: string | undefined;
-      let data: Record<string, unknown> = person;
-
-      // Check enrichment cache for people without email
-      if (!email && person.id) {
-        const cached = await db.query.enrichments.findFirst({
-          where: eq(enrichments.apolloPersonId, person.id),
-        });
-
-        if (cached) {
-          if (!isCacheFresh(cached.enrichedAt, !!cached.email)) {
-            // Cache expired — will be re-enriched during pullNext
-          } else if (!cached.email) {
-            // Previously enriched, no email found, cache still fresh — skip entirely
-            continue;
-          } else {
-            email = cached.email;
-            emailStatus = cached.emailStatus ?? undefined;
-            // Merge enriched data so buffer row has full person data (lastName, etc.)
-            if (cached.responseRaw && typeof cached.responseRaw === "object") {
-              data = { ...person, ...(cached.responseRaw as Record<string, unknown>) };
-            }
-          }
-        }
-      }
-
-      // Skip if email status is not valid
-      if (email && emailStatus && !VALID_EMAIL_STATUSES.has(emailStatus)) {
-        continue;
-      }
-
-      // Try to find existing leadId
-      if (person.id) {
-        const existingLeadId = await findLeadByApolloPersonId(person.id);
-        if (existingLeadId) leadId = existingLeadId;
-      }
-
-      candidates.push({ data, apolloPersonId: person.id, email, leadId });
-    }
-
-    // Batch contacted check for candidates with emails and leadIds
-    const itemsWithEmails = candidates
-      .filter((c): c is typeof c & { email: string; leadId: string } => !!c.email && !!c.leadId)
-      .map((c) => ({ email: c.email }));
-
-    const contactedMap =
-      itemsWithEmails.length > 0
-        ? await checkContacted(params.brandIds, params.campaignId, itemsWithEmails, {
-            orgId: params.orgId,
-            userId: params.userId ?? undefined,
-            runId: params.pushRunId ?? undefined,
-            campaignId: params.campaignId,
-            brandId: brandIdCsv,
-            workflowSlug: params.workflowSlug,
-            featureSlug: params.featureSlug,
-          })
-        : new Map<string, import("./email-gateway-client.js").EmailCheckResult>();
-
-    let pageFilled = 0;
-
-    for (const { data, apolloPersonId, email } of candidates) {
-      const status = email ? contactedMap.get(email) : undefined;
-      if (status?.contacted || status?.bounced || status?.unsubscribed) continue;
-
-      await db.insert(leadBuffer).values({
-        namespace: "apollo",
-        campaignId: params.campaignId,
-        email: email ?? "",
-        apolloPersonId: apolloPersonId,
-        data,
-        status: "buffered",
-        pushRunId: params.pushRunId ?? null,
-        brandIds: params.brandIds,
-        orgId: params.orgId,
-        userId: params.userId ?? null,
-        workflowSlug: params.workflowSlug ?? null,
-        featureSlug: params.featureSlug ?? null,
-      });
-      pageFilled++;
-    }
-
-    totalFilled += pageFilled;
-
-    // Found new leads on this page — stop walking, let pullNext serve them
-    if (pageFilled > 0) {
-      console.log(`[fillBuffer] Buffered ${pageFilled} new leads from page ${page}`);
-      return { filled: totalFilled };
-    }
-
-    // All people on this page were dupes — continue to next page
-
-    if (result.done) {
-      console.log(`[fillBuffer] Apollo exhausted all pages, no new leads found`);
-      break;
+      activeStrategy = next.strategy;
+      freshStrategy = true;
     }
   }
 
-  return { filled: totalFilled };
+  return { filled: totalInserted };
 }
 
-export async function pullNext(params: {
-  orgId: string;
-  campaignId: string;
-  brandIds: string[];
-  parentRunId?: string | null;
-  runId?: string | null;
-  userId?: string | null;
-  workflowSlug?: string;
-  featureSlug?: string;
-}): Promise<{
+interface ClaimedRow {
+  leadCampaignId: string;
+  leadId: string;
+  apolloPersonId: string | null;
+  enrichedAt: Date | null;
+  hasEmail: boolean;
+  primaryEmail: string | null;
+  primaryEmailStatus: string | null;
+}
+
+async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise<ClaimedRow | null> {
+  const claimed = await pgSql<{
+    id: string;
+    lead_id: string;
+  }[]>`
+    UPDATE leads_campaigns
+    SET status = 'claimed', updated_at = NOW()
+    WHERE id = (
+      SELECT id FROM leads_campaigns
+      WHERE org_id = ${orgId}
+        AND campaign_id = ${campaignId}
+        AND status = 'buffered'
+      ORDER BY created_at ASC
+      LIMIT 1
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, lead_id
+  `;
+  if (claimed.length === 0) return null;
+  const { id: leadCampaignId, lead_id: leadId } = claimed[0];
+
+  const lead = await db.query.leads.findFirst({
+    where: eq(leads.id, leadId),
+  });
+  const primary = await getPrimaryEmail(leadId);
+
+  return {
+    leadCampaignId,
+    leadId,
+    apolloPersonId: lead?.apolloPersonId ?? null,
+    enrichedAt: lead?.enrichedAt ?? null,
+    hasEmail: primary !== null,
+    primaryEmail: primary?.email ?? null,
+    primaryEmailStatus: primary?.status ?? null,
+  };
+}
+
+async function setLeadCampaignStatus(
+  leadCampaignId: string,
+  status: "skipped" | "served",
+  reason?: string,
+  details?: string,
+): Promise<void> {
+  await db
+    .update(leadsCampaigns)
+    .set({
+      status,
+      statusReason: reason ?? null,
+      statusDetails: details ?? null,
+      ...(status === "served" ? { servedAt: new Date() } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(leadsCampaigns.id, leadCampaignId));
+}
+
+export async function pullNext(
+  params: {
+    orgId: string;
+    campaignId: string;
+    brandIds: string[];
+    parentRunId?: string | null;
+    runId?: string | null;
+    userId?: string | null;
+    workflowSlug?: string;
+    featureSlug?: string;
+  },
+  signal?: AbortSignal,
+): Promise<{
   found: boolean;
   lead?: {
     leadId: string;
@@ -272,329 +339,173 @@ export async function pullNext(params: {
 }> {
   const brandIdCsv = params.brandIds.join(",");
 
-  // Recover stale claimed leads: if a pullNext process crashed after claiming
-  // but before resolving (skip/serve), the lead stays "claimed" forever.
-  // Reset any claimed leads older than 1 hour back to "buffered".
+  // Stale claimed recovery: any leads_campaigns rows stuck in 'claimed' for >1h
+  // get reset to 'buffered'. Filet de sécurité if a previous pullNext crashed mid-flight.
   const staleCutoff = new Date(Date.now() - 60 * 60 * 1000);
   const staleRecovered = await pgSql`
-    UPDATE lead_buffer
-    SET status = 'buffered'
+    UPDATE leads_campaigns
+    SET status = 'buffered', updated_at = NOW()
     WHERE org_id = ${params.orgId}
       AND campaign_id = ${params.campaignId}
-      AND namespace = 'apollo'
       AND status = 'claimed'
-      AND created_at < ${staleCutoff.toISOString()}::timestamptz
+      AND updated_at < ${staleCutoff.toISOString()}::timestamptz
     RETURNING id
   `;
   if (staleRecovered.length > 0) {
-    console.log(`[lead-service] Recovered ${staleRecovered.length} stale claimed leads for campaign=${params.campaignId}`);
+    console.log(
+      `[lead-service] pullNext recovered ${staleRecovered.length} stale claimed leads for campaign=${params.campaignId}`,
+    );
   }
 
-  const MAX_ITERATIONS = 100;
-  let iterations = 0;
-  while (true) {
-    iterations++;
+  while (!signal?.aborted) {
+    const claimed = await claimNextLeadCampaign(params.orgId, params.campaignId);
 
-    if (iterations > MAX_ITERATIONS) {
-      console.warn(`[pullNext] Hit MAX_ITERATIONS (${MAX_ITERATIONS}), giving up`);
-      return { found: false };
-    }
-    // Use FOR UPDATE SKIP LOCKED to atomically claim a buffer row,
-    // preventing concurrent pullNext calls from picking the same lead.
-    const claimedRows = await pgSql`
-      UPDATE lead_buffer
-      SET status = 'claimed'
-      WHERE id = (
-        SELECT id FROM lead_buffer
-        WHERE org_id = ${params.orgId}
-          AND campaign_id = ${params.campaignId}
-          AND namespace = 'apollo'
-          AND status = 'buffered'
-        ORDER BY CASE WHEN email != '' THEN 0 ELSE 1 END
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING *
-    `;
+    if (!claimed) {
+      const result = await topUpApolloLeadBuffer(
+        {
+          orgId: params.orgId,
+          campaignId: params.campaignId,
+          brandIds: params.brandIds,
+          pushRunId: params.runId,
+          userId: params.userId,
+          workflowSlug: params.workflowSlug,
+          featureSlug: params.featureSlug,
+        },
+        signal,
+      );
 
-    const row = claimedRows.length > 0 ? {
-      id: claimedRows[0].id as string,
-      namespace: claimedRows[0].namespace as string,
-      campaignId: claimedRows[0].campaign_id as string,
-      email: claimedRows[0].email as string,
-      apolloPersonId: claimedRows[0].apollo_person_id as string | null,
-      data: claimedRows[0].data as unknown,
-      status: claimedRows[0].status as string,
-      pushRunId: claimedRows[0].push_run_id as string | null,
-      brandIds: claimedRows[0].brand_ids as string[] | null,
-      orgId: claimedRows[0].org_id as string,
-      userId: claimedRows[0].user_id as string | null,
-      createdAt: claimedRows[0].created_at as Date,
-    } : null;
-
-    if (!row) {
-      // Buffer empty — fill from Apollo search
-      const result = await fillBufferFromSearch({
-        orgId: params.orgId,
-        campaignId: params.campaignId,
-        brandIds: params.brandIds,
-        pushRunId: params.runId,
-        userId: params.userId,
-        workflowSlug: params.workflowSlug,
-        featureSlug: params.featureSlug,
-      });
-
-      if (result.filled > 0) {
-        continue; // Retry pulling from buffer
-      }
+      if (result.filled > 0) continue;
 
       console.log(`[lead-service] pullNext found=false campaign=${params.campaignId}`);
       return { found: false };
     }
 
-    // Pre-enrichment brand dedup: skip leads already served for this brand
-    // before paying for Apollo enrichment (uses apolloPersonId only, no email needed)
-    if (row.apolloPersonId) {
+    // Pre-enrich brand dedup (uses apolloPersonId only).
+    if (claimed.apolloPersonId) {
       const preCheck = await isAlreadyServedForBrand({
         orgId: params.orgId,
         brandIds: params.brandIds,
-        apolloPersonId: row.apolloPersonId,
+        apolloPersonId: claimed.apolloPersonId,
       });
-
       if (preCheck.blocked) {
-        console.log(`[lead-service] pullNext skip (pre-enrich brand dedup): ${preCheck.reason} apolloPersonId=${row.apolloPersonId}`);
-        await db
-          .update(leadBuffer)
-          .set({
-            status: "skipped",
-            statusReason: "pre_enrich_brand_dedup",
-            statusDetails: `Already served for brand (pre-enrich check), apolloPersonId=${row.apolloPersonId}, campaignId=${params.campaignId}, brandIds=${params.brandIds.join(",")}, reason=${preCheck.reason}`,
-          })
-          .where(eq(leadBuffer.id, row.id));
+        await setLeadCampaignStatus(
+          claimed.leadCampaignId,
+          "skipped",
+          "pre_enrich_brand_dedup",
+          `Already served for overlapping brand (pre-enrich), apolloPersonId=${claimed.apolloPersonId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}`,
+        );
         continue;
       }
     }
 
-    // Enrich if no email
-    let email = row.email;
-    let enrichedData = row.data;
+    let email = claimed.primaryEmail;
+    let emailStatus = claimed.primaryEmailStatus;
 
-    if (!email && row.apolloPersonId) {
-      // Check enrichment cache first to avoid duplicate Apollo API calls
-      const cached = await db.query.enrichments.findFirst({
-        where: eq(enrichments.apolloPersonId, row.apolloPersonId),
+    const cacheFresh = isCacheFresh(claimed.enrichedAt, claimed.hasEmail);
+    const needEnrich = !email && !cacheFresh;
+
+    if (needEnrich && claimed.apolloPersonId) {
+      const enrichResult = await apolloEnrich(claimed.apolloPersonId, {
+        runId: params.runId,
+        orgId: params.orgId,
+        userId: params.userId,
+        brandId: brandIdCsv,
+        campaignId: params.campaignId,
+        workflowSlug: params.workflowSlug,
+        featureSlug: params.featureSlug,
       });
 
-      if (cached && isCacheFresh(cached.enrichedAt, !!cached.email)) {
-        if (cached.email) {
-          // Check email status from cache
-          if (cached.emailStatus && !VALID_EMAIL_STATUSES.has(cached.emailStatus)) {
-            console.log(`[lead-service] pullNext skip (invalid emailStatus: ${cached.emailStatus}) apolloPersonId=${row.apolloPersonId}`);
-            await db
-              .update(leadBuffer)
-              .set({
-                status: "skipped",
-                statusReason: "invalid_email_status",
-                statusDetails: `Cached email status "${cached.emailStatus}" is not valid (requires verified/extrapolated), email=${cached.email}, apolloPersonId=${row.apolloPersonId}, campaignId=${params.campaignId}`,
-              })
-              .where(eq(leadBuffer.id, row.id));
-            continue;
-          }
-          // Use cached enrichment — no apollo-service call needed
-          email = cached.email;
-          enrichedData = cached.responseRaw ?? row.data;
-        } else {
-          // Previously enriched but no email found, cache still fresh — skip without calling Apollo
-          await db
-            .update(leadBuffer)
-            .set({
-              status: "skipped",
-              statusReason: "no_email_cached",
-              statusDetails: `Previously enriched but no email found (cache still fresh), apolloPersonId=${row.apolloPersonId}, campaignId=${params.campaignId}`,
-            })
-            .where(eq(leadBuffer.id, row.id));
-          continue;
+      if (enrichResult?.person) {
+        await upsertLeadFromPerson(enrichResult.person, { enriched: true });
+        await recordEmploymentHistory({ leadId: claimed.leadId, person: enrichResult.person });
+        if (enrichResult.person.email) {
+          await upsertContactMethod({
+            leadId: claimed.leadId,
+            channel: "email",
+            value: enrichResult.person.email,
+            status: enrichResult.person.emailStatus ?? null,
+            source: "apollo",
+          });
+          email = enrichResult.person.email;
+          emailStatus = enrichResult.person.emailStatus ?? null;
         }
       } else {
-        const enrichResult = await apolloEnrich(row.apolloPersonId, {
-          runId: params.runId,
-          orgId: params.orgId,
-          userId: params.userId,
-          brandId: brandIdCsv,
-          campaignId: params.campaignId,
-          workflowSlug: params.workflowSlug,
-          featureSlug: params.featureSlug,
-        });
-
-        if (!enrichResult?.person?.email) {
-          // Cache the no-email result to avoid re-enriching this person
-          await db.insert(enrichments).values({
-            email: null,
-            emailStatus: null,
-            apolloPersonId: row.apolloPersonId,
-            name: enrichResult?.person?.name ?? null,
-            firstName: enrichResult?.person?.firstName ?? null,
-            lastName: enrichResult?.person?.lastName ?? null,
-            title: enrichResult?.person?.title ?? null,
-            linkedinUrl: enrichResult?.person?.linkedinUrl ?? null,
-            personalEmails: enrichResult?.person?.personalEmails ?? null,
-            mobilePhone: enrichResult?.person?.mobilePhone ?? null,
-            phoneNumbers: enrichResult?.person?.phoneNumbers ?? null,
-            organizationId: enrichResult?.person?.organizationId ?? null,
-            organizationName: enrichResult?.person?.organizationName ?? null,
-            organizationDomain: enrichResult?.person?.organizationDomain ?? null,
-            organizationIndustry: enrichResult?.person?.organizationIndustry ?? null,
-            organizationSize: enrichResult?.person?.organizationSize ?? null,
-            organizationRawAddress: enrichResult?.person?.organizationRawAddress ?? null,
-            responseRaw: enrichResult?.person ?? null,
-          }).onConflictDoNothing();
-          await db
-            .update(leadBuffer)
-            .set({
-              status: "skipped",
-              statusReason: "no_email",
-              statusDetails: `Apollo enrichment returned no email, apolloPersonId=${row.apolloPersonId}, campaignId=${params.campaignId}`,
-            })
-            .where(eq(leadBuffer.id, row.id));
-          continue;
-        }
-
-        // Check email status from fresh enrichment
-        const freshEmailStatus = enrichResult.person.emailStatus;
-        if (freshEmailStatus && !VALID_EMAIL_STATUSES.has(freshEmailStatus)) {
-          console.log(`[lead-service] pullNext skip (invalid emailStatus: ${freshEmailStatus}) apolloPersonId=${row.apolloPersonId}`);
-          // Still cache the result
-          await db.insert(enrichments).values({
-            email: enrichResult.person.email,
-            emailStatus: freshEmailStatus,
-            apolloPersonId: row.apolloPersonId,
-            name: enrichResult.person.name ?? null,
-            firstName: enrichResult.person.firstName ?? null,
-            lastName: enrichResult.person.lastName ?? null,
-            title: enrichResult.person.title ?? null,
-            linkedinUrl: enrichResult.person.linkedinUrl ?? null,
-            personalEmails: enrichResult.person.personalEmails ?? null,
-            mobilePhone: enrichResult.person.mobilePhone ?? null,
-            phoneNumbers: enrichResult.person.phoneNumbers ?? null,
-            organizationId: enrichResult.person.organizationId ?? null,
-            organizationName: enrichResult.person.organizationName ?? null,
-            organizationDomain: enrichResult.person.organizationDomain ?? null,
-            organizationIndustry: enrichResult.person.organizationIndustry ?? null,
-            organizationSize: enrichResult.person.organizationSize ?? null,
-            organizationRawAddress: enrichResult.person.organizationRawAddress ?? null,
-            responseRaw: enrichResult.person,
-          }).onConflictDoNothing();
-          await db
-            .update(leadBuffer)
-            .set({
-              status: "skipped",
-              statusReason: "invalid_email_status",
-              statusDetails: `Fresh enrichment email status "${freshEmailStatus}" is not valid (requires verified/extrapolated), email=${enrichResult.person.email}, apolloPersonId=${row.apolloPersonId}, campaignId=${params.campaignId}`,
-            })
-            .where(eq(leadBuffer.id, row.id));
-          continue;
-        }
-
-        email = enrichResult.person.email;
-        enrichedData = { ...(row.data as object ?? {}), ...enrichResult.person };
-
-        // Save to enrichment cache for future lookups
-        await db.insert(enrichments).values({
-          email,
-          emailStatus: freshEmailStatus ?? null,
-          apolloPersonId: row.apolloPersonId,
-          name: enrichResult.person.name ?? null,
-          firstName: enrichResult.person.firstName ?? null,
-          lastName: enrichResult.person.lastName ?? null,
-          title: enrichResult.person.title ?? null,
-          linkedinUrl: enrichResult.person.linkedinUrl ?? null,
-          personalEmails: enrichResult.person.personalEmails ?? null,
-          mobilePhone: enrichResult.person.mobilePhone ?? null,
-          phoneNumbers: enrichResult.person.phoneNumbers ?? null,
-          organizationId: enrichResult.person.organizationId ?? null,
-          organizationName: enrichResult.person.organizationName ?? null,
-          organizationDomain: enrichResult.person.organizationDomain ?? null,
-          organizationIndustry: enrichResult.person.organizationIndustry ?? null,
-          organizationSize: enrichResult.person.organizationSize ?? null,
-          organizationRawAddress: enrichResult.person.organizationRawAddress ?? null,
-          responseRaw: enrichResult.person,
-        }).onConflictDoNothing();
+        await db
+          .update(leads)
+          .set({ enrichedAt: new Date() })
+          .where(eq(leads.id, claimed.leadId));
       }
-
-      // Update buffer row with enriched email
-      await db
-        .update(leadBuffer)
-        .set({ email, data: enrichedData })
-        .where(eq(leadBuffer.id, row.id));
     }
 
-    // Skip leads with no email — found: true must always have a usable email
     if (!email) {
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "no_email",
-          statusDetails: `No email available after all enrichment attempts, apolloPersonId=${row.apolloPersonId ?? "none"}, bufferId=${row.id}, campaignId=${params.campaignId}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+      const stillHasEmail = await leadHasEmail(claimed.leadId);
+      if (!stillHasEmail) {
+        await setLeadCampaignStatus(
+          claimed.leadCampaignId,
+          "skipped",
+          "no_email",
+          `No email after enrichment, leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
+        );
+        continue;
+      }
+      const refreshed = await getPrimaryEmail(claimed.leadId);
+      if (!refreshed) {
+        await setLeadCampaignStatus(
+          claimed.leadCampaignId,
+          "skipped",
+          "no_email",
+          `No primary email row after enrichment, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+        );
+        continue;
+      }
+      email = refreshed.email;
+      emailStatus = refreshed.status;
+    }
+
+    if (emailStatus && !VALID_EMAIL_STATUSES.has(emailStatus)) {
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "invalid_email_status",
+        `Email status "${emailStatus}" not valid (verified/extrapolated required), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      );
       continue;
     }
 
-    // Resolve or create the lead identity
-    const { leadId } = await resolveOrCreateLead({
-      apolloPersonId: row.apolloPersonId,
-      email,
-      metadata: enrichedData,
-    });
-
-    // DB-level brand dedup: check served_leads cross-campaign via brand_ids overlap
     const brandCheck = await isAlreadyServedForBrand({
       orgId: params.orgId,
       brandIds: params.brandIds,
-      leadId,
+      leadId: claimed.leadId,
       email,
-      apolloPersonId: row.apolloPersonId,
+      apolloPersonId: claimed.apolloPersonId,
     });
-
     if (brandCheck.blocked) {
-      console.log(`[lead-service] pullNext skip (brand dedup): ${brandCheck.reason} email=${email}`);
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "brand_dedup",
-          statusDetails: `Already served for brand (post-enrich check), email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, leadId=${leadId}, brandIds=${params.brandIds.join(",")}, campaignId=${params.campaignId}, reason=${brandCheck.reason}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "brand_dedup",
+        `Already served for overlapping brand (post-enrich), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}, reason=${brandCheck.reason}`,
+      );
       continue;
     }
 
-    // Race window: skip if another buffer row for the same brand was recently claimed/served
     const inRaceWindow = await checkRaceWindow({
       orgId: params.orgId,
       brandIds: params.brandIds,
       email,
-      excludeBufferId: row.id,
+      excludeLeadCampaignId: claimed.leadCampaignId,
     });
-
     if (inRaceWindow) {
-      console.log(`[lead-service] pullNext skip (race window) email=${email}`);
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "race_window",
-          statusDetails: `Another buffer row for same brand was recently claimed/served, email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, brandIds=${params.brandIds.join(",")}, campaignId=${params.campaignId}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "race_window",
+        `Concurrent claim/serve detected, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      );
       continue;
     }
 
-    // Email-gateway: contacted + bounce + unsub check (fails loud if unreachable)
-    const statusMap = await checkContacted(params.brandIds, params.campaignId, [
-      { email },
-    ], {
+    const statusMap = await checkContacted(params.brandIds, params.campaignId, [{ email }], {
       orgId: params.orgId,
       userId: params.userId ?? undefined,
       runId: params.runId ?? undefined,
@@ -603,100 +514,73 @@ export async function pullNext(params: {
       workflowSlug: params.workflowSlug,
       featureSlug: params.featureSlug,
     });
-
-    const emailStatus = statusMap.get(email);
-    if (emailStatus?.contacted) {
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "contacted",
-          statusDetails: `Already contacted via email-gateway, email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, leadId=${leadId}, campaignId=${params.campaignId}, brandIds=${params.brandIds.join(",")}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+    const gw = statusMap.get(email);
+    if (gw?.contacted) {
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "contacted",
+        `Already contacted via email-gateway, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      );
       continue;
     }
-    if (emailStatus?.bounced) {
-      console.log(`[lead-service] pullNext skip (bounced) email=${email}`);
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "bounced",
-          statusDetails: `Email previously bounced, email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, leadId=${leadId}, campaignId=${params.campaignId}, brandIds=${params.brandIds.join(",")}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+    if (gw?.bounced) {
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "bounced",
+        `Email previously bounced, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      );
       continue;
     }
-    if (emailStatus?.unsubscribed) {
-      console.log(`[lead-service] pullNext skip (unsubscribed) email=${email}`);
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "unsubscribed",
-          statusDetails: `Email unsubscribed, email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, leadId=${leadId}, campaignId=${params.campaignId}, brandIds=${params.brandIds.join(",")}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
-      continue;
-    }
-
-    const { inserted } = await markServed({
-      orgId: params.orgId,
-      namespace: "apollo",
-      brandIds: params.brandIds,
-      campaignId: params.campaignId,
-      email,
-      leadId,
-      apolloPersonId: row.apolloPersonId,
-      metadata: enrichedData,
-      parentRunId: params.parentRunId ?? null,
-      runId: params.runId ?? null,
-      userId: row.userId,
-      workflowSlug: params.workflowSlug ?? null,
-      featureSlug: params.featureSlug ?? null,
-    });
-
-    if (!inserted) {
-      // Another request already served this email for this org+campaign — skip
-      await db
-        .update(leadBuffer)
-        .set({
-          status: "skipped",
-          statusReason: "serve_dedup",
-          statusDetails: `Another request already served this email for org+campaign, email=${email}, apolloPersonId=${row.apolloPersonId ?? "none"}, leadId=${leadId}, campaignId=${params.campaignId}`,
-        })
-        .where(eq(leadBuffer.id, row.id));
+    if (gw?.unsubscribed) {
+      await setLeadCampaignStatus(
+        claimed.leadCampaignId,
+        "skipped",
+        "unsubscribed",
+        `Email unsubscribed, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      );
       continue;
     }
 
     await db
-      .update(leadBuffer)
+      .update(leadsCampaigns)
       .set({
         status: "served",
         statusReason: "served",
-        statusDetails: `Lead served successfully, email=${email}, leadId=${leadId}, apolloPersonId=${row.apolloPersonId ?? "none"}, campaignId=${params.campaignId}, brandIds=${params.brandIds.join(",")}`,
+        statusDetails: `Lead served, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+        servedAt: new Date(),
+        parentRunId: params.parentRunId ?? null,
+        runId: params.runId ?? null,
+        updatedAt: new Date(),
       })
-      .where(eq(leadBuffer.id, row.id));
+      .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
 
-    // Ensure data.email always matches the canonical email
-    const finalData =
-      enrichedData && typeof enrichedData === "object"
-        ? { ...(enrichedData as Record<string, unknown>), email }
-        : { email };
+    const leadRow = await db.query.leads.findFirst({ where: eq(leads.id, claimed.leadId) });
+    const finalData: Record<string, unknown> = {
+      ...(leadRow?.metadata && typeof leadRow.metadata === "object" ? (leadRow.metadata as Record<string, unknown>) : {}),
+      email,
+    };
 
-    console.log(`[lead-service] pullNext found=true campaign=${params.campaignId} email=${email} leadId=${leadId}`);
+    console.log(
+      `[lead-service] pullNext found=true campaign=${params.campaignId} email=${email} leadId=${claimed.leadId}`,
+    );
     return {
       found: true,
       lead: {
-        leadId,
+        leadId: claimed.leadId,
         email,
         data: finalData,
         brandIds: params.brandIds,
-        orgId: row.orgId,
-        userId: row.userId,
-        apolloPersonId: row.apolloPersonId,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: claimed.apolloPersonId,
       },
     };
   }
+
+  // Aborted (timeout from caller's AbortSignal)
+  return { found: false };
 }
+
+export { leadContactMethods, leadsCampaigns };

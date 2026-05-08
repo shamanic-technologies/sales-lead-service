@@ -127,6 +127,13 @@
       "when": 1778457600000,
       "tag": "0017_apollo_full_coverage",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1778544000000,
+      "tag": "0018_multi_strategy_cursor",
+      "breakpoints": true
     }
   ]
 }

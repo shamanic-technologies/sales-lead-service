@@ -29,7 +29,10 @@ export interface ApolloSearchParams {
   personTitles?: string[];
   organizationLocations?: string[];
   organizationIndustries?: string[];
-  organizationSizeRanges?: string[];
+  organizationNumEmployeesRanges?: string[];
+  qOrganizationKeywordTags?: string[];
+  qOrganizationIndustryTagIds?: string[];
+  qKeywords?: string[];
   keywords?: string[];
   [key: string]: unknown;
 }
@@ -130,79 +133,19 @@ export interface ApolloPersonResult {
   organizationNumSuborganizations?: number;
   organizationRetailLocationCount?: number;
   organizationAlexaRanking?: number;
-  // Verbatim Apollo person payload (snake_case, includes any field Apollo returns)
   raw?: Record<string, unknown>;
-  // Allow any additional fields Apollo adds in the future
   [key: string]: unknown;
 }
 
-export interface ApolloSearchResult {
-  people: ApolloPersonResult[];
-  pagination: {
-    page: number;
-    totalPages: number;
-    totalEntries: number;
-  };
-}
+// --- Fetch Page (server-managed pagination via apollo-service /search/next) ---
 
-interface ApolloSearchRawResponse {
-  people?: ApolloPersonResult[];
-  pagination?: ApolloSearchResult["pagination"];
-  total_entries?: number;
-  totalEntries?: number;
-  per_page?: number;
-  perPage?: number;
-  [key: string]: unknown;
-}
-
-export async function apolloSearch(
-  params: ApolloSearchParams,
-  page: number = 1,
-  options?: { runId?: string | null; orgId?: string | null; userId?: string | null; brandId?: string; campaignId?: string; workflowSlug?: string; featureSlug?: string }
-): Promise<ApolloSearchResult | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (options?.orgId) headers["x-org-id"] = options.orgId;
-    if (options?.userId) headers["x-user-id"] = options.userId;
-    if (options?.runId) headers["x-run-id"] = options.runId;
-    if (options?.brandId) headers["x-brand-id"] = options.brandId;
-    if (options?.campaignId) headers["x-campaign-id"] = options.campaignId;
-    if (options?.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
-    if (options?.featureSlug) headers["x-feature-slug"] = options.featureSlug;
-
-    const raw = await callApolloService<ApolloSearchRawResponse>("/search", {
-      method: "POST",
-      body: {
-        ...params,
-        page,
-      },
-      headers,
-    });
-
-    const people = raw.people ?? [];
-    const pagination = raw.pagination ?? {
-      page,
-      totalEntries: raw.total_entries ?? raw.totalEntries ?? 0,
-      totalPages: Math.ceil((raw.total_entries ?? raw.totalEntries ?? 0) / (raw.per_page ?? raw.perPage ?? 25)),
-    };
-
-    const result: ApolloSearchResult = { people, pagination };
-    return result;
-  } catch (error) {
-    console.error("[apollo-client] Search failed:", error);
-    throw error;
-  }
-}
-
-// --- Search Next (server-managed pagination) ---
-
-export interface ApolloSearchNextResult {
+export interface ApolloFetchPageResult {
   people: ApolloPersonResult[];
   done: boolean;
   totalEntries: number;
 }
 
-export async function apolloSearchNext(options: {
+export async function apolloFetchPage(options: {
   campaignId: string;
   brandId: string;
   searchParams?: ApolloSearchParams;
@@ -211,63 +154,54 @@ export async function apolloSearchNext(options: {
   userId?: string | null;
   workflowSlug?: string;
   featureSlug?: string;
-}): Promise<ApolloSearchNextResult | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (options.orgId) headers["x-org-id"] = options.orgId;
-    if (options.userId) headers["x-user-id"] = options.userId;
-    if (options.runId) headers["x-run-id"] = options.runId;
-    headers["x-brand-id"] = options.brandId;
-    headers["x-campaign-id"] = options.campaignId;
-    if (options.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
-    if (options.featureSlug) headers["x-feature-slug"] = options.featureSlug;
-
-    const body: Record<string, unknown> = {};
-    if (options.searchParams) body.searchParams = options.searchParams;
-
-    return await callApolloService<ApolloSearchNextResult>("/search/next", {
-      method: "POST",
-      body,
-      headers,
-    });
-  } catch (error) {
-    console.error("[apollo-client] SearchNext failed:", error);
-    throw error;
-  }
-}
-
-// --- Search Params (LLM-powered search filter generation) ---
-
-export interface ApolloSearchParamsResult {
-  searchParams: ApolloSearchParams;
-  totalResults: number;
-  attempts: number;
-}
-
-export async function apolloSearchParams(options: {
-  context: string;
-  runId: string;
-  brandId: string;
-  campaignId: string;
-  orgId?: string | null;
-  userId?: string | null;
-  workflowSlug?: string;
-  featureSlug?: string;
-}): Promise<ApolloSearchParamsResult> {
+}): Promise<ApolloFetchPageResult> {
   const headers: Record<string, string> = {};
   if (options.orgId) headers["x-org-id"] = options.orgId;
   if (options.userId) headers["x-user-id"] = options.userId;
-  headers["x-run-id"] = options.runId;
+  if (options.runId) headers["x-run-id"] = options.runId;
   headers["x-brand-id"] = options.brandId;
   headers["x-campaign-id"] = options.campaignId;
   if (options.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
   if (options.featureSlug) headers["x-feature-slug"] = options.featureSlug;
 
-  return callApolloService<ApolloSearchParamsResult>("/search/params", {
+  const body: Record<string, unknown> = {};
+  if (options.searchParams) body.searchParams = options.searchParams;
+
+  return callApolloService<ApolloFetchPageResult>("/search/next", {
     method: "POST",
-    body: {
-      context: options.context,
-    },
+    body,
+    headers,
+  });
+}
+
+// --- Dry Run (probe filters without persistence — used by strategy-generator LLM loop) ---
+
+export interface ApolloDryRunResult {
+  totalEntries: number;
+  validationErrors: string[];
+}
+
+export async function apolloDryRun(options: {
+  filters: ApolloSearchParams;
+  orgId: string;
+  userId?: string | null;
+  runId?: string | null;
+  brandId?: string;
+  campaignId?: string;
+  workflowSlug?: string;
+  featureSlug?: string;
+}): Promise<ApolloDryRunResult> {
+  const headers: Record<string, string> = { "x-org-id": options.orgId };
+  if (options.userId) headers["x-user-id"] = options.userId;
+  if (options.runId) headers["x-run-id"] = options.runId;
+  if (options.brandId) headers["x-brand-id"] = options.brandId;
+  if (options.campaignId) headers["x-campaign-id"] = options.campaignId;
+  if (options.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
+  if (options.featureSlug) headers["x-feature-slug"] = options.featureSlug;
+
+  return callApolloService<ApolloDryRunResult>("/search/dry-run", {
+    method: "POST",
+    body: { filters: options.filters },
     headers,
   });
 }
@@ -286,36 +220,24 @@ export async function fetchApolloStats(
   orgId?: string | null,
   context?: { userId?: string; runId?: string; campaignId?: string; brandId?: string; workflowSlug?: string; featureSlug?: string }
 ): Promise<ApolloStats> {
-  try {
-    const headers: Record<string, string> = {};
-    if (orgId) headers["x-org-id"] = orgId;
-    if (context?.userId) headers["x-user-id"] = context.userId;
-    if (context?.runId) headers["x-run-id"] = context.runId;
-    if (context?.campaignId) headers["x-campaign-id"] = context.campaignId;
-    if (context?.brandId) headers["x-brand-id"] = context.brandId;
-    if (context?.workflowSlug) headers["x-workflow-slug"] = context.workflowSlug;
-    if (context?.featureSlug) headers["x-feature-slug"] = context.featureSlug;
+  const headers: Record<string, string> = {};
+  if (orgId) headers["x-org-id"] = orgId;
+  if (context?.userId) headers["x-user-id"] = context.userId;
+  if (context?.runId) headers["x-run-id"] = context.runId;
+  if (context?.campaignId) headers["x-campaign-id"] = context.campaignId;
+  if (context?.brandId) headers["x-brand-id"] = context.brandId;
+  if (context?.workflowSlug) headers["x-workflow-slug"] = context.workflowSlug;
+  if (context?.featureSlug) headers["x-feature-slug"] = context.featureSlug;
 
-    const result = await callApolloService<{ stats: ApolloStats }>("/stats", {
-      method: "POST",
-      body: filters,
-      headers,
-    });
-
-    return result.stats;
-  } catch (error) {
-    console.error("[apollo-client] Stats fetch failed:", error);
-    return { enrichedLeadsCount: 0, searchCount: 0, fetchedPeopleCount: 0, totalMatchingPeople: 0 };
-  }
+  const result = await callApolloService<{ stats: ApolloStats }>("/stats", {
+    method: "POST",
+    body: filters,
+    headers,
+  });
+  return result.stats;
 }
 
-// --- Enrichment ---
-
-export interface ApolloEnrichResult {
-  person: ApolloPersonResult;
-}
-
-// --- Person Match (by name + organization domain) ---
+// --- Match (by name + organization domain) ---
 
 export interface ApolloMatchResult {
   enrichmentId: string | null;
@@ -327,58 +249,48 @@ export async function apolloMatch(
   params: { firstName: string; lastName: string; organizationDomain: string },
   options?: { runId?: string | null; orgId?: string | null; userId?: string | null; brandId?: string; campaignId?: string; workflowSlug?: string; featureSlug?: string }
 ): Promise<ApolloMatchResult | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (options?.orgId) headers["x-org-id"] = options.orgId;
-    if (options?.userId) headers["x-user-id"] = options.userId;
-    if (options?.runId) headers["x-run-id"] = options.runId;
-    if (options?.brandId) headers["x-brand-id"] = options.brandId;
-    if (options?.campaignId) headers["x-campaign-id"] = options.campaignId;
-    if (options?.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
-    if (options?.featureSlug) headers["x-feature-slug"] = options.featureSlug;
+  const headers: Record<string, string> = {};
+  if (options?.orgId) headers["x-org-id"] = options.orgId;
+  if (options?.userId) headers["x-user-id"] = options.userId;
+  if (options?.runId) headers["x-run-id"] = options.runId;
+  if (options?.brandId) headers["x-brand-id"] = options.brandId;
+  if (options?.campaignId) headers["x-campaign-id"] = options.campaignId;
+  if (options?.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
+  if (options?.featureSlug) headers["x-feature-slug"] = options.featureSlug;
 
-    return await callApolloService<ApolloMatchResult>("/match", {
-      method: "POST",
-      body: {
-        firstName: params.firstName,
-        lastName: params.lastName,
-        organizationDomain: params.organizationDomain,
-      },
-      headers,
-    });
-  } catch (error) {
-    console.error(`[apollo-client] Match failed for ${params.firstName} ${params.lastName} @ ${params.organizationDomain}:`, error);
-    throw error;
-  }
+  return callApolloService<ApolloMatchResult>("/match", {
+    method: "POST",
+    body: {
+      firstName: params.firstName,
+      lastName: params.lastName,
+      organizationDomain: params.organizationDomain,
+    },
+    headers,
+  });
 }
 
 // --- Enrichment ---
+
+export interface ApolloEnrichResult {
+  person: ApolloPersonResult;
+}
 
 export async function apolloEnrich(
   personId: string,
   options?: { runId?: string | null; orgId?: string | null; userId?: string | null; brandId?: string; campaignId?: string; workflowSlug?: string; featureSlug?: string }
 ): Promise<ApolloEnrichResult | null> {
-  try {
-    const headers: Record<string, string> = {};
-    if (options?.orgId) headers["x-org-id"] = options.orgId;
-    if (options?.userId) headers["x-user-id"] = options.userId;
-    if (options?.runId) headers["x-run-id"] = options.runId;
-    if (options?.brandId) headers["x-brand-id"] = options.brandId;
-    if (options?.campaignId) headers["x-campaign-id"] = options.campaignId;
-    if (options?.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
-    if (options?.featureSlug) headers["x-feature-slug"] = options.featureSlug;
+  const headers: Record<string, string> = {};
+  if (options?.orgId) headers["x-org-id"] = options.orgId;
+  if (options?.userId) headers["x-user-id"] = options.userId;
+  if (options?.runId) headers["x-run-id"] = options.runId;
+  if (options?.brandId) headers["x-brand-id"] = options.brandId;
+  if (options?.campaignId) headers["x-campaign-id"] = options.campaignId;
+  if (options?.workflowSlug) headers["x-workflow-slug"] = options.workflowSlug;
+  if (options?.featureSlug) headers["x-feature-slug"] = options.featureSlug;
 
-    const result = await callApolloService<ApolloEnrichResult>("/enrich", {
-      method: "POST",
-      body: {
-        apolloPersonId: personId,
-      },
-      headers,
-    });
-
-    return result;
-  } catch (error) {
-    console.error(`[apollo-client] Enrich failed for personId=${personId}:`, error);
-    throw error;
-  }
+  return callApolloService<ApolloEnrichResult>("/enrich", {
+    method: "POST",
+    body: { apolloPersonId: personId },
+    headers,
+  });
 }
