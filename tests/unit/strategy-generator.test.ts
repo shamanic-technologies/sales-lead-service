@@ -39,6 +39,7 @@ import {
   generateNextStrategy,
   getCurrentStrategy,
   advanceStrategyOrGenerate,
+  __SYSTEM_PROMPT__,
   type StrategyContext,
 } from "../../src/lib/strategy-generator.js";
 
@@ -432,6 +433,55 @@ describe("strategy-generator", () => {
 
       const result = await advanceStrategyOrGenerate(baseCtx);
       expect("strategy" in result && result.strategy).toEqual({ personTitles: ["Orthodontist"] });
+    });
+  });
+
+  describe("SYSTEM_PROMPT — Apollo filter shape doc", () => {
+    it("documents qKeywords as string (not string[]) with OR-joined example", () => {
+      expect(__SYSTEM_PROMPT__).toMatch(/qKeywords:\s*string\b(?!\[\])/);
+      expect(__SYSTEM_PROMPT__).not.toMatch(/qKeywords:\s*string\[\]/);
+      expect(__SYSTEM_PROMPT__).toMatch(/qKeywords[\s\S]{0,300}?\bOR\b/);
+    });
+
+    it("lists personSeniorities enum values", () => {
+      const enums = ["entry", "senior", "manager", "director", "vp", "c_suite", "owner", "founder", "partner"];
+      const block = __SYSTEM_PROMPT__.match(/personSeniorities[\s\S]{0,400}/)?.[0] ?? "";
+      for (const v of enums) {
+        expect(block).toContain(v);
+      }
+    });
+
+    it("lists contactEmailStatus enum values", () => {
+      const enums = ["verified", "unverified", "likely to engage", "unavailable"];
+      const block = __SYSTEM_PROMPT__.match(/contactEmailStatus[\s\S]{0,400}/)?.[0] ?? "";
+      for (const v of enums) {
+        expect(block).toContain(v);
+      }
+    });
+
+    it("lists organizationNumEmployeesRanges enum values", () => {
+      const buckets = [
+        "1,10",
+        "11,20",
+        "21,50",
+        "51,100",
+        "101,200",
+        "201,500",
+        "501,1000",
+        "1001,2000",
+        "2001,5000",
+        "5001,10000",
+        "10001,",
+      ];
+      const block = __SYSTEM_PROMPT__.match(/organizationNumEmployeesRanges[\s\S]{0,800}/)?.[0] ?? "";
+      for (const b of buckets) {
+        expect(block).toContain(b);
+      }
+    });
+
+    it("does not list silently-dropped fields (organizationIndustries, keywords)", () => {
+      expect(__SYSTEM_PROMPT__).not.toMatch(/^- organizationIndustries:/m);
+      expect(__SYSTEM_PROMPT__).not.toMatch(/^- keywords:/m);
     });
   });
 });
