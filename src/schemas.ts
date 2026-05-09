@@ -139,6 +139,73 @@ const ContactMethodViewSchema = z
     },
   });
 
+const FundingEventSchema = z
+  .object({
+    id: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Apollo-assigned identifier for the funding event.",
+        example: "fund_5f2a3b4c5d6e7f8a9b0c1d2e",
+      }),
+    date: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO date (YYYY-MM-DD) of the funding event.",
+        example: "2024-06-01",
+      }),
+    type: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Funding round type (e.g. 'Seed', 'Series A', 'Series B').",
+        example: "Series A",
+      }),
+    investors: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Comma-separated list of investors as reported by Apollo.",
+        example: "Acme VC, Foo Capital",
+      }),
+    amount: z
+      .number()
+      .nullable()
+      .openapi({
+        description: "Amount raised in this round, in the round's currency.",
+        example: 5000000,
+      }),
+    currency: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO 4217 currency code for the amount.",
+        example: "USD",
+      }),
+    newsUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "URL to a news article announcing this funding event. Mapped from Apollo's snake_case `news_url` to camelCase for consistency with the rest of the API surface.",
+        example: "https://techcrunch.com/2024/06/01/casco-bay-series-a",
+      }),
+  })
+  .openapi("FundingEvent", {
+    description:
+      "One funding round attached to an organization. All fields are nullable because Apollo's coverage is best-effort.",
+    example: {
+      id: "fund_5f2a3b4c5d6e7f8a9b0c1d2e",
+      date: "2024-06-01",
+      type: "Series A",
+      investors: "Acme VC, Foo Capital",
+      amount: 5000000,
+      currency: "USD",
+      newsUrl: "https://techcrunch.com/2024/06/01/casco-bay-series-a",
+    },
+  });
+
 const OrganizationViewSchema = z
   .object({
     id: z
@@ -312,6 +379,122 @@ const OrganizationViewSchema = z
         description: "Secondary industry classifications.",
         example: ["digital-marketing"],
       }),
+    latestFundingStage: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Most recent funding stage label as reported by Apollo (e.g. 'seed', 'series_a', 'series_b'). null when never funded or unknown.",
+        example: "series_a",
+      }),
+    latestFundingRoundDate: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO date (YYYY-MM-DD) of the most recent funding round. null when unknown.",
+        example: "2024-06-01",
+      }),
+    totalFunding: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Total funding raised, in USD, serialized as a numeric string to avoid float precision loss for very large amounts.",
+        example: "5000000",
+      }),
+    totalFundingPrinted: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Human-friendly total-funding string from Apollo (e.g. '$5M', '$1.2B').",
+        example: "$5M",
+      }),
+    fundingEvents: z
+      .array(FundingEventSchema)
+      .openapi({
+        description:
+          "Per-round funding history. Empty array when no funding events are known. Apollo's snake_case `news_url` is mapped to camelCase `newsUrl` for API consistency.",
+        example: [
+          {
+            id: "fund_5f2a3b4c5d6e7f8a9b0c1d2e",
+            date: "2024-06-01",
+            type: "Series A",
+            investors: "Acme VC, Foo Capital",
+            amount: 5000000,
+            currency: "USD",
+            newsUrl: "https://techcrunch.com/2024/06/01/casco-bay-series-a",
+          },
+        ],
+      }),
+    retailLocationCount: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description: "Number of physical retail locations the organization operates.",
+        example: 3,
+      }),
+    publiclyTradedSymbol: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Stock ticker symbol when the company is publicly traded. null for private companies.",
+        example: "AAPL",
+      }),
+    publiclyTradedExchange: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Stock exchange where the company is listed (e.g. 'NASDAQ', 'NYSE'). null for private companies.",
+        example: "NASDAQ",
+      }),
+    primaryPhone: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Primary phone number for the company (E.164 when available).",
+        example: "+15555550100",
+      }),
+    seoDescription: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Long-form SEO meta description scraped from the company's website. Distinct from `shortDescription` (which is editorial / Apollo-curated).",
+        example: "Casco Bay is a boutique digital marketing agency based in Portland, Maine.",
+      }),
+    angellistUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "AngelList / Wellfound profile URL.",
+        example: "https://angel.co/cascobay",
+      }),
+    numSuborganizations: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description: "Count of subsidiaries / sub-organizations associated with this company.",
+        example: 0,
+      }),
+    alexaRanking: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description: "Alexa global website rank (smaller = more popular). null when unranked.",
+        example: 250000,
+      }),
+    keywords: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Free-form keywords that describe the company (Apollo-curated).",
+        example: ["marketing", "branding", "digital"],
+      }),
   })
   .openapi("OrganizationView", {
     description:
@@ -343,6 +526,30 @@ const OrganizationViewSchema = z
       technologyNames: ["GA4", "HubSpot"],
       industries: ["marketing", "advertising"],
       secondaryIndustries: null,
+      latestFundingStage: "series_a",
+      latestFundingRoundDate: "2024-06-01",
+      totalFunding: "5000000",
+      totalFundingPrinted: "$5M",
+      fundingEvents: [
+        {
+          id: "fund_5f2a3b4c5d6e7f8a9b0c1d2e",
+          date: "2024-06-01",
+          type: "Series A",
+          investors: "Acme VC, Foo Capital",
+          amount: 5000000,
+          currency: "USD",
+          newsUrl: "https://techcrunch.com/2024/06/01/casco-bay-series-a",
+        },
+      ],
+      retailLocationCount: null,
+      publiclyTradedSymbol: null,
+      publiclyTradedExchange: null,
+      primaryPhone: "+15555550100",
+      seoDescription: "Casco Bay is a boutique digital marketing agency based in Portland, Maine.",
+      angellistUrl: null,
+      numSuborganizations: 0,
+      alexaRanking: 250000,
+      keywords: ["marketing", "branding", "digital"],
     },
   });
 
@@ -548,6 +755,16 @@ export const FullLeadSchema = z
           "ISO 8601 timestamp of last successful enrichment. null when the lead was registered without enrichment.",
         example: "2026-01-01T00:00:00.000Z",
       }),
+    currentTitle: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Lead's current role title — derived from the leads_organizations row where current=true. " +
+          "Mirrors `employmentHistory[].title` for the current entry; surfaced top-level for convenient template binding " +
+          "(e.g. `recipientTitle` on outbound email). null when the lead has no current employment row or the row has no title.",
+        example: "Founder",
+      }),
     organization: OrganizationViewSchema.nullable(),
     contacts: z
       .array(ContactMethodViewSchema)
@@ -598,6 +815,7 @@ export const FullLeadSchema = z
       githubUrl: null,
       facebookUrl: null,
       enrichedAt: "2026-01-01T00:00:00.000Z",
+      currentTitle: "Founder",
       organization: {
         id: "10000000-0000-0000-0000-000000000001",
         apolloOrganizationId: "5f2a3b4c5d6e7f8a9b0c1d2e",
@@ -623,6 +841,30 @@ export const FullLeadSchema = z
         technologyNames: ["GA4", "HubSpot"],
         industries: ["marketing", "advertising"],
         secondaryIndustries: null,
+        latestFundingStage: "series_a",
+        latestFundingRoundDate: "2024-06-01",
+        totalFunding: "5000000",
+        totalFundingPrinted: "$5M",
+        fundingEvents: [
+          {
+            id: "fund_5f2a3b4c5d6e7f8a9b0c1d2e",
+            date: "2024-06-01",
+            type: "Series A",
+            investors: "Acme VC, Foo Capital",
+            amount: 5000000,
+            currency: "USD",
+            newsUrl: "https://techcrunch.com/2024/06/01/casco-bay-series-a",
+          },
+        ],
+        retailLocationCount: null,
+        publiclyTradedSymbol: null,
+        publiclyTradedExchange: null,
+        primaryPhone: "+15555550100",
+        seoDescription: "Casco Bay is a boutique digital marketing agency based in Portland, Maine.",
+        angellistUrl: null,
+        numSuborganizations: 0,
+        alexaRanking: 250000,
+        keywords: ["marketing", "branding", "digital"],
       },
       contacts: [
         { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },
@@ -740,6 +982,7 @@ export const BufferNextResponseSchema = z
               githubUrl: null,
               facebookUrl: null,
               enrichedAt: "2026-01-01T00:00:00.000Z",
+              currentTitle: "Founder",
               organization: {
                 id: "10000000-0000-0000-0000-000000000001",
                 apolloOrganizationId: "5f2a3b4c5d6e7f8a9b0c1d2e",
@@ -765,6 +1008,20 @@ export const BufferNextResponseSchema = z
                 technologyNames: ["GA4"],
                 industries: ["marketing"],
                 secondaryIndustries: null,
+                latestFundingStage: "series_a",
+                latestFundingRoundDate: "2024-06-01",
+                totalFunding: "5000000",
+                totalFundingPrinted: "$5M",
+                fundingEvents: [],
+                retailLocationCount: null,
+                publiclyTradedSymbol: null,
+                publiclyTradedExchange: null,
+                primaryPhone: null,
+                seoDescription: null,
+                angellistUrl: null,
+                numSuborganizations: null,
+                alexaRanking: null,
+                keywords: null,
               },
               contacts: [
                 { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },

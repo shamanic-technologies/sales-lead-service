@@ -40,6 +40,7 @@ const minimalLead = {
   githubUrl: null,
   facebookUrl: null,
   enrichedAt: null,
+  currentTitle: null,
   organization: null,
   contacts: [],
   employmentHistory: [],
@@ -50,34 +51,138 @@ describe("FullLeadSchema", () => {
     expect(FullLeadSchema.safeParse(minimalLead).success).toBe(true);
   });
 
-  it("accepts a lead with full nested organization view", () => {
+  it("accepts a lead with full nested organization view including 14 new fields", () => {
+    const orgInput = {
+      id: ORG_UUID,
+      apolloOrganizationId: "apollo-org-1",
+      name: "Casco Bay",
+      primaryDomain: "cascobay.com",
+      websiteUrl: "https://cascobay.com",
+      industry: "marketing",
+      estimatedNumEmployees: 12,
+      annualRevenue: "1000000",
+      logoUrl: null,
+      shortDescription: "boutique",
+      linkedinUrl: null,
+      twitterUrl: null,
+      facebookUrl: null,
+      blogUrl: null,
+      crunchbaseUrl: null,
+      foundedYear: 2018,
+      city: "Portland",
+      state: "ME",
+      country: "USA",
+      streetAddress: null,
+      postalCode: null,
+      technologyNames: ["GA4"],
+      industries: ["marketing"],
+      secondaryIndustries: null,
+      latestFundingStage: "series_a",
+      latestFundingRoundDate: "2024-06-01",
+      totalFunding: "5000000",
+      totalFundingPrinted: "$5M",
+      fundingEvents: [
+        {
+          id: "fund-1",
+          date: "2024-06-01",
+          type: "Series A",
+          investors: "Acme VC",
+          amount: 5000000,
+          currency: "USD",
+          newsUrl: "https://example.com/news/1",
+        },
+      ],
+      retailLocationCount: 3,
+      publiclyTradedSymbol: null,
+      publiclyTradedExchange: null,
+      primaryPhone: "+15555550100",
+      seoDescription: "Casco Bay - Boutique marketing.",
+      angellistUrl: null,
+      numSuborganizations: 0,
+      alexaRanking: 250000,
+      keywords: ["marketing", "branding"],
+    };
+    const result = FullLeadSchema.safeParse({
+      ...minimalLead,
+      organization: orgInput,
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const org = result.data.organization as Record<string, unknown>;
+      expect(org.latestFundingStage).toBe("series_a");
+      expect(org.latestFundingRoundDate).toBe("2024-06-01");
+      expect(org.totalFunding).toBe("5000000");
+      expect(org.totalFundingPrinted).toBe("$5M");
+      expect(org.fundingEvents).toEqual(orgInput.fundingEvents);
+      expect(org.retailLocationCount).toBe(3);
+      expect(org.publiclyTradedSymbol).toBeNull();
+      expect(org.publiclyTradedExchange).toBeNull();
+      expect(org.primaryPhone).toBe("+15555550100");
+      expect(org.seoDescription).toBe("Casco Bay - Boutique marketing.");
+      expect(org.angellistUrl).toBeNull();
+      expect(org.numSuborganizations).toBe(0);
+      expect(org.alexaRanking).toBe(250000);
+      expect(org.keywords).toEqual(["marketing", "branding"]);
+    }
+  });
+
+  it("accepts currentTitle as string and as null", () => {
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, currentTitle: "Founder" }).success,
+    ).toBe(true);
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, currentTitle: null }).success,
+    ).toBe(true);
+  });
+
+  it("requires currentTitle field (use null for unknown)", () => {
+    const without = { ...minimalLead };
+    delete (without as Record<string, unknown>).currentTitle;
+    expect(FullLeadSchema.safeParse(without).success).toBe(false);
+  });
+
+  it("accepts an organization with empty fundingEvents array", () => {
     const result = FullLeadSchema.safeParse({
       ...minimalLead,
       organization: {
-        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-        apolloOrganizationId: "apollo-org-1",
-        name: "Casco Bay",
-        primaryDomain: "cascobay.com",
-        websiteUrl: "https://cascobay.com",
-        industry: "marketing",
-        estimatedNumEmployees: 12,
-        annualRevenue: "1000000",
+        id: ORG_UUID,
+        apolloOrganizationId: null,
+        name: "X",
+        primaryDomain: null,
+        websiteUrl: null,
+        industry: null,
+        estimatedNumEmployees: null,
+        annualRevenue: null,
         logoUrl: null,
-        shortDescription: "boutique",
+        shortDescription: null,
         linkedinUrl: null,
         twitterUrl: null,
         facebookUrl: null,
         blogUrl: null,
         crunchbaseUrl: null,
-        foundedYear: 2018,
-        city: "Portland",
-        state: "ME",
-        country: "USA",
+        foundedYear: null,
+        city: null,
+        state: null,
+        country: null,
         streetAddress: null,
         postalCode: null,
-        technologyNames: ["GA4"],
-        industries: ["marketing"],
+        technologyNames: null,
+        industries: null,
         secondaryIndustries: null,
+        latestFundingStage: null,
+        latestFundingRoundDate: null,
+        totalFunding: null,
+        totalFundingPrinted: null,
+        fundingEvents: [],
+        retailLocationCount: null,
+        publiclyTradedSymbol: null,
+        publiclyTradedExchange: null,
+        primaryPhone: null,
+        seoDescription: null,
+        angellistUrl: null,
+        numSuborganizations: null,
+        alexaRanking: null,
+        keywords: null,
       },
     });
     expect(result.success).toBe(true);
