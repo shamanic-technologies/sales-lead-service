@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { eq, lt } from "drizzle-orm";
-import { type AuthenticatedRequest, apiKeyAuth, requireOrgId } from "../middleware/auth.js";
+import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
 import { pullNext } from "../lib/buffer.js";
 import { createRun, updateRun } from "../lib/runs-client.js";
 import { traceEvent } from "../lib/trace-event.js";
@@ -27,7 +27,7 @@ function pruneExpiredIdempotencyCache(): void {
     });
 }
 
-router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (req: AuthenticatedRequest, res) => {
   const parsed = BufferNextRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -41,7 +41,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, async (req: Authentic
   }
 
   const workflowSlug = req.workflowSlug;
-  const runId = req.runId!;
+  const runId = req.runId as string;
 
   const runMeta = {
     orgId: req.orgId,
@@ -95,18 +95,15 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, async (req: Authentic
       pullSignal,
     );
 
-    // Cache response keyed by caller's runId for idempotency
+    // Cache response keyed by caller's runId for idempotency.
+    // campaign-service guarantees one workflow run per campaign at a time, so concurrent
+    // requests with the same runId cannot happen — a duplicate-key error here is a real bug.
     if (Math.random() < 0.01) pruneExpiredIdempotencyCache();
-    try {
-      await db.insert(idempotencyCache).values({
-        idempotencyKey: runId,
-        orgId: req.orgId!,
-        response: result,
-      });
-    } catch (err) {
-      // Ignore duplicate key errors (race condition between concurrent retries)
-      console.warn("[lead-service] Failed to cache idempotency response:", err);
-    }
+    await db.insert(idempotencyCache).values({
+      idempotencyKey: runId,
+      orgId: req.orgId!,
+      response: result,
+    });
 
     traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-done", detail: `found=${result.found}`, data: { found: result.found } }, req.headers).catch(() => {});
 

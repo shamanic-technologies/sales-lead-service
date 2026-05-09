@@ -38,6 +38,7 @@ export async function traceEvent(
       method: "POST",
       headers: forwardHeaders,
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5_000),
     });
   } catch (err) {
     console.error("[lead-service] Failed to trace event:", err);

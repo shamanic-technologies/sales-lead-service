@@ -58,6 +58,15 @@ describe("traceEvent", () => {
     });
   });
 
+  it("attaches a 5s AbortSignal so a hung runs-service does not hang the caller", async () => {
+    const { traceEvent } = await import("../../src/lib/trace-event.js");
+
+    await traceEvent("run-123", { service: "lead-service", event: "test" }, { "x-org-id": "o" });
+
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("forwards all identity headers", async () => {
     const { traceEvent } = await import("../../src/lib/trace-event.js");
 
