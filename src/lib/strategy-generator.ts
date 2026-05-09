@@ -3,7 +3,11 @@ import { db } from "../db/index.js";
 import { campaignsApolloStrategies } from "../db/schema.js";
 import { MAX_STRATEGY_GENERATION_ROUNDS } from "../config.js";
 import { chatComplete } from "./chat-client.js";
-import { apolloDryRun, type ApolloSearchParams } from "./apollo-client.js";
+import {
+  apolloDryRun,
+  fetchApolloFiltersPrompt,
+  type ApolloSearchParams,
+} from "./apollo-client.js";
 
 export interface StrategyContext {
   orgId: string;
@@ -21,7 +25,9 @@ export type StrategyOutcome =
   | { strategy: ApolloSearchParams }
   | { exhausted: true; reason: string };
 
-const SYSTEM_PROMPT = `You are an Apollo.io search filter generator for a B2B outreach campaign.
+// Static portion of the system prompt. The Apollo filter shape doc is appended
+// per-call from apollo-service GET /search/filters-prompt (single source of truth).
+const SYSTEM_PROMPT_STATIC = `You are an Apollo.io search filter generator for a B2B outreach campaign.
 
 CONTEXT YOU RECEIVE:
 - Brand: name, industry, target geography, ideal lead type, target job titles, offerings
@@ -55,66 +61,33 @@ To confirm the last tested filter set is good (only allowed when the last test r
 {"action": "confirm", "reasoning": "<one sentence>"}
 
 To declare no viable alternative exists in scope:
-{"action": "exhausted", "reason": "<why no viable alternative exists>"}
+{"action": "exhausted", "reason": "<why no viable alternative exists>"}`;
 
-Apollo filter shape (camelCase, all optional). Use ONLY these field names — any other key is silently dropped by the search service:
+function buildSystemPrompt(filtersPrompt: string): string {
+  return `${SYSTEM_PROMPT_STATIC}\n\n${filtersPrompt}`;
+}
 
-- personTitles: string[]
-  ex: ["CEO", "CTO", "VP Engineering", "Dentist"]
-  Filter by job titles. Free-form.
+let cachedFiltersPrompt: { schemaVersion: string; prompt: string } | null = null;
 
-- personLocations: string[]
-  ex: ["San Francisco, California, US", "New York, US", "London, UK"]
-  Filter by the person's location (city, state, country). Different from organizationLocations.
+async function getFiltersPrompt(orgId: string, userId: string | null): Promise<string> {
+  const fresh = await fetchApolloFiltersPrompt({ orgId, userId });
+  if (!cachedFiltersPrompt || cachedFiltersPrompt.schemaVersion !== fresh.schemaVersion) {
+    if (cachedFiltersPrompt && cachedFiltersPrompt.schemaVersion !== fresh.schemaVersion) {
+      console.log(
+        `[lead-service] apollo filters-prompt schemaVersion changed: ${cachedFiltersPrompt.schemaVersion} -> ${fresh.schemaVersion}`,
+      );
+    }
+    cachedFiltersPrompt = { schemaVersion: fresh.schemaVersion, prompt: fresh.prompt };
+  }
+  return cachedFiltersPrompt.prompt;
+}
 
-- personSeniorities: string[]
-  enum: entry | senior | manager | director | vp | c_suite | owner | founder | partner
-  ex: ["director", "vp", "c_suite"]
-  Filter by seniority level. Use ONLY the listed enum values.
+// Test-only: lets unit tests reset the module-level cache between cases.
+export function __resetFiltersPromptCache(): void {
+  cachedFiltersPrompt = null;
+}
 
-- organizationLocations: string[]
-  ex: ["United States", "California, US", "Germany"]
-  Filter by company HQ location.
-
-- organizationNumEmployeesRanges: string[]
-  enum: "1,10" | "11,20" | "21,50" | "51,100" | "101,200" | "201,500" | "501,1000" | "1001,2000" | "2001,5000" | "5001,10000" | "10001,"
-  ex: ["11,20", "21,50", "51,100"]
-  Company headcount buckets. MUST use the exact enum strings — do NOT invent custom ranges like "1,50" or "100,500". You may pass multiple buckets to cover a range.
-
-- qOrganizationKeywordTags: string[]
-  ex: ["SaaS", "fintech", "developer tools"]
-  Free-form company keyword tags.
-
-- qOrganizationIndustryTagIds: string[]
-  ex: ["Information Technology and Services", "Computer Software"]
-  Apollo industry labels (use the canonical Apollo strings, not arbitrary words).
-
-- qOrganizationDomains: string[]
-  ex: ["google.com", "stripe.com"]
-  Filter by specific company domains.
-
-- contactEmailStatus: string[]
-  enum: verified | unverified | "likely to engage" | unavailable
-  ex: ["verified"]
-  Email verification status.
-
-- currentlyUsingAnyOfTechnologyUids: string[]
-  ex: ["salesforce", "hubspot", "segment"]
-  Filter by technology stack (Apollo technology UIDs).
-
-- revenueRange: string[]
-  ex: ["1000000,10000000", "10000000,50000000"]
-  Annual revenue buckets, "min,max" format in raw dollars.
-
-- organizationIds: string[]
-  ex: ["5f5e100a01d6b1000169c754"]
-  Filter by specific Apollo organization IDs.
-
-- qKeywords: string
-  ex: "machine learning OR data science OR AI"
-  Single OR-joined free-text keyword string. NOT an array. Combine alternatives with " OR ".`;
-
-export const __SYSTEM_PROMPT__ = SYSTEM_PROMPT;
+export const __SYSTEM_PROMPT_STATIC__ = SYSTEM_PROMPT_STATIC;
 
 interface LlmAction {
   action?: unknown;
@@ -167,11 +140,14 @@ export async function generateNextStrategy(
     featureSlug: ctx.featureSlug ?? null,
   };
 
+  const filtersPrompt = await getFiltersPrompt(ctx.orgId, ctx.userId ?? null);
+  const systemPrompt = buildSystemPrompt(filtersPrompt);
+
   for (let round = 0; round < MAX_STRATEGY_GENERATION_ROUNDS; round++) {
     const completion = await chatComplete(
       {
         message: transcript.join("\n\n---\n\n"),
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         provider: "google",
         model: "pro",
         responseFormat: "json",
