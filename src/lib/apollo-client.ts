@@ -25,15 +25,22 @@ async function callApolloService<T>(
   return response.json() as Promise<T>;
 }
 
+// Mirrors apollo-service `SearchFiltersSchema` (see apollo-service/src/schemas.ts).
+// qKeywords is a single OR-joined string per Apollo's contract — array shapes are rejected with 400.
 export interface ApolloSearchParams {
   personTitles?: string[];
+  personLocations?: string[];
+  personSeniorities?: string[];
   organizationLocations?: string[];
-  organizationIndustries?: string[];
   organizationNumEmployeesRanges?: string[];
   qOrganizationKeywordTags?: string[];
   qOrganizationIndustryTagIds?: string[];
-  qKeywords?: string[];
-  keywords?: string[];
+  qOrganizationDomains?: string[];
+  contactEmailStatus?: string[];
+  currentlyUsingAnyOfTechnologyUids?: string[];
+  revenueRange?: string[];
+  organizationIds?: string[];
+  qKeywords?: string;
   [key: string]: unknown;
 }
 
