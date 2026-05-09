@@ -36,76 +36,103 @@
         "type": "object",
         "properties": {
           "found": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True when a lead was claimed and returned. False when the campaign buffer is empty.",
+            "example": true
           },
           "lead": {
-            "type": "object",
-            "properties": {
-              "leadId": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "email": {
-                "type": "string"
-              },
-              "data": {
-                "$ref": "#/components/schemas/ApolloPersonData"
-              },
-              "brandIds": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "orgId": {
-                "type": "string",
-                "nullable": true
-              },
-              "userId": {
-                "type": "string",
-                "nullable": true
-              },
-              "apolloPersonId": {
-                "type": "string",
-                "nullable": true,
-                "description": "Apollo person ID from enrichment. Present when the lead was sourced or enriched via Apollo.",
-                "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
-              }
-            },
-            "required": [
-              "leadId",
-              "email",
-              "data",
-              "brandIds",
-              "orgId",
-              "userId"
-            ]
+            "$ref": "#/components/schemas/ServedLead"
           }
         },
         "required": [
           "found"
         ],
-        "description": "Response from pulling the next lead. When found is true, lead contains the served lead with typed IDs.",
+        "description": "Response from POST /orgs/buffer/next. When found is true, lead contains the served lead with full canonical FullLead payload under `lead.data`.",
         "examples": [
           {
             "summary": "Apollo lead",
             "value": {
               "found": true,
               "lead": {
-                "leadId": "c1d2e3f4-a5b6-7890-abcd-ef1234567890",
-                "email": "jane.doe@acme.com",
+                "leadId": "00000000-0000-0000-0000-000000000001",
+                "email": "sara@cascobay.com",
                 "data": {
-                  "firstName": "Jane",
-                  "lastName": "Doe",
-                  "title": "VP of Marketing",
-                  "organizationName": "Acme Corp",
-                  "organizationDomain": "acme.com"
+                  "leadId": "00000000-0000-0000-0000-000000000001",
+                  "apolloPersonId": "5f2a3b4c5d6e7f8a9b0c1d2e",
+                  "firstName": "Sara",
+                  "lastName": "Freshley",
+                  "name": "Sara Freshley",
+                  "headline": "Founder at Casco Bay",
+                  "linkedinUrl": "https://linkedin.com/in/sara-freshley",
+                  "photoUrl": null,
+                  "city": "Portland",
+                  "state": "ME",
+                  "country": "USA",
+                  "seniority": "founder",
+                  "departments": [
+                    "c_suite"
+                  ],
+                  "subdepartments": null,
+                  "functions": null,
+                  "twitterUrl": null,
+                  "githubUrl": null,
+                  "facebookUrl": null,
+                  "enrichedAt": "2026-01-01T00:00:00.000Z",
+                  "organization": {
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "apolloOrganizationId": "5f2a3b4c5d6e7f8a9b0c1d2e",
+                    "name": "Casco Bay",
+                    "primaryDomain": "cascobay.com",
+                    "websiteUrl": "https://cascobay.com",
+                    "industry": "marketing",
+                    "estimatedNumEmployees": 12,
+                    "annualRevenue": "1000000",
+                    "logoUrl": null,
+                    "shortDescription": null,
+                    "linkedinUrl": null,
+                    "twitterUrl": null,
+                    "facebookUrl": null,
+                    "blogUrl": null,
+                    "crunchbaseUrl": null,
+                    "foundedYear": 2018,
+                    "city": "Portland",
+                    "state": "ME",
+                    "country": "USA",
+                    "streetAddress": null,
+                    "postalCode": null,
+                    "technologyNames": [
+                      "GA4"
+                    ],
+                    "industries": [
+                      "marketing"
+                    ],
+                    "secondaryIndustries": null
+                  },
+                  "contacts": [
+                    {
+                      "channel": "email",
+                      "value": "sara@cascobay.com",
+                      "status": "verified",
+                      "source": "apollo"
+                    }
+                  ],
+                  "employmentHistory": [
+                    {
+                      "organizationId": "10000000-0000-0000-0000-000000000001",
+                      "organizationName": "Casco Bay",
+                      "title": "Founder",
+                      "startDate": "2018-01-01",
+                      "endDate": null,
+                      "current": true,
+                      "description": null
+                    }
+                  ]
                 },
                 "brandIds": [
-                  "brand-uuid"
+                  "20000000-0000-0000-0000-000000000001"
                 ],
-                "orgId": "org-uuid",
-                "userId": "user-uuid",
+                "orgId": "30000000-0000-0000-0000-000000000001",
+                "userId": "40000000-0000-0000-0000-000000000001",
                 "apolloPersonId": "5f2a3b4c5d6e7f8a9b0c1d2e"
               }
             }
@@ -118,417 +145,662 @@
           }
         ]
       },
-      "ApolloPersonData": {
+      "ServedLead": {
         "type": "object",
-        "nullable": true,
         "properties": {
-          "id": {
-            "type": "string"
+          "leadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Internal lead UUID. Same as data.leadId — kept at the top level for backwards compatibility with workflow scripts that read it directly.",
+            "example": "00000000-0000-0000-0000-000000000001"
           },
           "email": {
             "type": "string",
-            "nullable": true
+            "description": "The email address selected for outreach. Always populated when found=true. Same address appears in data.contacts for the 'email' channel.",
+            "example": "sara@cascobay.com"
           },
-          "emailStatus": {
+          "data": {
+            "$ref": "#/components/schemas/FullLead"
+          },
+          "brandIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Brand UUIDs this lead was buffered for (echoed back from x-brand-id header).",
+            "example": [
+              "20000000-0000-0000-0000-000000000001"
+            ]
+          },
+          "orgId": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Internal organization UUID owning the campaign.",
+            "example": "30000000-0000-0000-0000-000000000001"
+          },
+          "userId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Internal user UUID who triggered the campaign run.",
+            "example": "40000000-0000-0000-0000-000000000001"
+          },
+          "apolloPersonId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Apollo person ID — same value as data.apolloPersonId.",
+            "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
+          }
+        },
+        "required": [
+          "leadId",
+          "email",
+          "data",
+          "brandIds",
+          "orgId",
+          "userId"
+        ],
+        "description": "A single lead served from the campaign buffer. The full lead payload lives under `data` (FullLead shape)."
+      },
+      "FullLead": {
+        "type": "object",
+        "properties": {
+          "leadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Internal lead UUID (lead-service registry). Stable across enrichment refreshes.",
+            "example": "00000000-0000-0000-0000-000000000001"
+          },
+          "apolloPersonId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Apollo person ID — present when the lead was sourced or enriched via Apollo.",
+            "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
+          },
+          "firstName": {
+            "type": "string",
+            "description": "Lead's first name. Required — lead-service refuses to register a lead without one. Use this for recipientFirstName on outbound email.",
+            "example": "Sara"
+          },
+          "lastName": {
+            "type": "string",
+            "description": "Lead's last name. Required. Use this for recipientLastName on outbound email.",
+            "example": "Freshley"
           },
           "name": {
             "type": "string",
-            "nullable": true
-          },
-          "firstName": {
-            "type": "string"
-          },
-          "lastName": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string",
-            "nullable": true
-          },
-          "linkedinUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "photoUrl": {
-            "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Full display name as provided by source (often 'firstName lastName' but not always).",
+            "example": "Sara Freshley"
           },
           "headline": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's professional headline / current role line (e.g. LinkedIn-style headline).",
+            "example": "Founder at Casco Bay"
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Lead's LinkedIn profile URL.",
+            "example": "https://linkedin.com/in/sara-freshley"
+          },
+          "photoUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Lead's profile photo URL.",
+            "example": "https://media.licdn.com/photo.jpg"
           },
           "city": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's city.",
+            "example": "Portland"
           },
           "state": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's state / province.",
+            "example": "ME"
           },
           "country": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's country.",
+            "example": "USA"
           },
           "seniority": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Seniority bucket from enrichment (e.g. 'founder', 'director', 'vp').",
+            "example": "founder"
           },
           "departments": {
             "type": "array",
+            "nullable": true,
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Department classifications.",
+            "example": [
+              "c_suite"
+            ]
           },
           "subdepartments": {
             "type": "array",
+            "nullable": true,
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Subdepartment classifications.",
+            "example": [
+              "founders"
+            ]
           },
           "functions": {
             "type": "array",
+            "nullable": true,
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Job function classifications.",
+            "example": [
+              "entrepreneurship"
+            ]
           },
           "twitterUrl": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's Twitter / X profile URL.",
+            "example": "https://twitter.com/sara"
           },
           "githubUrl": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Lead's GitHub profile URL.",
+            "example": "https://github.com/sara"
           },
           "facebookUrl": {
             "type": "string",
-            "nullable": true
-          },
-          "personalEmails": {
-            "type": "array",
             "nullable": true,
-            "items": {
-              "type": "string"
-            }
+            "description": "Lead's Facebook profile URL.",
+            "example": "https://facebook.com/sara"
           },
-          "mobilePhone": {
+          "enrichedAt": {
             "type": "string",
-            "nullable": true
-          },
-          "phoneNumbers": {
-            "type": "array",
             "nullable": true,
+            "description": "ISO 8601 timestamp of last successful enrichment. null when the lead was registered without enrichment.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "organization": {
+            "$ref": "#/components/schemas/OrganizationView"
+          },
+          "contacts": {
+            "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "rawNumber": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "sanitizedNumber": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "type": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "position": {
-                  "type": "number",
-                  "nullable": true
-                },
-                "status": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "dncStatus": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "dncOtherInfo": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "dialerFlags": {
-                  "type": "object",
-                  "nullable": true,
-                  "additionalProperties": {
-                    "nullable": true
-                  }
-                }
+              "$ref": "#/components/schemas/ContactMethodView"
+            },
+            "description": "All contact methods attached to this lead — email, phone, etc. May be empty.",
+            "example": [
+              {
+                "channel": "email",
+                "value": "sara@cascobay.com",
+                "status": "verified",
+                "source": "apollo"
               }
-            }
+            ]
           },
           "employmentHistory": {
             "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "title": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "organizationName": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "startDate": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "endDate": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "description": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "current": {
-                  "type": "boolean"
-                }
+              "$ref": "#/components/schemas/EmploymentEntryView"
+            },
+            "description": "Full employment history (current + past). Returned in insertion order; check the `current` flag to find the present role.",
+            "example": [
+              {
+                "organizationId": "10000000-0000-0000-0000-000000000001",
+                "organizationName": "Casco Bay",
+                "title": "Founder",
+                "startDate": "2018-01-01",
+                "endDate": null,
+                "current": true,
+                "description": null
               }
-            }
-          },
-          "organizationId": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationName": {
-            "type": "string"
-          },
-          "organizationDomain": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationIndustry": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationSize": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationRawAddress": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationRevenueUsd": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationWebsiteUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationLogoUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationShortDescription": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationSeoDescription": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationLinkedinUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationTwitterUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationFacebookUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationBlogUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationCrunchbaseUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationAngellistUrl": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationFoundedYear": {
-            "type": "number",
-            "nullable": true
-          },
-          "organizationPrimaryPhone": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationPubliclyTradedSymbol": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationPubliclyTradedExchange": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationAnnualRevenuePrinted": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationTotalFunding": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationTotalFundingPrinted": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationLatestFundingRoundDate": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationLatestFundingStage": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationFundingEvents": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "id": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "date": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "type": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "investors": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "amount": {
-                  "anyOf": [
-                    {
-                      "type": "number"
-                    },
-                    {
-                      "type": "string"
-                    },
-                    {
-                      "nullable": true
-                    }
-                  ]
-                },
-                "currency": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "news_url": {
-                  "type": "string",
-                  "nullable": true
-                }
-              }
-            }
-          },
-          "organizationCity": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationState": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationCountry": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationStreetAddress": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationPostalCode": {
-            "type": "string",
-            "nullable": true
-          },
-          "organizationTechnologyNames": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "organizationCurrentTechnologies": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "uid": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "name": {
-                  "type": "string",
-                  "nullable": true
-                },
-                "category": {
-                  "type": "string",
-                  "nullable": true
-                }
-              }
-            }
-          },
-          "organizationKeywords": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "organizationIndustries": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "organizationSecondaryIndustries": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "organizationNumSuborganizations": {
-            "type": "number",
-            "nullable": true
-          },
-          "organizationRetailLocationCount": {
-            "type": "number",
-            "nullable": true
-          },
-          "organizationAlexaRanking": {
-            "type": "number",
-            "nullable": true
-          },
-          "raw": {
-            "type": "object",
-            "nullable": true,
-            "additionalProperties": {
-              "nullable": true
-            }
+            ]
           }
         },
         "required": [
+          "leadId",
+          "apolloPersonId",
           "firstName",
           "lastName",
-          "organizationName"
+          "name",
+          "headline",
+          "linkedinUrl",
+          "photoUrl",
+          "city",
+          "state",
+          "country",
+          "seniority",
+          "departments",
+          "subdepartments",
+          "functions",
+          "twitterUrl",
+          "githubUrl",
+          "facebookUrl",
+          "enrichedAt",
+          "organization",
+          "contacts",
+          "employmentHistory"
         ],
-        "description": "Apollo person + organization data in flat camelCase format. Organization fields are prefixed with 'organization' (e.g. organizationDomain, organizationName) — there is NO nested 'organization' object."
+        "description": "Canonical lead representation returned by every lead-bearing endpoint. Built entirely from structured columns — there is no `metadata` or `raw` Apollo passthrough. Field names are stable regardless of upstream enrichment provider.",
+        "example": {
+          "leadId": "00000000-0000-0000-0000-000000000001",
+          "apolloPersonId": "5f2a3b4c5d6e7f8a9b0c1d2e",
+          "firstName": "Sara",
+          "lastName": "Freshley",
+          "name": "Sara Freshley",
+          "headline": "Founder at Casco Bay",
+          "linkedinUrl": "https://linkedin.com/in/sara-freshley",
+          "photoUrl": null,
+          "city": "Portland",
+          "state": "ME",
+          "country": "USA",
+          "seniority": "founder",
+          "departments": [
+            "c_suite"
+          ],
+          "subdepartments": [
+            "founders"
+          ],
+          "functions": [
+            "entrepreneurship"
+          ],
+          "twitterUrl": null,
+          "githubUrl": null,
+          "facebookUrl": null,
+          "enrichedAt": "2026-01-01T00:00:00.000Z",
+          "organization": {
+            "id": "10000000-0000-0000-0000-000000000001",
+            "apolloOrganizationId": "5f2a3b4c5d6e7f8a9b0c1d2e",
+            "name": "Casco Bay",
+            "primaryDomain": "cascobay.com",
+            "websiteUrl": "https://cascobay.com",
+            "industry": "marketing",
+            "estimatedNumEmployees": 12,
+            "annualRevenue": "1000000",
+            "logoUrl": "https://logo.clearbit.com/cascobay.com",
+            "shortDescription": "Boutique digital marketing agency in Portland, ME.",
+            "linkedinUrl": "https://linkedin.com/company/cascobay",
+            "twitterUrl": null,
+            "facebookUrl": null,
+            "blogUrl": null,
+            "crunchbaseUrl": null,
+            "foundedYear": 2018,
+            "city": "Portland",
+            "state": "ME",
+            "country": "USA",
+            "streetAddress": null,
+            "postalCode": "04101",
+            "technologyNames": [
+              "GA4",
+              "HubSpot"
+            ],
+            "industries": [
+              "marketing",
+              "advertising"
+            ],
+            "secondaryIndustries": null
+          },
+          "contacts": [
+            {
+              "channel": "email",
+              "value": "sara@cascobay.com",
+              "status": "verified",
+              "source": "apollo"
+            }
+          ],
+          "employmentHistory": [
+            {
+              "organizationId": "10000000-0000-0000-0000-000000000001",
+              "organizationName": "Casco Bay",
+              "title": "Founder",
+              "startDate": "2018-01-01",
+              "endDate": null,
+              "current": true,
+              "description": null
+            }
+          ]
+        }
+      },
+      "OrganizationView": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Internal organization UUID (lead-service registry).",
+            "example": "10000000-0000-0000-0000-000000000001"
+          },
+          "apolloOrganizationId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Apollo organization ID — present when sourced from Apollo enrichment.",
+            "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company name as registered. Use this for recipientCompany on outbound email.",
+            "example": "Casco Bay"
+          },
+          "primaryDomain": {
+            "type": "string",
+            "nullable": true,
+            "description": "Primary domain of the company (no protocol). Useful for domain-level deliverability or matching.",
+            "example": "cascobay.com"
+          },
+          "websiteUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Canonical company website URL (with protocol).",
+            "example": "https://cascobay.com"
+          },
+          "industry": {
+            "type": "string",
+            "nullable": true,
+            "description": "Primary industry classification.",
+            "example": "marketing"
+          },
+          "estimatedNumEmployees": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Estimated employee count.",
+            "example": 12
+          },
+          "annualRevenue": {
+            "type": "string",
+            "nullable": true,
+            "description": "Annual revenue (USD), serialized as a numeric string to avoid float precision loss for very large companies.",
+            "example": "1000000"
+          },
+          "logoUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Logo image URL.",
+            "example": "https://logo.clearbit.com/cascobay.com"
+          },
+          "shortDescription": {
+            "type": "string",
+            "nullable": true,
+            "description": "Short marketing-style description of the company.",
+            "example": "Boutique digital marketing agency in Portland, ME."
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company LinkedIn URL.",
+            "example": "https://linkedin.com/company/cascobay"
+          },
+          "twitterUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company Twitter/X URL.",
+            "example": "https://twitter.com/cascobay"
+          },
+          "facebookUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company Facebook URL.",
+            "example": "https://facebook.com/cascobay"
+          },
+          "blogUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company blog URL.",
+            "example": "https://cascobay.com/blog"
+          },
+          "crunchbaseUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Crunchbase profile URL.",
+            "example": "https://crunchbase.com/organization/cascobay"
+          },
+          "foundedYear": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Year the company was founded.",
+            "example": 2018
+          },
+          "city": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company HQ city.",
+            "example": "Portland"
+          },
+          "state": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company HQ state / province (ISO subdivision when available).",
+            "example": "ME"
+          },
+          "country": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company HQ country.",
+            "example": "USA"
+          },
+          "streetAddress": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company HQ street address.",
+            "example": "123 Main St"
+          },
+          "postalCode": {
+            "type": "string",
+            "nullable": true,
+            "description": "Company HQ postal / ZIP code.",
+            "example": "04101"
+          },
+          "technologyNames": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Technologies the company is known to use (e.g. 'GA4', 'Salesforce').",
+            "example": [
+              "GA4",
+              "HubSpot"
+            ]
+          },
+          "industries": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "All industry classifications attached to this company.",
+            "example": [
+              "marketing",
+              "advertising"
+            ]
+          },
+          "secondaryIndustries": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            },
+            "description": "Secondary industry classifications.",
+            "example": [
+              "digital-marketing"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "apolloOrganizationId",
+          "name",
+          "primaryDomain",
+          "websiteUrl",
+          "industry",
+          "estimatedNumEmployees",
+          "annualRevenue",
+          "logoUrl",
+          "shortDescription",
+          "linkedinUrl",
+          "twitterUrl",
+          "facebookUrl",
+          "blogUrl",
+          "crunchbaseUrl",
+          "foundedYear",
+          "city",
+          "state",
+          "country",
+          "streetAddress",
+          "postalCode",
+          "technologyNames",
+          "industries",
+          "secondaryIndustries"
+        ],
+        "description": "Snapshot of the lead's CURRENT employer organization, joined from leads_organizations where current=true. All fields are nullable because organization enrichment is best-effort. null at the parent level means the lead has no current employment record.",
+        "example": {
+          "id": "10000000-0000-0000-0000-000000000001",
+          "apolloOrganizationId": "5f2a3b4c5d6e7f8a9b0c1d2e",
+          "name": "Casco Bay",
+          "primaryDomain": "cascobay.com",
+          "websiteUrl": "https://cascobay.com",
+          "industry": "marketing",
+          "estimatedNumEmployees": 12,
+          "annualRevenue": "1000000",
+          "logoUrl": "https://logo.clearbit.com/cascobay.com",
+          "shortDescription": "Boutique digital marketing agency in Portland, ME.",
+          "linkedinUrl": "https://linkedin.com/company/cascobay",
+          "twitterUrl": null,
+          "facebookUrl": null,
+          "blogUrl": null,
+          "crunchbaseUrl": null,
+          "foundedYear": 2018,
+          "city": "Portland",
+          "state": "ME",
+          "country": "USA",
+          "streetAddress": null,
+          "postalCode": "04101",
+          "technologyNames": [
+            "GA4",
+            "HubSpot"
+          ],
+          "industries": [
+            "marketing",
+            "advertising"
+          ],
+          "secondaryIndustries": null
+        }
+      },
+      "ContactMethodView": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "description": "Contact channel kind. Currently used: 'email', 'phone'. Stable identifier — case-sensitive.",
+            "example": "email"
+          },
+          "value": {
+            "type": "string",
+            "description": "Contact value (the actual email address, phone number, etc.). Unique per (leadId, channel).",
+            "example": "sara@cascobay.com"
+          },
+          "status": {
+            "type": "string",
+            "nullable": true,
+            "description": "Provider-reported status of the contact value (e.g. 'verified', 'unverified', 'extrapolated' for emails). null when not classified.",
+            "example": "verified"
+          },
+          "source": {
+            "type": "string",
+            "description": "Where this contact method originated (e.g. 'apollo', 'manual', 'csv-upload').",
+            "example": "apollo"
+          }
+        },
+        "required": [
+          "channel",
+          "value",
+          "status",
+          "source"
+        ],
+        "description": "One contact endpoint attached to a lead — email, phone, or any other channel. Multiple rows per lead are possible.",
+        "example": {
+          "channel": "email",
+          "value": "sara@cascobay.com",
+          "status": "verified",
+          "source": "apollo"
+        }
+      },
+      "EmploymentEntryView": {
+        "type": "object",
+        "properties": {
+          "organizationId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Internal organization UUID for this employment row.",
+            "example": "10000000-0000-0000-0000-000000000001"
+          },
+          "organizationName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Organization name at time of join. May differ from current name if company was renamed.",
+            "example": "Casco Bay"
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "description": "Role title held during this employment.",
+            "example": "Founder"
+          },
+          "startDate": {
+            "type": "string",
+            "nullable": true,
+            "description": "ISO date (YYYY-MM-DD) when this employment started. null when unknown.",
+            "example": "2018-01-01"
+          },
+          "endDate": {
+            "type": "string",
+            "nullable": true,
+            "description": "ISO date (YYYY-MM-DD) when this employment ended. null when current or unknown.",
+            "example": null
+          },
+          "current": {
+            "type": "boolean",
+            "description": "True when this is the lead's current employment.",
+            "example": true
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "description": "Free-form description of the role.",
+            "example": "Leads strategy and operations."
+          }
+        },
+        "required": [
+          "organizationId",
+          "organizationName",
+          "title",
+          "startDate",
+          "endDate",
+          "current",
+          "description"
+        ],
+        "description": "One employment row from the lead's career history. All rows from leads_organizations are returned (past + current).",
+        "example": {
+          "organizationId": "10000000-0000-0000-0000-000000000001",
+          "organizationName": "Casco Bay",
+          "title": "Founder",
+          "startDate": "2018-01-01",
+          "endDate": null,
+          "current": true,
+          "description": "Leads strategy and operations."
+        }
       },
       "ErrorResponse": {
         "type": "object",
@@ -552,40 +824,40 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/LeadDetail"
-            }
+            },
+            "description": "All leads_campaigns rows matching the query, with full canonical lead payload + delivery overlay."
           }
         },
         "required": [
           "leads"
-        ]
+        ],
+        "description": "Response shape for GET /orgs/leads."
       },
       "LeadDetail": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "leads_campaigns row UUID (per-campaign per-lead lifecycle row, NOT the lead itself).",
+            "example": "50000000-0000-0000-0000-000000000001"
           },
           "leadId": {
             "type": "string",
             "nullable": true,
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Internal lead UUID. Null only when the row references a lead that was deleted.",
+            "example": "00000000-0000-0000-0000-000000000001"
           },
           "namespace": {
-            "type": "string"
+            "type": "string",
+            "description": "Namespace this lead was sourced from. Currently always 'apollo'.",
+            "example": "apollo"
           },
           "email": {
-            "type": "string"
-          },
-          "apolloPersonId": {
             "type": "string",
-            "nullable": true,
-            "description": "Apollo person ID from enrichment"
-          },
-          "emailStatus": {
-            "type": "string",
-            "nullable": true,
-            "description": "Email verification status from Apollo (verified, extrapolated, etc.)"
+            "description": "The email address tied to this leads_campaigns row.",
+            "example": "sara@cascobay.com"
           },
           "status": {
             "type": "string",
@@ -595,66 +867,138 @@
               "claimed",
               "served"
             ],
-            "description": "Lead lifecycle status. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow."
+            "description": "Lead lifecycle status in this campaign. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow.",
+            "example": "served"
           },
-          "metadata": {
-            "$ref": "#/components/schemas/ApolloPersonData"
+          "statusReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why this lead is in its current status (e.g. 'already_contacted', 'bounced'). Set for skipped/buffered leads.",
+            "example": "already_contacted"
+          },
+          "statusDetails": {
+            "type": "string",
+            "nullable": true,
+            "description": "Human-readable details about the status reason.",
+            "example": "Lead was contacted in campaign abc-123 on 2026-01-01."
           },
           "parentRunId": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Run ID of the workflow that pulled / processed this lead.",
+            "example": "run-uuid"
           },
           "runId": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Run ID for the campaign-tick that produced this lead.",
+            "example": "run-uuid"
           },
           "brandIds": {
             "type": "array",
             "items": {
               "type": "string"
-            }
+            },
+            "description": "Brand UUIDs this lead was buffered for.",
+            "example": [
+              "20000000-0000-0000-0000-000000000001"
+            ]
           },
           "campaignId": {
-            "type": "string"
+            "type": "string",
+            "description": "Campaign ID owning this leads_campaigns row.",
+            "example": "60000000-0000-0000-0000-000000000001"
           },
           "orgId": {
-            "type": "string"
+            "type": "string",
+            "description": "Internal organization UUID.",
+            "example": "30000000-0000-0000-0000-000000000001"
           },
           "userId": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Internal user UUID who triggered the campaign run.",
+            "example": "40000000-0000-0000-0000-000000000001"
+          },
+          "workflowSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Workflow slug that processed this lead (e.g. 'sales-cold-email-outreach-helium').",
+            "example": "sales-cold-email-outreach-helium"
+          },
+          "featureSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Feature slug for tracking.",
+            "example": "outreach"
           },
           "servedAt": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "ISO timestamp when this lead was served. null for buffered/skipped/claimed rows.",
+            "example": "2026-01-01T00:00:00.000Z"
           },
-          "enrichment": {
-            "$ref": "#/components/schemas/ApolloPersonData"
+          "apolloPersonId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Apollo person ID — convenience copy of lead.apolloPersonId.",
+            "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
+          },
+          "emailStatus": {
+            "type": "string",
+            "nullable": true,
+            "description": "Email verification status from Apollo (verified, unverified, extrapolated, etc.).",
+            "example": "verified"
+          },
+          "lead": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/FullLead"
+              },
+              {
+                "nullable": true
+              }
+            ]
           },
           "contacted": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Lead has been contacted at least once in this scope (campaign or brand depending on query).",
+            "example": true
           },
           "sent": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "An email send has been attempted.",
+            "example": true
           },
           "delivered": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Provider confirmed delivery.",
+            "example": true
           },
           "opened": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Lead has opened at least one email.",
+            "example": false
           },
           "clicked": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Lead has clicked at least one tracked link.",
+            "example": false
           },
           "bounced": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Email bounced.",
+            "example": false
           },
           "unsubscribed": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Lead unsubscribed in this scope.",
+            "example": false
           },
           "replied": {
             "type": "boolean",
-            "description": "Whether the lead replied (any reply, regardless of sentiment)"
+            "description": "Whether the lead replied (any reply, regardless of sentiment).",
+            "example": false
           },
           "replyClassification": {
             "type": "string",
@@ -665,30 +1009,27 @@
               "neutral",
               null
             ],
-            "description": "Classification of the most recent reply from email-gateway. 'positive' = interested or willing to meet, 'negative' = not interested, 'neutral' = ambiguous or informational. null when no reply detected."
-          },
-          "statusReason": {
-            "type": "string",
-            "nullable": true,
-            "description": "Why this lead was skipped or placed in its current status (e.g. 'already_contacted', 'bounced'). Only set for buffer leads."
-          },
-          "statusDetails": {
-            "type": "string",
-            "nullable": true,
-            "description": "Human-readable details about the status reason. Only set for buffer leads."
+            "description": "Classification of the most recent reply from email-gateway. 'positive' = interested or willing to meet, 'negative' = not interested, 'neutral' = ambiguous or informational. null when no reply detected.",
+            "example": null
           },
           "lastDeliveredAt": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "ISO timestamp of the last delivered message in this scope.",
+            "example": "2026-01-02T00:00:00.000Z"
           },
           "global": {
             "type": "object",
             "properties": {
               "bounced": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Lead has bounced anywhere across the platform.",
+                "example": false
               },
               "unsubscribed": {
-                "type": "boolean"
+                "type": "boolean",
+                "description": "Lead has unsubscribed anywhere across the platform.",
+                "example": false
               }
             },
             "required": [
@@ -703,18 +1044,21 @@
           "leadId",
           "namespace",
           "email",
-          "apolloPersonId",
-          "emailStatus",
           "status",
-          "metadata",
+          "statusReason",
+          "statusDetails",
           "parentRunId",
           "runId",
           "brandIds",
           "campaignId",
           "orgId",
           "userId",
+          "workflowSlug",
+          "featureSlug",
           "servedAt",
-          "enrichment",
+          "apolloPersonId",
+          "emailStatus",
+          "lead",
           "contacted",
           "sent",
           "delivered",
@@ -724,11 +1068,10 @@
           "unsubscribed",
           "replied",
           "replyClassification",
-          "statusReason",
-          "statusDetails",
           "lastDeliveredAt",
           "global"
-        ]
+        ],
+        "description": "One leads_campaigns row enriched with the full canonical lead payload (FullLead) and delivery status from email-gateway."
       },
       "StatsResponse": {
         "type": "object",
@@ -1155,6 +1498,7 @@
     "/orgs/buffer/next": {
       "post": {
         "summary": "Pull the next lead from the buffer",
+        "description": "Claims and returns the next available lead from the campaign buffer. Response contains the full canonical lead payload (FullLead) under `lead.data` — use `data.firstName`, `data.lastName`, `data.organization.name` for outbound recipient fields.",
         "parameters": [
           {
             "in": "header",
@@ -1240,7 +1584,7 @@
         },
         "responses": {
           "200": {
-            "description": "Next lead from buffer",
+            "description": "Next lead from buffer (or found=false when exhausted)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1267,8 +1611,8 @@
     },
     "/orgs/leads": {
       "get": {
-        "summary": "List leads with enrichment and delivery status",
-        "description": "Returns leads from leads_campaigns. Each lead includes a 'status' field: 'served' (pulled and served), 'buffered'/'skipped'/'claimed' (still pending). Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). Buffer entries have delivery fields defaulted to false/null. Delivery status is fetched from email-gateway when brandId or campaignId is provided. With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). Without either: status fields default to false/null.",
+        "summary": "List leads with full enrichment and delivery status",
+        "description": "Returns leads_campaigns rows. Each row includes the full canonical lead payload (FullLead — see schema) under `lead`, plus delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). Delivery status is fetched from email-gateway when brandId or campaignId is provided. With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). Without either: status fields default to false/null.",
         "parameters": [
           {
             "in": "header",
@@ -1377,7 +1721,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List of served leads",
+            "description": "List of leads with full canonical payload + delivery overlay",
             "content": {
               "application/json": {
                 "schema": {

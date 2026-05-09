@@ -15,6 +15,7 @@ import {
   leadHasEmail,
   getPrimaryEmail,
 } from "./leads-registry.js";
+import { buildFullLead } from "./lead-shape.js";
 import {
   checkContacted,
   isAlreadyServedForBrand,
@@ -549,11 +550,7 @@ export async function pullNext(
         .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
       claimSettled = true;
 
-      const leadRow = await db.query.leads.findFirst({ where: eq(leads.id, claimed.leadId) });
-      const finalData: Record<string, unknown> = {
-        ...(leadRow?.metadata && typeof leadRow.metadata === "object" ? (leadRow.metadata as Record<string, unknown>) : {}),
-        email,
-      };
+      const fullLead = await buildFullLead(claimed.leadId);
 
       console.log(
         `[lead-service] pullNext found=true campaign=${params.campaignId} email=${email} leadId=${claimed.leadId}`,
@@ -563,7 +560,7 @@ export async function pullNext(
         lead: {
           leadId: claimed.leadId,
           email,
-          data: finalData,
+          data: fullLead,
           brandIds: params.brandIds,
           orgId: params.orgId,
           userId: params.userId ?? null,
