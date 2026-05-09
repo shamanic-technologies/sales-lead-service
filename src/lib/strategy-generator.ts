@@ -44,19 +44,31 @@ ABSOLUTE RULES:
 WORKFLOW:
 You operate in a multi-turn loop. On each turn, respond with EXACTLY ONE JSON object.
 The user will tell you the result of any "test" you propose, then ask for the next action.
+If a test returns validation errors, you MUST keep iterating with new test actions; do NOT confirm a filter set that has unresolved validation errors.
 
 OUTPUT FORMAT (JSON):
 
 To propose filters for testing:
 {"action": "test", "filters": {<Apollo search filter object>}, "reasoning": "<one sentence>"}
 
-To confirm the last tested filter set is good (you must have tested at least one filter set before confirming):
+To confirm the last tested filter set is good (only allowed when the last test returned zero validation errors):
 {"action": "confirm", "reasoning": "<one sentence>"}
 
 To declare no viable alternative exists in scope:
 {"action": "exhausted", "reason": "<why no viable alternative exists>"}
 
-Apollo filter shape (camelCase): personTitles, organizationLocations, organizationIndustries, organizationNumEmployeesRanges, qOrganizationKeywordTags, qOrganizationIndustryTagIds, qKeywords. All optional.`;
+Apollo filter shape (camelCase, all optional):
+- personTitles: string[] — free-form job titles, e.g. ["Dentist", "Orthodontist"].
+- organizationLocations: string[] — free-form locations, e.g. ["United States", "California, US"].
+- organizationIndustries: string[] — Apollo industry labels, e.g. ["health, wellness & fitness", "financial services"].
+- organizationNumEmployeesRanges: string[] — MUST use ONLY the following exact bucket strings (no other values are accepted):
+    "1,10", "11,20", "21,50", "51,100", "101,200", "201,500", "501,1000", "1001,2000", "2001,5000", "5001,10000", "10001,"
+  You may pass multiple buckets (e.g. ["1,10", "11,20"]) to cover a range; you cannot invent custom ranges like "1,50" or "100,500".
+- qOrganizationKeywordTags: string[] — free-form company keyword tags.
+- qOrganizationIndustryTagIds: string[] — Apollo industry tag IDs.
+- qKeywords: string[] — free-form keyword search terms.`;
+
+export const __SYSTEM_PROMPT__ = SYSTEM_PROMPT;
 
 interface LlmAction {
   action?: unknown;
@@ -88,9 +100,16 @@ function buildSeedMessage(brandCampaignDescription: string, previousStrategies: 
 export async function generateNextStrategy(
   ctx: StrategyContext,
   previousStrategies: ApolloSearchParams[],
+  apolloError?: string,
 ): Promise<StrategyOutcome> {
   const transcript: string[] = [buildSeedMessage(ctx.brandCampaignDescription, previousStrategies)];
+  if (apolloError) {
+    transcript.push(
+      `PRIOR APOLLO ERROR (the last persisted strategy was rejected by Apollo at fetch time, treat as a validation failure to avoid):\n${apolloError}`,
+    );
+  }
   let lastTestedFilters: ApolloSearchParams | null = null;
+  let lastTestedHadErrors = false;
 
   const tracking = {
     orgId: ctx.orgId,
@@ -130,24 +149,44 @@ export async function generateNextStrategy(
         continue;
       }
       const filters = action.filters as ApolloSearchParams;
-      const dry = await apolloDryRun({
-        filters,
-        orgId: ctx.orgId,
-        userId: ctx.userId ?? null,
-        runId: ctx.runId ?? null,
-        brandId: ctx.brandId,
-        campaignId: ctx.campaignId,
-        workflowSlug: ctx.workflowSlug,
-        featureSlug: ctx.featureSlug,
-      });
-      lastTestedFilters = filters;
-      transcript.push(
-        [
-          `Round ${round + 1}: tested filters=${JSON.stringify(filters)}`,
-          `Result: totalEntries=${dry.totalEntries}, validationErrors=${JSON.stringify(dry.validationErrors)}.`,
-          `Either confirm this set, propose another test, or declare exhausted.`,
-        ].join("\n"),
-      );
+      try {
+        const dry = await apolloDryRun({
+          filters,
+          orgId: ctx.orgId,
+          userId: ctx.userId ?? null,
+          runId: ctx.runId ?? null,
+          brandId: ctx.brandId,
+          campaignId: ctx.campaignId,
+          workflowSlug: ctx.workflowSlug,
+          featureSlug: ctx.featureSlug,
+        });
+        lastTestedFilters = filters;
+        lastTestedHadErrors = (dry.validationErrors ?? []).length > 0;
+        transcript.push(
+          [
+            `Round ${round + 1}: tested filters=${JSON.stringify(filters)}`,
+            `Result: totalEntries=${dry.totalEntries}, validationErrors=${JSON.stringify(dry.validationErrors)}.`,
+            lastTestedHadErrors
+              ? `Validation errors present — you MUST propose another "test" with corrected filters; "confirm" will be rejected until validationErrors is empty.`
+              : `Either confirm this set, propose another test, or declare exhausted.`,
+          ].join("\n"),
+        );
+      } catch (err) {
+        lastTestedFilters = null;
+        lastTestedHadErrors = true;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(
+          `[lead-service] strategy dryRun threw, feeding error back to LLM round=${round + 1}: ${message}`,
+        );
+        transcript.push(
+          [
+            `Round ${round + 1}: tested filters=${JSON.stringify(filters)}`,
+            `Result: Apollo rejected the request with an error. Treat this as a validation failure to avoid:`,
+            message,
+            `Propose another "test" with corrected filters, or declare exhausted.`,
+          ].join("\n"),
+        );
+      }
       continue;
     }
 
@@ -155,6 +194,12 @@ export async function generateNextStrategy(
       if (!lastTestedFilters) {
         transcript.push(
           `Round ${round + 1}: you tried to confirm without testing any filters yet. You must test at least one filter set first.`,
+        );
+        continue;
+      }
+      if (lastTestedHadErrors) {
+        transcript.push(
+          `Round ${round + 1}: confirm rejected — the last tested filter set had validation errors. Propose a new "test" with corrected filters.`,
         );
         continue;
       }
@@ -283,11 +328,13 @@ export async function getCurrentStrategy(
 }
 
 /**
- * Mark the current strategy as exhausted (Apollo returned no more leads) and try to generate
- * the next strategy. Used by buffer fill when a page returns 0 candidates.
+ * Mark the current strategy as exhausted (Apollo returned no more leads, or Apollo rejected
+ * the persisted filter set) and try to generate the next strategy. Used by buffer fill when a
+ * page returns 0 candidates or Apollo throws a validation error on the persisted strategy.
  */
 export async function advanceStrategyOrGenerate(
   ctx: StrategyContext,
+  apolloError?: string,
 ): Promise<{ strategy: ApolloSearchParams } | { exhausted: true; reason: string }> {
   const existing = await loadRow(ctx.orgId, ctx.campaignId);
 
@@ -297,7 +344,7 @@ export async function advanceStrategyOrGenerate(
 
   // Bump index past current strategy; subsequent generateNextStrategy uses all known strategies as the "tried" set.
   const triedStrategies = existing?.strategies ?? [];
-  const outcome = await generateNextStrategy(ctx, triedStrategies);
+  const outcome = await generateNextStrategy(ctx, triedStrategies, apolloError);
   return persistOutcome({
     orgId: ctx.orgId,
     campaignId: ctx.campaignId,

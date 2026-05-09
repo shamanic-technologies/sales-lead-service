@@ -23,4 +23,9 @@ describe("buffer.ts simplification invariants", () => {
   it("releases the claim back to 'buffered' on exception via try/finally", () => {
     expect(bufferSrc).toMatch(/finally\s*\{[\s\S]*claimSettled[\s\S]*status:\s*"buffered"/);
   });
+
+  it("wraps apolloFetchPage in try/catch and routes Apollo validation errors back into the strategy loop", () => {
+    expect(bufferSrc).toMatch(/try\s*\{[\s\S]*apolloFetchPage[\s\S]*\}\s*catch/);
+    expect(bufferSrc).toMatch(/advanceStrategyOrGenerate[\s\S]*lastApolloError/);
+  });
 });
