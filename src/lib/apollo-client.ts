@@ -122,6 +122,7 @@ export interface ApolloPersonResult {
     investors?: string;
     amount?: number;
     currency?: string;
+    news_url?: string;
   }>;
   organizationCity?: string;
   organizationState?: string;

@@ -7,6 +7,16 @@ import {
   leadContactMethods,
 } from "../db/schema.js";
 
+export interface FundingEventView {
+  id: string | null;
+  date: string | null;
+  type: string | null;
+  investors: string | null;
+  amount: number | null;
+  currency: string | null;
+  newsUrl: string | null;
+}
+
 export interface OrganizationView {
   id: string;
   apolloOrganizationId: string | null;
@@ -32,6 +42,20 @@ export interface OrganizationView {
   technologyNames: string[] | null;
   industries: string[] | null;
   secondaryIndustries: string[] | null;
+  latestFundingStage: string | null;
+  latestFundingRoundDate: string | null;
+  totalFunding: string | null;
+  totalFundingPrinted: string | null;
+  fundingEvents: FundingEventView[];
+  retailLocationCount: number | null;
+  publiclyTradedSymbol: string | null;
+  publiclyTradedExchange: string | null;
+  primaryPhone: string | null;
+  seoDescription: string | null;
+  angellistUrl: string | null;
+  numSuborganizations: number | null;
+  alexaRanking: number | null;
+  keywords: string[] | null;
 }
 
 export interface ContactMethodView {
@@ -71,9 +95,26 @@ export interface FullLead {
   githubUrl: string | null;
   facebookUrl: string | null;
   enrichedAt: string | null;
+  currentTitle: string | null;
   organization: OrganizationView | null;
   contacts: ContactMethodView[];
   employmentHistory: EmploymentEntryView[];
+}
+
+function mapFundingEvents(raw: unknown): FundingEventView[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((entry) => {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    return {
+      id: typeof e.id === "string" ? e.id : null,
+      date: typeof e.date === "string" ? e.date : null,
+      type: typeof e.type === "string" ? e.type : null,
+      investors: typeof e.investors === "string" ? e.investors : null,
+      amount: typeof e.amount === "number" ? e.amount : null,
+      currency: typeof e.currency === "string" ? e.currency : null,
+      newsUrl: typeof e.news_url === "string" ? e.news_url : null,
+    };
+  });
 }
 
 function mapOrganizationView(row: typeof organizations.$inferSelect): OrganizationView {
@@ -102,6 +143,20 @@ function mapOrganizationView(row: typeof organizations.$inferSelect): Organizati
     technologyNames: row.technologyNames ?? null,
     industries: row.industries ?? null,
     secondaryIndustries: row.secondaryIndustries ?? null,
+    latestFundingStage: row.latestFundingStage ?? null,
+    latestFundingRoundDate: row.latestFundingRoundDate ?? null,
+    totalFunding: row.totalFunding ?? null,
+    totalFundingPrinted: row.totalFundingPrinted ?? null,
+    fundingEvents: mapFundingEvents(row.fundingEvents),
+    retailLocationCount: row.retailLocationCount ?? null,
+    publiclyTradedSymbol: row.publiclyTradedSymbol ?? null,
+    publiclyTradedExchange: row.publiclyTradedExchange ?? null,
+    primaryPhone: row.primaryPhone ?? null,
+    seoDescription: row.seoDescription ?? null,
+    angellistUrl: row.angellistUrl ?? null,
+    numSuborganizations: row.numSuborganizations ?? null,
+    alexaRanking: row.alexaRanking ?? null,
+    keywords: row.keywords ?? null,
   };
 }
 
@@ -178,6 +233,7 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
     githubUrl: lead.githubUrl ?? null,
     facebookUrl: lead.facebookUrl ?? null,
     enrichedAt: lead.enrichedAt ? lead.enrichedAt.toISOString() : null,
+    currentTitle: currentEmployment?.title ?? null,
     organization,
     contacts,
     employmentHistory,
