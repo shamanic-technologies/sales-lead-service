@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from "express";
+import * as Sentry from "@sentry/node";
 import { LEAD_SERVICE_API_KEY } from "../config.js";
 
 export interface ServiceContext {
@@ -20,6 +21,16 @@ export interface AuthenticatedRequest extends Request {
   brandIds?: string[];
   workflowSlug?: string;
   featureSlug?: string;
+}
+
+function applySentryTags(req: AuthenticatedRequest): void {
+  if (req.orgId) Sentry.setTag("orgId", req.orgId);
+  if (req.userId) Sentry.setTag("userId", req.userId);
+  if (req.runId) Sentry.setTag("runId", req.runId);
+  if (req.campaignId) Sentry.setTag("campaignId", req.campaignId);
+  if (req.brandId) Sentry.setTag("brandId", req.brandId);
+  if (req.workflowSlug) Sentry.setTag("workflowSlug", req.workflowSlug);
+  if (req.featureSlug) Sentry.setTag("featureSlug", req.featureSlug);
 }
 
 export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
@@ -93,5 +104,25 @@ export function requireOrgId(
   if (workflowSlug) req.workflowSlug = workflowSlug;
   if (featureSlug) req.featureSlug = featureSlug;
 
+  applySentryTags(req);
+  next();
+}
+
+/**
+ * Requires x-run-id header. Used on endpoints that must be idempotent per run.
+ * Must be used after requireOrgId (which parses x-run-id from headers).
+ */
+export function requireRunId(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+) {
+  const runId = req.runId ?? (req.headers["x-run-id"] as string | undefined);
+  if (!runId) {
+    res.status(400).json({ error: "x-run-id header required" });
+    return;
+  }
+  req.runId = runId;
+  Sentry.setTag("runId", runId);
   next();
 }

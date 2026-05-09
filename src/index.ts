@@ -6,7 +6,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { db, sql } from "./db/index.js";
-import { PORT } from "./config.js";
+import { PORT, PULL_NEXT_TIMEOUT_MS } from "./config.js";
 import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
 import leadsRoutes from "./routes/leads.js";
@@ -54,8 +54,11 @@ if (process.env.NODE_ENV !== "test") {
       console.log("Migrations complete");
       await registerProviders();
       const server = app.listen(Number(PORT), "::", () => {
-        console.log(`lead-service running on port ${PORT}`);
+        console.log(`[lead-service] running on port ${PORT}`);
       });
+      // Allow socket to outlive the longest in-flight route + 5s grace.
+      // Without this Node defaults to no timeout, so a hung downstream can pile up zombie sockets.
+      server.setTimeout(PULL_NEXT_TIMEOUT_MS + 5_000);
 
       const shutdown = () => {
         console.log("Shutting down gracefully...");

@@ -615,6 +615,13 @@ const InternalApiKeyHeader = [
     schema: { type: "string" as const },
     description: "API key for authenticating requests",
   },
+  {
+    in: "header" as const,
+    name: "x-run-id",
+    required: true,
+    schema: { type: "string" as const },
+    description: "Idempotency key — replaying with the same x-run-id returns the cached response",
+  },
 ];
 
 export const TransferBrandRequestSchema = z

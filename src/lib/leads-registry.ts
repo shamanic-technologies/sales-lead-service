@@ -177,6 +177,8 @@ export async function upsertOrganizationFromPerson(person: ApolloPersonResult): 
 
 /**
  * Upsert a lead contact method (email/phone/twitter/etc.). Idempotent on (leadId, channel, value).
+ * On conflict the latest status + source overwrite the existing row so re-enrichment
+ * (e.g. Apollo upgrading "unverified" → "verified") is reflected instead of being silently dropped.
  */
 export async function upsertContactMethod(params: {
   leadId: string;
@@ -194,7 +196,13 @@ export async function upsertContactMethod(params: {
       status: params.status ?? null,
       source: params.source,
     })
-    .onConflictDoNothing();
+    .onConflictDoUpdate({
+      target: [leadContactMethods.leadId, leadContactMethods.channel, leadContactMethods.value],
+      set: {
+        status: params.status ?? null,
+        source: params.source,
+      },
+    });
 }
 
 /**

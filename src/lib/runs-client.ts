@@ -15,7 +15,7 @@ async function callRunsService(path: string, options: {
       ...extraHeaders,
     },
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(300_000),
+    signal: AbortSignal.timeout(5_000),
   });
 
   if (!response.ok) {

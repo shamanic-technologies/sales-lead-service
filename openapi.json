@@ -1629,6 +1629,15 @@
               "type": "string"
             },
             "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Idempotency key — replaying with the same x-run-id returns the cached response"
           }
         ],
         "requestBody": {
