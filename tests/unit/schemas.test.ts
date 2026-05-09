@@ -1,113 +1,173 @@
 import { describe, it, expect } from "vitest";
-import { BufferNextRequestSchema, ApolloPersonDataSchema } from "../../src/schemas.js";
+import {
+  BufferNextRequestSchema,
+  FullLeadSchema,
+  BufferNextResponseSchema,
+} from "../../src/schemas.js";
 
-describe("schema validation", () => {
-  describe("BufferNextRequestSchema", () => {
-    it("accepts empty body", () => {
-      const result = BufferNextRequestSchema.safeParse({});
-      expect(result.success).toBe(true);
-    });
-
-    it("rejects unknown fields (strict)", () => {
-      const result = BufferNextRequestSchema.safeParse({
-        sourceType: "apollo",
-      });
-      // Empty object schema accepts extra keys by default in Zod
-      // This is fine — extra fields are stripped
-      expect(result.success).toBe(true);
-    });
+describe("BufferNextRequestSchema", () => {
+  it("accepts empty body", () => {
+    expect(BufferNextRequestSchema.safeParse({}).success).toBe(true);
   });
 
-  describe("ApolloPersonDataSchema", () => {
-    const validPerson = {
-      firstName: "Sara",
-      lastName: "Freshley",
-      organizationName: "Casco Bay",
-    };
+  it("strips unknown fields silently", () => {
+    expect(
+      BufferNextRequestSchema.safeParse({ sourceType: "apollo" }).success,
+    ).toBe(true);
+  });
+});
 
-    it("accepts valid person data with required fields", () => {
-      const result = ApolloPersonDataSchema.safeParse(validPerson);
-      expect(result.success).toBe(true);
+const LEAD_UUID = "11111111-2222-4333-8444-555555555555";
+const ORG_UUID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+
+const minimalLead = {
+  leadId: LEAD_UUID,
+  apolloPersonId: null,
+  firstName: "Sara",
+  lastName: "Freshley",
+  name: null,
+  headline: null,
+  linkedinUrl: null,
+  photoUrl: null,
+  city: null,
+  state: null,
+  country: null,
+  seniority: null,
+  departments: null,
+  subdepartments: null,
+  functions: null,
+  twitterUrl: null,
+  githubUrl: null,
+  facebookUrl: null,
+  enrichedAt: null,
+  organization: null,
+  contacts: [],
+  employmentHistory: [],
+};
+
+describe("FullLeadSchema", () => {
+  it("accepts a minimal lead with all-null nullable fields", () => {
+    expect(FullLeadSchema.safeParse(minimalLead).success).toBe(true);
+  });
+
+  it("accepts a lead with full nested organization view", () => {
+    const result = FullLeadSchema.safeParse({
+      ...minimalLead,
+      organization: {
+        id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        apolloOrganizationId: "apollo-org-1",
+        name: "Casco Bay",
+        primaryDomain: "cascobay.com",
+        websiteUrl: "https://cascobay.com",
+        industry: "marketing",
+        estimatedNumEmployees: 12,
+        annualRevenue: "1000000",
+        logoUrl: null,
+        shortDescription: "boutique",
+        linkedinUrl: null,
+        twitterUrl: null,
+        facebookUrl: null,
+        blogUrl: null,
+        crunchbaseUrl: null,
+        foundedYear: 2018,
+        city: "Portland",
+        state: "ME",
+        country: "USA",
+        streetAddress: null,
+        postalCode: null,
+        technologyNames: ["GA4"],
+        industries: ["marketing"],
+        secondaryIndustries: null,
+      },
     });
+    expect(result.success).toBe(true);
+  });
 
-    it("rejects missing firstName", () => {
-      const { firstName, ...rest } = validPerson;
-      const result = ApolloPersonDataSchema.safeParse(rest);
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects missing lastName", () => {
-      const { lastName, ...rest } = validPerson;
-      const result = ApolloPersonDataSchema.safeParse(rest);
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects missing organizationName", () => {
-      const { organizationName, ...rest } = validPerson;
-      const result = ApolloPersonDataSchema.safeParse(rest);
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects null firstName", () => {
-      const result = ApolloPersonDataSchema.safeParse({ ...validPerson, firstName: null });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects null lastName", () => {
-      const result = ApolloPersonDataSchema.safeParse({ ...validPerson, lastName: null });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects null organizationName", () => {
-      const result = ApolloPersonDataSchema.safeParse({ ...validPerson, organizationName: null });
-      expect(result.success).toBe(false);
-    });
-
-    it("accepts new Apollo fields (name, personalEmails, mobilePhone, phoneNumbers, organizationId, organizationRawAddress)", () => {
-      const result = ApolloPersonDataSchema.safeParse({
-        ...validPerson,
-        name: "Sara Freshley",
-        personalEmails: ["sara.personal@gmail.com", "sara@me.com"],
-        mobilePhone: "+1-555-555-5555",
-        phoneNumbers: [
-          {
-            rawNumber: "+1-555-555-5555",
-            sanitizedNumber: "+15555555555",
-            type: "mobile",
-            position: 1,
-            status: "verified",
-            dncStatus: "no_dnc",
-            dncOtherInfo: null,
-            dialerFlags: { do_not_call: false },
-          },
-        ],
-        organizationId: "org-apollo-123",
-        organizationRawAddress: "123 Main St, Portland, ME 04101",
-      });
-      expect(result.success).toBe(true);
-    });
-
-    it("accepts raw field as arbitrary record", () => {
-      const result = ApolloPersonDataSchema.safeParse({
-        ...validPerson,
-        raw: {
-          first_name: "Sara",
-          last_name: "Freshley",
-          some_new_apollo_field: { nested: true },
-          totally_unknown_array: [1, 2, 3],
+  it("accepts a lead with contact methods and employment history", () => {
+    const result = FullLeadSchema.safeParse({
+      ...minimalLead,
+      contacts: [
+        { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },
+        { channel: "phone", value: "+15555555555", status: null, source: "apollo" },
+      ],
+      employmentHistory: [
+        {
+          organizationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+          organizationName: "Casco Bay",
+          title: "Founder",
+          startDate: "2018-01-01",
+          endDate: null,
+          current: true,
+          description: null,
         },
-      });
-      expect(result.success).toBe(true);
+      ],
     });
+    expect(result.success).toBe(true);
+  });
 
-    it("accepts null/undefined raw field", () => {
-      expect(ApolloPersonDataSchema.safeParse({ ...validPerson, raw: null }).success).toBe(true);
-      expect(ApolloPersonDataSchema.safeParse({ ...validPerson }).success).toBe(true);
-    });
+  it("requires leadId", () => {
+    const without = { ...minimalLead };
+    delete (without as Record<string, unknown>).leadId;
+    expect(FullLeadSchema.safeParse(without).success).toBe(false);
+  });
 
-    it("accepts null/undefined personalEmails and phoneNumbers", () => {
-      expect(ApolloPersonDataSchema.safeParse({ ...validPerson, personalEmails: null, phoneNumbers: null }).success).toBe(true);
-      expect(ApolloPersonDataSchema.safeParse({ ...validPerson, personalEmails: [], phoneNumbers: [] }).success).toBe(true);
+  it("requires firstName", () => {
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, firstName: undefined }).success,
+    ).toBe(false);
+  });
+
+  it("requires lastName", () => {
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, lastName: undefined }).success,
+    ).toBe(false);
+  });
+
+  it("requires contacts array", () => {
+    const without = { ...minimalLead };
+    delete (without as Record<string, unknown>).contacts;
+    expect(FullLeadSchema.safeParse(without).success).toBe(false);
+  });
+
+  it("requires employmentHistory array", () => {
+    const without = { ...minimalLead };
+    delete (without as Record<string, unknown>).employmentHistory;
+    expect(FullLeadSchema.safeParse(without).success).toBe(false);
+  });
+
+  it("strips legacy raw/metadata fields if passed in (no longer part of contract)", () => {
+    const result = FullLeadSchema.safeParse({
+      ...minimalLead,
+      metadata: { foo: "bar" },
+      raw: { first_name: "Sara" },
     });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const data = result.data as Record<string, unknown>;
+      expect(data.metadata).toBeUndefined();
+      expect(data.raw).toBeUndefined();
+    }
+  });
+});
+
+describe("BufferNextResponseSchema", () => {
+  it("accepts found:true with FullLead", () => {
+    const result = BufferNextResponseSchema.safeParse({
+      found: true,
+      lead: {
+        leadId: LEAD_UUID,
+        email: "sara@cascobay.com",
+        data: minimalLead,
+        brandIds: ["brand-1"],
+        orgId: "org-1",
+        userId: "user-1",
+        apolloPersonId: null,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts found:false without lead", () => {
+    expect(BufferNextResponseSchema.safeParse({ found: false }).success).toBe(true);
   });
 });
