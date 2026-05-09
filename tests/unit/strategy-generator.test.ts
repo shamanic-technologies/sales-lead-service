@@ -176,6 +176,119 @@ describe("strategy-generator", () => {
       expect(chatComplete).toHaveBeenCalledTimes(3);
     });
 
+    it("rejects confirm when last dryRun returned validationErrors and forces another test", async () => {
+      apolloDryRun
+        .mockResolvedValueOnce({
+          totalEntries: 0,
+          validationErrors: [
+            'organizationNumEmployeesRanges: Invalid option: expected one of "1,10"|"11,20"|...',
+          ],
+        })
+        .mockResolvedValueOnce({ totalEntries: 500, validationErrors: [] });
+      chatComplete
+        .mockResolvedValueOnce({
+          json: {
+            action: "test",
+            filters: {
+              personTitles: ["Dentist"],
+              organizationNumEmployeesRanges: ["1,50"],
+            },
+            reasoning: "trying",
+          },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: { action: "confirm", reasoning: "ignoring errors" },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: {
+            action: "test",
+            filters: {
+              personTitles: ["Dentist"],
+              organizationNumEmployeesRanges: ["1,10", "11,20"],
+            },
+            reasoning: "fixed bucket",
+          },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: { action: "confirm", reasoning: "now valid" },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        });
+
+      const result = await generateNextStrategy(baseCtx, []);
+      expect("strategy" in result).toBe(true);
+      const strategy = (result as { strategy: { organizationNumEmployeesRanges: string[] } }).strategy;
+      expect(strategy.organizationNumEmployeesRanges).toEqual(["1,10", "11,20"]);
+      expect(apolloDryRun).toHaveBeenCalledTimes(2);
+    });
+
+    it("catches Apollo 400 thrown by dryRun, feeds error to LLM, continues loop", async () => {
+      apolloDryRun
+        .mockRejectedValueOnce(
+          new Error(
+            'Apollo service call failed: 400 - {"type":"validation","error":"Invalid request","details":{"fieldErrors":{"searchParams":["bad bucket"]}}}',
+          ),
+        )
+        .mockResolvedValueOnce({ totalEntries: 100, validationErrors: [] });
+      chatComplete
+        .mockResolvedValueOnce({
+          json: {
+            action: "test",
+            filters: { organizationNumEmployeesRanges: ["1,50"] },
+            reasoning: "first",
+          },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: {
+            action: "test",
+            filters: { organizationNumEmployeesRanges: ["1,10"] },
+            reasoning: "fixed",
+          },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: { action: "confirm", reasoning: "ok" },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        });
+
+      const result = await generateNextStrategy(baseCtx, []);
+      expect("strategy" in result).toBe(true);
+      expect(apolloDryRun).toHaveBeenCalledTimes(2);
+    });
+
+    it("SYSTEM_PROMPT enumerates allowed organizationNumEmployeesRanges buckets", async () => {
+      const sysPrompt = await import("../../src/lib/strategy-generator.js").then(
+        (m: { __SYSTEM_PROMPT__?: string }) => m.__SYSTEM_PROMPT__ ?? "",
+      );
+      expect(sysPrompt).toMatch(/"1,10"/);
+      expect(sysPrompt).toMatch(/"11,20"/);
+      expect(sysPrompt).toMatch(/"10001,"/);
+    });
+
     it("returns Max rounds reached after MAX_STRATEGY_GENERATION_ROUNDS", async () => {
       // Always test, never confirm.
       apolloDryRun.mockResolvedValue({ totalEntries: 10, validationErrors: [] });
