@@ -212,16 +212,37 @@ export async function topUpApolloLeadBuffer(params: IngestParams, signal?: Abort
       freshStrategy = true;
     }
 
-    const page = await apolloFetchPage({
-      campaignId: params.campaignId,
-      brandId: brandIdCsv,
-      searchParams: freshStrategy ? activeStrategy : undefined,
-      runId: params.pushRunId ?? null,
-      orgId: params.orgId,
-      userId: params.userId ?? null,
-      workflowSlug: params.workflowSlug,
-      featureSlug: params.featureSlug,
-    });
+    let page: Awaited<ReturnType<typeof apolloFetchPage>>;
+    try {
+      page = await apolloFetchPage({
+        campaignId: params.campaignId,
+        brandId: brandIdCsv,
+        searchParams: freshStrategy ? activeStrategy : undefined,
+        runId: params.pushRunId ?? null,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        workflowSlug: params.workflowSlug,
+        featureSlug: params.featureSlug,
+      });
+    } catch (err) {
+      // Apollo rejected the persisted strategy (e.g. validation error after schema tightening,
+      // or LLM previously confirmed an invalid filter). Don't propagate — invalidate the strategy
+      // and feed the error back to the LLM loop so it can converge on a valid filter set.
+      const lastApolloError = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[lead-service] apolloFetchPage failed for campaign=${params.campaignId}, advancing strategy: ${lastApolloError}`,
+      );
+      const next = await advanceStrategyOrGenerate(ctx, lastApolloError);
+      if ("exhausted" in next) {
+        console.log(
+          `[lead-service] topUp strategies exhausted after Apollo rejection campaign=${params.campaignId} reason=${next.reason}`,
+        );
+        return { filled: totalInserted };
+      }
+      activeStrategy = next.strategy;
+      freshStrategy = true;
+      continue;
+    }
     freshStrategy = false;
 
     let pageInserted = 0;
