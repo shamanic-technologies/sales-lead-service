@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchApolloStats, apolloEnrich } from "../../src/lib/apollo-client.js";
+import {
+  fetchApolloStats,
+  apolloEnrich,
+  fetchApolloFiltersPrompt,
+} from "../../src/lib/apollo-client.js";
 
 type CapturedRequest = { url: string; init: RequestInit };
 
@@ -83,6 +87,44 @@ describe("apollo-client", () => {
       const result = await apolloEnrich("p1");
 
       expect(result).toEqual({ person, cached: false });
+    });
+  });
+
+  describe("fetchApolloFiltersPrompt", () => {
+    it("GETs /search/filters-prompt with x-org-id and x-user-id headers", async () => {
+      const { calls } = mockFetch({ prompt: "DOC", schemaVersion: "v1" });
+
+      const out = await fetchApolloFiltersPrompt({ orgId: "org-9", userId: "user-9" });
+
+      expect(out).toEqual({ prompt: "DOC", schemaVersion: "v1" });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("http://apollo:3003/search/filters-prompt");
+      expect(calls[0].init.method ?? "GET").toBe("GET");
+      const headers = calls[0].init.headers as Record<string, string>;
+      expect(headers["x-org-id"]).toBe("org-9");
+      expect(headers["x-user-id"]).toBe("user-9");
+      expect(headers["X-API-Key"]).toBeDefined();
+    });
+
+    it("omits x-user-id when userId is null", async () => {
+      const { calls } = mockFetch({ prompt: "DOC", schemaVersion: "v1" });
+
+      await fetchApolloFiltersPrompt({ orgId: "org-9", userId: null });
+
+      const headers = calls[0].init.headers as Record<string, string>;
+      expect(headers["x-org-id"]).toBe("org-9");
+      expect(headers["x-user-id"]).toBeUndefined();
+    });
+
+    it("throws on non-2xx response (no silent fallback)", async () => {
+      const fetchSpy = vi.fn(async () =>
+        new Response("apollo down", { status: 503 }),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      await expect(
+        fetchApolloFiltersPrompt({ orgId: "org-1", userId: null }),
+      ).rejects.toThrow(/Apollo service call failed: 503/);
     });
   });
 });
