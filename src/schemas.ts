@@ -89,121 +89,556 @@ const HealthResponseSchema = z
   })
   .openapi("HealthResponse");
 
-// --- Apollo Person Data (flat camelCase — matches Apollo enrichment API) ---
+// --- Canonical lead views ---
+//
+// Every lead-bearing endpoint returns the same canonical FullLead shape.
+// Built from structured DB columns only — no Apollo raw blob, no metadata
+// passthrough. Clients can rely on field names + types being stable across
+// upstream provider changes.
 
-const EmploymentHistorySchema = z.object({
-  title: z.string().nullable().optional(),
-  organizationName: z.string().nullable().optional(),
-  startDate: z.string().nullable().optional(),
-  endDate: z.string().nullable().optional(),
-  description: z.string().nullable().optional(),
-  current: z.boolean().optional(),
-});
-
-const FundingEventSchema = z.object({
-  id: z.string().nullable().optional(),
-  date: z.string().nullable().optional(),
-  type: z.string().nullable().optional(),
-  investors: z.string().nullable().optional(),
-  amount: z.union([z.number(), z.string()]).nullable().optional(),
-  currency: z.string().nullable().optional(),
-  news_url: z.string().nullable().optional(),
-});
-
-const TechnologySchema = z.object({
-  uid: z.string().nullable().optional(),
-  name: z.string().nullable().optional(),
-  category: z.string().nullable().optional(),
-});
-
-const PhoneNumberSchema = z.object({
-  rawNumber: z.string().nullable().optional(),
-  sanitizedNumber: z.string().nullable().optional(),
-  type: z.string().nullable().optional(),
-  position: z.number().nullable().optional(),
-  status: z.string().nullable().optional(),
-  dncStatus: z.string().nullable().optional(),
-  dncOtherInfo: z.string().nullable().optional(),
-  dialerFlags: z.record(z.string(), z.unknown()).nullable().optional(),
-});
-
-export const ApolloPersonDataSchema = z
+const ContactMethodViewSchema = z
   .object({
-    // Person identifiers
-    id: z.string().optional(),
-    email: z.string().nullable().optional(),
-    emailStatus: z.string().nullable().optional(),
-    name: z.string().nullable().optional(),
-    firstName: z.string(),
-    lastName: z.string(),
-    title: z.string().nullable().optional(),
-    linkedinUrl: z.string().nullable().optional(),
-    // Person details
-    photoUrl: z.string().nullable().optional(),
-    headline: z.string().nullable().optional(),
-    city: z.string().nullable().optional(),
-    state: z.string().nullable().optional(),
-    country: z.string().nullable().optional(),
-    seniority: z.string().nullable().optional(),
-    departments: z.array(z.string()).optional(),
-    subdepartments: z.array(z.string()).optional(),
-    functions: z.array(z.string()).optional(),
-    twitterUrl: z.string().nullable().optional(),
-    githubUrl: z.string().nullable().optional(),
-    facebookUrl: z.string().nullable().optional(),
-    personalEmails: z.array(z.string()).nullable().optional(),
-    mobilePhone: z.string().nullable().optional(),
-    phoneNumbers: z.array(PhoneNumberSchema).nullable().optional(),
-    employmentHistory: z.array(EmploymentHistorySchema).optional(),
-    // Organization details (flat, NOT nested)
-    organizationId: z.string().nullable().optional(),
-    organizationName: z.string(),
-    organizationDomain: z.string().nullable().optional(),
-    organizationIndustry: z.string().nullable().optional(),
-    organizationSize: z.string().nullable().optional(),
-    organizationRawAddress: z.string().nullable().optional(),
-    organizationRevenueUsd: z.string().nullable().optional(),
-    organizationWebsiteUrl: z.string().nullable().optional(),
-    organizationLogoUrl: z.string().nullable().optional(),
-    organizationShortDescription: z.string().nullable().optional(),
-    organizationSeoDescription: z.string().nullable().optional(),
-    organizationLinkedinUrl: z.string().nullable().optional(),
-    organizationTwitterUrl: z.string().nullable().optional(),
-    organizationFacebookUrl: z.string().nullable().optional(),
-    organizationBlogUrl: z.string().nullable().optional(),
-    organizationCrunchbaseUrl: z.string().nullable().optional(),
-    organizationAngellistUrl: z.string().nullable().optional(),
-    organizationFoundedYear: z.number().nullable().optional(),
-    organizationPrimaryPhone: z.string().nullable().optional(),
-    organizationPubliclyTradedSymbol: z.string().nullable().optional(),
-    organizationPubliclyTradedExchange: z.string().nullable().optional(),
-    organizationAnnualRevenuePrinted: z.string().nullable().optional(),
-    organizationTotalFunding: z.string().nullable().optional(),
-    organizationTotalFundingPrinted: z.string().nullable().optional(),
-    organizationLatestFundingRoundDate: z.string().nullable().optional(),
-    organizationLatestFundingStage: z.string().nullable().optional(),
-    organizationFundingEvents: z.array(FundingEventSchema).optional(),
-    organizationCity: z.string().nullable().optional(),
-    organizationState: z.string().nullable().optional(),
-    organizationCountry: z.string().nullable().optional(),
-    organizationStreetAddress: z.string().nullable().optional(),
-    organizationPostalCode: z.string().nullable().optional(),
-    organizationTechnologyNames: z.array(z.string()).optional(),
-    organizationCurrentTechnologies: z.array(TechnologySchema).optional(),
-    organizationKeywords: z.array(z.string()).optional(),
-    organizationIndustries: z.array(z.string()).optional(),
-    organizationSecondaryIndustries: z.array(z.string()).optional(),
-    organizationNumSuborganizations: z.number().nullable().optional(),
-    organizationRetailLocationCount: z.number().nullable().optional(),
-    organizationAlexaRanking: z.number().nullable().optional(),
-    // Verbatim Apollo person payload (snake_case, includes any field Apollo returns)
-    raw: z.record(z.string(), z.unknown()).nullable().optional(),
+    channel: z
+      .string()
+      .openapi({
+        description:
+          "Contact channel kind. Currently used: 'email', 'phone'. Stable identifier — case-sensitive.",
+        example: "email",
+      }),
+    value: z
+      .string()
+      .openapi({
+        description:
+          "Contact value (the actual email address, phone number, etc.). Unique per (leadId, channel).",
+        example: "sara@cascobay.com",
+      }),
+    status: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Provider-reported status of the contact value (e.g. 'verified', 'unverified', 'extrapolated' for emails). null when not classified.",
+        example: "verified",
+      }),
+    source: z
+      .string()
+      .openapi({
+        description:
+          "Where this contact method originated (e.g. 'apollo', 'manual', 'csv-upload').",
+        example: "apollo",
+      }),
   })
-  .openapi("ApolloPersonData", {
+  .openapi("ContactMethodView", {
     description:
-      "Apollo person + organization data in flat camelCase format. " +
-      "Organization fields are prefixed with 'organization' (e.g. organizationDomain, organizationName) — " +
-      "there is NO nested 'organization' object.",
+      "One contact endpoint attached to a lead — email, phone, or any other channel. Multiple rows per lead are possible.",
+    example: {
+      channel: "email",
+      value: "sara@cascobay.com",
+      status: "verified",
+      source: "apollo",
+    },
+  });
+
+const OrganizationViewSchema = z
+  .object({
+    id: z
+      .string()
+      .uuid()
+      .openapi({
+        description: "Internal organization UUID (lead-service registry).",
+        example: "10000000-0000-0000-0000-000000000001",
+      }),
+    apolloOrganizationId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Apollo organization ID — present when sourced from Apollo enrichment.",
+        example: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      }),
+    name: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company name as registered. Use this for recipientCompany on outbound email.",
+        example: "Casco Bay",
+      }),
+    primaryDomain: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Primary domain of the company (no protocol). Useful for domain-level deliverability or matching.",
+        example: "cascobay.com",
+      }),
+    websiteUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Canonical company website URL (with protocol).",
+        example: "https://cascobay.com",
+      }),
+    industry: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Primary industry classification.",
+        example: "marketing",
+      }),
+    estimatedNumEmployees: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description: "Estimated employee count.",
+        example: 12,
+      }),
+    annualRevenue: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Annual revenue (USD), serialized as a numeric string to avoid float precision loss for very large companies.",
+        example: "1000000",
+      }),
+    logoUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Logo image URL.",
+        example: "https://logo.clearbit.com/cascobay.com",
+      }),
+    shortDescription: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Short marketing-style description of the company.",
+        example: "Boutique digital marketing agency in Portland, ME.",
+      }),
+    linkedinUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company LinkedIn URL.",
+        example: "https://linkedin.com/company/cascobay",
+      }),
+    twitterUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company Twitter/X URL.",
+        example: "https://twitter.com/cascobay",
+      }),
+    facebookUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company Facebook URL.",
+        example: "https://facebook.com/cascobay",
+      }),
+    blogUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company blog URL.",
+        example: "https://cascobay.com/blog",
+      }),
+    crunchbaseUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Crunchbase profile URL.",
+        example: "https://crunchbase.com/organization/cascobay",
+      }),
+    foundedYear: z
+      .number()
+      .int()
+      .nullable()
+      .openapi({
+        description: "Year the company was founded.",
+        example: 2018,
+      }),
+    city: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company HQ city.",
+        example: "Portland",
+      }),
+    state: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company HQ state / province (ISO subdivision when available).",
+        example: "ME",
+      }),
+    country: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company HQ country.",
+        example: "USA",
+      }),
+    streetAddress: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company HQ street address.",
+        example: "123 Main St",
+      }),
+    postalCode: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Company HQ postal / ZIP code.",
+        example: "04101",
+      }),
+    technologyNames: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Technologies the company is known to use (e.g. 'GA4', 'Salesforce').",
+        example: ["GA4", "HubSpot"],
+      }),
+    industries: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "All industry classifications attached to this company.",
+        example: ["marketing", "advertising"],
+      }),
+    secondaryIndustries: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Secondary industry classifications.",
+        example: ["digital-marketing"],
+      }),
+  })
+  .openapi("OrganizationView", {
+    description:
+      "Snapshot of the lead's CURRENT employer organization, joined from leads_organizations where current=true. " +
+      "All fields are nullable because organization enrichment is best-effort. " +
+      "null at the parent level means the lead has no current employment record.",
+    example: {
+      id: "10000000-0000-0000-0000-000000000001",
+      apolloOrganizationId: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      name: "Casco Bay",
+      primaryDomain: "cascobay.com",
+      websiteUrl: "https://cascobay.com",
+      industry: "marketing",
+      estimatedNumEmployees: 12,
+      annualRevenue: "1000000",
+      logoUrl: "https://logo.clearbit.com/cascobay.com",
+      shortDescription: "Boutique digital marketing agency in Portland, ME.",
+      linkedinUrl: "https://linkedin.com/company/cascobay",
+      twitterUrl: null,
+      facebookUrl: null,
+      blogUrl: null,
+      crunchbaseUrl: null,
+      foundedYear: 2018,
+      city: "Portland",
+      state: "ME",
+      country: "USA",
+      streetAddress: null,
+      postalCode: "04101",
+      technologyNames: ["GA4", "HubSpot"],
+      industries: ["marketing", "advertising"],
+      secondaryIndustries: null,
+    },
+  });
+
+const EmploymentEntryViewSchema = z
+  .object({
+    organizationId: z
+      .string()
+      .uuid()
+      .openapi({
+        description: "Internal organization UUID for this employment row.",
+        example: "10000000-0000-0000-0000-000000000001",
+      }),
+    organizationName: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Organization name at time of join. May differ from current name if company was renamed.",
+        example: "Casco Bay",
+      }),
+    title: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Role title held during this employment.",
+        example: "Founder",
+      }),
+    startDate: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO date (YYYY-MM-DD) when this employment started. null when unknown.",
+        example: "2018-01-01",
+      }),
+    endDate: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO date (YYYY-MM-DD) when this employment ended. null when current or unknown.",
+        example: null,
+      }),
+    current: z
+      .boolean()
+      .openapi({
+        description: "True when this is the lead's current employment.",
+        example: true,
+      }),
+    description: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Free-form description of the role.",
+        example: "Leads strategy and operations.",
+      }),
+  })
+  .openapi("EmploymentEntryView", {
+    description:
+      "One employment row from the lead's career history. All rows from leads_organizations are returned (past + current).",
+    example: {
+      organizationId: "10000000-0000-0000-0000-000000000001",
+      organizationName: "Casco Bay",
+      title: "Founder",
+      startDate: "2018-01-01",
+      endDate: null,
+      current: true,
+      description: "Leads strategy and operations.",
+    },
+  });
+
+export const FullLeadSchema = z
+  .object({
+    leadId: z
+      .string()
+      .uuid()
+      .openapi({
+        description: "Internal lead UUID (lead-service registry). Stable across enrichment refreshes.",
+        example: "00000000-0000-0000-0000-000000000001",
+      }),
+    apolloPersonId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Apollo person ID — present when the lead was sourced or enriched via Apollo.",
+        example: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      }),
+    firstName: z
+      .string()
+      .openapi({
+        description:
+          "Lead's first name. Required — lead-service refuses to register a lead without one. " +
+          "Use this for recipientFirstName on outbound email.",
+        example: "Sara",
+      }),
+    lastName: z
+      .string()
+      .openapi({
+        description:
+          "Lead's last name. Required. Use this for recipientLastName on outbound email.",
+        example: "Freshley",
+      }),
+    name: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Full display name as provided by source (often 'firstName lastName' but not always).",
+        example: "Sara Freshley",
+      }),
+    headline: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's professional headline / current role line (e.g. LinkedIn-style headline).",
+        example: "Founder at Casco Bay",
+      }),
+    linkedinUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's LinkedIn profile URL.",
+        example: "https://linkedin.com/in/sara-freshley",
+      }),
+    photoUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's profile photo URL.",
+        example: "https://media.licdn.com/photo.jpg",
+      }),
+    city: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's city.",
+        example: "Portland",
+      }),
+    state: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's state / province.",
+        example: "ME",
+      }),
+    country: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's country.",
+        example: "USA",
+      }),
+    seniority: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Seniority bucket from enrichment (e.g. 'founder', 'director', 'vp').",
+        example: "founder",
+      }),
+    departments: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Department classifications.",
+        example: ["c_suite"],
+      }),
+    subdepartments: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Subdepartment classifications.",
+        example: ["founders"],
+      }),
+    functions: z
+      .array(z.string())
+      .nullable()
+      .openapi({
+        description: "Job function classifications.",
+        example: ["entrepreneurship"],
+      }),
+    twitterUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's Twitter / X profile URL.",
+        example: "https://twitter.com/sara",
+      }),
+    githubUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's GitHub profile URL.",
+        example: "https://github.com/sara",
+      }),
+    facebookUrl: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Lead's Facebook profile URL.",
+        example: "https://facebook.com/sara",
+      }),
+    enrichedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "ISO 8601 timestamp of last successful enrichment. null when the lead was registered without enrichment.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    organization: OrganizationViewSchema.nullable(),
+    contacts: z
+      .array(ContactMethodViewSchema)
+      .openapi({
+        description: "All contact methods attached to this lead — email, phone, etc. May be empty.",
+        example: [
+          { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },
+        ],
+      }),
+    employmentHistory: z
+      .array(EmploymentEntryViewSchema)
+      .openapi({
+        description:
+          "Full employment history (current + past). Returned in insertion order; check the `current` flag to find the present role.",
+        example: [
+          {
+            organizationId: "10000000-0000-0000-0000-000000000001",
+            organizationName: "Casco Bay",
+            title: "Founder",
+            startDate: "2018-01-01",
+            endDate: null,
+            current: true,
+            description: null,
+          },
+        ],
+      }),
+  })
+  .openapi("FullLead", {
+    description:
+      "Canonical lead representation returned by every lead-bearing endpoint. Built entirely from structured columns — there is no `metadata` or `raw` Apollo passthrough. Field names are stable regardless of upstream enrichment provider.",
+    example: {
+      leadId: "00000000-0000-0000-0000-000000000001",
+      apolloPersonId: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      firstName: "Sara",
+      lastName: "Freshley",
+      name: "Sara Freshley",
+      headline: "Founder at Casco Bay",
+      linkedinUrl: "https://linkedin.com/in/sara-freshley",
+      photoUrl: null,
+      city: "Portland",
+      state: "ME",
+      country: "USA",
+      seniority: "founder",
+      departments: ["c_suite"],
+      subdepartments: ["founders"],
+      functions: ["entrepreneurship"],
+      twitterUrl: null,
+      githubUrl: null,
+      facebookUrl: null,
+      enrichedAt: "2026-01-01T00:00:00.000Z",
+      organization: {
+        id: "10000000-0000-0000-0000-000000000001",
+        apolloOrganizationId: "5f2a3b4c5d6e7f8a9b0c1d2e",
+        name: "Casco Bay",
+        primaryDomain: "cascobay.com",
+        websiteUrl: "https://cascobay.com",
+        industry: "marketing",
+        estimatedNumEmployees: 12,
+        annualRevenue: "1000000",
+        logoUrl: "https://logo.clearbit.com/cascobay.com",
+        shortDescription: "Boutique digital marketing agency in Portland, ME.",
+        linkedinUrl: "https://linkedin.com/company/cascobay",
+        twitterUrl: null,
+        facebookUrl: null,
+        blogUrl: null,
+        crunchbaseUrl: null,
+        foundedYear: 2018,
+        city: "Portland",
+        state: "ME",
+        country: "USA",
+        streetAddress: null,
+        postalCode: "04101",
+        technologyNames: ["GA4", "HubSpot"],
+        industries: ["marketing", "advertising"],
+        secondaryIndustries: null,
+      },
+      contacts: [
+        { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },
+      ],
+      employmentHistory: [
+        {
+          organizationId: "10000000-0000-0000-0000-000000000001",
+          organizationName: "Casco Bay",
+          title: "Founder",
+          startDate: "2018-01-01",
+          endDate: null,
+          current: true,
+          description: null,
+        },
+      ],
+    },
   });
 
 // --- Buffer Next ---
@@ -212,50 +647,143 @@ export const BufferNextRequestSchema = z
   .object({})
   .openapi("BufferNextRequest");
 
-const ServedLeadSchema = z.object({
-  leadId: z.string().uuid(),
-  email: z.string(),
-  data: ApolloPersonDataSchema.nullable(),
-  brandIds: z.array(z.string()),
-  orgId: z.string().nullable(),
-  userId: z.string().nullable(),
-  apolloPersonId: z
-    .string()
-    .nullable()
-    .optional()
-    .openapi({
-      description:
-        "Apollo person ID from enrichment. Present when the lead was sourced or enriched via Apollo.",
-      example: "5f2a3b4c5d6e7f8a9b0c1d2e",
-    }),
-});
-
-const BufferNextResponseSchema = z
+const ServedLeadSchema = z
   .object({
-    found: z.boolean(),
+    leadId: z
+      .string()
+      .uuid()
+      .openapi({
+        description:
+          "Internal lead UUID. Same as data.leadId — kept at the top level for backwards compatibility with workflow scripts that read it directly.",
+        example: "00000000-0000-0000-0000-000000000001",
+      }),
+    email: z
+      .string()
+      .openapi({
+        description:
+          "The email address selected for outreach. Always populated when found=true. Same address appears in data.contacts for the 'email' channel.",
+        example: "sara@cascobay.com",
+      }),
+    data: FullLeadSchema,
+    brandIds: z
+      .array(z.string())
+      .openapi({
+        description: "Brand UUIDs this lead was buffered for (echoed back from x-brand-id header).",
+        example: ["20000000-0000-0000-0000-000000000001"],
+      }),
+    orgId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Internal organization UUID owning the campaign.",
+        example: "30000000-0000-0000-0000-000000000001",
+      }),
+    userId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Internal user UUID who triggered the campaign run.",
+        example: "40000000-0000-0000-0000-000000000001",
+      }),
+    apolloPersonId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Apollo person ID — same value as data.apolloPersonId.",
+        example: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      }),
+  })
+  .openapi("ServedLead", {
+    description:
+      "A single lead served from the campaign buffer. The full lead payload lives under `data` (FullLead shape).",
+  });
+
+export const BufferNextResponseSchema = z
+  .object({
+    found: z
+      .boolean()
+      .openapi({
+        description: "True when a lead was claimed and returned. False when the campaign buffer is empty.",
+        example: true,
+      }),
     lead: ServedLeadSchema.optional(),
   })
   .openapi("BufferNextResponse", {
     description:
-      "Response from pulling the next lead. When found is true, lead contains the served lead with typed IDs.",
+      "Response from POST /orgs/buffer/next. When found is true, lead contains the served lead with full canonical FullLead payload under `lead.data`.",
     examples: [
       {
         summary: "Apollo lead",
         value: {
           found: true,
           lead: {
-            leadId: "c1d2e3f4-a5b6-7890-abcd-ef1234567890",
-            email: "jane.doe@acme.com",
+            leadId: "00000000-0000-0000-0000-000000000001",
+            email: "sara@cascobay.com",
             data: {
-              firstName: "Jane",
-              lastName: "Doe",
-              title: "VP of Marketing",
-              organizationName: "Acme Corp",
-              organizationDomain: "acme.com",
+              leadId: "00000000-0000-0000-0000-000000000001",
+              apolloPersonId: "5f2a3b4c5d6e7f8a9b0c1d2e",
+              firstName: "Sara",
+              lastName: "Freshley",
+              name: "Sara Freshley",
+              headline: "Founder at Casco Bay",
+              linkedinUrl: "https://linkedin.com/in/sara-freshley",
+              photoUrl: null,
+              city: "Portland",
+              state: "ME",
+              country: "USA",
+              seniority: "founder",
+              departments: ["c_suite"],
+              subdepartments: null,
+              functions: null,
+              twitterUrl: null,
+              githubUrl: null,
+              facebookUrl: null,
+              enrichedAt: "2026-01-01T00:00:00.000Z",
+              organization: {
+                id: "10000000-0000-0000-0000-000000000001",
+                apolloOrganizationId: "5f2a3b4c5d6e7f8a9b0c1d2e",
+                name: "Casco Bay",
+                primaryDomain: "cascobay.com",
+                websiteUrl: "https://cascobay.com",
+                industry: "marketing",
+                estimatedNumEmployees: 12,
+                annualRevenue: "1000000",
+                logoUrl: null,
+                shortDescription: null,
+                linkedinUrl: null,
+                twitterUrl: null,
+                facebookUrl: null,
+                blogUrl: null,
+                crunchbaseUrl: null,
+                foundedYear: 2018,
+                city: "Portland",
+                state: "ME",
+                country: "USA",
+                streetAddress: null,
+                postalCode: null,
+                technologyNames: ["GA4"],
+                industries: ["marketing"],
+                secondaryIndustries: null,
+              },
+              contacts: [
+                { channel: "email", value: "sara@cascobay.com", status: "verified", source: "apollo" },
+              ],
+              employmentHistory: [
+                {
+                  organizationId: "10000000-0000-0000-0000-000000000001",
+                  organizationName: "Casco Bay",
+                  title: "Founder",
+                  startDate: "2018-01-01",
+                  endDate: null,
+                  current: true,
+                  description: null,
+                },
+              ],
             },
-            brandIds: ["brand-uuid"],
-            orgId: "org-uuid",
-            userId: "user-uuid",
+            brandIds: ["20000000-0000-0000-0000-000000000001"],
+            orgId: "30000000-0000-0000-0000-000000000001",
+            userId: "40000000-0000-0000-0000-000000000001",
             apolloPersonId: "5f2a3b4c5d6e7f8a9b0c1d2e",
           },
         },
@@ -273,38 +801,178 @@ const BufferNextResponseSchema = z
 
 const LeadDetailSchema = z
   .object({
-    id: z.string().uuid(),
-    leadId: z.string().uuid().nullable(),
-    namespace: z.string(),
-    email: z.string(),
-    apolloPersonId: z.string().nullable().openapi({
-      description: "Apollo person ID from enrichment",
-    }),
-    emailStatus: z.string().nullable().openapi({
-      description: "Email verification status from Apollo (verified, extrapolated, etc.)",
-    }),
-    status: z.enum(["buffered", "skipped", "claimed", "served"]).openapi({
-      description: "Lead lifecycle status. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow.",
-    }),
-    metadata: ApolloPersonDataSchema.nullable(),
-    parentRunId: z.string().nullable(),
-    runId: z.string().nullable(),
-    brandIds: z.array(z.string()),
-    campaignId: z.string(),
-    orgId: z.string(),
-    userId: z.string().nullable(),
-    servedAt: z.string().nullable(),
-    enrichment: ApolloPersonDataSchema.nullable(),
-    contacted: z.boolean(),
-    sent: z.boolean(),
-    delivered: z.boolean(),
-    opened: z.boolean(),
-    clicked: z.boolean(),
-    bounced: z.boolean(),
-    unsubscribed: z.boolean(),
+    id: z
+      .string()
+      .uuid()
+      .openapi({
+        description: "leads_campaigns row UUID (per-campaign per-lead lifecycle row, NOT the lead itself).",
+        example: "50000000-0000-0000-0000-000000000001",
+      }),
+    leadId: z
+      .string()
+      .uuid()
+      .nullable()
+      .openapi({
+        description: "Internal lead UUID. Null only when the row references a lead that was deleted.",
+        example: "00000000-0000-0000-0000-000000000001",
+      }),
+    namespace: z
+      .string()
+      .openapi({
+        description: "Namespace this lead was sourced from. Currently always 'apollo'.",
+        example: "apollo",
+      }),
+    email: z
+      .string()
+      .openapi({
+        description: "The email address tied to this leads_campaigns row.",
+        example: "sara@cascobay.com",
+      }),
+    status: z
+      .enum(["buffered", "skipped", "claimed", "served"])
+      .openapi({
+        description:
+          "Lead lifecycle status in this campaign. 'buffered'/'skipped'/'claimed'/'served' all live in leads_campaigns; 'served' = pulled and served to a workflow.",
+        example: "served",
+      }),
+    statusReason: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Why this lead is in its current status (e.g. 'already_contacted', 'bounced'). Set for skipped/buffered leads.",
+        example: "already_contacted",
+      }),
+    statusDetails: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Human-readable details about the status reason.",
+        example: "Lead was contacted in campaign abc-123 on 2026-01-01.",
+      }),
+    parentRunId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Run ID of the workflow that pulled / processed this lead.",
+        example: "run-uuid",
+      }),
+    runId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Run ID for the campaign-tick that produced this lead.",
+        example: "run-uuid",
+      }),
+    brandIds: z
+      .array(z.string())
+      .openapi({
+        description: "Brand UUIDs this lead was buffered for.",
+        example: ["20000000-0000-0000-0000-000000000001"],
+      }),
+    campaignId: z
+      .string()
+      .openapi({
+        description: "Campaign ID owning this leads_campaigns row.",
+        example: "60000000-0000-0000-0000-000000000001",
+      }),
+    orgId: z
+      .string()
+      .openapi({
+        description: "Internal organization UUID.",
+        example: "30000000-0000-0000-0000-000000000001",
+      }),
+    userId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Internal user UUID who triggered the campaign run.",
+        example: "40000000-0000-0000-0000-000000000001",
+      }),
+    workflowSlug: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Workflow slug that processed this lead (e.g. 'sales-cold-email-outreach-helium').",
+        example: "sales-cold-email-outreach-helium",
+      }),
+    featureSlug: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Feature slug for tracking.",
+        example: "outreach",
+      }),
+    servedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO timestamp when this lead was served. null for buffered/skipped/claimed rows.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    apolloPersonId: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Apollo person ID — convenience copy of lead.apolloPersonId.",
+        example: "5f2a3b4c5d6e7f8a9b0c1d2e",
+      }),
+    emailStatus: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "Email verification status from Apollo (verified, unverified, extrapolated, etc.).",
+        example: "verified",
+      }),
+    lead: FullLeadSchema.nullable(),
+    contacted: z
+      .boolean()
+      .openapi({
+        description: "Lead has been contacted at least once in this scope (campaign or brand depending on query).",
+        example: true,
+      }),
+    sent: z
+      .boolean()
+      .openapi({
+        description: "An email send has been attempted.",
+        example: true,
+      }),
+    delivered: z
+      .boolean()
+      .openapi({
+        description: "Provider confirmed delivery.",
+        example: true,
+      }),
+    opened: z
+      .boolean()
+      .openapi({
+        description: "Lead has opened at least one email.",
+        example: false,
+      }),
+    clicked: z
+      .boolean()
+      .openapi({
+        description: "Lead has clicked at least one tracked link.",
+        example: false,
+      }),
+    bounced: z
+      .boolean()
+      .openapi({
+        description: "Email bounced.",
+        example: false,
+      }),
+    unsubscribed: z
+      .boolean()
+      .openapi({
+        description: "Lead unsubscribed in this scope.",
+        example: false,
+      }),
     replied: z
       .boolean()
-      .openapi({ description: "Whether the lead replied (any reply, regardless of sentiment)" }),
+      .openapi({
+        description: "Whether the lead replied (any reply, regardless of sentiment).",
+        example: false,
+      }),
     replyClassification: z
       .enum(["positive", "negative", "neutral"])
       .nullable()
@@ -315,28 +983,38 @@ const LeadDetailSchema = z
           "'negative' = not interested, " +
           "'neutral' = ambiguous or informational. " +
           "null when no reply detected.",
+        example: null,
       }),
-    statusReason: z.string().nullable().openapi({
-      description: "Why this lead was skipped or placed in its current status (e.g. 'already_contacted', 'bounced'). Only set for buffer leads.",
-    }),
-    statusDetails: z.string().nullable().openapi({
-      description: "Human-readable details about the status reason. Only set for buffer leads.",
-    }),
-    lastDeliveredAt: z.string().nullable(),
-    global: z.object({
-      bounced: z.boolean(),
-      unsubscribed: z.boolean(),
-    }).openapi({
-      description: "Global-scope status (across all brands/campaigns). bounced and unsubscribed are global flags.",
-    }),
+    lastDeliveredAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description: "ISO timestamp of the last delivered message in this scope.",
+        example: "2026-01-02T00:00:00.000Z",
+      }),
+    global: z
+      .object({
+        bounced: z.boolean().openapi({ description: "Lead has bounced anywhere across the platform.", example: false }),
+        unsubscribed: z.boolean().openapi({ description: "Lead has unsubscribed anywhere across the platform.", example: false }),
+      })
+      .openapi({
+        description: "Global-scope status (across all brands/campaigns). bounced and unsubscribed are global flags.",
+      }),
   })
-  .openapi("LeadDetail");
+  .openapi("LeadDetail", {
+    description:
+      "One leads_campaigns row enriched with the full canonical lead payload (FullLead) and delivery status from email-gateway.",
+  });
 
 const LeadsResponseSchema = z
   .object({
-    leads: z.array(LeadDetailSchema),
+    leads: z.array(LeadDetailSchema).openapi({
+      description: "All leads_campaigns rows matching the query, with full canonical lead payload + delivery overlay.",
+    }),
   })
-  .openapi("LeadsResponse");
+  .openapi("LeadsResponse", {
+    description: "Response shape for GET /orgs/leads.",
+  });
 
 // --- Stats ---
 
@@ -413,6 +1091,10 @@ registry.registerPath({
   method: "post",
   path: "/orgs/buffer/next",
   summary: "Pull the next lead from the buffer",
+  description:
+    "Claims and returns the next available lead from the campaign buffer. " +
+    "Response contains the full canonical lead payload (FullLead) under `lead.data` — " +
+    "use `data.firstName`, `data.lastName`, `data.organization.name` for outbound recipient fields.",
   request: {
     params: z.object({}),
     body: {
@@ -422,7 +1104,7 @@ registry.registerPath({
   parameters: BufferNextHeaders,
   responses: {
     200: {
-      description: "Next lead from buffer",
+      description: "Next lead from buffer (or found=false when exhausted)",
       content: { "application/json": { schema: BufferNextResponseSchema } },
     },
     400: {
@@ -436,13 +1118,10 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/orgs/leads",
-  summary: "List leads with enrichment and delivery status",
+  summary: "List leads with full enrichment and delivery status",
   description:
-    "Returns leads from leads_campaigns. Each lead includes a 'status' field: " +
-    "'served' (pulled and served), 'buffered'/'skipped'/'claimed' (still pending). " +
-    "Served leads include Apollo enrichment data, apolloPersonId, emailStatus, and full delivery status " +
-    "(contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). " +
-    "Buffer entries have delivery fields defaulted to false/null. " +
+    "Returns leads_campaigns rows. Each row includes the full canonical lead payload (FullLead — see schema) under `lead`, " +
+    "plus delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). " +
     "Delivery status is fetched from email-gateway when brandId or campaignId is provided. " +
     "With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). " +
     "Without either: status fields default to false/null.",
@@ -475,7 +1154,7 @@ registry.registerPath({
   ],
   responses: {
     200: {
-      description: "List of served leads",
+      description: "List of leads with full canonical payload + delivery overlay",
       content: { "application/json": { schema: LeadsResponseSchema } },
     },
     401: { description: "Unauthorized" },

@@ -2,7 +2,7 @@ import { Router } from "express";
 import { eq, and, sql, type SQL } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { db } from "../db/index.js";
-import { leadsCampaigns, leads, leadContactMethods } from "../db/schema.js";
+import { leadsCampaigns, leads } from "../db/schema.js";
 import {
   checkDeliveryStatus,
   type StatusResult,
@@ -11,6 +11,7 @@ import {
   type GlobalStatus,
 } from "../lib/email-gateway-client.js";
 import { traceEvent } from "../lib/trace-event.js";
+import { buildFullLead, type FullLead } from "../lib/lead-shape.js";
 
 const router = Router();
 
@@ -127,35 +128,25 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         workflowSlug: leadsCampaigns.workflowSlug,
         featureSlug: leadsCampaigns.featureSlug,
         leadApolloPersonId: leads.apolloPersonId,
-        leadFirstName: leads.firstName,
-        leadLastName: leads.lastName,
-        leadName: leads.name,
-        leadHeadline: leads.headline,
-        leadLinkedinUrl: leads.linkedinUrl,
-        leadCity: leads.city,
-        leadState: leads.state,
-        leadCountry: leads.country,
-        leadMetadata: leads.metadata,
       })
       .from(leadsCampaigns)
       .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
       .where(and(...conditions));
 
-    // Fetch primary email per leadId in a single query
     const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
-    const emailRows = leadIds.length === 0
-      ? []
-      : await db.execute<{ lead_id: string; value: string; status: string | null }>(sql`
-          SELECT DISTINCT ON (lead_id) lead_id, value, status
-          FROM lead_contact_methods
-          WHERE channel = 'email'
-            AND lead_id = ANY(${sql.raw(`ARRAY[${leadIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(",") || "NULL"}]::uuid[]`)})
-          ORDER BY lead_id, created_at DESC
-        `);
-    const emailByLead = new Map<string, { value: string; status: string | null }>();
-    for (const row of emailRows as unknown as Array<{ lead_id: string; value: string; status: string | null }>) {
-      emailByLead.set(row.lead_id, { value: row.value, status: row.status });
-    }
+    const fullLeadByLeadId = new Map<string, FullLead>();
+    await Promise.all(
+      leadIds.map(async (leadId) => {
+        const fullLead = await buildFullLead(leadId);
+        fullLeadByLeadId.set(leadId, fullLead);
+      }),
+    );
+
+    const primaryEmail = (lead: FullLead | undefined): { value: string; status: string | null } | null => {
+      if (!lead) return null;
+      const email = lead.contacts.find((c) => c.channel === "email");
+      return email ? { value: email.value, status: email.status } : null;
+    };
 
     const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
     const brandIdStr = typeof brandId === "string" ? brandId : undefined;
@@ -168,7 +159,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
       for (const row of rows) {
         if (row.status !== "served") continue;
-        const email = emailByLead.get(row.leadId)?.value;
+        const fullLead = fullLeadByLeadId.get(row.leadId);
+        const email = primaryEmail(fullLead)?.value;
         if (!email) continue;
         const primaryBrandId = row.brandIds[0] ?? "unknown";
         if (!groups.has(primaryBrandId)) {
@@ -185,7 +177,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     }
 
     const allLeads = rows.map((row) => {
-      const email = emailByLead.get(row.leadId);
+      const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;
+      const email = primaryEmail(fullLead ?? undefined);
       const emailValue = email?.value ?? "";
       const emailStatus = email?.status ?? null;
       const statusResult = statusMap.get(emailValue);
@@ -193,29 +186,12 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
         : DEFAULT_STATUS;
 
-      const enrichment = row.leadFirstName || row.leadLastName || row.leadHeadline || row.leadMetadata
-        ? {
-            firstName: row.leadFirstName ?? undefined,
-            lastName: row.leadLastName ?? undefined,
-            name: row.leadName ?? undefined,
-            headline: row.leadHeadline ?? undefined,
-            linkedinUrl: row.leadLinkedinUrl ?? undefined,
-            city: row.leadCity ?? undefined,
-            state: row.leadState ?? undefined,
-            country: row.leadCountry ?? undefined,
-            ...(row.leadMetadata && typeof row.leadMetadata === "object"
-              ? (row.leadMetadata as Record<string, unknown>)
-              : {}),
-          }
-        : null;
-
       return {
         id: row.id,
         leadId: row.leadId,
         namespace: "apollo",
         email: emailValue,
         apolloPersonId: row.leadApolloPersonId ?? null,
-        metadata: row.leadMetadata,
         parentRunId: row.parentRunId,
         runId: row.runId,
         brandIds: row.brandIds,
@@ -227,7 +203,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         servedAt: row.servedAt ? row.servedAt.toISOString() : null,
         status: row.status as "buffered" | "skipped" | "claimed" | "served",
         emailStatus,
-        enrichment,
+        lead: fullLead,
         statusReason: row.statusReason ?? null,
         statusDetails: row.statusDetails ?? null,
         ...deliveryStatus,
