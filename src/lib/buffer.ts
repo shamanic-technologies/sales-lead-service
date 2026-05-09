@@ -29,16 +29,22 @@ import {
 import { fetchCampaign } from "./campaign-client.js";
 import { extractBrandFields } from "./brand-client.js";
 
-const VALID_EMAIL_STATUSES = new Set(["verified", "extrapolated"]);
+export const VALID_EMAIL_STATUSES = new Set(["verified", "extrapolated"]);
 
-/** TTL for re-enriching a lead. */
-const CACHE_TTL_EMAIL_FOUND_MS = 6 * 30 * 24 * 60 * 60 * 1000;
-const CACHE_TTL_NO_EMAIL_MS = 1 * 24 * 60 * 60 * 1000;
+/**
+ * TTL for re-enriching a lead. A lead with a valid email short-circuits
+ * before this check, so the TTL only governs how soon we retry leads whose
+ * latest enrichment did NOT yield a usable email (or had an invalid status).
+ */
+export const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-function isCacheFresh(enrichedAt: Date | null, hasEmail: boolean): boolean {
+export function isCacheFresh(enrichedAt: Date | null): boolean {
   if (!enrichedAt) return false;
-  const ttl = hasEmail ? CACHE_TTL_EMAIL_FOUND_MS : CACHE_TTL_NO_EMAIL_MS;
-  return Date.now() - enrichedAt.getTime() < ttl;
+  return Date.now() - enrichedAt.getTime() < CACHE_TTL_MS;
+}
+
+export function hasValidEmail(email: string | null, status: string | null): boolean {
+  return !!email && !!status && VALID_EMAIL_STATUSES.has(status);
 }
 
 async function bufferedCount(orgId: string, campaignId: string): Promise<number> {
@@ -410,8 +416,9 @@ export async function pullNext(
       let email = claimed.primaryEmail;
       let emailStatus = claimed.primaryEmailStatus;
 
-      const cacheFresh = isCacheFresh(claimed.enrichedAt, claimed.hasEmail);
-      const needEnrich = !email && !cacheFresh;
+      const validEmail = hasValidEmail(email, emailStatus);
+      const cacheFresh = isCacheFresh(claimed.enrichedAt);
+      const needEnrich = !validEmail && !cacheFresh;
 
       if (needEnrich && claimed.apolloPersonId) {
         const enrichResult = await apolloEnrich(claimed.apolloPersonId, {
