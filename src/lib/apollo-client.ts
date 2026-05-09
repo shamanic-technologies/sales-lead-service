@@ -144,6 +144,22 @@ export interface ApolloPersonResult {
   [key: string]: unknown;
 }
 
+// --- Filters Prompt (server-generated LLM doc for SearchFiltersSchema) ---
+
+export interface ApolloFiltersPrompt {
+  prompt: string;
+  schemaVersion: string;
+}
+
+export async function fetchApolloFiltersPrompt(opts: {
+  orgId: string;
+  userId?: string | null;
+}): Promise<ApolloFiltersPrompt> {
+  const headers: Record<string, string> = { "x-org-id": opts.orgId };
+  if (opts.userId) headers["x-user-id"] = opts.userId;
+  return callApolloService<ApolloFiltersPrompt>("/search/filters-prompt", { headers });
+}
+
 // --- Fetch Page (server-managed pagination via apollo-service /search/next) ---
 
 export interface ApolloFetchPageResult {

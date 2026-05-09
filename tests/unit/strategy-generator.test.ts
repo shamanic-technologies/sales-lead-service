@@ -7,8 +7,10 @@ vi.mock("../../src/lib/chat-client.js", () => ({
 }));
 
 const apolloDryRun = vi.fn();
+const fetchApolloFiltersPrompt = vi.fn();
 vi.mock("../../src/lib/apollo-client.js", () => ({
   apolloDryRun: (...args: unknown[]) => apolloDryRun(...args),
+  fetchApolloFiltersPrompt: (...args: unknown[]) => fetchApolloFiltersPrompt(...args),
 }));
 
 // Mock the DB layer used by getCurrentStrategy / advanceStrategyOrGenerate / persistOutcome.
@@ -39,7 +41,8 @@ import {
   generateNextStrategy,
   getCurrentStrategy,
   advanceStrategyOrGenerate,
-  __SYSTEM_PROMPT__,
+  __SYSTEM_PROMPT_STATIC__,
+  __resetFiltersPromptCache,
   type StrategyContext,
 } from "../../src/lib/strategy-generator.js";
 
@@ -55,9 +58,16 @@ const baseCtx: StrategyContext = {
 beforeEach(() => {
   chatComplete.mockReset();
   apolloDryRun.mockReset();
+  fetchApolloFiltersPrompt.mockReset();
   findFirst.mockReset();
   insertReturning.mockReset();
   updateWhere.mockReset();
+  __resetFiltersPromptCache();
+  // Default: filter-shape doc fetch returns a stable shape so existing tests don't have to opt in.
+  fetchApolloFiltersPrompt.mockResolvedValue({
+    prompt: "DEFAULT FILTERS PROMPT BLOCK",
+    schemaVersion: "default-v1",
+  });
 });
 
 describe("strategy-generator", () => {
@@ -281,15 +291,6 @@ describe("strategy-generator", () => {
       expect(apolloDryRun).toHaveBeenCalledTimes(2);
     });
 
-    it("SYSTEM_PROMPT enumerates allowed organizationNumEmployeesRanges buckets", async () => {
-      const sysPrompt = await import("../../src/lib/strategy-generator.js").then(
-        (m: { __SYSTEM_PROMPT__?: string }) => m.__SYSTEM_PROMPT__ ?? "",
-      );
-      expect(sysPrompt).toMatch(/"1,10"/);
-      expect(sysPrompt).toMatch(/"11,20"/);
-      expect(sysPrompt).toMatch(/"10001,"/);
-    });
-
     it("returns Max rounds reached after MAX_STRATEGY_GENERATION_ROUNDS", async () => {
       // Always test, never confirm.
       apolloDryRun.mockResolvedValue({ totalEntries: 10, validationErrors: [] });
@@ -436,52 +437,96 @@ describe("strategy-generator", () => {
     });
   });
 
-  describe("SYSTEM_PROMPT — Apollo filter shape doc", () => {
-    it("documents qKeywords as string (not string[]) with OR-joined example", () => {
-      expect(__SYSTEM_PROMPT__).toMatch(/qKeywords:\s*string\b(?!\[\])/);
-      expect(__SYSTEM_PROMPT__).not.toMatch(/qKeywords:\s*string\[\]/);
-      expect(__SYSTEM_PROMPT__).toMatch(/qKeywords[\s\S]{0,300}?\bOR\b/);
+  describe("SYSTEM_PROMPT — static portion", () => {
+    it("contains the absolute rules + workflow framing but not the filter shape doc", () => {
+      expect(__SYSTEM_PROMPT_STATIC__).toContain("ABSOLUTE RULES");
+      expect(__SYSTEM_PROMPT_STATIC__).toContain("OUTPUT FORMAT");
+      // Filter shape lines must NOT appear in the static block — they're fetched from apollo-service.
+      expect(__SYSTEM_PROMPT_STATIC__).not.toMatch(/^- personTitles:/m);
+      expect(__SYSTEM_PROMPT_STATIC__).not.toMatch(/qKeywords/);
+    });
+  });
+
+  describe("filters-prompt fetch + cache", () => {
+    function nextActionsForOneTestThenConfirm() {
+      apolloDryRun.mockResolvedValueOnce({ totalEntries: 100, validationErrors: [] });
+      chatComplete
+        .mockResolvedValueOnce({
+          json: { action: "test", filters: { personTitles: ["Dentist"] }, reasoning: "primary" },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        })
+        .mockResolvedValueOnce({
+          json: { action: "confirm", reasoning: "ok" },
+          tokensInput: 0,
+          tokensOutput: 0,
+          model: "gemini-pro",
+          content: "",
+        });
+    }
+
+    it("fetches filter-shape doc and injects it into the chatComplete systemPrompt", async () => {
+      fetchApolloFiltersPrompt.mockReset();
+      fetchApolloFiltersPrompt.mockResolvedValue({
+        prompt: "MOCK_FILTER_DOC_X",
+        schemaVersion: "v-abc",
+      });
+      nextActionsForOneTestThenConfirm();
+
+      await generateNextStrategy(baseCtx, []);
+
+      expect(fetchApolloFiltersPrompt).toHaveBeenCalledWith({ orgId: "org-1", userId: "user-1" });
+      const firstCall = chatComplete.mock.calls[0][0] as { systemPrompt: string };
+      expect(firstCall.systemPrompt).toContain("MOCK_FILTER_DOC_X");
+      expect(firstCall.systemPrompt).toContain("ABSOLUTE RULES");
     });
 
-    it("lists personSeniorities enum values", () => {
-      const enums = ["entry", "senior", "manager", "director", "vp", "c_suite", "owner", "founder", "partner"];
-      const block = __SYSTEM_PROMPT__.match(/personSeniorities[\s\S]{0,400}/)?.[0] ?? "";
-      for (const v of enums) {
-        expect(block).toContain(v);
-      }
+    it("re-fetches each invocation but reuses cached prompt when schemaVersion is unchanged", async () => {
+      fetchApolloFiltersPrompt.mockReset();
+      fetchApolloFiltersPrompt.mockResolvedValue({
+        prompt: "STABLE_DOC",
+        schemaVersion: "stable-v1",
+      });
+
+      nextActionsForOneTestThenConfirm();
+      await generateNextStrategy(baseCtx, []);
+      nextActionsForOneTestThenConfirm();
+      await generateNextStrategy(baseCtx, []);
+
+      expect(fetchApolloFiltersPrompt).toHaveBeenCalledTimes(2);
+      const promptA = (chatComplete.mock.calls[0][0] as { systemPrompt: string }).systemPrompt;
+      const promptC = (chatComplete.mock.calls[2][0] as { systemPrompt: string }).systemPrompt;
+      expect(promptA).toContain("STABLE_DOC");
+      expect(promptC).toContain("STABLE_DOC");
     });
 
-    it("lists contactEmailStatus enum values", () => {
-      const enums = ["verified", "unverified", "likely to engage", "unavailable"];
-      const block = __SYSTEM_PROMPT__.match(/contactEmailStatus[\s\S]{0,400}/)?.[0] ?? "";
-      for (const v of enums) {
-        expect(block).toContain(v);
-      }
+    it("swaps cache and uses new prompt when schemaVersion changes", async () => {
+      fetchApolloFiltersPrompt.mockReset();
+      fetchApolloFiltersPrompt
+        .mockResolvedValueOnce({ prompt: "DOC_OLD", schemaVersion: "v1" })
+        .mockResolvedValueOnce({ prompt: "DOC_NEW", schemaVersion: "v2" });
+
+      nextActionsForOneTestThenConfirm();
+      await generateNextStrategy(baseCtx, []);
+      nextActionsForOneTestThenConfirm();
+      await generateNextStrategy(baseCtx, []);
+
+      const firstSystem = (chatComplete.mock.calls[0][0] as { systemPrompt: string }).systemPrompt;
+      const thirdSystem = (chatComplete.mock.calls[2][0] as { systemPrompt: string }).systemPrompt;
+      expect(firstSystem).toContain("DOC_OLD");
+      expect(firstSystem).not.toContain("DOC_NEW");
+      expect(thirdSystem).toContain("DOC_NEW");
+      expect(thirdSystem).not.toContain("DOC_OLD");
     });
 
-    it("lists organizationNumEmployeesRanges enum values", () => {
-      const buckets = [
-        "1,10",
-        "11,20",
-        "21,50",
-        "51,100",
-        "101,200",
-        "201,500",
-        "501,1000",
-        "1001,2000",
-        "2001,5000",
-        "5001,10000",
-        "10001,",
-      ];
-      const block = __SYSTEM_PROMPT__.match(/organizationNumEmployeesRanges[\s\S]{0,800}/)?.[0] ?? "";
-      for (const b of buckets) {
-        expect(block).toContain(b);
-      }
-    });
+    it("propagates fetch errors (no silent fallback)", async () => {
+      fetchApolloFiltersPrompt.mockReset();
+      fetchApolloFiltersPrompt.mockRejectedValue(new Error("apollo-service down"));
 
-    it("does not list silently-dropped fields (organizationIndustries, keywords)", () => {
-      expect(__SYSTEM_PROMPT__).not.toMatch(/^- organizationIndustries:/m);
-      expect(__SYSTEM_PROMPT__).not.toMatch(/^- keywords:/m);
+      await expect(generateNextStrategy(baseCtx, [])).rejects.toThrow(/apollo-service down/);
+      expect(chatComplete).not.toHaveBeenCalled();
     });
   });
 });
