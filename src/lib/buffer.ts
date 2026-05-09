@@ -228,14 +228,12 @@ export async function topUpApolloLeadBuffer(params: IngestParams, signal?: Abort
       // Apollo rejected the persisted strategy (e.g. validation error after schema tightening,
       // or LLM previously confirmed an invalid filter). Don't propagate — invalidate the strategy
       // and feed the error back to the LLM loop so it can converge on a valid filter set.
+      // Stay quiet on per-attempt failures; only surface a log when all strategies are exhausted.
       const lastApolloError = err instanceof Error ? err.message : String(err);
-      console.warn(
-        `[lead-service] apolloFetchPage failed for campaign=${params.campaignId}, advancing strategy: ${lastApolloError}`,
-      );
       const next = await advanceStrategyOrGenerate(ctx, lastApolloError);
       if ("exhausted" in next) {
-        console.log(
-          `[lead-service] topUp strategies exhausted after Apollo rejection campaign=${params.campaignId} reason=${next.reason}`,
+        console.warn(
+          `[lead-service] topUp strategies exhausted after Apollo rejection campaign=${params.campaignId} reason=${next.reason} lastError=${lastApolloError}`,
         );
         return { filled: totalInserted };
       }
