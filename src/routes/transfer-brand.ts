@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { leadsCampaigns } from "../db/schema.js";
+import { leadsCampaigns, idempotencyCache } from "../db/schema.js";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { traceEvent } from "../lib/trace-event.js";
 
@@ -22,20 +22,33 @@ router.post("/internal/transfer-brand", apiKeyAuth, async (req, res) => {
     return;
   }
 
+  const runId = req.headers["x-run-id"] as string | undefined;
+  if (!runId) {
+    res.status(400).json({ error: "x-run-id header required" });
+    return;
+  }
+
   const { sourceBrandId, sourceOrgId, targetOrgId, targetBrandId } = parsed.data;
 
-  const runId = req.headers["x-run-id"] as string | undefined;
-  if (runId) {
-    traceEvent(
-      runId,
-      {
-        service: "lead-service",
-        event: "transfer-brand-start",
-        detail: `sourceBrandId=${sourceBrandId}, sourceOrgId=${sourceOrgId}, targetOrgId=${targetOrgId}`,
-      },
-      req.headers,
-    ).catch(() => {});
+  // Idempotency on x-run-id: replay the cached response if this run already completed.
+  const cached = await db.query.idempotencyCache.findFirst({
+    where: eq(idempotencyCache.idempotencyKey, runId),
+  });
+  if (cached) {
+    console.log(`[lead-service] transfer-brand idempotency hit for runId=${runId}`);
+    res.json(cached.response);
+    return;
   }
+
+  traceEvent(
+    runId,
+    {
+      service: "lead-service",
+      event: "transfer-brand-start",
+      detail: `sourceBrandId=${sourceBrandId}, sourceOrgId=${sourceOrgId}, targetOrgId=${targetOrgId}`,
+    },
+    req.headers,
+  ).catch(() => {});
 
   console.log(
     `[lead-service] Transfer brand ${sourceBrandId} from org ${sourceOrgId} to org ${targetOrgId}` +
@@ -61,23 +74,28 @@ router.post("/internal/transfer-brand", apiKeyAuth, async (req, res) => {
   }
 
   const updatedTables = [{ tableName: "leads_campaigns", count: moved.length }];
+  const response = { updatedTables };
 
   console.log(`[lead-service] Transfer complete: ${JSON.stringify(updatedTables)}`);
 
-  if (runId) {
-    traceEvent(
-      runId,
-      {
-        service: "lead-service",
-        event: "transfer-brand-done",
-        detail: `updated: ${JSON.stringify(updatedTables)}`,
-        data: { updatedTables },
-      },
-      req.headers,
-    ).catch(() => {});
-  }
+  await db.insert(idempotencyCache).values({
+    idempotencyKey: runId,
+    orgId: targetOrgId,
+    response,
+  });
 
-  res.json({ updatedTables });
+  traceEvent(
+    runId,
+    {
+      service: "lead-service",
+      event: "transfer-brand-done",
+      detail: `updated: ${JSON.stringify(updatedTables)}`,
+      data: { updatedTables },
+    },
+    req.headers,
+  ).catch(() => {});
+
+  res.json(response);
 });
 
 export default router;

@@ -259,6 +259,8 @@ interface ClaimedRow {
 }
 
 async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise<ClaimedRow | null> {
+  // campaign-service serializes workflow runs per campaign, so concurrent pullNext calls for the
+  // same (orgId, campaignId) cannot happen. A plain UPDATE on the oldest buffered row is enough.
   const claimed = await pgSql<{
     id: string;
     lead_id: string;
@@ -272,7 +274,6 @@ async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise
         AND status = 'buffered'
       ORDER BY created_at ASC
       LIMIT 1
-      FOR UPDATE SKIP LOCKED
     )
     RETURNING id, lead_id
   `;
@@ -339,24 +340,6 @@ export async function pullNext(
 }> {
   const brandIdCsv = params.brandIds.join(",");
 
-  // Stale claimed recovery: any leads_campaigns rows stuck in 'claimed' for >1h
-  // get reset to 'buffered'. Filet de sécurité if a previous pullNext crashed mid-flight.
-  const staleCutoff = new Date(Date.now() - 60 * 60 * 1000);
-  const staleRecovered = await pgSql`
-    UPDATE leads_campaigns
-    SET status = 'buffered', updated_at = NOW()
-    WHERE org_id = ${params.orgId}
-      AND campaign_id = ${params.campaignId}
-      AND status = 'claimed'
-      AND updated_at < ${staleCutoff.toISOString()}::timestamptz
-    RETURNING id
-  `;
-  if (staleRecovered.length > 0) {
-    console.log(
-      `[lead-service] pullNext recovered ${staleRecovered.length} stale claimed leads for campaign=${params.campaignId}`,
-    );
-  }
-
   while (!signal?.aborted) {
     const claimed = await claimNextLeadCampaign(params.orgId, params.campaignId);
 
@@ -380,203 +363,214 @@ export async function pullNext(
       return { found: false };
     }
 
-    // Pre-enrich brand dedup (uses apolloPersonId only).
-    if (claimed.apolloPersonId) {
-      const preCheck = await isAlreadyServedForBrand({
-        orgId: params.orgId,
-        brandIds: params.brandIds,
-        apolloPersonId: claimed.apolloPersonId,
-      });
-      if (preCheck.blocked) {
-        await setLeadCampaignStatus(
-          claimed.leadCampaignId,
-          "skipped",
-          "pre_enrich_brand_dedup",
-          `Already served for overlapping brand (pre-enrich), apolloPersonId=${claimed.apolloPersonId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}`,
+    // Release the claim back to 'buffered' if processing throws below — caller can retry.
+    let claimSettled = false;
+    const settleSkip = async (reason: string, details: string) => {
+      await setLeadCampaignStatus(claimed.leadCampaignId, "skipped", reason, details);
+      claimSettled = true;
+    };
+
+    try {
+      // Pre-enrich brand dedup (uses apolloPersonId only).
+      if (claimed.apolloPersonId) {
+        const preCheck = await isAlreadyServedForBrand({
+          orgId: params.orgId,
+          brandIds: params.brandIds,
+          apolloPersonId: claimed.apolloPersonId,
+        });
+        if (preCheck.blocked) {
+          await settleSkip(
+            "pre_enrich_brand_dedup",
+            `Already served for overlapping brand (pre-enrich), apolloPersonId=${claimed.apolloPersonId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}`,
+          );
+          continue;
+        }
+      }
+
+      let email = claimed.primaryEmail;
+      let emailStatus = claimed.primaryEmailStatus;
+
+      const cacheFresh = isCacheFresh(claimed.enrichedAt, claimed.hasEmail);
+      const needEnrich = !email && !cacheFresh;
+
+      if (needEnrich && claimed.apolloPersonId) {
+        const enrichResult = await apolloEnrich(claimed.apolloPersonId, {
+          runId: params.runId,
+          orgId: params.orgId,
+          userId: params.userId,
+          brandId: brandIdCsv,
+          campaignId: params.campaignId,
+          workflowSlug: params.workflowSlug,
+          featureSlug: params.featureSlug,
+        });
+
+        if (enrichResult?.person) {
+          await upsertLeadFromPerson(enrichResult.person, { enriched: true });
+          await recordEmploymentHistory({ leadId: claimed.leadId, person: enrichResult.person });
+          if (enrichResult.person.email) {
+            await upsertContactMethod({
+              leadId: claimed.leadId,
+              channel: "email",
+              value: enrichResult.person.email,
+              status: enrichResult.person.emailStatus ?? null,
+              source: "apollo",
+            });
+            email = enrichResult.person.email;
+            emailStatus = enrichResult.person.emailStatus ?? null;
+          }
+        } else {
+          await db
+            .update(leads)
+            .set({ enrichedAt: new Date() })
+            .where(eq(leads.id, claimed.leadId));
+        }
+      }
+
+      if (!email) {
+        const stillHasEmail = await leadHasEmail(claimed.leadId);
+        if (!stillHasEmail) {
+          await settleSkip(
+            "no_email",
+            `No email after enrichment, leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
+          );
+          continue;
+        }
+        const refreshed = await getPrimaryEmail(claimed.leadId);
+        if (!refreshed) {
+          await settleSkip(
+            "no_email",
+            `No primary email row after enrichment, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+          );
+          continue;
+        }
+        email = refreshed.email;
+        emailStatus = refreshed.status;
+      }
+
+      if (emailStatus && !VALID_EMAIL_STATUSES.has(emailStatus)) {
+        await settleSkip(
+          "invalid_email_status",
+          `Email status "${emailStatus}" not valid (verified/extrapolated required), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
         );
         continue;
       }
-    }
 
-    let email = claimed.primaryEmail;
-    let emailStatus = claimed.primaryEmailStatus;
-
-    const cacheFresh = isCacheFresh(claimed.enrichedAt, claimed.hasEmail);
-    const needEnrich = !email && !cacheFresh;
-
-    if (needEnrich && claimed.apolloPersonId) {
-      const enrichResult = await apolloEnrich(claimed.apolloPersonId, {
-        runId: params.runId,
+      const brandCheck = await isAlreadyServedForBrand({
         orgId: params.orgId,
-        userId: params.userId,
-        brandId: brandIdCsv,
+        brandIds: params.brandIds,
+        leadId: claimed.leadId,
+        email,
+        apolloPersonId: claimed.apolloPersonId,
+      });
+      if (brandCheck.blocked) {
+        await settleSkip(
+          "brand_dedup",
+          `Already served for overlapping brand (post-enrich), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}, reason=${brandCheck.reason}`,
+        );
+        continue;
+      }
+
+      const inRaceWindow = await checkRaceWindow({
+        orgId: params.orgId,
+        brandIds: params.brandIds,
+        email,
+        excludeLeadCampaignId: claimed.leadCampaignId,
+      });
+      if (inRaceWindow) {
+        await settleSkip(
+          "race_window",
+          `Concurrent claim/serve detected, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+        );
+        continue;
+      }
+
+      const statusMap = await checkContacted(params.brandIds, params.campaignId, [{ email }], {
+        orgId: params.orgId,
+        userId: params.userId ?? undefined,
+        runId: params.runId ?? undefined,
         campaignId: params.campaignId,
+        brandId: brandIdCsv,
         workflowSlug: params.workflowSlug,
         featureSlug: params.featureSlug,
       });
-
-      if (enrichResult?.person) {
-        await upsertLeadFromPerson(enrichResult.person, { enriched: true });
-        await recordEmploymentHistory({ leadId: claimed.leadId, person: enrichResult.person });
-        if (enrichResult.person.email) {
-          await upsertContactMethod({
-            leadId: claimed.leadId,
-            channel: "email",
-            value: enrichResult.person.email,
-            status: enrichResult.person.emailStatus ?? null,
-            source: "apollo",
-          });
-          email = enrichResult.person.email;
-          emailStatus = enrichResult.person.emailStatus ?? null;
-        }
-      } else {
-        await db
-          .update(leads)
-          .set({ enrichedAt: new Date() })
-          .where(eq(leads.id, claimed.leadId));
-      }
-    }
-
-    if (!email) {
-      const stillHasEmail = await leadHasEmail(claimed.leadId);
-      if (!stillHasEmail) {
-        await setLeadCampaignStatus(
-          claimed.leadCampaignId,
-          "skipped",
-          "no_email",
-          `No email after enrichment, leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
+      const gw = statusMap.get(email);
+      if (gw?.contacted) {
+        await settleSkip(
+          "contacted",
+          `Already contacted via email-gateway, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
         );
         continue;
       }
-      const refreshed = await getPrimaryEmail(claimed.leadId);
-      if (!refreshed) {
-        await setLeadCampaignStatus(
-          claimed.leadCampaignId,
-          "skipped",
-          "no_email",
-          `No primary email row after enrichment, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+      if (gw?.bounced) {
+        await settleSkip(
+          "bounced",
+          `Email previously bounced, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
         );
         continue;
       }
-      email = refreshed.email;
-      emailStatus = refreshed.status;
-    }
+      if (gw?.unsubscribed) {
+        await settleSkip(
+          "unsubscribed",
+          `Email unsubscribed, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+        );
+        continue;
+      }
 
-    if (emailStatus && !VALID_EMAIL_STATUSES.has(emailStatus)) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "invalid_email_status",
-        `Email status "${emailStatus}" not valid (verified/extrapolated required), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-      );
-      continue;
-    }
+      await db
+        .update(leadsCampaigns)
+        .set({
+          status: "served",
+          statusReason: "served",
+          statusDetails: `Lead served, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
+          servedAt: new Date(),
+          parentRunId: params.parentRunId ?? null,
+          runId: params.runId ?? null,
+          updatedAt: new Date(),
+        })
+        .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
+      claimSettled = true;
 
-    const brandCheck = await isAlreadyServedForBrand({
-      orgId: params.orgId,
-      brandIds: params.brandIds,
-      leadId: claimed.leadId,
-      email,
-      apolloPersonId: claimed.apolloPersonId,
-    });
-    if (brandCheck.blocked) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "brand_dedup",
-        `Already served for overlapping brand (post-enrich), email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}, brandIds=${brandIdCsv}, reason=${brandCheck.reason}`,
-      );
-      continue;
-    }
-
-    const inRaceWindow = await checkRaceWindow({
-      orgId: params.orgId,
-      brandIds: params.brandIds,
-      email,
-      excludeLeadCampaignId: claimed.leadCampaignId,
-    });
-    if (inRaceWindow) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "race_window",
-        `Concurrent claim/serve detected, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-      );
-      continue;
-    }
-
-    const statusMap = await checkContacted(params.brandIds, params.campaignId, [{ email }], {
-      orgId: params.orgId,
-      userId: params.userId ?? undefined,
-      runId: params.runId ?? undefined,
-      campaignId: params.campaignId,
-      brandId: brandIdCsv,
-      workflowSlug: params.workflowSlug,
-      featureSlug: params.featureSlug,
-    });
-    const gw = statusMap.get(email);
-    if (gw?.contacted) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "contacted",
-        `Already contacted via email-gateway, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-      );
-      continue;
-    }
-    if (gw?.bounced) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "bounced",
-        `Email previously bounced, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-      );
-      continue;
-    }
-    if (gw?.unsubscribed) {
-      await setLeadCampaignStatus(
-        claimed.leadCampaignId,
-        "skipped",
-        "unsubscribed",
-        `Email unsubscribed, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-      );
-      continue;
-    }
-
-    await db
-      .update(leadsCampaigns)
-      .set({
-        status: "served",
-        statusReason: "served",
-        statusDetails: `Lead served, email=${email}, leadId=${claimed.leadId}, campaignId=${params.campaignId}`,
-        servedAt: new Date(),
-        parentRunId: params.parentRunId ?? null,
-        runId: params.runId ?? null,
-        updatedAt: new Date(),
-      })
-      .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
-
-    const leadRow = await db.query.leads.findFirst({ where: eq(leads.id, claimed.leadId) });
-    const finalData: Record<string, unknown> = {
-      ...(leadRow?.metadata && typeof leadRow.metadata === "object" ? (leadRow.metadata as Record<string, unknown>) : {}),
-      email,
-    };
-
-    console.log(
-      `[lead-service] pullNext found=true campaign=${params.campaignId} email=${email} leadId=${claimed.leadId}`,
-    );
-    return {
-      found: true,
-      lead: {
-        leadId: claimed.leadId,
+      const leadRow = await db.query.leads.findFirst({ where: eq(leads.id, claimed.leadId) });
+      const finalData: Record<string, unknown> = {
+        ...(leadRow?.metadata && typeof leadRow.metadata === "object" ? (leadRow.metadata as Record<string, unknown>) : {}),
         email,
-        data: finalData,
-        brandIds: params.brandIds,
-        orgId: params.orgId,
-        userId: params.userId ?? null,
-        apolloPersonId: claimed.apolloPersonId,
-      },
-    };
+      };
+
+      console.log(
+        `[lead-service] pullNext found=true campaign=${params.campaignId} email=${email} leadId=${claimed.leadId}`,
+      );
+      return {
+        found: true,
+        lead: {
+          leadId: claimed.leadId,
+          email,
+          data: finalData,
+          brandIds: params.brandIds,
+          orgId: params.orgId,
+          userId: params.userId ?? null,
+          apolloPersonId: claimed.apolloPersonId,
+        },
+      };
+    } finally {
+      if (!claimSettled) {
+        // Processing threw before we could mark the row terminal — release back to 'buffered'
+        // so the next pullNext can retry. Without this the row would sit 'claimed' forever.
+        try {
+          await db
+            .update(leadsCampaigns)
+            .set({ status: "buffered", updatedAt: new Date() })
+            .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
+          console.warn(
+            `[lead-service] pullNext released claimed lead ${claimed.leadCampaignId} after exception`,
+          );
+        } catch (releaseErr) {
+          console.error(
+            `[lead-service] pullNext failed to release claim ${claimed.leadCampaignId}:`,
+            releaseErr,
+          );
+        }
+      }
+    }
   }
 
   // Aborted (timeout from caller's AbortSignal)

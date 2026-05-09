@@ -29,7 +29,7 @@ export async function fetchCampaign(
 
     const response = await fetch(`${CAMPAIGN_SERVICE_URL}/campaigns/${campaignId}`, {
       headers,
-      signal: AbortSignal.timeout(300_000),
+      signal: AbortSignal.timeout(5_000),
     });
 
     if (!response.ok) {
