@@ -47,6 +47,18 @@ const ORG_FIELD_MAP: Record<string, keyof NewOrganization> = {
   organizationCountry: "country",
   organizationStreetAddress: "streetAddress",
   organizationPostalCode: "postalCode",
+  organizationLatestFundingStage: "latestFundingStage",
+  organizationLatestFundingRoundDate: "latestFundingRoundDate",
+  organizationTotalFunding: "totalFunding",
+  organizationTotalFundingPrinted: "totalFundingPrinted",
+  organizationRetailLocationCount: "retailLocationCount",
+  organizationPubliclyTradedSymbol: "publiclyTradedSymbol",
+  organizationPubliclyTradedExchange: "publiclyTradedExchange",
+  organizationPrimaryPhone: "primaryPhone",
+  organizationSeoDescription: "seoDescription",
+  organizationAngellistUrl: "angellistUrl",
+  organizationNumSuborganizations: "numSuborganizations",
+  organizationAlexaRanking: "alexaRanking",
 };
 
 function pickPersonFields(person: ApolloPersonResult): Partial<NewLead> {
@@ -78,6 +90,8 @@ function pickOrgFields(person: ApolloPersonResult): Partial<NewOrganization> {
   if (person.organizationTechnologyNames) out.technologyNames = person.organizationTechnologyNames;
   if (person.organizationIndustries) out.industries = person.organizationIndustries;
   if (person.organizationSecondaryIndustries) out.secondaryIndustries = person.organizationSecondaryIndustries;
+  if (person.organizationFundingEvents) out.fundingEvents = person.organizationFundingEvents;
+  if (person.organizationKeywords) out.keywords = person.organizationKeywords;
   return out;
 }
 

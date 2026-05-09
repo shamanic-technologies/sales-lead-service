@@ -134,6 +134,13 @@
       "when": 1778544000000,
       "tag": "0018_multi_strategy_cursor",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1778803200000,
+      "tag": "0019_promote_apollo_org_fields",
+      "breakpoints": true
     }
   ]
 }
