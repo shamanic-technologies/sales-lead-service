@@ -216,7 +216,7 @@ export interface ApolloStats {
 }
 
 export async function fetchApolloStats(
-  filters: { runIds?: string[]; brandId?: string; campaignId?: string },
+  filters: { runIds?: string[]; brandIds?: string[]; campaignId?: string },
   orgId?: string | null,
   context?: { userId?: string; runId?: string; campaignId?: string; brandId?: string; workflowSlug?: string; featureSlug?: string }
 ): Promise<ApolloStats> {
@@ -273,6 +273,7 @@ export async function apolloMatch(
 
 export interface ApolloEnrichResult {
   person: ApolloPersonResult;
+  cached: boolean;
 }
 
 export async function apolloEnrich(
