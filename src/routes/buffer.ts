@@ -8,6 +8,7 @@ import { BufferNextRequestSchema } from "../schemas.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
+import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 
 const router = Router();
 
@@ -60,6 +61,25 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     console.log(`[lead-service] Idempotency hit for runId=${runId}`);
     traceEvent(runId, { service: "lead-service", event: "idempotency-hit", detail: `Returning cached response for runId=${runId}` }, req.headers).catch(() => {});
     return res.json(cached.response);
+  }
+
+  // In-flight guard: campaign-service is supposed to serialize workflow runs per campaignId.
+  // If runs-service shows another lead-service run already in-flight for this campaignId,
+  // the upstream serial invariant is broken — fail loud with full debug context instead of
+  // racing the strategy persist path into a duplicate-key 500.
+  // Must run BEFORE createRun so we don't self-detect.
+  const concurrentCheck = await checkConcurrentBufferNext({
+    orgId: req.orgId!,
+    campaignId,
+    attemptedParentRunId: runId,
+    attemptedBrandIds: brandIds,
+    attemptedWorkflowSlug: workflowSlug,
+    attemptedFeatureSlug: req.featureSlug,
+  });
+  if (concurrentCheck.blocked) {
+    console.error(`[lead-service] ${concurrentCheck.detail}`);
+    traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail: concurrentCheck.detail }, req.headers).catch(() => {});
+    return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail: concurrentCheck.detail });
   }
 
   // Create child run for traceability (x-run-id from caller becomes our parentRunId)

@@ -81,6 +81,36 @@ export async function updateRun(
   });
 }
 
+export interface RunsListItem {
+  id: string;
+  parentRunId: string | null;
+  campaignId: string | null;
+  startedAt: string;
+  brandIds: string[] | null;
+  workflowSlug: string | null;
+  featureSlug: string | null;
+}
+
+export async function listRuns(params: {
+  orgId: string;
+  campaignId: string;
+  serviceName: string;
+  status: string;
+  limit: number;
+}): Promise<RunsListItem[]> {
+  const query = new URLSearchParams({
+    campaignId: params.campaignId,
+    serviceName: params.serviceName,
+    status: params.status,
+    limit: String(params.limit),
+  });
+  const result = (await callRunsService(`/runs?${query.toString()}`, {
+    method: "GET",
+    headers: { "x-org-id": params.orgId },
+  })) as { runs: RunsListItem[] };
+  return result.runs;
+}
+
 export async function addCosts(
   runId: string,
   items: Array<{ costName: string; quantity: number; costSource: "platform" | "org" }>,
