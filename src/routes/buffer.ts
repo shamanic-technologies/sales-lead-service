@@ -8,7 +8,6 @@ import { BufferNextRequestSchema } from "../schemas.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
-import { tryAcquire, release } from "../lib/inflight-guard.js";
 
 const router = Router();
 
@@ -63,93 +62,64 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.json(cached.response);
   }
 
-  // In-flight guard: campaign-service is supposed to serialize workflow runs per
-  // (orgId, campaignId). If lead-service receives a second concurrent call for the
-  // same campaign, that invariant is broken upstream — fail loud with full debug
-  // context instead of racing the strategy persist path into a duplicate-key 500.
-  const acquire = tryAcquire(req.orgId!, campaignId, {
+  // Create child run for traceability (x-run-id from caller becomes our parentRunId)
+  const childRun = await createRun({
+    orgId: req.orgId!,
+    serviceName: "lead-service",
+    taskName: "lead-serve",
     parentRunId: runId,
-    brandIds,
-    startedAt: Date.now(),
+    userId: req.userId,
+    brandId: req.brandId,
+    campaignId,
     workflowSlug,
     featureSlug: req.featureSlug,
   });
-  if (!acquire.acquired) {
-    const existing = acquire.existing;
-    const elapsedMs = Date.now() - existing.startedAt;
-    const detail = [
-      `Concurrent buffer/next call for orgId=${req.orgId} campaignId=${campaignId}.`,
-      `campaign-service is supposed to serialize workflow runs per campaign — this is an upstream serial-invariant violation.`,
-      `In-flight: parentRunId=${existing.parentRunId} brandIds=${existing.brandIds.join(",")} startedAt=${new Date(existing.startedAt).toISOString()} elapsedMs=${elapsedMs} workflowSlug=${existing.workflowSlug ?? "none"} featureSlug=${existing.featureSlug ?? "none"}.`,
-      `Rejected: parentRunId=${runId} brandIds=${brandIds.join(",")} workflowSlug=${workflowSlug ?? "none"} featureSlug=${req.featureSlug ?? "none"}.`,
-    ].join(" ");
-    console.error(`[lead-service] ${detail}`);
-    traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail }, req.headers).catch(() => {});
-    return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail });
-  }
+  const serveRunId = childRun.id;
+
+  traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}` }, req.headers).catch(() => {});
+
+  const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
 
   try {
-    // Create child run for traceability (x-run-id from caller becomes our parentRunId)
-    const childRun = await createRun({
-      orgId: req.orgId!,
-      serviceName: "lead-service",
-      taskName: "lead-serve",
-      parentRunId: runId,
-      userId: req.userId,
-      brandId: req.brandId,
-      campaignId,
-      workflowSlug,
-      featureSlug: req.featureSlug,
-    });
-    const serveRunId = childRun.id;
-
-    traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}` }, req.headers).catch(() => {});
-
-    const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
-
-    try {
-      const result = await pullNext(
-        {
-          orgId: req.orgId!,
-          campaignId,
-          brandIds,
-          parentRunId: runId,
-          runId: serveRunId,
-          userId: req.userId ?? null,
-          workflowSlug,
-          featureSlug: req.featureSlug,
-        },
-        pullSignal,
-      );
-
-      // Cache response keyed by caller's runId for idempotency.
-      // campaign-service guarantees one workflow run per campaign at a time, so concurrent
-      // requests with the same runId cannot happen — a duplicate-key error here is a real bug.
-      if (Math.random() < 0.01) pruneExpiredIdempotencyCache();
-      await db.insert(idempotencyCache).values({
-        idempotencyKey: runId,
+    const result = await pullNext(
+      {
         orgId: req.orgId!,
-        response: result,
-      });
+        campaignId,
+        brandIds,
+        parentRunId: runId,
+        runId: serveRunId,
+        userId: req.userId ?? null,
+        workflowSlug,
+        featureSlug: req.featureSlug,
+      },
+      pullSignal,
+    );
 
-      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-done", detail: `found=${result.found}`, data: { found: result.found } }, req.headers).catch(() => {});
+    // Cache response keyed by caller's runId for idempotency.
+    // campaign-service guarantees one workflow run per campaign at a time, so concurrent
+    // requests with the same runId cannot happen — a duplicate-key error here is a real bug.
+    if (Math.random() < 0.01) pruneExpiredIdempotencyCache();
+    await db.insert(idempotencyCache).values({
+      idempotencyKey: runId,
+      orgId: req.orgId!,
+      response: result,
+    });
 
-      const runStatus = "completed";
-      await updateRun(serveRunId, runStatus, runMeta);
+    traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-done", detail: `found=${result.found}`, data: { found: result.found } }, req.headers).catch(() => {});
 
-      res.json(result);
-    } catch (error) {
-      console.error("[lead-service] buffer/next error:", error);
-      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: String(error) }, req.headers).catch(() => {});
-      try {
-        await updateRun(serveRunId, "failed", runMeta);
-      } catch (runErr) {
-        console.error("[lead-service] Failed to close run after error:", runErr);
-      }
-      res.status(500).json({ error: "Internal server error" });
+    const runStatus = "completed";
+    await updateRun(serveRunId, runStatus, runMeta);
+
+    res.json(result);
+  } catch (error) {
+    console.error("[lead-service] buffer/next error:", error);
+    traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: String(error) }, req.headers).catch(() => {});
+    try {
+      await updateRun(serveRunId, "failed", runMeta);
+    } catch (runErr) {
+      console.error("[lead-service] Failed to close run after error:", runErr);
     }
-  } finally {
-    release(req.orgId!, campaignId);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
