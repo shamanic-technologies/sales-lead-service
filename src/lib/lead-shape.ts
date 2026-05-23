@@ -1,4 +1,4 @@
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray, asc } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   leads,
@@ -240,3 +240,110 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
   };
 }
 
+// Batched version: fetches FullLead data for N leadIds in 3 DB queries (vs 5N sequential).
+// Used by list endpoints (/orgs/leads) where N can reach thousands.
+// Same FullLead shape as buildFullLead. Missing leadIds (deleted between caller queries)
+// are omitted from the result Map rather than throwing.
+export async function buildFullLeadsBatch(
+  leadIds: string[],
+): Promise<Map<string, FullLead>> {
+  const result = new Map<string, FullLead>();
+  if (leadIds.length === 0) return result;
+
+  const [leadRows, contactRows, empJoinRows] = await Promise.all([
+    db.select().from(leads).where(inArray(leads.id, leadIds)),
+    db
+      .select()
+      .from(leadContactMethods)
+      .where(inArray(leadContactMethods.leadId, leadIds))
+      .orderBy(asc(leadContactMethods.createdAt)),
+    db
+      .select({
+        leadId: leadsOrganizations.leadId,
+        organizationId: leadsOrganizations.organizationId,
+        title: leadsOrganizations.title,
+        startDate: leadsOrganizations.startDate,
+        endDate: leadsOrganizations.endDate,
+        current: leadsOrganizations.current,
+        description: leadsOrganizations.description,
+        empCreatedAt: leadsOrganizations.createdAt,
+        org: organizations,
+      })
+      .from(leadsOrganizations)
+      .leftJoin(organizations, eq(organizations.id, leadsOrganizations.organizationId))
+      .where(inArray(leadsOrganizations.leadId, leadIds)),
+  ]);
+
+  const contactsByLeadId = new Map<string, ContactMethodView[]>();
+  for (const row of contactRows) {
+    const list = contactsByLeadId.get(row.leadId) ?? [];
+    list.push({
+      channel: row.channel,
+      value: row.value,
+      status: row.status ?? null,
+      source: row.source,
+    });
+    contactsByLeadId.set(row.leadId, list);
+  }
+
+  const empByLeadId = new Map<string, typeof empJoinRows>();
+  for (const row of empJoinRows) {
+    const list = empByLeadId.get(row.leadId) ?? [];
+    list.push(row);
+    empByLeadId.set(row.leadId, list);
+  }
+
+  for (const lead of leadRows) {
+    const empRows = empByLeadId.get(lead.id) ?? [];
+
+    const currentEmp = empRows
+      .filter((r) => r.current === true)
+      .sort((a, b) => {
+        const ta = a.empCreatedAt instanceof Date ? a.empCreatedAt.getTime() : 0;
+        const tb = b.empCreatedAt instanceof Date ? b.empCreatedAt.getTime() : 0;
+        return ta - tb;
+      })[0];
+
+    const organization: OrganizationView | null = currentEmp?.org
+      ? mapOrganizationView(currentEmp.org)
+      : null;
+
+    const employmentHistory: EmploymentEntryView[] = empRows.map((row) => ({
+      organizationId: row.organizationId,
+      organizationName: row.org?.name ?? null,
+      title: row.title ?? null,
+      startDate: row.startDate ?? null,
+      endDate: row.endDate ?? null,
+      current: row.current,
+      description: row.description ?? null,
+    }));
+
+    result.set(lead.id, {
+      leadId: lead.id,
+      apolloPersonId: lead.apolloPersonId ?? null,
+      firstName: lead.firstName ?? "",
+      lastName: lead.lastName ?? "",
+      name: lead.name ?? null,
+      headline: lead.headline ?? null,
+      linkedinUrl: lead.linkedinUrl ?? null,
+      photoUrl: lead.photoUrl ?? null,
+      city: lead.city ?? null,
+      state: lead.state ?? null,
+      country: lead.country ?? null,
+      seniority: lead.seniority ?? null,
+      departments: lead.departments ?? null,
+      subdepartments: lead.subdepartments ?? null,
+      functions: lead.functions ?? null,
+      twitterUrl: lead.twitterUrl ?? null,
+      githubUrl: lead.githubUrl ?? null,
+      facebookUrl: lead.facebookUrl ?? null,
+      enrichedAt: lead.enrichedAt ? lead.enrichedAt.toISOString() : null,
+      currentTitle: currentEmp?.title ?? null,
+      organization,
+      contacts: contactsByLeadId.get(lead.id) ?? [],
+      employmentHistory,
+    });
+  }
+
+  return result;
+}
