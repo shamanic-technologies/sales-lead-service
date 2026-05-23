@@ -11,7 +11,7 @@ import {
   type GlobalStatus,
 } from "../lib/email-gateway-client.js";
 import { traceEvent } from "../lib/trace-event.js";
-import { buildFullLead, type FullLead } from "../lib/lead-shape.js";
+import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 
 const router = Router();
 
@@ -134,13 +134,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       .where(and(...conditions));
 
     const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
-    const fullLeadByLeadId = new Map<string, FullLead>();
-    await Promise.all(
-      leadIds.map(async (leadId) => {
-        const fullLead = await buildFullLead(leadId);
-        fullLeadByLeadId.set(leadId, fullLead);
-      }),
-    );
+    const fullLeadByLeadId = await buildFullLeadsBatch(leadIds);
 
     const primaryEmail = (lead: FullLead | undefined): { value: string; status: string | null } | null => {
       if (!lead) return null;
