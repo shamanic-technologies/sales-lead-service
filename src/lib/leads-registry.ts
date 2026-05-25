@@ -189,10 +189,22 @@ export async function upsertOrganizationFromPerson(person: ApolloPersonResult): 
   return null;
 }
 
+export type UpsertContactResult =
+  | { inserted: true }
+  | { inserted: false; reason: "global_collision" };
+
 /**
- * Upsert a lead contact method (email/phone/twitter/etc.). Idempotent on (leadId, channel, value).
- * On conflict the latest status + source overwrite the existing row so re-enrichment
- * (e.g. Apollo upgrading "unverified" → "verified") is reflected instead of being silently dropped.
+ * Upsert a lead contact method (email/phone/twitter/etc.).
+ *
+ * Two unique indexes apply:
+ *   - idx_lcm_lead_channel_value (lead_id, channel, value) — same-lead re-enrichment, handled by ON CONFLICT DO UPDATE.
+ *   - idx_lcm_channel_value (channel, value)               — global "one email = one lead" invariant.
+ *
+ * When the second collides (Apollo returns an email already attached to a different lead — e.g. role
+ * inboxes, executive-assistant addresses, or Apollo person-id churn), Postgres raises 23505 because
+ * ON CONFLICT can target only one constraint. We catch that specific case and return
+ * { inserted: false, reason: "global_collision" } so the caller can fall back to alternate emails
+ * (Apollo's personalEmails[]) or mark the lead as skipped under a distinct status reason.
  */
 export async function upsertContactMethod(params: {
   leadId: string;
@@ -200,23 +212,37 @@ export async function upsertContactMethod(params: {
   value: string;
   status?: string | null;
   source: string;
-}): Promise<void> {
-  await db
-    .insert(leadContactMethods)
-    .values({
-      leadId: params.leadId,
-      channel: params.channel,
-      value: params.value,
-      status: params.status ?? null,
-      source: params.source,
-    })
-    .onConflictDoUpdate({
-      target: [leadContactMethods.leadId, leadContactMethods.channel, leadContactMethods.value],
-      set: {
+}): Promise<UpsertContactResult> {
+  try {
+    await db
+      .insert(leadContactMethods)
+      .values({
+        leadId: params.leadId,
+        channel: params.channel,
+        value: params.value,
         status: params.status ?? null,
         source: params.source,
-      },
-    });
+      })
+      .onConflictDoUpdate({
+        target: [leadContactMethods.leadId, leadContactMethods.channel, leadContactMethods.value],
+        set: {
+          status: params.status ?? null,
+          source: params.source,
+        },
+      });
+    return { inserted: true };
+  } catch (err) {
+    if (isGlobalContactDupKey(err)) {
+      return { inserted: false, reason: "global_collision" };
+    }
+    throw err;
+  }
+}
+
+function isGlobalContactDupKey(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const e = err as { code?: string; constraint_name?: string };
+  return e.code === "23505" && e.constraint_name === "idx_lcm_channel_value";
 }
 
 /**
