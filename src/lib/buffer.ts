@@ -155,13 +155,27 @@ async function ingestPerson(person: ApolloPersonResult, params: IngestParams, si
   if (signal?.aborted) return false;
 
   if (person.email) {
-    await upsertContactMethod({
-      leadId,
-      channel: "email",
-      value: person.email,
-      status: person.emailStatus ?? null,
-      source: "apollo",
-    });
+    const candidates = [person.email, ...(person.personalEmails ?? [])];
+    let attached = false;
+    for (const candidate of candidates) {
+      const res = await upsertContactMethod({
+        leadId,
+        channel: "email",
+        value: candidate,
+        status: candidate === person.email ? (person.emailStatus ?? null) : null,
+        source: "apollo",
+      });
+      if (res.inserted) {
+        attached = true;
+        break;
+      }
+    }
+    if (!attached) {
+      console.warn(
+        `[lead-service] ingest skip — all Apollo emails already attached to other leads, personId=${person.id}, candidates=${candidates.join(",")}`,
+      );
+      return false;
+    }
   }
   if (signal?.aborted) return false;
 
@@ -435,15 +449,33 @@ export async function pullNext(
           await upsertLeadFromPerson(enrichResult.person, { enriched: true });
           await recordEmploymentHistory({ leadId: claimed.leadId, person: enrichResult.person });
           if (enrichResult.person.email) {
-            await upsertContactMethod({
-              leadId: claimed.leadId,
-              channel: "email",
-              value: enrichResult.person.email,
-              status: enrichResult.person.emailStatus ?? null,
-              source: "apollo",
-            });
-            email = enrichResult.person.email;
-            emailStatus = enrichResult.person.emailStatus ?? null;
+            const primary = enrichResult.person.email;
+            const primaryStatus = enrichResult.person.emailStatus ?? null;
+            const candidates = [primary, ...(enrichResult.person.personalEmails ?? [])];
+            let attached: { value: string; status: string | null } | null = null;
+            for (const candidate of candidates) {
+              const res = await upsertContactMethod({
+                leadId: claimed.leadId,
+                channel: "email",
+                value: candidate,
+                status: candidate === primary ? primaryStatus : null,
+                source: "apollo",
+              });
+              if (res.inserted) {
+                attached = { value: candidate, status: candidate === primary ? primaryStatus : null };
+                break;
+              }
+            }
+            if (attached) {
+              email = attached.value;
+              emailStatus = attached.status;
+            } else {
+              await settleSkip(
+                "email_collision_other_lead",
+                `All Apollo emails already attached to other leads, candidates=[${candidates.join(",")}], leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
+              );
+              continue;
+            }
           }
         } else {
           await db
