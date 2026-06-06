@@ -246,40 +246,109 @@ function isGlobalContactDupKey(err: unknown): boolean {
 }
 
 /**
- * Persist current + past employment from an Apollo person. Idempotent on (leadId, organizationId, startDate).
+ * Reuse an existing organization with the same name instead of minting a fresh
+ * placeholder row on every enrichment. Apollo employment-history entries that
+ * don't match the person's top-level (enriched) org have only a name — inserting
+ * a brand-new uuid'd org each time defeats the (leadId, orgId, startDate) dedup
+ * and accumulates duplicate bare orgs without bound. Reuse by name; insert only
+ * when none exists.
+ */
+async function resolveHistoryOrgId(name: string): Promise<string | null> {
+  const existing = await db
+    .select({ id: organizations.id })
+    .from(organizations)
+    .where(eq(organizations.name, name))
+    .limit(1);
+  if (existing[0]) return existing[0].id;
+  const inserted = await db
+    .insert(organizations)
+    .values({ name })
+    .returning({ id: organizations.id });
+  return inserted[0]?.id ?? null;
+}
+
+/**
+ * Mark the lead's link to `organizationId` as the current employer, idempotent on
+ * (leadId, organizationId). Updates the existing link in place when present (so
+ * re-enrichment never grows the row count); inserts otherwise.
+ */
+async function markCurrentEmployment(
+  leadId: string,
+  organizationId: string,
+  title: string | null,
+): Promise<void> {
+  const existing = await db
+    .select({ id: leadsOrganizations.id })
+    .from(leadsOrganizations)
+    .where(
+      and(
+        eq(leadsOrganizations.leadId, leadId),
+        eq(leadsOrganizations.organizationId, organizationId),
+      ),
+    )
+    .limit(1);
+  if (existing[0]) {
+    await db
+      .update(leadsOrganizations)
+      .set({ current: true, title })
+      .where(eq(leadsOrganizations.id, existing[0].id));
+    return;
+  }
+  await db.insert(leadsOrganizations).values({ leadId, organizationId, title, current: true });
+}
+
+/**
+ * Persist current + past employment from an Apollo person.
+ *
+ * Apollo re-asserts "current" on every enrichment WITHOUT expiring the prior
+ * employment, so a lead would otherwise accumulate multiple current=true rows
+ * (the read path then picks the wrong one — see lead-shape.ts pickCurrentEmployment).
+ * Here we enforce exactly ONE current employer per lead at write time, history-
+ * preserving (no rows deleted):
+ *   1. Expire the current flag on all existing rows for this lead.
+ *   2. Resolve the canonical current employer — the person's top-level (enriched)
+ *      org when present, else the history entry Apollo flags current.
+ *   3. Record past employment with current=false (orgs reused by name, not churned).
+ *   4. Mark exactly the canonical current employer current=true.
+ *
+ * Idempotent on re-enrichment: org ids are stable (top-level by apolloId, history
+ * by name), the current link is upserted, and history rows dedup on
+ * (leadId, organizationId, startDate) — so re-running does not grow row count.
  */
 export async function recordEmploymentHistory(params: {
   leadId: string;
   person: ApolloPersonResult;
 }): Promise<void> {
   const { leadId, person } = params;
+
+  await db
+    .update(leadsOrganizations)
+    .set({ current: false })
+    .where(and(eq(leadsOrganizations.leadId, leadId), eq(leadsOrganizations.current, true)));
+
   const orgId = await upsertOrganizationFromPerson(person);
-  if (orgId) {
-    await db
-      .insert(leadsOrganizations)
-      .values({
-        leadId,
-        organizationId: orgId,
-        title: person.title ?? null,
-        current: true,
-      })
-      .onConflictDoNothing();
-  }
+
+  // Canonical current employer: top-level org wins; otherwise fall back to the
+  // first history entry Apollo flags current (search-time leads with no top-level org).
+  let currentOrgId: string | null = orgId;
+  let currentTitle: string | null = orgId ? person.title ?? null : null;
 
   const history = person.employmentHistory ?? [];
   for (const job of history) {
     if (!job.organizationName) continue;
-    let jobOrgId: string | null = null;
-    if (job.organizationName === person.organizationName && orgId) {
-      jobOrgId = orgId;
-    } else {
-      const inserted = await db
-        .insert(organizations)
-        .values({ name: job.organizationName })
-        .returning({ id: organizations.id });
-      jobOrgId = inserted[0]?.id ?? null;
-    }
+    const jobOrgId =
+      job.organizationName === person.organizationName && orgId
+        ? orgId
+        : await resolveHistoryOrgId(job.organizationName);
     if (!jobOrgId) continue;
+
+    if (!currentOrgId && job.current === true) {
+      currentOrgId = jobOrgId;
+      currentTitle = job.title ?? null;
+    }
+
+    // The canonical current employer is marked separately below.
+    if (jobOrgId === currentOrgId) continue;
 
     await db
       .insert(leadsOrganizations)
@@ -289,10 +358,14 @@ export async function recordEmploymentHistory(params: {
         title: job.title ?? null,
         startDate: job.startDate ?? null,
         endDate: job.endDate ?? null,
-        current: !!job.current,
+        current: false,
         description: job.description ?? null,
       })
       .onConflictDoNothing();
+  }
+
+  if (currentOrgId) {
+    await markCurrentEmployment(leadId, currentOrgId, currentTitle);
   }
 }
 
