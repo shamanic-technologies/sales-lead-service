@@ -270,69 +270,69 @@ describe("buildFullLeadsBatch", () => {
     expect(lead?.employmentHistory).toEqual([]);
   });
 
-  it("picks deterministic primary employment when multiple current=true (createdAt ASC)", async () => {
-    leadsSelect.mockResolvedValue([
-      {
-        id: "lead-dup",
-        apolloPersonId: null,
-        firstName: "Dup",
-        lastName: "Lead",
-        name: null,
-        headline: null,
-        linkedinUrl: null,
-        photoUrl: null,
-        city: null,
-        state: null,
-        country: null,
-        seniority: null,
-        departments: null,
-        subdepartments: null,
-        functions: null,
-        twitterUrl: null,
-        githubUrl: null,
-        facebookUrl: null,
-        enrichedAt: null,
-      },
-    ]);
+  const dupLeadRow = {
+    id: "lead-dup",
+    apolloPersonId: null,
+    firstName: "Dup",
+    lastName: "Lead",
+    name: null,
+    headline: null,
+    linkedinUrl: null,
+    photoUrl: null,
+    city: null,
+    state: null,
+    country: null,
+    seniority: null,
+    departments: null,
+    subdepartments: null,
+    functions: null,
+    twitterUrl: null,
+    githubUrl: null,
+    facebookUrl: null,
+    enrichedAt: null,
+  };
+  const orgBase = {
+    apolloOrganizationId: null,
+    primaryDomain: null,
+    websiteUrl: null,
+    industry: null,
+    estimatedNumEmployees: null,
+    annualRevenue: null,
+    logoUrl: null,
+    shortDescription: null,
+    linkedinUrl: null,
+    twitterUrl: null,
+    facebookUrl: null,
+    blogUrl: null,
+    crunchbaseUrl: null,
+    foundedYear: null,
+    city: null,
+    state: null,
+    country: null,
+    streetAddress: null,
+    postalCode: null,
+    technologyNames: null,
+    industries: null,
+    secondaryIndustries: null,
+    latestFundingStage: null,
+    latestFundingRoundDate: null,
+    totalFunding: null,
+    totalFundingPrinted: null,
+    fundingEvents: null,
+    retailLocationCount: null,
+    publiclyTradedSymbol: null,
+    publiclyTradedExchange: null,
+    primaryPhone: null,
+    seoDescription: null,
+    angellistUrl: null,
+    numSuborganizations: null,
+    alexaRanking: null,
+    keywords: null,
+  };
+
+  it("multiple current=true, no org enriched → most-recent current (createdAt DESC)", async () => {
+    leadsSelect.mockResolvedValue([dupLeadRow]);
     contactsSelect.mockResolvedValue([]);
-    const orgBase = {
-      apolloOrganizationId: null,
-      primaryDomain: null,
-      websiteUrl: null,
-      industry: null,
-      estimatedNumEmployees: null,
-      annualRevenue: null,
-      logoUrl: null,
-      shortDescription: null,
-      linkedinUrl: null,
-      twitterUrl: null,
-      facebookUrl: null,
-      blogUrl: null,
-      crunchbaseUrl: null,
-      foundedYear: null,
-      city: null,
-      state: null,
-      country: null,
-      streetAddress: null,
-      postalCode: null,
-      technologyNames: null,
-      industries: null,
-      secondaryIndustries: null,
-      latestFundingStage: null,
-      latestFundingRoundDate: null,
-      totalFunding: null,
-      totalFundingPrinted: null,
-      fundingEvents: null,
-      retailLocationCount: null,
-      publiclyTradedSymbol: null,
-      publiclyTradedExchange: null,
-      primaryPhone: null,
-      seoDescription: null,
-      angellistUrl: null,
-      numSuborganizations: null,
-      alexaRanking: null,
-      keywords: null,
-    };
     empSelect.mockResolvedValue([
       {
         leadId: "lead-dup",
@@ -361,9 +361,80 @@ describe("buildFullLeadsBatch", () => {
     const { buildFullLeadsBatch } = await import("../../src/lib/lead-shape.js");
     const result = await buildFullLeadsBatch(["lead-dup"]);
     const lead = result.get("lead-dup");
-    expect(lead?.organization?.name).toBe("Earlier Co");
-    expect(lead?.currentTitle).toBe("Earlier Title");
+    expect(lead?.organization?.name).toBe("Newer Co");
+    expect(lead?.currentTitle).toBe("Newer Title");
     expect(lead?.employmentHistory).toHaveLength(2);
+  });
+
+  it("multiple current=true, older bare + newer enriched → enriched org", async () => {
+    leadsSelect.mockResolvedValue([dupLeadRow]);
+    contactsSelect.mockResolvedValue([]);
+    empSelect.mockResolvedValue([
+      {
+        leadId: "lead-dup",
+        organizationId: "org-bare",
+        title: "Bare Title",
+        startDate: null,
+        endDate: null,
+        current: true,
+        description: null,
+        empCreatedAt: new Date("2025-01-01T00:00:00Z"),
+        org: { id: "org-bare", name: "Bare Co", ...orgBase },
+      },
+      {
+        leadId: "lead-dup",
+        organizationId: "org-rich",
+        title: "Enriched Title",
+        startDate: null,
+        endDate: null,
+        current: true,
+        description: null,
+        empCreatedAt: new Date("2025-06-01T00:00:00Z"),
+        org: { id: "org-rich", name: "Enriched Co", ...orgBase, logoUrl: "https://logo.dev/enriched.png", primaryDomain: "enriched.com" },
+      },
+    ]);
+
+    const { buildFullLeadsBatch } = await import("../../src/lib/lead-shape.js");
+    const result = await buildFullLeadsBatch(["lead-dup"]);
+    const lead = result.get("lead-dup");
+    expect(lead?.organization?.name).toBe("Enriched Co");
+    expect(lead?.organization?.logoUrl).toBe("https://logo.dev/enriched.png");
+    expect(lead?.currentTitle).toBe("Enriched Title");
+  });
+
+  it("multiple current=true, older ENRICHED + newer bare → enriched wins over recency", async () => {
+    leadsSelect.mockResolvedValue([dupLeadRow]);
+    contactsSelect.mockResolvedValue([]);
+    empSelect.mockResolvedValue([
+      {
+        leadId: "lead-dup",
+        organizationId: "org-rich",
+        title: "Enriched Title",
+        startDate: null,
+        endDate: null,
+        current: true,
+        description: null,
+        empCreatedAt: new Date("2025-01-01T00:00:00Z"),
+        org: { id: "org-rich", name: "Enriched Co", ...orgBase, primaryDomain: "enriched.com" },
+      },
+      {
+        leadId: "lead-dup",
+        organizationId: "org-bare",
+        title: "Bare Title",
+        startDate: null,
+        endDate: null,
+        current: true,
+        description: null,
+        empCreatedAt: new Date("2025-06-01T00:00:00Z"),
+        org: { id: "org-bare", name: "Bare Co", ...orgBase },
+      },
+    ]);
+
+    const { buildFullLeadsBatch } = await import("../../src/lib/lead-shape.js");
+    const result = await buildFullLeadsBatch(["lead-dup"]);
+    const lead = result.get("lead-dup");
+    expect(lead?.organization?.name).toBe("Enriched Co");
+    expect(lead?.currentTitle).toBe("Enriched Title");
   });
 
   it("requested leadId missing from leads table is omitted from result Map", async () => {

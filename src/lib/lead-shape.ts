@@ -1,4 +1,4 @@
-import { eq, and, inArray, asc } from "drizzle-orm";
+import { eq, inArray, asc } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   leads,
@@ -160,22 +160,56 @@ function mapOrganizationView(row: typeof organizations.$inferSelect): Organizati
   };
 }
 
+/**
+ * An org row is "enriched" when it carries a logo or a primary domain — the two
+ * fields the dashboard needs to render a company logo. Bare placeholder orgs
+ * (name-only, inserted by Apollo employment-history ingestion) have neither.
+ */
+function isEnrichedOrg(org: typeof organizations.$inferSelect | null | undefined): boolean {
+  return !!org && (org.logoUrl != null || org.primaryDomain != null);
+}
+
+interface CurrentEmploymentCandidate {
+  current: boolean;
+  organizationId: string;
+  empCreatedAt: Date | null;
+  org: typeof organizations.$inferSelect | null;
+}
+
+/**
+ * Select the lead's REAL current employer among employment rows.
+ *
+ * A large majority of leads carry MORE THAN ONE row flagged `current = true`
+ * (Apollo enrichment appends a new current employment without clearing the
+ * prior one's flag). The earliest such row is systematically the bare,
+ * un-enriched placeholder org (no logo, no domain); the enriched org is a newer
+ * current row. Picking the earliest therefore drops the logo.
+ *
+ * Selection order among `current = true` rows (pure read-time, no data mutation):
+ *   1. ENRICHED org first (logo_url OR primary_domain non-null)
+ *   2. most-recently-created employment (createdAt DESC)
+ *   3. organizationId (stable, deterministic final tiebreak)
+ *
+ * Returns undefined only when the lead has no current employment at all.
+ */
+function pickCurrentEmployment<T extends CurrentEmploymentCandidate>(rows: T[]): T | undefined {
+  const currentRows = rows.filter((r) => r.current === true);
+  if (currentRows.length === 0) return undefined;
+  return [...currentRows].sort((a, b) => {
+    const ae = isEnrichedOrg(a.org) ? 1 : 0;
+    const be = isEnrichedOrg(b.org) ? 1 : 0;
+    if (ae !== be) return be - ae;
+    const ta = a.empCreatedAt instanceof Date ? a.empCreatedAt.getTime() : 0;
+    const tb = b.empCreatedAt instanceof Date ? b.empCreatedAt.getTime() : 0;
+    if (ta !== tb) return tb - ta;
+    return a.organizationId < b.organizationId ? -1 : a.organizationId > b.organizationId ? 1 : 0;
+  })[0];
+}
+
 export async function buildFullLead(leadId: string): Promise<FullLead> {
   const lead = await db.query.leads.findFirst({ where: eq(leads.id, leadId) });
   if (!lead) {
     throw new Error(`[lead-service] buildFullLead: lead ${leadId} not found`);
-  }
-
-  const currentEmployment = await db.query.leadsOrganizations.findFirst({
-    where: and(eq(leadsOrganizations.leadId, leadId), eq(leadsOrganizations.current, true)),
-  });
-
-  let organization: OrganizationView | null = null;
-  if (currentEmployment) {
-    const orgRow = await db.query.organizations.findFirst({
-      where: eq(organizations.id, currentEmployment.organizationId),
-    });
-    if (orgRow) organization = mapOrganizationView(orgRow);
   }
 
   const contactRows = await db.query.leadContactMethods.findMany({
@@ -192,20 +226,26 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
   const employmentRows = await db
     .select({
       organizationId: leadsOrganizations.organizationId,
-      organizationName: organizations.name,
       title: leadsOrganizations.title,
       startDate: leadsOrganizations.startDate,
       endDate: leadsOrganizations.endDate,
       current: leadsOrganizations.current,
       description: leadsOrganizations.description,
+      empCreatedAt: leadsOrganizations.createdAt,
+      org: organizations,
     })
     .from(leadsOrganizations)
     .leftJoin(organizations, eq(organizations.id, leadsOrganizations.organizationId))
     .where(eq(leadsOrganizations.leadId, leadId));
 
+  const currentEmp = pickCurrentEmployment(employmentRows);
+  const organization: OrganizationView | null = currentEmp?.org
+    ? mapOrganizationView(currentEmp.org)
+    : null;
+
   const employmentHistory: EmploymentEntryView[] = employmentRows.map((row) => ({
     organizationId: row.organizationId,
-    organizationName: row.organizationName ?? null,
+    organizationName: row.org?.name ?? null,
     title: row.title ?? null,
     startDate: row.startDate ?? null,
     endDate: row.endDate ?? null,
@@ -233,7 +273,7 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
     githubUrl: lead.githubUrl ?? null,
     facebookUrl: lead.facebookUrl ?? null,
     enrichedAt: lead.enrichedAt ? lead.enrichedAt.toISOString() : null,
-    currentTitle: currentEmployment?.title ?? null,
+    currentTitle: currentEmp?.title ?? null,
     organization,
     contacts,
     employmentHistory,
@@ -296,13 +336,7 @@ export async function buildFullLeadsBatch(
   for (const lead of leadRows) {
     const empRows = empByLeadId.get(lead.id) ?? [];
 
-    const currentEmp = empRows
-      .filter((r) => r.current === true)
-      .sort((a, b) => {
-        const ta = a.empCreatedAt instanceof Date ? a.empCreatedAt.getTime() : 0;
-        const tb = b.empCreatedAt instanceof Date ? b.empCreatedAt.getTime() : 0;
-        return ta - tb;
-      })[0];
+    const currentEmp = pickCurrentEmployment(empRows);
 
     const organization: OrganizationView | null = currentEmp?.org
       ? mapOrganizationView(currentEmp.org)
