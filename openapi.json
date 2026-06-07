@@ -1727,6 +1727,48 @@
           "sourceOrgId",
           "targetOrgId"
         ]
+      },
+      "FeatureMembershipsResponse": {
+        "type": "object",
+        "properties": {
+          "memberships": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FeatureMembership"
+            },
+            "description": "Distinct (orgId, brandId, workflowSlug) tuples from leads_campaigns whose feature_slug matches the requested feature(s). Empty array when no matches."
+          }
+        },
+        "required": [
+          "memberships"
+        ],
+        "description": "Response shape for GET /internal/feature-memberships."
+      },
+      "FeatureMembership": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "Internal organization UUID owning the leads.",
+            "example": "30000000-0000-0000-0000-000000000001"
+          },
+          "brandId": {
+            "type": "string",
+            "description": "Brand UUID (unnested from leads_campaigns.brand_ids).",
+            "example": "20000000-0000-0000-0000-000000000001"
+          },
+          "workflowSlug": {
+            "type": "string",
+            "description": "Workflow slug that produced leads for this (org, brand) under the requested feature.",
+            "example": "sales-cold-email-outreach-lithium"
+          }
+        },
+        "required": [
+          "orgId",
+          "brandId",
+          "workflowSlug"
+        ],
+        "description": "One distinct (org, brand, workflow) combination that has leads for a requested feature."
       }
     },
     "parameters": {},
@@ -1976,6 +2018,15 @@
             "in": "query",
             "name": "userId",
             "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workflowSlug",
+            "required": false,
+            "description": "Restrict returned leads to those whose leads_campaigns row has workflow_slug = <value>. When absent, behavior + response shape are unchanged.",
             "schema": {
               "type": "string"
             }
@@ -2272,6 +2323,47 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/feature-memberships": {
+      "get": {
+        "summary": "List distinct (org, brand, workflow) combinations that have leads for a feature",
+        "description": "Returns the DISTINCT (orgId, brandId, workflowSlug) tuples from leads_campaigns whose feature_slug matches the requested feature(s). featureSlugs is comma-separated and matched exactly (feature slugs are not versioned). brandId is unnested from brand_ids[]. Rows with a null workflow_slug are excluded. Empty array when no matches. Auth: x-api-key only.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "query",
+            "name": "featureSlugs",
+            "required": true,
+            "description": "Comma-separated list of feature slugs to resolve memberships for.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Distinct (org, brand, workflow) memberships for the requested feature(s)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeatureMembershipsResponse"
                 }
               }
             }

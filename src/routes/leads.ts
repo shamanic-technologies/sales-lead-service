@@ -96,7 +96,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       traceEvent(req.runId, { service: "lead-service", event: "leads-query-start", detail: `orgId=${req.orgId}` }, req.headers).catch(() => {});
     }
 
-    const { brandId, campaignId, orgId: queryOrgId, userId } = req.query;
+    const { brandId, campaignId, orgId: queryOrgId, userId, workflowSlug } = req.query;
     const conditions: SQL[] = [eq(leadsCampaigns.orgId, req.orgId!)];
     if (brandId && typeof brandId === "string") {
       conditions.push(sql`${brandId} = ANY(${leadsCampaigns.brandIds})`);
@@ -109,6 +109,9 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     }
     if (userId && typeof userId === "string") {
       conditions.push(eq(leadsCampaigns.userId, userId));
+    }
+    if (workflowSlug && typeof workflowSlug === "string") {
+      conditions.push(eq(leadsCampaigns.workflowSlug, workflowSlug));
     }
 
     const rows = await db
