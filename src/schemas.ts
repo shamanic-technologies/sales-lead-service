@@ -1408,6 +1408,15 @@ registry.registerPath({
       required: false,
       schema: { type: "string" as const },
     },
+    {
+      in: "query" as const,
+      name: "workflowSlug",
+      required: false,
+      description:
+        "Restrict returned leads to those whose leads_campaigns row has workflow_slug = <value>. " +
+        "When absent, behavior + response shape are unchanged.",
+      schema: { type: "string" as const },
+    },
   ],
   responses: {
     200: {
@@ -1601,6 +1610,82 @@ registry.registerPath({
     400: {
       description: "Invalid request body",
       content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
+// --- Feature memberships (internal) ---
+
+const FeatureMembershipApiKeyHeader = [
+  {
+    in: "header" as const,
+    name: "x-api-key",
+    required: true,
+    schema: { type: "string" as const },
+    description: "API key for authenticating requests",
+  },
+];
+
+const FeatureMembershipSchema = z
+  .object({
+    orgId: z
+      .string()
+      .openapi({
+        description: "Internal organization UUID owning the leads.",
+        example: "30000000-0000-0000-0000-000000000001",
+      }),
+    brandId: z
+      .string()
+      .openapi({
+        description: "Brand UUID (unnested from leads_campaigns.brand_ids).",
+        example: "20000000-0000-0000-0000-000000000001",
+      }),
+    workflowSlug: z
+      .string()
+      .openapi({
+        description: "Workflow slug that produced leads for this (org, brand) under the requested feature.",
+        example: "sales-cold-email-outreach-lithium",
+      }),
+  })
+  .openapi("FeatureMembership", {
+    description:
+      "One distinct (org, brand, workflow) combination that has leads for a requested feature.",
+  });
+
+const FeatureMembershipsResponseSchema = z
+  .object({
+    memberships: z.array(FeatureMembershipSchema).openapi({
+      description:
+        "Distinct (orgId, brandId, workflowSlug) tuples from leads_campaigns whose feature_slug matches the requested feature(s). Empty array when no matches.",
+    }),
+  })
+  .openapi("FeatureMembershipsResponse", {
+    description: "Response shape for GET /internal/feature-memberships.",
+  });
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/feature-memberships",
+  summary: "List distinct (org, brand, workflow) combinations that have leads for a feature",
+  description:
+    "Returns the DISTINCT (orgId, brandId, workflowSlug) tuples from leads_campaigns whose feature_slug matches the requested feature(s). " +
+    "featureSlugs is comma-separated and matched exactly (feature slugs are not versioned). brandId is unnested from brand_ids[]. " +
+    "Rows with a null workflow_slug are excluded. Empty array when no matches. Auth: x-api-key only.",
+  parameters: [
+    ...FeatureMembershipApiKeyHeader,
+    {
+      in: "query" as const,
+      name: "featureSlugs",
+      required: true,
+      description: "Comma-separated list of feature slugs to resolve memberships for.",
+      schema: { type: "string" as const },
+    },
+  ],
+  responses: {
+    200: {
+      description: "Distinct (org, brand, workflow) memberships for the requested feature(s)",
+      content: { "application/json": { schema: FeatureMembershipsResponseSchema } },
     },
     401: { description: "Unauthorized" },
   },
