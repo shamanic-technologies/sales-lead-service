@@ -37,11 +37,19 @@
         "properties": {
           "found": {
             "type": "boolean",
-            "description": "True when a lead was claimed and returned. False when the campaign buffer is empty.",
+            "description": "True when a lead was claimed and returned. False when no lead can be served right now.",
             "example": true
           },
           "lead": {
             "$ref": "#/components/schemas/ServedLead"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "credit_insufficient"
+            ],
+            "description": "Optional reason when found=false. credit_insufficient means the org has no available platform credits, so no paid enrichment/search/LLM action was performed.",
+            "example": "credit_insufficient"
           }
         },
         "required": [
@@ -156,6 +164,13 @@
             "summary": "Buffer exhausted",
             "value": {
               "found": false
+            }
+          },
+          {
+            "summary": "Insufficient credits",
+            "value": {
+              "found": false,
+              "reason": "credit_insufficient"
             }
           }
         ]

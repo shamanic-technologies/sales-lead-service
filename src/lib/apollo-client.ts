@@ -1,4 +1,27 @@
 import { APOLLO_SERVICE_URL, APOLLO_SERVICE_API_KEY } from "../config.js";
+import { isCreditInsufficientError } from "./credit-errors.js";
+
+export class ApolloServiceError extends Error {
+  readonly status: number;
+  readonly responseText: string;
+  readonly body: unknown;
+
+  constructor(status: number, responseText: string) {
+    super(`Apollo service call failed: ${status} - ${responseText}`);
+    this.name = "ApolloServiceError";
+    this.status = status;
+    this.responseText = responseText;
+    try {
+      this.body = JSON.parse(responseText) as unknown;
+    } catch {
+      this.body = null;
+    }
+  }
+}
+
+export function isApolloCreditInsufficientError(error: unknown): boolean {
+  return isCreditInsufficientError(error);
+}
 
 async function callApolloService<T>(
   path: string,
@@ -19,7 +42,7 @@ async function callApolloService<T>(
 
   if (!response.ok) {
     const error = await response.text();
-    throw new Error(`Apollo service call failed: ${response.status} - ${error}`);
+    throw new ApolloServiceError(response.status, error);
   }
 
   return response.json() as Promise<T>;
