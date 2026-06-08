@@ -5,9 +5,11 @@ import { TARGET_BUFFER_SIZE } from "../config.js";
 import {
   apolloFetchPage,
   apolloEnrich,
+  isApolloCreditInsufficientError,
   type ApolloPersonResult,
   type ApolloSearchParams,
 } from "./apollo-client.js";
+import { CREDIT_INSUFFICIENT_REASON, type CreditInsufficientReason } from "./credit-errors.js";
 import {
   upsertLeadFromPerson,
   recordEmploymentHistory,
@@ -199,7 +201,10 @@ async function ingestPerson(person: ApolloPersonResult, params: IngestParams, si
   return inserted.length > 0;
 }
 
-export async function topUpApolloLeadBuffer(params: IngestParams, signal?: AbortSignal): Promise<{ filled: number }> {
+export async function topUpApolloLeadBuffer(
+  params: IngestParams,
+  signal?: AbortSignal,
+): Promise<{ filled: number; reason?: CreditInsufficientReason }> {
   const brandIdCsv = params.brandIds.join(",");
   const ctx = await buildStrategyContext({
     orgId: params.orgId,
@@ -222,7 +227,15 @@ export async function topUpApolloLeadBuffer(params: IngestParams, signal?: Abort
     }
 
     if (!activeStrategy) {
-      const current = await getCurrentStrategy(ctx);
+      let current: Awaited<ReturnType<typeof getCurrentStrategy>>;
+      try {
+        current = await getCurrentStrategy(ctx);
+      } catch (err) {
+        if (isApolloCreditInsufficientError(err)) {
+          return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
+        }
+        throw err;
+      }
       if ("exhausted" in current) {
         console.log(
           `[lead-service] topUp exhausted campaign=${params.campaignId} reason=${current.reason}`,
@@ -251,7 +264,18 @@ export async function topUpApolloLeadBuffer(params: IngestParams, signal?: Abort
       // and feed the error back to the LLM loop so it can converge on a valid filter set.
       // Stay quiet on per-attempt failures; only surface a log when all strategies are exhausted.
       const lastApolloError = err instanceof Error ? err.message : String(err);
-      const next = await advanceStrategyOrGenerate(ctx, lastApolloError);
+      if (isApolloCreditInsufficientError(err)) {
+        return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
+      }
+      let next: Awaited<ReturnType<typeof advanceStrategyOrGenerate>>;
+      try {
+        next = await advanceStrategyOrGenerate(ctx, lastApolloError);
+      } catch (strategyErr) {
+        if (isApolloCreditInsufficientError(strategyErr)) {
+          return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
+        }
+        throw strategyErr;
+      }
       if ("exhausted" in next) {
         console.warn(
           `[lead-service] topUp strategies exhausted after Apollo rejection campaign=${params.campaignId} reason=${next.reason} lastError=${lastApolloError}`,
@@ -273,7 +297,15 @@ export async function topUpApolloLeadBuffer(params: IngestParams, signal?: Abort
     totalInserted += pageInserted;
 
     if (page.done || page.people.length === 0) {
-      const next = await advanceStrategyOrGenerate(ctx);
+      let next: Awaited<ReturnType<typeof advanceStrategyOrGenerate>>;
+      try {
+        next = await advanceStrategyOrGenerate(ctx);
+      } catch (err) {
+        if (isApolloCreditInsufficientError(err)) {
+          return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
+        }
+        throw err;
+      }
       if ("exhausted" in next) {
         console.log(
           `[lead-service] topUp strategies exhausted campaign=${params.campaignId} reason=${next.reason}`,
@@ -377,6 +409,7 @@ export async function pullNext(
     userId: string | null;
     apolloPersonId: string | null;
   };
+  reason?: CreditInsufficientReason;
 }> {
   const brandIdCsv = params.brandIds.join(",");
 
@@ -398,6 +431,10 @@ export async function pullNext(
       );
 
       if (result.filled > 0) continue;
+      if (result.reason === CREDIT_INSUFFICIENT_REASON) {
+        console.log(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=credit_insufficient`);
+        return { found: false, reason: CREDIT_INSUFFICIENT_REASON };
+      }
 
       console.log(`[lead-service] pullNext found=false campaign=${params.campaignId}`);
       return { found: false };
@@ -435,15 +472,29 @@ export async function pullNext(
       const needEnrich = !validEmail && !cacheFresh;
 
       if (needEnrich && claimed.apolloPersonId) {
-        const enrichResult = await apolloEnrich(claimed.apolloPersonId, {
-          runId: params.runId,
-          orgId: params.orgId,
-          userId: params.userId,
-          brandId: brandIdCsv,
-          campaignId: params.campaignId,
-          workflowSlug: params.workflowSlug,
-          featureSlug: params.featureSlug,
-        });
+        let enrichResult: Awaited<ReturnType<typeof apolloEnrich>>;
+        try {
+          enrichResult = await apolloEnrich(claimed.apolloPersonId, {
+            runId: params.runId,
+            orgId: params.orgId,
+            userId: params.userId,
+            brandId: brandIdCsv,
+            campaignId: params.campaignId,
+            workflowSlug: params.workflowSlug,
+            featureSlug: params.featureSlug,
+          });
+        } catch (err) {
+          if (isApolloCreditInsufficientError(err)) {
+            await db
+              .update(leadsCampaigns)
+              .set({ status: "buffered", updatedAt: new Date() })
+              .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
+            claimSettled = true;
+            console.log(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=credit_insufficient`);
+            return { found: false, reason: CREDIT_INSUFFICIENT_REASON };
+          }
+          throw err;
+        }
 
         if (enrichResult?.person) {
           await upsertLeadFromPerson(enrichResult.person, { enriched: true });

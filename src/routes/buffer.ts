@@ -9,6 +9,7 @@ import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
+import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 
 const router = Router();
 
@@ -132,6 +133,18 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     res.json(result);
   } catch (error) {
+    if (isCreditInsufficientError(error)) {
+      console.log(`[lead-service] buffer/next found=false reason=credit_insufficient campaign=${campaignId}`);
+      const result = { found: false, reason: CREDIT_INSUFFICIENT_REASON };
+      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-credit-insufficient", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
+      try {
+        await updateRun(serveRunId, "completed", runMeta);
+      } catch (runErr) {
+        console.error("[lead-service] Failed to close run after credit-insufficient response:", runErr);
+      }
+      return res.json(result);
+    }
+
     console.error("[lead-service] buffer/next error:", error);
     traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: String(error) }, req.headers).catch(() => {});
     try {

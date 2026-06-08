@@ -946,10 +946,18 @@ export const BufferNextResponseSchema = z
     found: z
       .boolean()
       .openapi({
-        description: "True when a lead was claimed and returned. False when the campaign buffer is empty.",
+        description: "True when a lead was claimed and returned. False when no lead can be served right now.",
         example: true,
       }),
     lead: ServedLeadSchema.optional(),
+    reason: z
+      .enum(["credit_insufficient"])
+      .optional()
+      .openapi({
+        description:
+          "Optional reason when found=false. credit_insufficient means the org has no available platform credits, so no paid enrichment/search/LLM action was performed.",
+        example: "credit_insufficient",
+      }),
   })
   .openapi("BufferNextResponse", {
     description:
@@ -1049,6 +1057,13 @@ export const BufferNextResponseSchema = z
         summary: "Buffer exhausted",
         value: {
           found: false,
+        },
+      },
+      {
+        summary: "Insufficient credits",
+        value: {
+          found: false,
+          reason: "credit_insufficient",
         },
       },
     ],

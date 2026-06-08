@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  ApolloServiceError,
   fetchApolloStats,
   apolloEnrich,
   fetchApolloFiltersPrompt,
+  isApolloCreditInsufficientError,
 } from "../../src/lib/apollo-client.js";
 
 type CapturedRequest = { url: string; init: RequestInit };
@@ -125,6 +127,37 @@ describe("apollo-client", () => {
       await expect(
         fetchApolloFiltersPrompt({ orgId: "org-1", userId: null }),
       ).rejects.toThrow(/Apollo service call failed: 503/);
+    });
+
+    it("classifies Apollo 402 credit_insufficient responses", async () => {
+      const fetchSpy = vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            type: "credit_insufficient",
+            error: "Insufficient credits",
+            balance_cents: "0.31",
+            required_cents: "2.83",
+          }),
+          { status: 402, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      vi.stubGlobal("fetch", fetchSpy);
+
+      let caught: unknown;
+      try {
+        await apolloEnrich("p1", {
+          orgId: "org-1",
+          userId: "user-1",
+          runId: "run-1",
+          brandId: "brand-1",
+          campaignId: "campaign-1",
+        });
+      } catch (err) {
+        caught = err;
+      }
+
+      expect(caught).toBeInstanceOf(ApolloServiceError);
+      expect(isApolloCreditInsufficientError(caught)).toBe(true);
     });
   });
 });
