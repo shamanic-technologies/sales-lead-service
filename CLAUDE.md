@@ -23,7 +23,7 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `src/lib/dedup.ts` — checkDelivered() (via email-gateway), markServed() deduplication
 - `src/lib/email-gateway-client.ts` — Email-gateway POST /status client for delivery checks
 - `src/lib/leads-registry.ts` — Global lead identity registry (leads + leadEmails tables)
-- `src/lib/apollo-client.ts` — Apollo enrichment service integration
+- `src/lib/people-client.ts` — human-service people gateway client (provider-agnostic search/enrich via apollo OR apify; lead-service no longer calls apollo/apify directly)
 - `src/lib/campaign-client.ts` — Campaign service client (fetch campaign details for search context)
 - `src/lib/brand-client.ts` — Brand service client (fetch brand details for search context)
 - `src/lib/runs-client.ts` — Runs service client for distributed tracing

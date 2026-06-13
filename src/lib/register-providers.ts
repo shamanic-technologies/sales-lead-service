@@ -1,7 +1,9 @@
 import { queryProviderRequirements, registerProviderRequirement } from "./key-service-client.js";
 
-// Maps each lead-service endpoint to the downstream apollo endpoints it calls.
-// This is the source of truth for which lead routes proxy which apollo routes.
+// Maps each lead-service endpoint to the downstream endpoints it calls.
+// People sourcing goes through the human-service people gateway (which routes to
+// apollo/apify); this is the source of truth for which lead routes proxy which
+// downstream routes.
 const ENDPOINT_MAPPING: Array<{
   lead: { method: string; path: string };
   downstream: Array<{ service: string; method: string; path: string }>;
@@ -9,16 +11,10 @@ const ENDPOINT_MAPPING: Array<{
   {
     lead: { method: "POST", path: "/orgs/buffer/next" },
     downstream: [
-      { service: "apollo", method: "POST", path: "/search/next" },
-      { service: "apollo", method: "POST", path: "/search/dry-run" },
-      { service: "apollo", method: "POST", path: "/enrich" },
+      { service: "human", method: "POST", path: "/orgs/people/search" },
+      { service: "human", method: "POST", path: "/orgs/people/search/dry-run" },
+      { service: "human", method: "POST", path: "/orgs/people/resolve-email" },
       { service: "chat", method: "POST", path: "/complete" },
-    ],
-  },
-  {
-    lead: { method: "GET", path: "/orgs/stats" },
-    downstream: [
-      { service: "apollo", method: "POST", path: "/stats" },
     ],
   },
 ];

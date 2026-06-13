@@ -6,8 +6,8 @@
 const TEST_ENV_VARS: Record<string, string> = {
   LEAD_SERVICE_API_KEY: "test-api-key",
   LEAD_SERVICE_DATABASE_URL: "postgresql://test:test@localhost:5432/test",
-  APOLLO_SERVICE_URL: "http://apollo:3003",
-  APOLLO_SERVICE_API_KEY: "test-apollo-key",
+  HUMAN_SERVICE_URL: "http://human:3012",
+  HUMAN_SERVICE_API_KEY: "test-human-key",
   BRAND_SERVICE_URL: "http://brand:3005",
   BRAND_SERVICE_API_KEY: "test-brand-key",
   CAMPAIGN_SERVICE_URL: "http://campaign:3003",
