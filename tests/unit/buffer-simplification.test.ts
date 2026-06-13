@@ -24,8 +24,8 @@ describe("buffer.ts simplification invariants", () => {
     expect(bufferSrc).toMatch(/finally\s*\{[\s\S]*claimSettled[\s\S]*status:\s*"buffered"/);
   });
 
-  it("wraps apolloFetchPage in try/catch and routes Apollo validation errors back into the strategy loop", () => {
-    expect(bufferSrc).toMatch(/try\s*\{[\s\S]*apolloFetchPage[\s\S]*\}\s*catch/);
-    expect(bufferSrc).toMatch(/advanceStrategyOrGenerate[\s\S]*lastApolloError/);
+  it("wraps peopleSearch in try/catch and routes provider validation errors back into the strategy loop", () => {
+    expect(bufferSrc).toMatch(/try\s*\{[\s\S]*peopleSearch[\s\S]*\}\s*catch/);
+    expect(bufferSrc).toMatch(/advanceStrategyOrGenerate[\s\S]*lastSearchError/);
   });
 });

@@ -8,8 +8,8 @@ describe("config", () => {
   it("exports all required env vars when they are set", async () => {
     const config = await import("../../src/config.js");
 
-    expect(config.APOLLO_SERVICE_URL).toBe(process.env.APOLLO_SERVICE_URL);
-    expect(config.APOLLO_SERVICE_API_KEY).toBe(process.env.APOLLO_SERVICE_API_KEY);
+    expect(config.HUMAN_SERVICE_URL).toBe(process.env.HUMAN_SERVICE_URL);
+    expect(config.HUMAN_SERVICE_API_KEY).toBe(process.env.HUMAN_SERVICE_API_KEY);
     expect(config.BRAND_SERVICE_URL).toBe(process.env.BRAND_SERVICE_URL);
     expect(config.EMAIL_GATEWAY_SERVICE_URL).toBe(process.env.EMAIL_GATEWAY_SERVICE_URL);
     expect(config.RUNS_SERVICE_URL).toBe(process.env.RUNS_SERVICE_URL);
@@ -18,28 +18,28 @@ describe("config", () => {
   });
 
   it("throws when a required env var is missing", async () => {
-    const original = process.env.APOLLO_SERVICE_URL;
-    delete process.env.APOLLO_SERVICE_URL;
+    const original = process.env.HUMAN_SERVICE_URL;
+    delete process.env.HUMAN_SERVICE_URL;
 
     try {
       await expect(
         import("../../src/config.js")
-      ).rejects.toThrow("Missing required environment variable: APOLLO_SERVICE_URL");
+      ).rejects.toThrow("Missing required environment variable: HUMAN_SERVICE_URL");
     } finally {
-      process.env.APOLLO_SERVICE_URL = original;
+      process.env.HUMAN_SERVICE_URL = original;
     }
   });
 
   it("throws when a required env var is empty string", async () => {
-    const original = process.env.APOLLO_SERVICE_API_KEY;
-    process.env.APOLLO_SERVICE_API_KEY = "";
+    const original = process.env.HUMAN_SERVICE_API_KEY;
+    process.env.HUMAN_SERVICE_API_KEY = "";
 
     try {
       await expect(
         import("../../src/config.js")
-      ).rejects.toThrow("Missing required environment variable: APOLLO_SERVICE_API_KEY");
+      ).rejects.toThrow("Missing required environment variable: HUMAN_SERVICE_API_KEY");
     } finally {
-      process.env.APOLLO_SERVICE_API_KEY = original;
+      process.env.HUMAN_SERVICE_API_KEY = original;
     }
   });
 

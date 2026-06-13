@@ -35,6 +35,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
   }
 
+  // Provider selector: explicit apollo|apify, else apollo (today's behavior).
+  const provider = parsed.data.provider ?? "apollo";
+
   const campaignId = req.campaignId;
   const brandIds = req.brandIds ?? [];
 
@@ -107,6 +110,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         orgId: req.orgId!,
         campaignId,
         brandIds,
+        provider,
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,
