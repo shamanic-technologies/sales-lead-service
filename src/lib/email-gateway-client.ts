@@ -1,4 +1,5 @@
 import { EMAIL_GATEWAY_SERVICE_URL, EMAIL_GATEWAY_SERVICE_API_KEY } from "../config.js";
+import { fetchWithRetry } from "./fetch-retry.js";
 
 export interface DeliveryStatusItem {
   email: string;
@@ -52,7 +53,7 @@ async function checkDeliveryStatusBatch(
   const body: Record<string, unknown> = { brandId, items };
   if (campaignId) body.campaignId = campaignId;
 
-  const response = await fetch(`${EMAIL_GATEWAY_SERVICE_URL}/orgs/status`, {
+  const response = await fetchWithRetry(`${EMAIL_GATEWAY_SERVICE_URL}/orgs/status`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -180,7 +181,7 @@ export async function fetchEmailGatewayStats(
   const qs = queryParams.toString();
   const url = `${EMAIL_GATEWAY_SERVICE_URL}/orgs/stats${qs ? `?${qs}` : ""}`;
 
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method: "GET",
     headers,
     signal: AbortSignal.timeout(300_000),

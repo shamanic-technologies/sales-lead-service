@@ -98,6 +98,21 @@ describe("email-gateway-client", () => {
       ).rejects.toThrow("fetch failed");
     });
 
+    it("retries a transient socket drop and then succeeds (no 500 leaks to caller)", async () => {
+      const cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+      const socketErr = Object.assign(new TypeError("fetch failed"), { cause });
+      mockFetch
+        .mockRejectedValueOnce(socketErr)
+        .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ results: [] }) });
+
+      const result = await checkDeliveryStatus("brand-1", "campaign-1", [
+        { email: "alice@acme.com" },
+      ]);
+
+      expect(result).toEqual({ results: [] });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
     it("returns empty results for empty items array", async () => {
       const result = await checkDeliveryStatus("brand-1", "campaign-1", []);
       expect(result).toEqual({ results: [] });
