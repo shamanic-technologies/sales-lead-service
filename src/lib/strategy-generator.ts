@@ -4,10 +4,11 @@ import { campaignsApolloStrategies } from "../db/schema.js";
 import { MAX_STRATEGY_GENERATION_ROUNDS } from "../config.js";
 import { chatComplete } from "./chat-client.js";
 import {
-  apolloDryRun,
-  fetchApolloFiltersPrompt,
-  type ApolloSearchParams,
-} from "./apollo-client.js";
+  peopleDryRun,
+  fetchFiltersPrompt,
+  type PeopleFilters,
+  type PeopleProvider,
+} from "./people-client.js";
 
 export interface StrategyContext {
   orgId: string;
@@ -15,6 +16,8 @@ export interface StrategyContext {
   runId?: string | null;
   campaignId: string;
   brandId: string;
+  /** Lead provider this campaign sources through (apollo | apify). */
+  provider: PeopleProvider;
   workflowSlug?: string;
   featureSlug?: string;
   /** Pre-formatted brand + campaign description used as the LLM seed. */
@@ -22,12 +25,13 @@ export interface StrategyContext {
 }
 
 export type StrategyOutcome =
-  | { strategy: ApolloSearchParams }
+  | { strategy: PeopleFilters }
   | { exhausted: true; reason: string };
 
-// Static portion of the system prompt. The Apollo filter shape doc is appended
-// per-call from apollo-service GET /search/filters-prompt (single source of truth).
-const SYSTEM_PROMPT_STATIC = `You are an Apollo.io search filter generator for a B2B outreach campaign.
+// Static portion of the system prompt. The provider-specific filter-shape doc is
+// appended per-call from the human-service people gateway
+// GET /orgs/people/filters-prompt?provider= (single source of truth).
+const SYSTEM_PROMPT_STATIC = `You are a B2B lead search filter generator for an outreach campaign.
 
 CONTEXT YOU RECEIVE:
 - Brand: name, industry, target geography, ideal lead type, target job titles, offerings
@@ -35,10 +39,10 @@ CONTEXT YOU RECEIVE:
 - Previously tried strategies (filter sets that have been exhausted)
 
 YOUR JOB:
-Generate ONE new Apollo search filter set that:
+Generate ONE new search filter set that:
 1. Stays STRICTLY within the campaign target audience and brand offerings.
 2. Is DISTINCT from all previously tried strategies (different titles / industries / locations).
-3. Will likely return >0 results in Apollo.
+3. Will likely return >0 results.
 
 ABSOLUTE RULES:
 - NEVER expand outside the campaign's stated target audience or geography.
@@ -55,7 +59,7 @@ If a test returns validation errors, you MUST keep iterating with new test actio
 OUTPUT FORMAT (JSON):
 
 To propose filters for testing:
-{"action": "test", "filters": {<Apollo search filter object>}, "reasoning": "<one sentence>"}
+{"action": "test", "filters": {<search filter object>}, "reasoning": "<one sentence>"}
 
 To confirm the last tested filter set is good (only allowed when the last test returned zero validation errors):
 {"action": "confirm", "reasoning": "<one sentence>"}
@@ -67,24 +71,30 @@ function buildSystemPrompt(filtersPrompt: string): string {
   return `${SYSTEM_PROMPT_STATIC}\n\n${filtersPrompt}`;
 }
 
-let cachedFiltersPrompt: { schemaVersion: string; prompt: string } | null = null;
+// Filter-shape doc differs per provider, so the cache is keyed by provider.
+const cachedFiltersPrompt = new Map<PeopleProvider, { schemaVersion: string; prompt: string }>();
 
-async function getFiltersPrompt(orgId: string, userId: string | null): Promise<string> {
-  const fresh = await fetchApolloFiltersPrompt({ orgId, userId });
-  if (!cachedFiltersPrompt || cachedFiltersPrompt.schemaVersion !== fresh.schemaVersion) {
-    if (cachedFiltersPrompt && cachedFiltersPrompt.schemaVersion !== fresh.schemaVersion) {
+async function getFiltersPrompt(
+  provider: PeopleProvider,
+  orgId: string,
+  userId: string | null,
+): Promise<string> {
+  const fresh = await fetchFiltersPrompt({ provider, orgId, userId });
+  const cached = cachedFiltersPrompt.get(provider);
+  if (!cached || cached.schemaVersion !== fresh.schemaVersion) {
+    if (cached && cached.schemaVersion !== fresh.schemaVersion) {
       console.log(
-        `[lead-service] apollo filters-prompt schemaVersion changed: ${cachedFiltersPrompt.schemaVersion} -> ${fresh.schemaVersion}`,
+        `[lead-service] ${provider} filters-prompt schemaVersion changed: ${cached.schemaVersion} -> ${fresh.schemaVersion}`,
       );
     }
-    cachedFiltersPrompt = { schemaVersion: fresh.schemaVersion, prompt: fresh.prompt };
+    cachedFiltersPrompt.set(provider, { schemaVersion: fresh.schemaVersion, prompt: fresh.prompt });
   }
-  return cachedFiltersPrompt.prompt;
+  return cachedFiltersPrompt.get(provider)!.prompt;
 }
 
 // Test-only: lets unit tests reset the module-level cache between cases.
 export function __resetFiltersPromptCache(): void {
-  cachedFiltersPrompt = null;
+  cachedFiltersPrompt.clear();
 }
 
 export const __SYSTEM_PROMPT_STATIC__ = SYSTEM_PROMPT_STATIC;
@@ -96,11 +106,11 @@ interface LlmAction {
   reason?: unknown;
 }
 
-function isValidFilters(filters: unknown): filters is ApolloSearchParams {
+function isValidFilters(filters: unknown): filters is PeopleFilters {
   return !!filters && typeof filters === "object" && !Array.isArray(filters);
 }
 
-function buildSeedMessage(brandCampaignDescription: string, previousStrategies: ApolloSearchParams[]): string {
+function buildSeedMessage(brandCampaignDescription: string, previousStrategies: PeopleFilters[]): string {
   const previousJson =
     previousStrategies.length === 0
       ? "(none yet — this is the first strategy for this campaign)"
@@ -118,16 +128,16 @@ function buildSeedMessage(brandCampaignDescription: string, previousStrategies: 
 
 export async function generateNextStrategy(
   ctx: StrategyContext,
-  previousStrategies: ApolloSearchParams[],
-  apolloError?: string,
+  previousStrategies: PeopleFilters[],
+  searchError?: string,
 ): Promise<StrategyOutcome> {
   const transcript: string[] = [buildSeedMessage(ctx.brandCampaignDescription, previousStrategies)];
-  if (apolloError) {
+  if (searchError) {
     transcript.push(
-      `PRIOR APOLLO ERROR (the last persisted strategy was rejected by Apollo at fetch time, treat as a validation failure to avoid):\n${apolloError}`,
+      `PRIOR SEARCH ERROR (the last persisted strategy was rejected by the provider at fetch time, treat as a validation failure to avoid):\n${searchError}`,
     );
   }
-  let lastTestedFilters: ApolloSearchParams | null = null;
+  let lastTestedFilters: PeopleFilters | null = null;
   let lastTestedHadErrors = false;
 
   const tracking = {
@@ -140,7 +150,7 @@ export async function generateNextStrategy(
     featureSlug: ctx.featureSlug ?? null,
   };
 
-  const filtersPrompt = await getFiltersPrompt(ctx.orgId, ctx.userId ?? null);
+  const filtersPrompt = await getFiltersPrompt(ctx.provider, ctx.orgId, ctx.userId ?? null);
   const systemPrompt = buildSystemPrompt(filtersPrompt);
 
   for (let round = 0; round < MAX_STRATEGY_GENERATION_ROUNDS; round++) {
@@ -166,13 +176,14 @@ export async function generateNextStrategy(
     if (actionType === "test") {
       if (!isValidFilters(action.filters)) {
         transcript.push(
-          `Round ${round + 1}: your "test" action was missing a valid "filters" object. Provide filters as a JSON object of Apollo search params.`,
+          `Round ${round + 1}: your "test" action was missing a valid "filters" object. Provide filters as a JSON object of search params.`,
         );
         continue;
       }
-      const filters = action.filters as ApolloSearchParams;
+      const filters = action.filters as PeopleFilters;
       try {
-        const dry = await apolloDryRun({
+        const dry = await peopleDryRun({
+          provider: ctx.provider,
           filters,
           orgId: ctx.orgId,
           userId: ctx.userId ?? null,
@@ -183,14 +194,12 @@ export async function generateNextStrategy(
           featureSlug: ctx.featureSlug,
         });
         lastTestedFilters = filters;
-        lastTestedHadErrors = (dry.validationErrors ?? []).length > 0;
+        lastTestedHadErrors = false;
         transcript.push(
           [
             `Round ${round + 1}: tested filters=${JSON.stringify(filters)}`,
-            `Result: totalEntries=${dry.totalEntries}, validationErrors=${JSON.stringify(dry.validationErrors)}.`,
-            lastTestedHadErrors
-              ? `Validation errors present — you MUST propose another "test" with corrected filters; "confirm" will be rejected until validationErrors is empty.`
-              : `Either confirm this set, propose another test, or declare exhausted.`,
+            `Result: totalEntries=${dry.totalEntries}.`,
+            `Either confirm this set, propose another test, or declare exhausted.`,
           ].join("\n"),
         );
       } catch (err) {
@@ -203,7 +212,7 @@ export async function generateNextStrategy(
         transcript.push(
           [
             `Round ${round + 1}: tested filters=${JSON.stringify(filters)}`,
-            `Result: Apollo rejected the request with an error. Treat this as a validation failure to avoid:`,
+            `Result: the provider rejected the request with an error. Treat this as a validation failure to avoid:`,
             message,
             `Propose another "test" with corrected filters, or declare exhausted.`,
           ].join("\n"),
@@ -221,7 +230,7 @@ export async function generateNextStrategy(
       }
       if (lastTestedHadErrors) {
         transcript.push(
-          `Round ${round + 1}: confirm rejected — the last tested filter set had validation errors. Propose a new "test" with corrected filters.`,
+          `Round ${round + 1}: confirm rejected — the last tested filter set was rejected by the provider. Propose a new "test" with corrected filters.`,
         );
         continue;
       }
@@ -238,8 +247,9 @@ export async function generateNextStrategy(
 
 interface StrategyRow {
   id: string;
-  strategies: ApolloSearchParams[];
+  strategies: PeopleFilters[];
   currentIndex: number;
+  apifyOffset: number;
   exhausted: boolean;
   exhaustionReason: string | null;
 }
@@ -254,12 +264,17 @@ async function loadRow(orgId: string, campaignId: string): Promise<StrategyRow |
   if (!row) return null;
   return {
     id: row.id,
-    strategies: (row.strategies as ApolloSearchParams[] | null) ?? [],
+    strategies: (row.strategies as PeopleFilters[] | null) ?? [],
     currentIndex: row.currentIndex,
+    apifyOffset: row.apifyOffset ?? 0,
     exhausted: row.exhausted,
     exhaustionReason: row.exhaustionReason ?? null,
   };
 }
+
+export type CurrentStrategy =
+  | { strategy: PeopleFilters; apifyOffset: number }
+  | { exhausted: true; reason: string };
 
 async function persistOutcome(params: {
   orgId: string;
@@ -267,7 +282,7 @@ async function persistOutcome(params: {
   existing: StrategyRow | null;
   outcome: StrategyOutcome;
   appendStrategy: boolean;
-}): Promise<{ strategy: ApolloSearchParams } | { exhausted: true; reason: string }> {
+}): Promise<CurrentStrategy> {
   const { orgId, campaignId, existing, outcome, appendStrategy } = params;
   if ("exhausted" in outcome) {
     if (existing) {
@@ -288,7 +303,7 @@ async function persistOutcome(params: {
     return { exhausted: true, reason: outcome.reason };
   }
 
-  // success: persist new strategy
+  // success: persist new strategy. A new strategy resets apify pagination to 0.
   const strategy = outcome.strategy;
   if (existing) {
     const newStrategies = appendStrategy ? [...existing.strategies, strategy] : existing.strategies;
@@ -298,6 +313,7 @@ async function persistOutcome(params: {
       .set({
         strategies: newStrategies,
         currentIndex: newIndex,
+        apifyOffset: 0,
         exhausted: false,
         exhaustionReason: null,
         updatedAt: new Date(),
@@ -309,19 +325,39 @@ async function persistOutcome(params: {
       campaignId,
       strategies: [strategy],
       currentIndex: 0,
+      apifyOffset: 0,
       exhausted: false,
     });
   }
-  return { strategy };
+  return { strategy, apifyOffset: 0 };
+}
+
+/**
+ * Persist the apify pagination offset for the current strategy of a campaign.
+ * apollo uses a server-managed cursor (no local state); apify is client-managed,
+ * so the offset must survive across buffer/next calls.
+ */
+export async function persistApifyOffset(
+  orgId: string,
+  campaignId: string,
+  offset: number,
+): Promise<void> {
+  await db
+    .update(campaignsApolloStrategies)
+    .set({ apifyOffset: offset, updatedAt: new Date() })
+    .where(
+      and(
+        eq(campaignsApolloStrategies.orgId, orgId),
+        eq(campaignsApolloStrategies.campaignId, campaignId),
+      ),
+    );
 }
 
 /**
  * Returns the strategy lead-service should use right now for this campaign.
  * Generates one if the row is missing. Returns exhausted permanently if previously marked exhausted.
  */
-export async function getCurrentStrategy(
-  ctx: StrategyContext,
-): Promise<{ strategy: ApolloSearchParams } | { exhausted: true; reason: string }> {
+export async function getCurrentStrategy(ctx: StrategyContext): Promise<CurrentStrategy> {
   if (!ctx.orgId) {
     throw new Error("[lead-service] getCurrentStrategy: orgId is required");
   }
@@ -335,7 +371,7 @@ export async function getCurrentStrategy(
   }
 
   if (existing && existing.currentIndex < existing.strategies.length) {
-    return { strategy: existing.strategies[existing.currentIndex] };
+    return { strategy: existing.strategies[existing.currentIndex], apifyOffset: existing.apifyOffset };
   }
 
   // Either no row, or currentIndex past end. Generate a fresh strategy.
@@ -350,14 +386,14 @@ export async function getCurrentStrategy(
 }
 
 /**
- * Mark the current strategy as exhausted (Apollo returned no more leads, or Apollo rejected
- * the persisted filter set) and try to generate the next strategy. Used by buffer fill when a
- * page returns 0 candidates or Apollo throws a validation error on the persisted strategy.
+ * Mark the current strategy as exhausted (provider returned no more leads, or
+ * rejected the persisted filter set) and try to generate the next strategy. Used
+ * by buffer fill when a page returns 0 candidates or the provider throws.
  */
 export async function advanceStrategyOrGenerate(
   ctx: StrategyContext,
-  apolloError?: string,
-): Promise<{ strategy: ApolloSearchParams } | { exhausted: true; reason: string }> {
+  searchError?: string,
+): Promise<CurrentStrategy> {
   const existing = await loadRow(ctx.orgId, ctx.campaignId);
 
   if (existing?.exhausted) {
@@ -366,7 +402,7 @@ export async function advanceStrategyOrGenerate(
 
   // Bump index past current strategy; subsequent generateNextStrategy uses all known strategies as the "tried" set.
   const triedStrategies = existing?.strategies ?? [];
-  const outcome = await generateNextStrategy(ctx, triedStrategies, apolloError);
+  const outcome = await generateNextStrategy(ctx, triedStrategies, searchError);
   return persistOutcome({
     orgId: ctx.orgId,
     campaignId: ctx.campaignId,

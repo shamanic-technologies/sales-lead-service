@@ -181,6 +181,10 @@ export const campaignsApolloStrategies = pgTable(
     campaignId: text("campaign_id").notNull(),
     strategies: jsonb("strategies").notNull().default(sql`'[]'::jsonb`),
     currentIndex: integer("current_index").notNull().default(0),
+    // apify pagination is client-managed; persist the offset for the current
+    // strategy so it survives across buffer/next calls. apollo ignores this
+    // (its cursor is server-managed by the gateway, keyed on org + campaign).
+    apifyOffset: integer("apify_offset").notNull().default(0),
     exhausted: boolean("exhausted").notNull().default(false),
     exhaustionReason: text("exhaustion_reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

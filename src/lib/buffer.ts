@@ -1,14 +1,15 @@
 import { eq, and, count } from "drizzle-orm";
 import { db, sql as pgSql } from "../db/index.js";
-import { leadsCampaigns, leadContactMethods, leads } from "../db/schema.js";
+import { leadsCampaigns, leadContactMethods, leads, leadsOrganizations, organizations } from "../db/schema.js";
 import { TARGET_BUFFER_SIZE } from "../config.js";
 import {
-  apolloFetchPage,
-  apolloEnrich,
-  isApolloCreditInsufficientError,
-  type ApolloPersonResult,
-  type ApolloSearchParams,
-} from "./apollo-client.js";
+  peopleSearch,
+  resolveEmail,
+  isPeopleCreditInsufficientError,
+  type Person,
+  type PeopleFilters,
+  type PeopleProvider,
+} from "./people-client.js";
 import { CREDIT_INSUFFICIENT_REASON, type CreditInsufficientReason } from "./credit-errors.js";
 import {
   upsertLeadFromPerson,
@@ -26,6 +27,7 @@ import {
 import {
   getCurrentStrategy,
   advanceStrategyOrGenerate,
+  persistApifyOffset,
   type StrategyContext,
 } from "./strategy-generator.js";
 import { fetchCampaign } from "./campaign-client.js";
@@ -67,6 +69,7 @@ async function buildStrategyContext(params: {
   orgId: string;
   campaignId: string;
   brandIdCsv: string;
+  provider: PeopleProvider;
   pushRunId?: string | null;
   userId?: string | null;
   workflowSlug?: string;
@@ -122,6 +125,7 @@ async function buildStrategyContext(params: {
     runId: params.pushRunId ?? null,
     campaignId: params.campaignId,
     brandId: params.brandIdCsv,
+    provider: params.provider,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
     brandCampaignDescription: lines.join("\n"),
@@ -132,6 +136,7 @@ interface IngestParams {
   orgId: string;
   campaignId: string;
   brandIds: string[];
+  provider: PeopleProvider;
   pushRunId?: string | null;
   userId?: string | null;
   workflowSlug?: string;
@@ -139,16 +144,17 @@ interface IngestParams {
 }
 
 /**
- * Insert one Apollo person into the schema:
- *   - upsert leads (by apolloPersonId)
- *   - upsert organizations + employment history
+ * Insert one neutral gateway Person into the schema:
+ *   - upsert leads (apollo: by providerPersonId; apify: by email)
+ *   - upsert organization + current employment
  *   - upsert email contact method (when present)
  *   - insert leads_campaigns row (status='buffered')
  * Returns true when a NEW leads_campaigns row was inserted (i.e. we added to buffer).
  */
-async function ingestPerson(person: ApolloPersonResult, params: IngestParams, signal?: AbortSignal): Promise<boolean> {
+async function ingestPerson(person: Person, params: IngestParams, signal?: AbortSignal): Promise<boolean> {
   if (signal?.aborted) return false;
-  if (!person.id) return false;
+  // apollo identifies by provider person id; apify (no person id) by verified email.
+  if (!person.providerPersonId && !person.email) return false;
 
   const leadId = await upsertLeadFromPerson(person, { enriched: false });
   if (signal?.aborted) return false;
@@ -157,24 +163,16 @@ async function ingestPerson(person: ApolloPersonResult, params: IngestParams, si
   if (signal?.aborted) return false;
 
   if (person.email) {
-    const candidates = [person.email, ...(person.personalEmails ?? [])];
-    let attached = false;
-    for (const candidate of candidates) {
-      const res = await upsertContactMethod({
-        leadId,
-        channel: "email",
-        value: candidate,
-        status: candidate === person.email ? (person.emailStatus ?? null) : null,
-        source: "apollo",
-      });
-      if (res.inserted) {
-        attached = true;
-        break;
-      }
-    }
-    if (!attached) {
+    const res = await upsertContactMethod({
+      leadId,
+      channel: "email",
+      value: person.email,
+      status: person.emailStatus ?? null,
+      source: params.provider,
+    });
+    if (!res.inserted) {
       console.warn(
-        `[lead-service] ingest skip — all Apollo emails already attached to other leads, personId=${person.id}, candidates=${candidates.join(",")}`,
+        `[lead-service] ingest skip — email already attached to another lead, provider=${params.provider}, personId=${person.providerPersonId ?? "none"}, email=${person.email}`,
       );
       return false;
     }
@@ -210,6 +208,7 @@ export async function topUpApolloLeadBuffer(
     orgId: params.orgId,
     campaignId: params.campaignId,
     brandIdCsv,
+    provider: params.provider,
     pushRunId: params.pushRunId,
     userId: params.userId,
     workflowSlug: params.workflowSlug,
@@ -218,7 +217,8 @@ export async function topUpApolloLeadBuffer(
 
   let totalInserted = 0;
   let freshStrategy = true;
-  let activeStrategy: ApolloSearchParams | null = null;
+  let activeStrategy: PeopleFilters | null = null;
+  let apifyOffset = 0;
 
   while (!signal?.aborted) {
     const buffered = await bufferedCount(params.orgId, params.campaignId);
@@ -231,7 +231,7 @@ export async function topUpApolloLeadBuffer(
       try {
         current = await getCurrentStrategy(ctx);
       } catch (err) {
-        if (isApolloCreditInsufficientError(err)) {
+        if (isPeopleCreditInsufficientError(err)) {
           return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
         }
         throw err;
@@ -243,15 +243,22 @@ export async function topUpApolloLeadBuffer(
         return { filled: totalInserted };
       }
       activeStrategy = current.strategy;
+      apifyOffset = current.apifyOffset;
       freshStrategy = true;
     }
 
-    let page: Awaited<ReturnType<typeof apolloFetchPage>>;
+    let page: Awaited<ReturnType<typeof peopleSearch>>;
     try {
-      page = await apolloFetchPage({
+      page = await peopleSearch({
+        provider: params.provider,
+        // apollo: filters on the first page only, then advance the server cursor.
+        // apify: stateless — send filters + offset on every page.
+        filters:
+          params.provider === "apify" || freshStrategy ? activeStrategy : undefined,
+        nextPage: params.provider === "apollo" && !freshStrategy ? true : undefined,
+        offset: params.provider === "apify" ? apifyOffset : undefined,
         campaignId: params.campaignId,
         brandId: brandIdCsv,
-        searchParams: freshStrategy ? activeStrategy : undefined,
         runId: params.pushRunId ?? null,
         orgId: params.orgId,
         userId: params.userId ?? null,
@@ -259,30 +266,31 @@ export async function topUpApolloLeadBuffer(
         featureSlug: params.featureSlug,
       });
     } catch (err) {
-      // Apollo rejected the persisted strategy (e.g. validation error after schema tightening,
+      // Provider rejected the persisted strategy (e.g. validation error after schema tightening,
       // or LLM previously confirmed an invalid filter). Don't propagate — invalidate the strategy
       // and feed the error back to the LLM loop so it can converge on a valid filter set.
       // Stay quiet on per-attempt failures; only surface a log when all strategies are exhausted.
-      const lastApolloError = err instanceof Error ? err.message : String(err);
-      if (isApolloCreditInsufficientError(err)) {
+      const lastSearchError = err instanceof Error ? err.message : String(err);
+      if (isPeopleCreditInsufficientError(err)) {
         return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
       }
       let next: Awaited<ReturnType<typeof advanceStrategyOrGenerate>>;
       try {
-        next = await advanceStrategyOrGenerate(ctx, lastApolloError);
+        next = await advanceStrategyOrGenerate(ctx, lastSearchError);
       } catch (strategyErr) {
-        if (isApolloCreditInsufficientError(strategyErr)) {
+        if (isPeopleCreditInsufficientError(strategyErr)) {
           return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
         }
         throw strategyErr;
       }
       if ("exhausted" in next) {
         console.warn(
-          `[lead-service] topUp strategies exhausted after Apollo rejection campaign=${params.campaignId} reason=${next.reason} lastError=${lastApolloError}`,
+          `[lead-service] topUp strategies exhausted after provider rejection campaign=${params.campaignId} reason=${next.reason} lastError=${lastSearchError}`,
         );
         return { filled: totalInserted };
       }
       activeStrategy = next.strategy;
+      apifyOffset = next.apifyOffset;
       freshStrategy = true;
       continue;
     }
@@ -296,12 +304,19 @@ export async function topUpApolloLeadBuffer(
     }
     totalInserted += pageInserted;
 
+    // apify pagination is client-managed: advance + persist the offset so the next
+    // buffer/next call resumes where this one left off (apollo's cursor is server-side).
+    if (params.provider === "apify") {
+      apifyOffset = page.nextOffset ?? apifyOffset;
+      await persistApifyOffset(params.orgId, params.campaignId, apifyOffset);
+    }
+
     if (page.done || page.people.length === 0) {
       let next: Awaited<ReturnType<typeof advanceStrategyOrGenerate>>;
       try {
         next = await advanceStrategyOrGenerate(ctx);
       } catch (err) {
-        if (isApolloCreditInsufficientError(err)) {
+        if (isPeopleCreditInsufficientError(err)) {
           return { filled: totalInserted, reason: CREDIT_INSUFFICIENT_REASON };
         }
         throw err;
@@ -313,6 +328,7 @@ export async function topUpApolloLeadBuffer(
         return { filled: totalInserted };
       }
       activeStrategy = next.strategy;
+      apifyOffset = next.apifyOffset;
       freshStrategy = true;
     }
   }
@@ -324,10 +340,24 @@ interface ClaimedRow {
   leadCampaignId: string;
   leadId: string;
   apolloPersonId: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  domain: string | null;
   enrichedAt: Date | null;
   hasEmail: boolean;
   primaryEmail: string | null;
   primaryEmailStatus: string | null;
+}
+
+/** Domain of the lead's current employer, used to resolve a verified email via the gateway. */
+async function getCurrentOrgDomain(leadId: string): Promise<string | null> {
+  const row = await db
+    .select({ domain: organizations.primaryDomain })
+    .from(leadsOrganizations)
+    .innerJoin(organizations, eq(leadsOrganizations.organizationId, organizations.id))
+    .where(and(eq(leadsOrganizations.leadId, leadId), eq(leadsOrganizations.current, true)))
+    .limit(1);
+  return row[0]?.domain ?? null;
 }
 
 async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise<ClaimedRow | null> {
@@ -356,11 +386,15 @@ async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise
     where: eq(leads.id, leadId),
   });
   const primary = await getPrimaryEmail(leadId);
+  const domain = await getCurrentOrgDomain(leadId);
 
   return {
     leadCampaignId,
     leadId,
     apolloPersonId: lead?.apolloPersonId ?? null,
+    firstName: lead?.firstName ?? null,
+    lastName: lead?.lastName ?? null,
+    domain,
     enrichedAt: lead?.enrichedAt ?? null,
     hasEmail: primary !== null,
     primaryEmail: primary?.email ?? null,
@@ -391,6 +425,7 @@ export async function pullNext(
     orgId: string;
     campaignId: string;
     brandIds: string[];
+    provider: PeopleProvider;
     parentRunId?: string | null;
     runId?: string | null;
     userId?: string | null;
@@ -422,6 +457,7 @@ export async function pullNext(
           orgId: params.orgId,
           campaignId: params.campaignId,
           brandIds: params.brandIds,
+          provider: params.provider,
           pushRunId: params.runId,
           userId: params.userId,
           workflowSlug: params.workflowSlug,
@@ -471,10 +507,18 @@ export async function pullNext(
       const cacheFresh = isCacheFresh(claimed.enrichedAt);
       const needEnrich = !validEmail && !cacheFresh;
 
-      if (needEnrich && claimed.apolloPersonId) {
-        let enrichResult: Awaited<ReturnType<typeof apolloEnrich>>;
+      // Reveal a verified email via the gateway resolve-email (name + org domain).
+      // The gateway has no enrich-by-person-id endpoint, so we resolve by identity.
+      // Needs first/last name + an org domain; without them the lead can't be resolved.
+      const canResolve = !!(claimed.firstName && claimed.lastName && claimed.domain);
+      if (needEnrich && canResolve) {
+        let enrichResult: Awaited<ReturnType<typeof resolveEmail>>;
         try {
-          enrichResult = await apolloEnrich(claimed.apolloPersonId, {
+          enrichResult = await resolveEmail({
+            provider: params.provider,
+            firstName: claimed.firstName as string,
+            lastName: claimed.lastName as string,
+            domain: claimed.domain as string,
             runId: params.runId,
             orgId: params.orgId,
             userId: params.userId,
@@ -484,7 +528,7 @@ export async function pullNext(
             featureSlug: params.featureSlug,
           });
         } catch (err) {
-          if (isApolloCreditInsufficientError(err)) {
+          if (isPeopleCreditInsufficientError(err)) {
             await db
               .update(leadsCampaigns)
               .set({ status: "buffered", updatedAt: new Date() })
@@ -502,28 +546,20 @@ export async function pullNext(
           if (enrichResult.person.email) {
             const primary = enrichResult.person.email;
             const primaryStatus = enrichResult.person.emailStatus ?? null;
-            const candidates = [primary, ...(enrichResult.person.personalEmails ?? [])];
-            let attached: { value: string; status: string | null } | null = null;
-            for (const candidate of candidates) {
-              const res = await upsertContactMethod({
-                leadId: claimed.leadId,
-                channel: "email",
-                value: candidate,
-                status: candidate === primary ? primaryStatus : null,
-                source: "apollo",
-              });
-              if (res.inserted) {
-                attached = { value: candidate, status: candidate === primary ? primaryStatus : null };
-                break;
-              }
-            }
-            if (attached) {
-              email = attached.value;
-              emailStatus = attached.status;
+            const res = await upsertContactMethod({
+              leadId: claimed.leadId,
+              channel: "email",
+              value: primary,
+              status: primaryStatus,
+              source: params.provider,
+            });
+            if (res.inserted) {
+              email = primary;
+              emailStatus = primaryStatus;
             } else {
               await settleSkip(
                 "email_collision_other_lead",
-                `All Apollo emails already attached to other leads, candidates=[${candidates.join(",")}], leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
+                `Resolved email already attached to another lead, email=${primary}, leadId=${claimed.leadId}, apolloPersonId=${claimed.apolloPersonId ?? "none"}, campaignId=${params.campaignId}`,
               );
               continue;
             }

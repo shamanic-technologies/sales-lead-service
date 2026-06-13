@@ -24,8 +24,10 @@ export const LEAD_SERVICE_API_KEY = required("LEAD_SERVICE_API_KEY");
 // LEAD_SERVICE_DATABASE_URL is validated in db/index.ts at import time
 
 // --- Downstream services ---
-export const APOLLO_SERVICE_URL = required("APOLLO_SERVICE_URL");
-export const APOLLO_SERVICE_API_KEY = required("APOLLO_SERVICE_API_KEY");
+// People sourcing goes through the human-service people gateway (apollo OR apify),
+// never apollo-service / apify-service directly.
+export const HUMAN_SERVICE_URL = required("HUMAN_SERVICE_URL");
+export const HUMAN_SERVICE_API_KEY = required("HUMAN_SERVICE_API_KEY");
 
 export const BRAND_SERVICE_URL = required("BRAND_SERVICE_URL");
 export const BRAND_SERVICE_API_KEY = required("BRAND_SERVICE_API_KEY");

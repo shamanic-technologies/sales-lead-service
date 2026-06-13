@@ -886,7 +886,16 @@ export const FullLeadSchema = z
 // --- Buffer Next ---
 
 export const BufferNextRequestSchema = z
-  .object({})
+  .object({
+    provider: z
+      .enum(["apollo", "apify"])
+      .optional()
+      .openapi({
+        description:
+          "Lead provider to source through the human-service people gateway. 'apollo' (rich search + reveal) or 'apify' (verified-email waterfall). Omitted = apollo (today's behavior, preserved for existing callers).",
+        example: "apollo",
+      }),
+  })
   .openapi("BufferNextRequest");
 
 const ServedLeadSchema = z

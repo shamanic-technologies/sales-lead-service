@@ -118,9 +118,9 @@ describe("registerProviders", () => {
       json: () =>
         Promise.resolve({
           requirements: [
-            { service: "apollo", method: "POST", path: "/search/next", provider: "apollo" },
-            { service: "apollo", method: "POST", path: "/search/dry-run", provider: "apollo" },
-            { service: "apollo", method: "POST", path: "/enrich", provider: "apollo" },
+            { service: "human", method: "POST", path: "/orgs/people/search", provider: "apollo" },
+            { service: "human", method: "POST", path: "/orgs/people/search/dry-run", provider: "apollo" },
+            { service: "human", method: "POST", path: "/orgs/people/resolve-email", provider: "apollo" },
             { service: "chat", method: "POST", path: "/complete", provider: "google" },
           ],
           providers: ["apollo", "google"],
@@ -141,12 +141,11 @@ describe("registerProviders", () => {
     expect(mockFetch).toHaveBeenCalledTimes(3);
 
     const queryBody = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(queryBody.endpoints).toHaveLength(5);
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search/next" });
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/search/dry-run" });
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/enrich" });
+    expect(queryBody.endpoints).toHaveLength(4);
+    expect(queryBody.endpoints).toContainEqual({ service: "human", method: "POST", path: "/orgs/people/search" });
+    expect(queryBody.endpoints).toContainEqual({ service: "human", method: "POST", path: "/orgs/people/search/dry-run" });
+    expect(queryBody.endpoints).toContainEqual({ service: "human", method: "POST", path: "/orgs/people/resolve-email" });
     expect(queryBody.endpoints).toContainEqual({ service: "chat", method: "POST", path: "/complete" });
-    expect(queryBody.endpoints).toContainEqual({ service: "apollo", method: "POST", path: "/stats" });
 
     const registrationCalls = mockFetch.mock.calls.slice(1);
     const registeredPairs = registrationCalls.map(([url, opts]: [string, RequestInit & { headers: Record<string, string> }]) => ({
@@ -185,7 +184,7 @@ describe("registerProviders", () => {
       json: () =>
         Promise.resolve({
           requirements: [
-            { service: "apollo", method: "POST", path: "/search/next", provider: "apollo" },
+            { service: "human", method: "POST", path: "/orgs/people/search", provider: "apollo" },
             { service: "chat", method: "POST", path: "/complete", provider: "google" },
           ],
           providers: ["apollo", "google"],

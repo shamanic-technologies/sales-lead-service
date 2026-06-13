@@ -1092,7 +1092,17 @@
       },
       "BufferNextRequest": {
         "type": "object",
-        "properties": {}
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "apollo",
+              "apify"
+            ],
+            "description": "Lead provider to source through the human-service people gateway. 'apollo' (rich search + reveal) or 'apify' (verified-email waterfall). Omitted = apollo (today's behavior, preserved for existing callers).",
+            "example": "apollo"
+          }
+        }
       },
       "LeadsResponse": {
         "type": "object",
