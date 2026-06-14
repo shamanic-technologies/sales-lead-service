@@ -90,7 +90,16 @@ const DEFAULT_STATUS: FlattenedStatus = {
   global: { bounced: false, unsubscribed: false },
 };
 
+// A single brand can carry 50k+ leads_campaigns rows. Hydrating + serializing all of
+// them at once OOMs the heap (the full FullLead object graph + the ~150MB JSON string
+// both live in memory simultaneously → StreamBase::Writev allocation failure). We instead
+// hydrate + serialize the response one chunk of rows at a time and STREAM each chunk to the
+// socket, so peak memory is bounded to one chunk regardless of the brand's lead count.
+// The wire shape is byte-identical to the old res.json({ leads }) — `{"leads":[...]}`.
+const LEADS_STREAM_CHUNK_SIZE = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
+
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+  let streamingStarted = false;
   try {
     if (req.runId) {
       traceEvent(req.runId, { service: "lead-service", event: "leads-query-start", detail: `orgId=${req.orgId}` }, req.headers).catch(() => {});
@@ -136,9 +145,6 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
       .where(and(...conditions));
 
-    const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
-    const fullLeadByLeadId = await buildFullLeadsBatch(leadIds);
-
     const primaryEmail = (lead: FullLead | undefined): { value: string; status: string | null } | null => {
       if (!lead) return null;
       const email = lead.contacts.find((c) => c.channel === "email");
@@ -151,69 +157,93 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
     const context = getServiceContext(req);
 
-    const statusMap = new Map<string, StatusResult>();
-    if (hasScopeForStatus) {
-      const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
-      for (const row of rows) {
-        if (row.status !== "served") continue;
-        const fullLead = fullLeadByLeadId.get(row.leadId);
-        const email = primaryEmail(fullLead)?.value;
-        if (!email) continue;
-        const primaryBrandId = row.brandIds[0] ?? "unknown";
-        if (!groups.has(primaryBrandId)) {
-          groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
+    // The DB query above is the last point a clean 500 can be sent. Everything below
+    // writes to the socket; from here on, failures destroy the stream (headers are sent).
+    res.setHeader("Content-Type", "application/json");
+    res.write('{"leads":[');
+    streamingStarted = true;
+
+    let wroteFirst = false;
+    for (let start = 0; start < rows.length; start += LEADS_STREAM_CHUNK_SIZE) {
+      const chunkRows = rows.slice(start, start + LEADS_STREAM_CHUNK_SIZE);
+      const chunkLeadIds = Array.from(new Set(chunkRows.map((r) => r.leadId)));
+      const fullLeadByLeadId = await buildFullLeadsBatch(chunkLeadIds);
+
+      // Delivery-status overlay, scoped to this chunk's served rows only.
+      const statusMap = new Map<string, StatusResult>();
+      if (hasScopeForStatus) {
+        const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
+        for (const row of chunkRows) {
+          if (row.status !== "served") continue;
+          const email = primaryEmail(fullLeadByLeadId.get(row.leadId))?.value;
+          if (!email) continue;
+          const primaryBrandId = row.brandIds[0] ?? "unknown";
+          if (!groups.has(primaryBrandId)) {
+            groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
+          }
+          groups.get(primaryBrandId)!.items.push({ email });
         }
-        groups.get(primaryBrandId)!.items.push({ email });
+        await Promise.all(
+          Array.from(groups.values()).map(async (group) => {
+            const response = await checkDeliveryStatus(group.brandId, campaignIdStr, group.items, context);
+            for (const result of response.results) statusMap.set(result.email, result);
+          }),
+        );
       }
-      await Promise.all(
-        Array.from(groups.values()).map(async (group) => {
-          const response = await checkDeliveryStatus(group.brandId, campaignIdStr, group.items, context);
-          for (const result of response.results) statusMap.set(result.email, result);
-        }),
-      );
+
+      for (const row of chunkRows) {
+        const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;
+        const email = primaryEmail(fullLead ?? undefined);
+        const emailValue = email?.value ?? "";
+        const emailStatus = email?.status ?? null;
+        const statusResult = statusMap.get(emailValue);
+        const deliveryStatus = hasScopeForStatus && row.status === "served"
+          ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+          : DEFAULT_STATUS;
+
+        const leadOut = {
+          id: row.id,
+          leadId: row.leadId,
+          namespace: "apollo",
+          email: emailValue,
+          apolloPersonId: row.leadApolloPersonId ?? null,
+          parentRunId: row.parentRunId,
+          runId: row.runId,
+          brandIds: row.brandIds,
+          campaignId: row.campaignId,
+          orgId: row.orgId,
+          userId: row.userId ?? null,
+          workflowSlug: row.workflowSlug ?? null,
+          featureSlug: row.featureSlug ?? null,
+          servedAt: row.servedAt ? row.servedAt.toISOString() : null,
+          status: row.status as "buffered" | "skipped" | "claimed" | "served",
+          emailStatus,
+          lead: fullLead,
+          statusReason: row.statusReason ?? null,
+          statusDetails: row.statusDetails ?? null,
+          ...deliveryStatus,
+        };
+
+        res.write((wroteFirst ? "," : "") + JSON.stringify(leadOut));
+        wroteFirst = true;
+      }
     }
 
-    const allLeads = rows.map((row) => {
-      const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;
-      const email = primaryEmail(fullLead ?? undefined);
-      const emailValue = email?.value ?? "";
-      const emailStatus = email?.status ?? null;
-      const statusResult = statusMap.get(emailValue);
-      const deliveryStatus = hasScopeForStatus && row.status === "served"
-        ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
-        : DEFAULT_STATUS;
-
-      return {
-        id: row.id,
-        leadId: row.leadId,
-        namespace: "apollo",
-        email: emailValue,
-        apolloPersonId: row.leadApolloPersonId ?? null,
-        parentRunId: row.parentRunId,
-        runId: row.runId,
-        brandIds: row.brandIds,
-        campaignId: row.campaignId,
-        orgId: row.orgId,
-        userId: row.userId ?? null,
-        workflowSlug: row.workflowSlug ?? null,
-        featureSlug: row.featureSlug ?? null,
-        servedAt: row.servedAt ? row.servedAt.toISOString() : null,
-        status: row.status as "buffered" | "skipped" | "claimed" | "served",
-        emailStatus,
-        lead: fullLead,
-        statusReason: row.statusReason ?? null,
-        statusDetails: row.statusDetails ?? null,
-        ...deliveryStatus,
-      };
-    });
+    res.write("]}");
+    res.end();
 
     if (req.runId) {
-      traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${allLeads.length}`, data: { count: allLeads.length } }, req.headers).catch(() => {});
+      traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rows.length}`, data: { count: rows.length } }, req.headers).catch(() => {});
     }
-    res.json({ leads: allLeads });
   } catch (error) {
     console.error("[lead-service] Leads error:", error);
-    res.status(500).json({ error: "Internal server error" });
+    if (streamingStarted || res.headersSent) {
+      // Stream already open — can't send a 500 body. Destroy the socket so the caller
+      // sees a truncated/aborted response and treats it as a failure (fail loud).
+      res.destroy(error instanceof Error ? error : new Error(String(error)));
+    } else {
+      res.status(500).json({ error: "Internal server error" });
+    }
   }
 });
 
