@@ -507,18 +507,24 @@ export async function pullNext(
       const cacheFresh = isCacheFresh(claimed.enrichedAt);
       const needEnrich = !validEmail && !cacheFresh;
 
-      // Reveal a verified email via the gateway resolve-email (name + org domain).
-      // The gateway has no enrich-by-person-id endpoint, so we resolve by identity.
-      // Needs first/last name + an org domain; without them the lead can't be resolved.
-      const canResolve = !!(claimed.firstName && claimed.lastName && claimed.domain);
+      // Reveal a verified email via the gateway resolve-email. The gateway is
+      // generic: it reveals by the provider's person id (apollo /enrich, the
+      // billed path) when we have one, else by identity (name + org domain).
+      // We hand it every identity field we stored and let it pick the path —
+      // the apollo person id is only ever populated on apollo-sourced leads, so
+      // (provider, apolloPersonId) is always consistent. A lead with neither a
+      // person id nor full identity is genuinely unresolvable.
+      const hasIdentity = !!(claimed.firstName && claimed.lastName && claimed.domain);
+      const canResolve = !!claimed.apolloPersonId || hasIdentity;
       if (needEnrich && canResolve) {
         let enrichResult: Awaited<ReturnType<typeof resolveEmail>>;
         try {
           enrichResult = await resolveEmail({
             provider: params.provider,
-            firstName: claimed.firstName as string,
-            lastName: claimed.lastName as string,
-            domain: claimed.domain as string,
+            providerPersonId: claimed.apolloPersonId ?? undefined,
+            firstName: hasIdentity ? (claimed.firstName as string) : undefined,
+            lastName: hasIdentity ? (claimed.lastName as string) : undefined,
+            domain: hasIdentity ? (claimed.domain as string) : undefined,
             runId: params.runId,
             orgId: params.orgId,
             userId: params.userId,
