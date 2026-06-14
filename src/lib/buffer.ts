@@ -33,7 +33,13 @@ import {
 import { fetchCampaign } from "./campaign-client.js";
 import { extractBrandFields } from "./brand-client.js";
 
-export const VALID_EMAIL_STATUSES = new Set(["verified", "extrapolated"]);
+// Servable email-verdict statuses, provider-agnostic (the gateway normalizes
+// both providers into one neutral Person; do NOT branch on provider here):
+//   - apollo: "verified" (billed enrich) + "extrapolated" (pattern-inferred)
+//   - apify:  "deliverable" (verified-email waterfall positive verdict)
+// apify's negative verdicts (undeliverable/risky/unknown) are intentionally
+// absent — a lead whose email status isn't here is skipped as invalid.
+export const VALID_EMAIL_STATUSES = new Set(["verified", "extrapolated", "deliverable"]);
 
 /**
  * TTL for re-enriching a lead. A lead with a valid email short-circuits
