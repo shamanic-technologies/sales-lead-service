@@ -90,6 +90,54 @@ const DEFAULT_STATUS: FlattenedStatus = {
   global: { bounced: false, unsubscribed: false },
 };
 
+interface SlimLead {
+  leadId: string;
+  apolloPersonId: string | null;
+  firstName: string;
+  lastName: string;
+  name: string | null;
+  headline: string | null;
+  linkedinUrl: string | null;
+  photoUrl: string | null;
+  organization: {
+    id: string;
+    name: string | null;
+    logoUrl: string | null;
+    primaryDomain: string | null;
+    websiteUrl: string | null;
+  } | null;
+}
+
+// Slim projection of FullLead for `?view=basic`. Drops the fields no consumer reads —
+// employmentHistory, the ~34 extra organization columns, funding events — verified against
+// features-service (revenue engine) + dashboard (leads table + detail panel). Cuts the wire
+// payload ~10x (~150MB -> ~15MB for a 50k-lead brand), which is what callers actually choke
+// on: features-service parses the whole body, the dashboard transfers it on a poll timer.
+// `view` absent => full shape (unchanged, backward-compatible).
+function toSlimLead(full: FullLead | null): SlimLead | null {
+  if (!full) return null;
+  const org = full.organization;
+  return {
+    leadId: full.leadId,
+    apolloPersonId: full.apolloPersonId,
+    firstName: full.firstName,
+    lastName: full.lastName,
+    name: full.name,
+    headline: full.headline,
+    linkedinUrl: full.linkedinUrl,
+    photoUrl: full.photoUrl,
+    organization: org
+      ? {
+          id: org.id,
+          name: org.name,
+          logoUrl: org.logoUrl,
+          primaryDomain: org.primaryDomain,
+          websiteUrl: org.websiteUrl,
+        }
+      : null,
+  };
+}
+
 // A single brand can carry 50k+ leads_campaigns rows. Hydrating + serializing all of
 // them at once OOMs the heap (the full FullLead object graph + the ~150MB JSON string
 // both live in memory simultaneously → StreamBase::Writev allocation failure). We instead
@@ -156,6 +204,9 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
     const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
     const context = getServiceContext(req);
+    // `?view=basic` => slim per-lead payload (see toSlimLead). Anything else (incl. absent)
+    // => full FullLead, the existing default. No Zod default: a missing param is full.
+    const slim = req.query.view === "basic";
 
     // The DB query above is the last point a clean 500 can be sent. Everything below
     // writes to the socket; from here on, failures destroy the stream (headers are sent).
@@ -218,7 +269,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           servedAt: row.servedAt ? row.servedAt.toISOString() : null,
           status: row.status as "buffered" | "skipped" | "claimed" | "served",
           emailStatus,
-          lead: fullLead,
+          lead: slim ? toSlimLead(fullLead) : fullLead,
           statusReason: row.statusReason ?? null,
           statusDetails: row.statusDetails ?? null,
           ...deliveryStatus,
