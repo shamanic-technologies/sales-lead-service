@@ -23,7 +23,7 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `src/lib/dedup.ts` — checkDelivered() (via email-gateway), markServed() deduplication
 - `src/lib/email-gateway-client.ts` — Email-gateway POST /status client for delivery checks
 - `src/lib/leads-registry.ts` — Global lead identity registry (leads + leadEmails tables)
-- `src/lib/people-client.ts` — human-service people gateway client (provider-agnostic search/enrich via apollo OR apify; lead-service no longer calls apollo/apify directly)
+- `src/lib/people-client.ts` — human-service people gateway client (provider-agnostic search/enrich via apollo OR apify; lead-service no longer calls apollo/apify directly). **Do NOT branch on provider in the consumer** (`if (provider === "apollo")`). The gateway is provider-agnostic: pass every identity field you stored (`providerPersonId` from the apollo-specific column when present, `firstName`/`lastName`/`domain` when present) and let the gateway pick the reveal path. The `(provider, providerPersonId)` pair is what disambiguates the id — `provider` qualifies it, so a generic wire field is correct; don't push per-provider routing back into lead-service. (Set 2026-06-14, v0.21.2 apollo reveal-by-person-id regression fix.)
 - `src/lib/campaign-client.ts` — Campaign service client (fetch campaign details for search context)
 - `src/lib/brand-client.ts` — Brand service client (fetch brand details for search context)
 - `src/lib/runs-client.ts` — Runs service client for distributed tracing
