@@ -83,8 +83,8 @@ describe("CACHE_TTL_MS", () => {
 });
 
 describe("VALID_EMAIL_STATUSES", () => {
-  it("contains exactly verified and extrapolated", () => {
-    expect(VALID_EMAIL_STATUSES).toEqual(new Set(["verified", "extrapolated"]));
+  it("contains apollo verified/extrapolated and apify deliverable", () => {
+    expect(VALID_EMAIL_STATUSES).toEqual(new Set(["verified", "extrapolated", "deliverable"]));
   });
 });
 
