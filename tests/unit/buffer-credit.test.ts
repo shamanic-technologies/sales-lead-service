@@ -64,16 +64,18 @@ vi.mock("../../src/lib/people-client.js", () => ({
 }));
 
 const getPrimaryEmail = vi.fn();
+const upsertContactMethod = vi.fn();
 vi.mock("../../src/lib/leads-registry.js", () => ({
   getPrimaryEmail: (...args: unknown[]) => getPrimaryEmail(...args),
   leadHasEmail: vi.fn(),
   recordEmploymentHistory: vi.fn(),
-  upsertContactMethod: vi.fn(),
+  upsertContactMethod: (...args: unknown[]) => upsertContactMethod(...args),
   upsertLeadFromPerson: vi.fn(),
 }));
 
+const checkContacted = vi.fn();
 vi.mock("../../src/lib/dedup.js", () => ({
-  checkContacted: vi.fn(),
+  checkContacted: (...args: unknown[]) => checkContacted(...args),
   checkRaceWindow: vi.fn(),
   isAlreadyServedForBrand: vi.fn(async () => ({ blocked: false })),
 }));
@@ -107,6 +109,8 @@ describe("pullNext credit handling", () => {
     updateWhere.mockReset();
     resolveEmail.mockReset();
     getPrimaryEmail.mockReset();
+    upsertContactMethod.mockReset();
+    checkContacted.mockReset();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -146,5 +150,79 @@ describe("pullNext credit handling", () => {
       expect.stringContaining("released claimed lead"),
     );
     expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("apollo: resolves by providerPersonId even when org domain is missing", async () => {
+    sql.mockResolvedValue([{ id: "lead-campaign-1", lead_id: "lead-1" }]);
+    findLead.mockResolvedValueOnce({
+      id: "lead-1",
+      apolloPersonId: "apollo-person-1",
+      firstName: "Sara",
+      lastName: "Lee",
+      enrichedAt: null,
+    });
+    selectLimit.mockResolvedValueOnce([]); // getCurrentOrgDomain -> null
+    getPrimaryEmail.mockResolvedValue(null);
+    resolveEmail.mockResolvedValue({
+      provider: "apollo",
+      person: { email: "sara@cascobay.com", emailStatus: "verified" },
+    });
+    upsertContactMethod.mockResolvedValue({ inserted: true });
+    checkContacted.mockResolvedValue(new Map());
+
+    const result = await pullNext({
+      orgId: "org-1",
+      campaignId: "campaign-1",
+      brandIds: ["brand-1"],
+      provider: "apollo",
+      runId: "run-1",
+      userId: "user-1",
+    });
+
+    expect(result.found).toBe(true);
+    expect(resolveEmail).toHaveBeenCalledTimes(1);
+    const body = resolveEmail.mock.calls[0][0] as Record<string, unknown>;
+    expect(body).toMatchObject({ provider: "apollo", providerPersonId: "apollo-person-1" });
+    expect(body.firstName).toBeUndefined();
+    expect(body.domain).toBeUndefined();
+  });
+
+  it("apify: resolves by name + domain, never sends a providerPersonId", async () => {
+    sql.mockResolvedValue([{ id: "lead-campaign-1", lead_id: "lead-1" }]);
+    findLead.mockResolvedValueOnce({
+      id: "lead-1",
+      apolloPersonId: null,
+      firstName: "Sara",
+      lastName: "Lee",
+      enrichedAt: null,
+    });
+    selectLimit.mockResolvedValueOnce([{ domain: "cascobay.com" }]);
+    getPrimaryEmail.mockResolvedValue(null);
+    resolveEmail.mockResolvedValue({
+      provider: "apify",
+      person: { email: "sara@cascobay.com", emailStatus: "verified" },
+    });
+    upsertContactMethod.mockResolvedValue({ inserted: true });
+    checkContacted.mockResolvedValue(new Map());
+
+    const result = await pullNext({
+      orgId: "org-1",
+      campaignId: "campaign-1",
+      brandIds: ["brand-1"],
+      provider: "apify",
+      runId: "run-1",
+      userId: "user-1",
+    });
+
+    expect(result.found).toBe(true);
+    expect(resolveEmail).toHaveBeenCalledTimes(1);
+    const body = resolveEmail.mock.calls[0][0] as Record<string, unknown>;
+    expect(body).toMatchObject({
+      provider: "apify",
+      firstName: "Sara",
+      lastName: "Lee",
+      domain: "cascobay.com",
+    });
+    expect(body.providerPersonId).toBeUndefined();
   });
 });
