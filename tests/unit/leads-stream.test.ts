@@ -44,9 +44,28 @@ function fullLeadMapFor(ids: string[]) {
   for (const id of ids) {
     m.set(id, {
       leadId: id,
+      apolloPersonId: `apollo-${id}`,
+      firstName: "Jane",
+      lastName: "Doe",
+      name: "Jane Doe",
+      headline: "CEO",
+      linkedinUrl: "https://linkedin.com/in/jane",
+      photoUrl: "https://example.com/jane.jpg",
       contacts: [{ channel: "email", value: `${id}@example.com`, status: "valid", source: "apollo" }],
-      organization: null,
-      employmentHistory: [],
+      organization: {
+        id: `org-${id}`,
+        name: "Acme",
+        logoUrl: "https://example.com/acme.png",
+        primaryDomain: "acme.com",
+        websiteUrl: "https://acme.com",
+        // Heavy fields that view=basic must drop:
+        annualRevenue: "1000000",
+        keywords: ["a", "b", "c"],
+        seoDescription: "long".repeat(50),
+        industries: ["software"],
+      },
+      // Heavy field that view=basic must drop entirely:
+      employmentHistory: [{ organizationId: `org-${id}`, title: "CEO", current: true }],
     });
   }
   return m;
@@ -138,6 +157,49 @@ describe("GET /orgs/leads chunked streaming", () => {
     for (const call of buildFullLeadsBatchMock.mock.calls) {
       expect(call[0].length).toBeLessThanOrEqual(2);
     }
+  });
+
+  it("view=basic returns a slim lead (drops employmentHistory + heavy org fields)", async () => {
+    mockRows = [row(1)];
+    const app = await buildApp();
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    const lead = res.body.leads[0].lead;
+    // Kept fields
+    expect(lead.firstName).toBe("Jane");
+    expect(lead.headline).toBe("CEO");
+    expect(lead.organization).toEqual({
+      id: "org-lead-1",
+      name: "Acme",
+      logoUrl: "https://example.com/acme.png",
+      primaryDomain: "acme.com",
+      websiteUrl: "https://acme.com",
+    });
+    // Dropped fields
+    expect(lead.employmentHistory).toBeUndefined();
+    expect(lead.contacts).toBeUndefined();
+    expect(lead.organization.annualRevenue).toBeUndefined();
+    expect(lead.organization.keywords).toBeUndefined();
+    expect(lead.organization.seoDescription).toBeUndefined();
+  });
+
+  it("view absent returns the full lead shape (backward-compatible)", async () => {
+    mockRows = [row(1)];
+    const app = await buildApp();
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    const lead = res.body.leads[0].lead;
+    expect(Array.isArray(lead.employmentHistory)).toBe(true);
+    expect(lead.organization.annualRevenue).toBe("1000000");
+    expect(lead.organization.keywords).toEqual(["a", "b", "c"]);
   });
 
   it("applies delivery overlay to served rows within a chunk", async () => {

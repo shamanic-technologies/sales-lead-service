@@ -1441,6 +1441,18 @@ registry.registerPath({
         "When absent, behavior + response shape are unchanged.",
       schema: { type: "string" as const },
     },
+    {
+      in: "query" as const,
+      name: "view",
+      required: false,
+      description:
+        "Per-lead payload size. `basic` returns a slim `lead` object (firstName, lastName, name, " +
+        "headline, linkedinUrl, photoUrl, apolloPersonId + organization {id, name, logoUrl, " +
+        "primaryDomain, websiteUrl}); drops employmentHistory, funding events, and the extra " +
+        "organization columns. Absent or any other value => the full FullLead payload (default, " +
+        "backward-compatible). Use `basic` for list views to cut the response ~10x.",
+      schema: { type: "string" as const, enum: ["basic", "full"] },
+    },
   ],
   responses: {
     200: {
