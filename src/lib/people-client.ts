@@ -245,8 +245,11 @@ export async function peopleDryRun(options: {
 }
 
 // --- Resolve Email (reveal a verified email for a known person) ---
-// Replaces the old apollo enrich-by-personId path: the gateway has no
-// enrich-by-id endpoint, so we resolve by name + organization domain.
+// The gateway is generic: reveal EITHER by `providerPersonId` (the id the same
+// provider returned at search time — apollo routes it to /enrich, the billed
+// path) OR by `firstName` + `lastName` + `domain` (identity match). lead-service
+// passes whatever identity it stored; the gateway picks the reveal path. The
+// pair (provider, providerPersonId) is what makes the id unambiguous.
 
 export interface ResolveEmailResult {
   provider: PeopleProvider;
@@ -255,9 +258,11 @@ export interface ResolveEmailResult {
 
 export async function resolveEmail(options: {
   provider: PeopleProvider;
-  firstName: string;
-  lastName: string;
-  domain: string;
+  /** Reveal by the provider's person id (apollo /enrich, the billed path). */
+  providerPersonId?: string;
+  firstName?: string;
+  lastName?: string;
+  domain?: string;
   includeInferred?: boolean;
   orgId: string;
   userId?: string | null;
@@ -267,12 +272,11 @@ export async function resolveEmail(options: {
   workflowSlug?: string;
   featureSlug?: string;
 }): Promise<ResolveEmailResult> {
-  const body: Record<string, unknown> = {
-    provider: options.provider,
-    firstName: options.firstName,
-    lastName: options.lastName,
-    domain: options.domain,
-  };
+  const body: Record<string, unknown> = { provider: options.provider };
+  if (options.providerPersonId) body.providerPersonId = options.providerPersonId;
+  if (options.firstName) body.firstName = options.firstName;
+  if (options.lastName) body.lastName = options.lastName;
+  if (options.domain) body.domain = options.domain;
   if (options.includeInferred !== undefined) body.includeInferred = options.includeInferred;
 
   return callGateway<ResolveEmailResult>("/orgs/people/resolve-email", {

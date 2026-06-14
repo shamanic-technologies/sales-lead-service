@@ -122,6 +122,42 @@ describe("people-client", () => {
       });
       expect(result.person).toEqual({ email: "a@b.com" });
     });
+
+    it("posts provider + providerPersonId (no name/domain) for the apollo enrich path", async () => {
+      const { calls } = mockFetch({ provider: "apollo", person: { email: "a@b.com" } });
+      await resolveEmail({
+        provider: "apollo",
+        providerPersonId: "apollo-person-1",
+        orgId: "org-1",
+        userId: "user-1",
+      });
+
+      const body = parseBody(calls[0].init);
+      expect(body).toEqual({ provider: "apollo", providerPersonId: "apollo-person-1" });
+      expect(body).not.toHaveProperty("firstName");
+      expect(body).not.toHaveProperty("domain");
+    });
+
+    it("includes providerPersonId alongside name+domain when both are present", async () => {
+      const { calls } = mockFetch({ provider: "apollo", person: { email: "a@b.com" } });
+      await resolveEmail({
+        provider: "apollo",
+        providerPersonId: "apollo-person-1",
+        firstName: "Sara",
+        lastName: "Lee",
+        domain: "cascobay.com",
+        orgId: "org-1",
+      });
+
+      const body = parseBody(calls[0].init);
+      expect(body).toEqual({
+        provider: "apollo",
+        providerPersonId: "apollo-person-1",
+        firstName: "Sara",
+        lastName: "Lee",
+        domain: "cascobay.com",
+      });
+    });
   });
 
   describe("peopleDryRun", () => {
