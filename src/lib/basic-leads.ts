@@ -39,6 +39,11 @@ export interface BasicLeadRow {
   servedAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
+  goal: string | null;
+  activeGoalId: string | null;
+  brandProfileId: string | null;
+  customerPersonaId: string | null;
+  customerProfileId: string | null;
   createdAt: Date;
   leadApolloPersonId: string | null;
   lead: BasicSlimLead | null;
@@ -76,6 +81,11 @@ interface RawBasicRow {
   served_at: RawTimestamp;
   workflow_slug: string | null;
   feature_slug: string | null;
+  goal: string | null;
+  active_goal_id: string | null;
+  brand_profile_id: string | null;
+  customer_persona_id: string | null;
+  customer_profile_id: string | null;
   created_at: Date | string;
   l_id: string | null;
   apollo_person_id: string | null;
@@ -158,6 +168,11 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     servedAt: toIsoTimestamp(r.served_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
+    goal: r.goal,
+    activeGoalId: r.active_goal_id,
+    brandProfileId: r.brand_profile_id,
+    customerPersonaId: r.customer_persona_id,
+    customerProfileId: r.customer_profile_id,
     createdAt: toDateTimestamp(r.created_at),
     leadApolloPersonId: r.apollo_person_id,
     lead,
@@ -174,7 +189,9 @@ function basicLeadQuery(
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
-      lc.served_at, lc.workflow_slug, lc.feature_slug, lc.created_at,
+      lc.served_at, lc.workflow_slug, lc.feature_slug,
+      lc.goal, lc.active_goal_id, lc.brand_profile_id, lc.customer_persona_id, lc.customer_profile_id,
+      lc.created_at,
       l.id AS l_id, l.apollo_person_id, l.first_name, l.last_name, l.name,
       l.headline, l.linkedin_url, l.photo_url,
       org.org_id AS org_id_inner, org.org_name, org.logo_url, org.primary_domain, org.website_url,

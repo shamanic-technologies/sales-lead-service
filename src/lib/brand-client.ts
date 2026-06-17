@@ -9,7 +9,19 @@ export interface ExtractedField {
   sourceUrls: string[] | null;
 }
 
-type ServiceContext = { userId?: string; runId?: string; campaignId?: string; brandId?: string; workflowSlug?: string; featureSlug?: string };
+type ServiceContext = {
+  userId?: string;
+  runId?: string;
+  campaignId?: string;
+  brandId?: string;
+  workflowSlug?: string;
+  featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
+};
 
 function buildHeaders(orgId?: string | null, context?: ServiceContext): Record<string, string> {
   const headers: Record<string, string> = {
@@ -23,6 +35,11 @@ function buildHeaders(orgId?: string | null, context?: ServiceContext): Record<s
   if (context?.brandId) headers["x-brand-id"] = context.brandId;
   if (context?.workflowSlug) headers["x-workflow-slug"] = context.workflowSlug;
   if (context?.featureSlug) headers["x-feature-slug"] = context.featureSlug;
+  if (context?.goal) headers["x-goal"] = context.goal;
+  if (context?.activeGoalId) headers["x-active-goal-id"] = context.activeGoalId;
+  if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
+  if (context?.customerPersonaId) headers["x-customer-persona-id"] = context.customerPersonaId;
+  if (context?.customerProfileId) headers["x-customer-profile-id"] = context.customerProfileId;
   return headers;
 }
 

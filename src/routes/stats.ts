@@ -23,14 +23,36 @@ const VALID_GROUP_BY = [
   "featureSlug",
   "workflowDynastySlug",
   "featureDynastySlug",
+  "goal",
+  "activeGoalId",
+  "brandProfileId",
+  "customerPersonaId",
+  "customerProfileId",
 ] as const;
 type GroupByField = (typeof VALID_GROUP_BY)[number];
+type AttributionGroupByField = Extract<
+  GroupByField,
+  "goal" | "activeGoalId" | "brandProfileId" | "customerPersonaId" | "customerProfileId"
+>;
 
 const COLUMN_MAP = {
   campaignId: leadsCampaigns.campaignId,
   workflowSlug: leadsCampaigns.workflowSlug,
   featureSlug: leadsCampaigns.featureSlug,
+  goal: leadsCampaigns.goal,
+  activeGoalId: leadsCampaigns.activeGoalId,
+  brandProfileId: leadsCampaigns.brandProfileId,
+  customerPersonaId: leadsCampaigns.customerPersonaId,
+  customerProfileId: leadsCampaigns.customerProfileId,
 } as const;
+
+const ATTRIBUTION_GROUP_BY = new Set<AttributionGroupByField>([
+  "goal",
+  "activeGoalId",
+  "brandProfileId",
+  "customerPersonaId",
+  "customerProfileId",
+]);
 
 const EG_GROUP_BY_MAP: Record<string, string> = {
   campaignId: "campaignId",
@@ -78,12 +100,28 @@ async function resolveDynastySlugs(
 }
 
 function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowSlugs: string[] | null; featureSlugs: string[] | null }) {
-  const { brandId, campaignId, orgId, userId, runIds } = req.query;
+  const {
+    brandId,
+    campaignId,
+    orgId,
+    userId,
+    runIds,
+    goal,
+    activeGoalId,
+    brandProfileId,
+    customerPersonaId,
+    customerProfileId,
+  } = req.query;
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const brandIdStr = str(brandId);
   const campaignIdStr = str(campaignId);
   const orgIdStr = str(orgId);
   const userIdStr = str(userId);
+  const goalStr = str(goal);
+  const activeGoalIdStr = str(activeGoalId);
+  const brandProfileIdStr = str(brandProfileId);
+  const customerPersonaIdStr = str(customerPersonaId);
+  const customerProfileIdStr = str(customerProfileId);
   const runIdList = typeof runIds === "string" ? runIds.split(",").filter(Boolean) : [];
 
   const conds: SQL[] = [eq(leadsCampaigns.orgId, req.orgId!)];
@@ -91,6 +129,11 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   if (campaignIdStr) conds.push(eq(leadsCampaigns.campaignId, campaignIdStr));
   if (orgIdStr) conds.push(eq(leadsCampaigns.orgId, orgIdStr));
   if (userIdStr) conds.push(eq(leadsCampaigns.userId, userIdStr));
+  if (goalStr) conds.push(eq(leadsCampaigns.goal, goalStr));
+  if (activeGoalIdStr) conds.push(eq(leadsCampaigns.activeGoalId, activeGoalIdStr));
+  if (brandProfileIdStr) conds.push(eq(leadsCampaigns.brandProfileId, brandProfileIdStr));
+  if (customerPersonaIdStr) conds.push(eq(leadsCampaigns.customerPersonaId, customerPersonaIdStr));
+  if (customerProfileIdStr) conds.push(eq(leadsCampaigns.customerProfileId, customerProfileIdStr));
   if (runIdList.length > 0) {
     conds.push(
       sql`(${leadsCampaigns.parentRunId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]) OR ${leadsCampaigns.runId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]) OR ${leadsCampaigns.pushRunId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]))`,
@@ -102,7 +145,19 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   if (dynastyResolved.featureSlugs && dynastyResolved.featureSlugs.length > 0) {
     conds.push(inArray(leadsCampaigns.featureSlug, dynastyResolved.featureSlugs));
   }
-  return { conds, runIdList, brandIdStr, campaignIdStr, orgIdStr };
+  return {
+    conds,
+    runIdList,
+    brandIdStr,
+    campaignIdStr,
+    orgIdStr,
+    hasAttributionFilter:
+      !!goalStr ||
+      !!activeGoalIdStr ||
+      !!brandProfileIdStr ||
+      !!customerPersonaIdStr ||
+      !!customerProfileIdStr,
+  };
 }
 
 const ZERO_RECIPIENT_STATS: RecipientStats = {
@@ -165,6 +220,226 @@ function applyStatusCounts(group: GroupStats, status: string, n: number) {
   else if (status === "claimed") group.claimed += n;
 }
 
+function addRecipientStats(group: GroupStats, stats: RecipientStats) {
+  for (const k of Object.keys(stats) as (keyof RecipientStats)[]) {
+    if (k === "repliesDetail") continue;
+    (group.byOutreachStatus[k] as number) += stats[k] as number;
+  }
+  for (const k of Object.keys(stats.repliesDetail) as (keyof RecipientStats["repliesDetail"])[]) {
+    (group.repliesDetail[k] as number) += stats.repliesDetail[k] as number;
+    (group.byOutreachStatus.repliesDetail[k] as number) += stats.repliesDetail[k] as number;
+  }
+}
+
+function isAttributionGroupBy(field: string | undefined): field is AttributionGroupByField {
+  return !!field && ATTRIBUTION_GROUP_BY.has(field as AttributionGroupByField);
+}
+
+interface StatusCountRow {
+  key?: string | null;
+  status: string;
+  count: number;
+}
+
+interface RecipientEvidenceRow {
+  id: string;
+  campaignId: string;
+  brandIds: string[];
+  workflowSlug: string | null;
+  featureSlug: string | null;
+  goal: string | null;
+  activeGoalId: string | null;
+  brandProfileId: string | null;
+  customerPersonaId: string | null;
+  customerProfileId: string | null;
+  email: string;
+}
+
+function normalizeGroupKey(
+  groupBy: GroupByField,
+  key: string | null | undefined,
+  dynastyMap?: Map<string, string>,
+): string | null {
+  if ((key == null || key === "") && isAttributionGroupBy(groupBy)) return null;
+  if (groupBy === "workflowDynastySlug" || groupBy === "featureDynastySlug") {
+    return dynastyMap?.get(key ?? "") ?? key ?? "unknown";
+  }
+  return key ?? "unknown";
+}
+
+function groupKeysForEvidenceRow(
+  row: RecipientEvidenceRow,
+  groupBy: GroupByField | undefined,
+  dynastyMap?: Map<string, string>,
+): string[] {
+  if (!groupBy) return ["__flat__"];
+  if (groupBy === "brandId") return row.brandIds.length > 0 ? row.brandIds : ["unknown"];
+  if (groupBy === "workflowDynastySlug") {
+    return [normalizeGroupKey(groupBy, row.workflowSlug, dynastyMap) ?? "unknown"];
+  }
+  if (groupBy === "featureDynastySlug") {
+    return [normalizeGroupKey(groupBy, row.featureSlug, dynastyMap) ?? "unknown"];
+  }
+
+  const value = row[groupBy as keyof RecipientEvidenceRow];
+  if (typeof value !== "string" || value.length === 0) {
+    return isAttributionGroupBy(groupBy) ? [] : ["unknown"];
+  }
+  return [value];
+}
+
+function getGroupedStats(
+  groups: Map<string, GroupStats>,
+  key: string,
+): GroupStats {
+  if (!groups.has(key)) groups.set(key, newGroupStats());
+  return groups.get(key)!;
+}
+
+async function fetchStatusCounts(
+  groupBy: GroupByField | undefined,
+  conds: SQL[],
+): Promise<StatusCountRow[]> {
+  if (!groupBy) {
+    const rows = await db
+      .select({ status: leadsCampaigns.status, count: count() })
+      .from(leadsCampaigns)
+      .where(and(...conds))
+      .groupBy(leadsCampaigns.status);
+    return rows;
+  }
+
+  if (groupBy === "brandId") {
+    const rows = await db.execute<{ key: string; status: string; count: number }>(sql`
+      SELECT unnest(brand_ids) AS key, status, COUNT(*)::int AS count
+      FROM leads_campaigns
+      WHERE ${and(...conds)}
+      GROUP BY key, status
+    `);
+    return rows as unknown as StatusCountRow[];
+  }
+
+  const col =
+    groupBy === "workflowDynastySlug"
+      ? leadsCampaigns.workflowSlug
+      : groupBy === "featureDynastySlug"
+        ? leadsCampaigns.featureSlug
+        : COLUMN_MAP[groupBy as keyof typeof COLUMN_MAP];
+  const rows = await db
+    .select({ key: col, status: leadsCampaigns.status, count: count() })
+    .from(leadsCampaigns)
+    .where(and(...conds))
+    .groupBy(col, leadsCampaigns.status);
+  return rows;
+}
+
+async function fetchRecipientEvidenceRows(conds: SQL[]): Promise<RecipientEvidenceRow[]> {
+  const rows = await db.execute<Record<string, unknown>>(sql`
+    SELECT
+      leads_campaigns.id AS "id",
+      leads_campaigns.campaign_id AS "campaignId",
+      leads_campaigns.brand_ids AS "brandIds",
+      leads_campaigns.workflow_slug AS "workflowSlug",
+      leads_campaigns.feature_slug AS "featureSlug",
+      leads_campaigns.goal AS "goal",
+      leads_campaigns.active_goal_id AS "activeGoalId",
+      leads_campaigns.brand_profile_id AS "brandProfileId",
+      leads_campaigns.customer_persona_id AS "customerPersonaId",
+      leads_campaigns.customer_profile_id AS "customerProfileId",
+      em.value AS "email"
+    FROM leads_campaigns
+    JOIN LATERAL (
+      SELECT value
+      FROM lead_contact_methods
+      WHERE lead_contact_methods.lead_id = leads_campaigns.lead_id
+        AND lead_contact_methods.channel = 'email'
+      ORDER BY lead_contact_methods.created_at ASC NULLS LAST, lead_contact_methods.value ASC
+      LIMIT 1
+    ) em ON true
+    WHERE ${and(...conds)}
+      AND leads_campaigns.status = 'served'
+      AND em.value IS NOT NULL
+  `);
+  return rows as unknown as RecipientEvidenceRow[];
+}
+
+async function buildRecipientStatsByCampaign(
+  evidenceRows: RecipientEvidenceRow[],
+  context: ReturnType<typeof getServiceContext>,
+): Promise<Map<string, Map<string, RecipientStats>>> {
+  const rowsByCampaign = new Map<string, RecipientEvidenceRow[]>();
+  for (const row of evidenceRows) {
+    if (!rowsByCampaign.has(row.campaignId)) rowsByCampaign.set(row.campaignId, []);
+    rowsByCampaign.get(row.campaignId)!.push(row);
+  }
+
+  const out = new Map<string, Map<string, RecipientStats>>();
+  await Promise.all(
+    Array.from(rowsByCampaign.entries()).map(async ([campaignId, rows]) => {
+      const primaryBrandId = rows.find((r) => r.brandIds.length > 0)?.brandIds[0];
+      const stats = await fetchEmailGatewayStats(
+        {
+          campaignId,
+          brandId: primaryBrandId,
+          groupBy: "recipientEmail",
+        },
+        context,
+      );
+      const byEmail = new Map<string, RecipientStats>();
+      if ("groups" in stats) {
+        for (const group of (stats as EmailGatewayGroupedStatsResponse).groups) {
+          const merged = mergeRecipientStats(group.broadcast, group.transactional);
+          byEmail.set(group.key.toLowerCase(), merged.byOutreachStatus);
+        }
+      }
+      out.set(campaignId, byEmail);
+    }),
+  );
+
+  return out;
+}
+
+async function buildAttributionAwareStats(
+  groupBy: GroupByField | undefined,
+  conds: SQL[],
+  context: ReturnType<typeof getServiceContext>,
+  dynastyMap?: Map<string, string>,
+): Promise<GroupStats | Map<string, GroupStats>> {
+  const [statusRows, evidenceRows] = await Promise.all([
+    fetchStatusCounts(groupBy, conds),
+    fetchRecipientEvidenceRows(conds),
+  ]);
+
+  const recipientStatsByCampaign = await buildRecipientStatsByCampaign(evidenceRows, context);
+
+  if (!groupBy) {
+    const flat = newGroupStats();
+    for (const row of statusRows) applyStatusCounts(flat, row.status, row.count);
+    for (const row of evidenceRows) {
+      const stats = recipientStatsByCampaign.get(row.campaignId)?.get(row.email.toLowerCase());
+      if (stats) addRecipientStats(flat, stats);
+    }
+    return flat;
+  }
+
+  const groups = new Map<string, GroupStats>();
+  for (const row of statusRows) {
+    const key = normalizeGroupKey(groupBy, row.key, dynastyMap);
+    if (key == null) continue;
+    applyStatusCounts(getGroupedStats(groups, key), row.status, row.count);
+  }
+
+  for (const row of evidenceRows) {
+    const stats = recipientStatsByCampaign.get(row.campaignId)?.get(row.email.toLowerCase());
+    if (!stats) continue;
+    for (const key of groupKeysForEvidenceRow(row, groupBy, dynastyMap)) {
+      addRecipientStats(getGroupedStats(groups, key), stats);
+    }
+  }
+
+  return groups;
+}
+
 const ZERO_STATS = { groups: [] };
 
 router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
@@ -194,12 +469,39 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
 
     const conds = buildConditions(req, dynastyResolved);
     const egContext = getServiceContext(req);
+    const groupBy = groupByParam as GroupByField | undefined;
 
     const egParams: Parameters<typeof fetchEmailGatewayStats>[0] = {};
     if (conds.brandIdStr) egParams.brandId = conds.brandIdStr;
     if (conds.campaignIdStr) egParams.campaignId = conds.campaignIdStr;
     if (dynastyResolved.workflowSlugs) egParams.workflowSlugs = dynastyResolved.workflowSlugs.join(",");
     if (dynastyResolved.featureSlugs) egParams.featureSlugs = dynastyResolved.featureSlugs.join(",");
+
+    if (conds.hasAttributionFilter || isAttributionGroupBy(groupByParam)) {
+      const dynastyContext = { orgId: req.orgId, userId: req.userId, runId: req.runId };
+      const dynastyMap =
+        groupBy === "workflowDynastySlug"
+          ? await fetchWorkflowDynastyMap(dynastyContext)
+          : groupBy === "featureDynastySlug"
+            ? await fetchFeatureDynastyMap(dynastyContext)
+            : undefined;
+      const attributionStats = await buildAttributionAwareStats(groupBy, conds.conds, egContext, dynastyMap);
+      if (attributionStats instanceof Map) {
+        res.json({
+          groups: Array.from(attributionStats.entries()).map(([key, stats]) => ({ key, ...stats })),
+        });
+      } else {
+        res.json({
+          totalLeads: attributionStats.totalLeads,
+          byOutreachStatus: attributionStats.byOutreachStatus,
+          repliesDetail: attributionStats.repliesDetail,
+          buffered: attributionStats.buffered,
+          skipped: attributionStats.skipped,
+          claimed: attributionStats.claimed,
+        });
+      }
+      return;
+    }
 
     if (groupByParam === "workflowDynastySlug" || groupByParam === "featureDynastySlug") {
       const isWorkflow = groupByParam === "workflowDynastySlug";

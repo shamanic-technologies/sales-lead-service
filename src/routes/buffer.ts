@@ -55,6 +55,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     brandId: req.brandId,
     workflowSlug,
     featureSlug: req.featureSlug,
+    goal: req.goal,
+    brandProfileId: req.brandProfileId,
+    customerProfileId: req.customerProfileId,
   };
 
   // Idempotency on x-run-id: if this run already got a lead, return the cached response
@@ -97,6 +100,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     campaignId,
     workflowSlug,
     featureSlug: req.featureSlug,
+    goal: req.goal,
+    brandProfileId: req.brandProfileId,
+    customerProfileId: req.customerProfileId,
   });
   const serveRunId = childRun.id;
 
@@ -116,6 +122,11 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         userId: req.userId ?? null,
         workflowSlug,
         featureSlug: req.featureSlug,
+        goal: req.goal ?? null,
+        activeGoalId: req.activeGoalId ?? null,
+        brandProfileId: req.brandProfileId ?? null,
+        customerPersonaId: req.customerPersonaId ?? null,
+        customerProfileId: req.customerProfileId ?? null,
       },
       pullSignal,
     );
