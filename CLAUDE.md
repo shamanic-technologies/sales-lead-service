@@ -34,6 +34,13 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `tests/` — Test files (`*.test.ts`)
 - `openapi.json` — Auto-generated from Zod schemas, do NOT edit manually
 
+## Data Layering
+
+- lead-service owns silver lead entities (`leads`, `lead_contact_methods`, `leads_organizations`, `organizations`) and per-campaign lifecycle rows (`leads_campaigns`).
+- `GET /orgs/leads?view=basic` is a Gold serving projection for dashboard list views: return only the locked slim lead shape, current-employer org summary, primary email, lifecycle fields, and live delivery overlay.
+- Prefer a Gold view/projection before a Gold table. Materialize only after profiling proves the joins themselves are the bottleneck; do not materialize live delivery status, and do not bake the known multi-`current=true` employment defect into stored Gold state.
+- For current employer reads, never trust a bare `current=true` filter alone. Use deterministic winner selection: enriched org first, newest employment row next, stable organization id last.
+
 ## API Design Rules
 
 - **Minimal request body.** Everything that workflow-service auto-injects as headers (`x-org-id`, `x-user-id`, `x-run-id`, `x-campaign-id`, `x-brand-id`, `x-workflow-slug`, `x-feature-slug`) MUST be read from headers, never duplicated in the body.
