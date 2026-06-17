@@ -4,13 +4,22 @@ import request from "supertest";
 
 // Mutable result set the mocked db query resolves to.
 let mockRows: Array<Record<string, unknown>> = [];
+let mockDbCallIndex = 0;
 
 vi.mock("../../src/db/index.js", () => ({
   db: {
     select: () => ({
       from: () => ({
         leftJoin: () => ({
-          where: () => Promise.resolve(mockRows),
+          where: () => ({
+            orderBy: () => ({
+              limit: (n: number) => {
+                const start = mockDbCallIndex * n;
+                mockDbCallIndex += 1;
+                return Promise.resolve(mockRows.slice(start, start + n));
+              },
+            }),
+          }),
         }),
       }),
     }),
@@ -87,6 +96,7 @@ function row(i: number, status = "buffered") {
     servedAt: null,
     workflowSlug: null,
     featureSlug: null,
+    createdAt: new Date(`2026-01-01T00:00:0${i}.000Z`),
     leadApolloPersonId: `apollo-${i}`,
   };
 }
@@ -95,7 +105,6 @@ function row(i: number, status = "buffered") {
 process.env.LEADS_STREAM_CHUNK_SIZE = "2";
 
 async function buildApp() {
-  vi.resetModules();
   const { default: route } = await import("../../src/routes/leads.js");
   const app = express();
   app.use(express.json());
@@ -106,6 +115,7 @@ async function buildApp() {
 describe("GET /orgs/leads chunked streaming", () => {
   beforeEach(() => {
     mockRows = [];
+    mockDbCallIndex = 0;
     buildFullLeadsBatchMock.mockReset();
     buildFullLeadsBatchMock.mockImplementation((ids: string[]) => Promise.resolve(fullLeadMapFor(ids)));
     checkDeliveryStatusMock.mockReset();
