@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
@@ -40,7 +40,6 @@ const VALID_UUID_B = "22222222-2222-4222-8222-222222222222";
 const VALID_UUID_C = "33333333-3333-4333-8333-333333333333";
 
 async function buildApp() {
-  vi.resetModules();
   const { default: route } = await import("../../src/routes/transfer-brand.js");
   const app = express();
   app.use(express.json());
@@ -49,6 +48,12 @@ async function buildApp() {
 }
 
 describe("POST /internal/transfer-brand", () => {
+  let app: express.Express;
+
+  beforeAll(async () => {
+    app = await buildApp();
+  }, 30_000);
+
   beforeEach(() => {
     findFirst.mockReset();
     insertValues.mockReset().mockResolvedValue(undefined);
@@ -57,7 +62,6 @@ describe("POST /internal/transfer-brand", () => {
   });
 
   it("rejects missing x-api-key with 401", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set("x-run-id", "run-1")
@@ -66,7 +70,6 @@ describe("POST /internal/transfer-brand", () => {
   });
 
   it("rejects missing x-run-id with 400", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set("x-api-key", "test-api-key")
@@ -80,7 +83,6 @@ describe("POST /internal/transfer-brand", () => {
     findFirst.mockResolvedValue(undefined);
     updateReturning.mockResolvedValueOnce([{ id: "row-1" }, { id: "row-2" }]);
 
-    const app = await buildApp();
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set("x-api-key", "test-api-key")
@@ -102,7 +104,6 @@ describe("POST /internal/transfer-brand", () => {
       response: { updatedTables: [{ tableName: "leads_campaigns", count: 7 }] },
     });
 
-    const app = await buildApp();
     const res = await request(app)
       .post("/internal/transfer-brand")
       .set("x-api-key", "test-api-key")
