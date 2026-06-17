@@ -29,6 +29,7 @@ function rawRow(servedAt: unknown) {
     served_at: servedAt,
     workflow_slug: null,
     feature_slug: null,
+    created_at: new Date("2026-01-01T00:00:00.000Z"),
     l_id: "lead-1",
     apollo_person_id: "apollo-1",
     first_name: "Jane",
@@ -55,18 +56,18 @@ describe("fetchBasicLeadRows", () => {
 
   it("normalizes postgres timestamp strings for servedAt", async () => {
     rawRows = [rawRow("2026-06-17 01:44:59.123456+00")];
-    const { fetchBasicLeadRows } = await import("../../src/lib/basic-leads.js");
+    const { fetchBasicLeadChunk } = await import("../../src/lib/basic-leads.js");
 
-    const rows = await fetchBasicLeadRows({ orgId: "org-1", brandId: "brand-1" });
+    const rows = await fetchBasicLeadChunk({ orgId: "org-1", brandId: "brand-1" }, null, 500);
 
     expect(rows[0].servedAt).toBe("2026-06-17T01:44:59.123Z");
   });
 
   it("keeps Date timestamps compatible with the full path", async () => {
     rawRows = [rawRow(new Date("2026-06-17T01:44:59.000Z"))];
-    const { fetchBasicLeadRows } = await import("../../src/lib/basic-leads.js");
+    const { fetchBasicLeadChunk } = await import("../../src/lib/basic-leads.js");
 
-    const rows = await fetchBasicLeadRows({ orgId: "org-1" });
+    const rows = await fetchBasicLeadChunk({ orgId: "org-1" }, null, 500);
 
     expect(rows[0].servedAt).toBe("2026-06-17T01:44:59.000Z");
   });
