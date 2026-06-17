@@ -12,6 +12,7 @@ import {
 } from "../lib/email-gateway-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
+import { fetchBasicLeadRows } from "../lib/basic-leads.js";
 
 const router = Router();
 
@@ -90,54 +91,6 @@ const DEFAULT_STATUS: FlattenedStatus = {
   global: { bounced: false, unsubscribed: false },
 };
 
-interface SlimLead {
-  leadId: string;
-  apolloPersonId: string | null;
-  firstName: string;
-  lastName: string;
-  name: string | null;
-  headline: string | null;
-  linkedinUrl: string | null;
-  photoUrl: string | null;
-  organization: {
-    id: string;
-    name: string | null;
-    logoUrl: string | null;
-    primaryDomain: string | null;
-    websiteUrl: string | null;
-  } | null;
-}
-
-// Slim projection of FullLead for `?view=basic`. Drops the fields no consumer reads —
-// employmentHistory, the ~34 extra organization columns, funding events — verified against
-// features-service (revenue engine) + dashboard (leads table + detail panel). Cuts the wire
-// payload ~10x (~150MB -> ~15MB for a 50k-lead brand), which is what callers actually choke
-// on: features-service parses the whole body, the dashboard transfers it on a poll timer.
-// `view` absent => full shape (unchanged, backward-compatible).
-function toSlimLead(full: FullLead | null): SlimLead | null {
-  if (!full) return null;
-  const org = full.organization;
-  return {
-    leadId: full.leadId,
-    apolloPersonId: full.apolloPersonId,
-    firstName: full.firstName,
-    lastName: full.lastName,
-    name: full.name,
-    headline: full.headline,
-    linkedinUrl: full.linkedinUrl,
-    photoUrl: full.photoUrl,
-    organization: org
-      ? {
-          id: org.id,
-          name: org.name,
-          logoUrl: org.logoUrl,
-          primaryDomain: org.primaryDomain,
-          websiteUrl: org.websiteUrl,
-        }
-      : null,
-  };
-}
-
 // A single brand can carry 50k+ leads_campaigns rows. Loading every row before
 // streaming still OOMs even if hydration/JSON writes are chunked. Read, hydrate,
 // overlay delivery status, and serialize one chunk at a time so peak memory is
@@ -212,20 +165,107 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       conditions.push(eq(leadsCampaigns.workflowSlug, workflowSlug));
     }
 
+    const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
+    const brandIdStr = typeof brandId === "string" ? brandId : undefined;
+    const queryOrgIdStr = typeof queryOrgId === "string" ? queryOrgId : undefined;
+    const userIdStr = typeof userId === "string" ? userId : undefined;
+    const workflowSlugStr = typeof workflowSlug === "string" ? workflowSlug : undefined;
+    const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
+    const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
+    const context = getServiceContext(req);
+    // `?view=basic` => slim per-lead payload. Anything else (incl. absent) => full
+    // FullLead, the existing default. No Zod default: a missing param is full.
+    const slim = req.query.view === "basic";
+
+    // Basic view: ONE flat query (current-employer org + primary email via LATERAL),
+    // batched delivery-status overlay — instead of the full path's per-chunk hydration
+    // that over-fetches the whole lead graph only to drop it. Same wire shape as full.
+    if (slim) {
+      const basicRows = await fetchBasicLeadRows({
+        orgId: req.orgId!,
+        brandId: brandIdStr,
+        campaignId: campaignIdStr,
+        queryOrgId: queryOrgIdStr,
+        userId: userIdStr,
+        workflowSlug: workflowSlugStr,
+      });
+
+      // Delivery-status overlay, scoped to served rows only, fetched once in parallel.
+      const statusMap = new Map<string, StatusResult>();
+      if (hasScopeForStatus) {
+        const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
+        for (const r of basicRows) {
+          if (r.status !== "served") continue;
+          const email = r.email?.value;
+          if (!email) continue;
+          const primaryBrandId = r.brandIds[0] ?? "unknown";
+          if (!groups.has(primaryBrandId)) {
+            groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
+          }
+          groups.get(primaryBrandId)!.items.push({ email });
+        }
+        await Promise.all(
+          Array.from(groups.values()).map(async (group) => {
+            const response = await checkDeliveryStatus(group.brandId, campaignIdStr, group.items, context);
+            for (const result of response.results) statusMap.set(result.email, result);
+          }),
+        );
+      }
+
+      res.setHeader("Content-Type", "application/json");
+      res.write('{"leads":[');
+      streamingStarted = true;
+
+      let wroteFirstBasic = false;
+      for (const r of basicRows) {
+        const emailValue = r.email?.value ?? "";
+        const emailStatus = r.email?.status ?? null;
+        const statusResult = statusMap.get(emailValue);
+        const deliveryStatus = hasScopeForStatus && r.status === "served"
+          ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+          : DEFAULT_STATUS;
+
+        const leadOut = {
+          id: r.id,
+          leadId: r.leadId,
+          namespace: "apollo",
+          email: emailValue,
+          apolloPersonId: r.leadApolloPersonId ?? null,
+          parentRunId: r.parentRunId,
+          runId: r.runId,
+          brandIds: r.brandIds,
+          campaignId: r.campaignId,
+          orgId: r.orgId,
+          userId: r.userId ?? null,
+          workflowSlug: r.workflowSlug ?? null,
+          featureSlug: r.featureSlug ?? null,
+          servedAt: r.servedAt ? r.servedAt.toISOString() : null,
+          status: r.status as "buffered" | "skipped" | "claimed" | "served",
+          emailStatus,
+          lead: r.lead,
+          statusReason: r.statusReason ?? null,
+          statusDetails: r.statusDetails ?? null,
+          ...deliveryStatus,
+        };
+
+        res.write((wroteFirstBasic ? "," : "") + JSON.stringify(leadOut));
+        wroteFirstBasic = true;
+      }
+
+      res.write("]}");
+      res.end();
+
+      if (req.runId) {
+        traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${basicRows.length}`, data: { count: basicRows.length } }, req.headers).catch(() => {});
+      }
+      return;
+    }
+
     const primaryEmail = (lead: FullLead | undefined): { value: string; status: string | null } | null => {
       if (!lead) return null;
       const email = lead.contacts.find((c) => c.channel === "email");
       return email ? { value: email.value, status: email.status } : null;
     };
-
-    const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
-    const brandIdStr = typeof brandId === "string" ? brandId : undefined;
-    const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
-    const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
-    const context = getServiceContext(req);
-    // `?view=basic` => slim per-lead payload (see toSlimLead). Anything else (incl. absent)
-    // => full FullLead, the existing default. No Zod default: a missing param is full.
-    const slim = req.query.view === "basic";
 
     // The DB query above is the last point a clean 500 can be sent. Everything below
     // writes to the socket; from here on, failures destroy the stream (headers are sent).
@@ -292,7 +332,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           servedAt: row.servedAt ? row.servedAt.toISOString() : null,
           status: row.status as "buffered" | "skipped" | "claimed" | "served",
           emailStatus,
-          lead: slim ? toSlimLead(fullLead) : fullLead,
+          lead: fullLead,
           statusReason: row.statusReason ?? null,
           statusDetails: row.statusDetails ?? null,
           ...deliveryStatus,
