@@ -17,6 +17,11 @@ vi.mock("../../src/db/index.js", () => ({
   },
 }));
 
+const fetchBasicLeadRowsMock = vi.fn();
+vi.mock("../../src/lib/basic-leads.js", () => ({
+  fetchBasicLeadRows: (...args: unknown[]) => fetchBasicLeadRowsMock(...args),
+}));
+
 const buildFullLeadsBatchMock = vi.fn();
 vi.mock("../../src/lib/lead-shape.js", () => ({
   buildFullLeadsBatch: (ids: string[]) => buildFullLeadsBatchMock(ids),
@@ -91,6 +96,32 @@ function row(i: number, status = "buffered") {
   };
 }
 
+function basicRow(i: number, status = "buffered") {
+  return {
+    ...row(i, status),
+    leadApolloPersonId: `apollo-lead-${i}`,
+    servedAt: null,
+    lead: {
+      leadId: `lead-${i}`,
+      apolloPersonId: `apollo-lead-${i}`,
+      firstName: "Jane",
+      lastName: "Doe",
+      name: "Jane Doe",
+      headline: "CEO",
+      linkedinUrl: "https://linkedin.com/in/jane",
+      photoUrl: "https://example.com/jane.jpg",
+      organization: {
+        id: `org-lead-${i}`,
+        name: "Acme",
+        logoUrl: "https://example.com/acme.png",
+        primaryDomain: "acme.com",
+        websiteUrl: "https://acme.com",
+      },
+    },
+    email: { value: `lead-${i}@example.com`, status: "valid" },
+  };
+}
+
 // Chunk size must be set BEFORE the route module is imported (read at module load).
 process.env.LEADS_STREAM_CHUNK_SIZE = "2";
 
@@ -106,6 +137,8 @@ async function buildApp() {
 describe("GET /orgs/leads chunked streaming", () => {
   beforeEach(() => {
     mockRows = [];
+    fetchBasicLeadRowsMock.mockReset();
+    fetchBasicLeadRowsMock.mockResolvedValue([]);
     buildFullLeadsBatchMock.mockReset();
     buildFullLeadsBatchMock.mockImplementation((ids: string[]) => Promise.resolve(fullLeadMapFor(ids)));
     checkDeliveryStatusMock.mockReset();
@@ -159,8 +192,8 @@ describe("GET /orgs/leads chunked streaming", () => {
     }
   });
 
-  it("view=basic returns a slim lead (drops employmentHistory + heavy org fields)", async () => {
-    mockRows = [row(1)];
+  it("view=basic returns the slim Gold projection without full-lead hydration", async () => {
+    fetchBasicLeadRowsMock.mockResolvedValue([basicRow(1)]);
     const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
@@ -168,6 +201,16 @@ describe("GET /orgs/leads chunked streaming", () => {
       .set("x-org-id", ORG);
 
     expect(res.status).toBe(200);
+    expect(fetchBasicLeadRowsMock).toHaveBeenCalledTimes(1);
+    expect(fetchBasicLeadRowsMock).toHaveBeenCalledWith({
+      orgId: ORG,
+      brandId: BRAND,
+      campaignId: undefined,
+      queryOrgId: undefined,
+      userId: undefined,
+      workflowSlug: undefined,
+    });
+    expect(buildFullLeadsBatchMock).not.toHaveBeenCalled();
     const lead = res.body.leads[0].lead;
     // Kept fields
     expect(lead.firstName).toBe("Jane");
@@ -185,6 +228,34 @@ describe("GET /orgs/leads chunked streaming", () => {
     expect(lead.organization.annualRevenue).toBeUndefined();
     expect(lead.organization.keywords).toBeUndefined();
     expect(lead.organization.seoDescription).toBeUndefined();
+  });
+
+  it("view=basic applies delivery overlay in one batch over served slim rows", async () => {
+    fetchBasicLeadRowsMock.mockResolvedValue([basicRow(1, "served"), basicRow(2, "served")]);
+    checkDeliveryStatusMock.mockResolvedValue({
+      results: [
+        {
+          email: "lead-1@example.com",
+          broadcast: { campaign: null, brand: { contacted: true, sent: true, delivered: true }, global: null },
+          transactional: null,
+        },
+      ],
+    });
+    const app = await buildApp();
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    expect(buildFullLeadsBatchMock).not.toHaveBeenCalled();
+    expect(checkDeliveryStatusMock).toHaveBeenCalledTimes(1);
+    expect(checkDeliveryStatusMock.mock.calls[0][2]).toEqual([
+      { email: "lead-1@example.com" },
+      { email: "lead-2@example.com" },
+    ]);
+    expect(res.body.leads[0].delivered).toBe(true);
+    expect(res.body.leads[1].delivered).toBe(false);
   });
 
   it("view absent returns the full lead shape (backward-compatible)", async () => {
