@@ -239,7 +239,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           userId: r.userId ?? null,
           workflowSlug: r.workflowSlug ?? null,
           featureSlug: r.featureSlug ?? null,
-          servedAt: r.servedAt ? r.servedAt.toISOString() : null,
+          servedAt: r.servedAt,
           status: r.status as "buffered" | "skipped" | "claimed" | "served",
           emailStatus,
           lead: r.lead,
