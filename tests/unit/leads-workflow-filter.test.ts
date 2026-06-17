@@ -14,7 +14,11 @@ vi.mock("../../src/db/index.js", () => ({
         leftJoin: () => ({
           where: (arg: unknown) => {
             capturedWhere = arg;
-            return Promise.resolve([]);
+            return {
+              orderBy: () => ({
+                limit: () => Promise.resolve([]),
+              }),
+            };
           },
         }),
       }),
