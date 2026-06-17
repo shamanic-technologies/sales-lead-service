@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, and, sql, type SQL } from "drizzle-orm";
+import { asc, eq, and, gt, or, sql, type SQL } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns, leads } from "../db/schema.js";
@@ -91,13 +91,54 @@ const DEFAULT_STATUS: FlattenedStatus = {
   global: { bounced: false, unsubscribed: false },
 };
 
-// A single brand can carry 50k+ leads_campaigns rows. Hydrating + serializing all of
-// them at once OOMs the heap (the full FullLead object graph + the ~150MB JSON string
-// both live in memory simultaneously → StreamBase::Writev allocation failure). We instead
-// hydrate + serialize the response one chunk of rows at a time and STREAM each chunk to the
-// socket, so peak memory is bounded to one chunk regardless of the brand's lead count.
+// A single brand can carry 50k+ leads_campaigns rows. Loading every row before
+// streaming still OOMs even if hydration/JSON writes are chunked. Read, hydrate,
+// overlay delivery status, and serialize one chunk at a time so peak memory is
+// bounded by LEADS_STREAM_CHUNK_SIZE regardless of the brand's lead count.
 // The wire shape is byte-identical to the old res.json({ leads }) — `{"leads":[...]}`.
 const LEADS_STREAM_CHUNK_SIZE = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
+
+interface LeadCampaignCursor {
+  createdAt: Date;
+  id: string;
+}
+
+async function fetchLeadCampaignChunk(conditions: SQL[], cursor: LeadCampaignCursor | null) {
+  const pagedConditions = cursor
+    ? [
+        ...conditions,
+        or(
+          gt(leadsCampaigns.createdAt, cursor.createdAt),
+          and(eq(leadsCampaigns.createdAt, cursor.createdAt), gt(leadsCampaigns.id, cursor.id)),
+        )!,
+      ]
+    : conditions;
+
+  return db
+    .select({
+      id: leadsCampaigns.id,
+      leadId: leadsCampaigns.leadId,
+      campaignId: leadsCampaigns.campaignId,
+      orgId: leadsCampaigns.orgId,
+      userId: leadsCampaigns.userId,
+      brandIds: leadsCampaigns.brandIds,
+      status: leadsCampaigns.status,
+      statusReason: leadsCampaigns.statusReason,
+      statusDetails: leadsCampaigns.statusDetails,
+      parentRunId: leadsCampaigns.parentRunId,
+      runId: leadsCampaigns.runId,
+      servedAt: leadsCampaigns.servedAt,
+      workflowSlug: leadsCampaigns.workflowSlug,
+      featureSlug: leadsCampaigns.featureSlug,
+      createdAt: leadsCampaigns.createdAt,
+      leadApolloPersonId: leads.apolloPersonId,
+    })
+    .from(leadsCampaigns)
+    .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
+    .where(and(...pagedConditions))
+    .orderBy(asc(leadsCampaigns.createdAt), asc(leadsCampaigns.id))
+    .limit(LEADS_STREAM_CHUNK_SIZE);
+}
 
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
@@ -220,28 +261,6 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       return;
     }
 
-    const rows = await db
-      .select({
-        id: leadsCampaigns.id,
-        leadId: leadsCampaigns.leadId,
-        campaignId: leadsCampaigns.campaignId,
-        orgId: leadsCampaigns.orgId,
-        userId: leadsCampaigns.userId,
-        brandIds: leadsCampaigns.brandIds,
-        status: leadsCampaigns.status,
-        statusReason: leadsCampaigns.statusReason,
-        statusDetails: leadsCampaigns.statusDetails,
-        parentRunId: leadsCampaigns.parentRunId,
-        runId: leadsCampaigns.runId,
-        servedAt: leadsCampaigns.servedAt,
-        workflowSlug: leadsCampaigns.workflowSlug,
-        featureSlug: leadsCampaigns.featureSlug,
-        leadApolloPersonId: leads.apolloPersonId,
-      })
-      .from(leadsCampaigns)
-      .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
-      .where(and(...conditions));
-
     const primaryEmail = (lead: FullLead | undefined): { value: string; status: string | null } | null => {
       if (!lead) return null;
       const email = lead.contacts.find((c) => c.channel === "email");
@@ -255,8 +274,12 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     streamingStarted = true;
 
     let wroteFirst = false;
-    for (let start = 0; start < rows.length; start += LEADS_STREAM_CHUNK_SIZE) {
-      const chunkRows = rows.slice(start, start + LEADS_STREAM_CHUNK_SIZE);
+    let cursor: LeadCampaignCursor | null = null;
+    let rowCount = 0;
+    while (true) {
+      const chunkRows = await fetchLeadCampaignChunk(conditions, cursor);
+      if (chunkRows.length === 0) break;
+      rowCount += chunkRows.length;
       const chunkLeadIds = Array.from(new Set(chunkRows.map((r) => r.leadId)));
       const fullLeadByLeadId = await buildFullLeadsBatch(chunkLeadIds);
 
@@ -318,13 +341,16 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         res.write((wroteFirst ? "," : "") + JSON.stringify(leadOut));
         wroteFirst = true;
       }
+
+      const lastRow = chunkRows[chunkRows.length - 1];
+      cursor = { createdAt: lastRow.createdAt, id: lastRow.id };
     }
 
     res.write("]}");
     res.end();
 
     if (req.runId) {
-      traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rows.length}`, data: { count: rows.length } }, req.headers).catch(() => {});
+      traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rowCount}`, data: { count: rowCount } }, req.headers).catch(() => {});
     }
   } catch (error) {
     console.error("[lead-service] Leads error:", error);
