@@ -12,7 +12,7 @@ import {
 } from "../lib/email-gateway-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
-import { fetchBasicLeadRows } from "../lib/basic-leads.js";
+import { streamBasicLeadChunks, type BasicLeadRow } from "../lib/basic-leads.js";
 
 const router = Router();
 
@@ -140,6 +140,35 @@ async function fetchLeadCampaignChunk(conditions: SQL[], cursor: LeadCampaignCur
     .limit(LEADS_STREAM_CHUNK_SIZE);
 }
 
+async function buildStatusMapForBasicRows(
+  rows: BasicLeadRow[],
+  campaignId: string | undefined,
+  context: ReturnType<typeof getServiceContext>,
+) {
+  const statusMap = new Map<string, StatusResult>();
+  const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
+
+  for (const row of rows) {
+    if (row.status !== "served") continue;
+    const email = row.email?.value;
+    if (!email) continue;
+    const primaryBrandId = row.brandIds[0] ?? "unknown";
+    if (!groups.has(primaryBrandId)) {
+      groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
+    }
+    groups.get(primaryBrandId)!.items.push({ email });
+  }
+
+  await Promise.all(
+    Array.from(groups.values()).map(async (group) => {
+      const response = await checkDeliveryStatus(group.brandId, campaignId, group.items, context);
+      for (const result of response.results) statusMap.set(result.email, result);
+    }),
+  );
+
+  return statusMap;
+}
+
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
   try {
@@ -178,85 +207,72 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     const slim = req.query.view === "basic";
 
     // Basic view: ONE flat query (current-employer org + primary email via LATERAL),
-    // batched delivery-status overlay — instead of the full path's per-chunk hydration
-    // that over-fetches the whole lead graph only to drop it. Same wire shape as full.
+    // streamed in cursor chunks. This keeps the list shape compatible with api-service
+    // while avoiding the "load a whole large brand before first byte" failure mode.
     if (slim) {
-      const basicRows = await fetchBasicLeadRows({
+      const basicFilters = {
         orgId: req.orgId!,
         brandId: brandIdStr,
         campaignId: campaignIdStr,
         queryOrgId: queryOrgIdStr,
         userId: userIdStr,
         workflowSlug: workflowSlugStr,
-      });
-
-      // Delivery-status overlay, scoped to served rows only, fetched once in parallel.
-      const statusMap = new Map<string, StatusResult>();
-      if (hasScopeForStatus) {
-        const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
-        for (const r of basicRows) {
-          if (r.status !== "served") continue;
-          const email = r.email?.value;
-          if (!email) continue;
-          const primaryBrandId = r.brandIds[0] ?? "unknown";
-          if (!groups.has(primaryBrandId)) {
-            groups.set(primaryBrandId, { brandId: primaryBrandId, items: [] });
-          }
-          groups.get(primaryBrandId)!.items.push({ email });
-        }
-        await Promise.all(
-          Array.from(groups.values()).map(async (group) => {
-            const response = await checkDeliveryStatus(group.brandId, campaignIdStr, group.items, context);
-            for (const result of response.results) statusMap.set(result.email, result);
-          }),
-        );
-      }
+      };
 
       res.setHeader("Content-Type", "application/json");
       res.write('{"leads":[');
       streamingStarted = true;
 
       let wroteFirstBasic = false;
-      for (const r of basicRows) {
-        const emailValue = r.email?.value ?? "";
-        const emailStatus = r.email?.status ?? null;
-        const statusResult = statusMap.get(emailValue);
-        const deliveryStatus = hasScopeForStatus && r.status === "served"
-          ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
-          : DEFAULT_STATUS;
+      let rowCount = 0;
+      for await (const basicRows of streamBasicLeadChunks(basicFilters, LEADS_STREAM_CHUNK_SIZE)) {
+        rowCount += basicRows.length;
 
-        const leadOut = {
-          id: r.id,
-          leadId: r.leadId,
-          namespace: "apollo",
-          email: emailValue,
-          apolloPersonId: r.leadApolloPersonId ?? null,
-          parentRunId: r.parentRunId,
-          runId: r.runId,
-          brandIds: r.brandIds,
-          campaignId: r.campaignId,
-          orgId: r.orgId,
-          userId: r.userId ?? null,
-          workflowSlug: r.workflowSlug ?? null,
-          featureSlug: r.featureSlug ?? null,
-          servedAt: r.servedAt,
-          status: r.status as "buffered" | "skipped" | "claimed" | "served",
-          emailStatus,
-          lead: r.lead,
-          statusReason: r.statusReason ?? null,
-          statusDetails: r.statusDetails ?? null,
-          ...deliveryStatus,
-        };
+        const statusMap = hasScopeForStatus
+          ? await buildStatusMapForBasicRows(basicRows, campaignIdStr, context)
+          : new Map<string, StatusResult>();
 
-        res.write((wroteFirstBasic ? "," : "") + JSON.stringify(leadOut));
-        wroteFirstBasic = true;
+        for (const r of basicRows) {
+          const emailValue = r.email?.value ?? "";
+          const emailStatus = r.email?.status ?? null;
+          const statusResult = statusMap.get(emailValue);
+          const deliveryStatus = hasScopeForStatus && r.status === "served"
+            ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+            : DEFAULT_STATUS;
+
+          const leadOut = {
+            id: r.id,
+            leadId: r.leadId,
+            namespace: "apollo",
+            email: emailValue,
+            apolloPersonId: r.leadApolloPersonId ?? null,
+            parentRunId: r.parentRunId,
+            runId: r.runId,
+            brandIds: r.brandIds,
+            campaignId: r.campaignId,
+            orgId: r.orgId,
+            userId: r.userId ?? null,
+            workflowSlug: r.workflowSlug ?? null,
+            featureSlug: r.featureSlug ?? null,
+            servedAt: r.servedAt,
+            status: r.status as "buffered" | "skipped" | "claimed" | "served",
+            emailStatus,
+            lead: r.lead,
+            statusReason: r.statusReason ?? null,
+            statusDetails: r.statusDetails ?? null,
+            ...deliveryStatus,
+          };
+
+          res.write((wroteFirstBasic ? "," : "") + JSON.stringify(leadOut));
+          wroteFirstBasic = true;
+        }
       }
 
       res.write("]}");
       res.end();
 
       if (req.runId) {
-        traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${basicRows.length}`, data: { count: basicRows.length } }, req.headers).catch(() => {});
+        traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rowCount}`, data: { count: rowCount } }, req.headers).catch(() => {});
       }
       return;
     }

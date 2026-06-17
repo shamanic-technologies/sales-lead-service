@@ -39,6 +39,7 @@ export interface BasicLeadRow {
   servedAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
+  createdAt: Date;
   leadApolloPersonId: string | null;
   lead: BasicSlimLead | null;
   email: { value: string; status: string | null } | null;
@@ -51,6 +52,11 @@ export interface BasicLeadFilters {
   queryOrgId?: string;
   userId?: string;
   workflowSlug?: string;
+}
+
+export interface BasicLeadCursor {
+  createdAt: Date;
+  id: string;
 }
 
 type RawTimestamp = Date | string | null;
@@ -70,6 +76,7 @@ interface RawBasicRow {
   served_at: RawTimestamp;
   workflow_slug: string | null;
   feature_slug: string | null;
+  created_at: Date | string;
   l_id: string | null;
   apollo_person_id: string | null;
   first_name: string | null;
@@ -96,6 +103,16 @@ function toIsoTimestamp(value: RawTimestamp): string | null {
     throw new Error(`[lead-service] invalid served_at timestamp: ${value}`);
   }
   return parsed.toISOString();
+}
+
+function toDateTimestamp(value: Date | string): Date {
+  if (value instanceof Date) return value;
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`[lead-service] invalid created_at timestamp: ${value}`);
+  }
+  return parsed;
 }
 
 function mapRow(r: RawBasicRow): BasicLeadRow {
@@ -141,22 +158,23 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     servedAt: toIsoTimestamp(r.served_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
+    createdAt: toDateTimestamp(r.created_at),
     leadApolloPersonId: r.apollo_person_id,
     lead,
     email: r.email_value != null ? { value: r.email_value, status: r.email_status } : null,
   };
 }
 
-// Single flat query for the basic view: leads_campaigns ⋈ leads ⋈ current-employer
-// org (5 cols) ⋈ primary email — no per-lead loop, no per-chunk fan-out. Replaces the
-// 121× sequential 3-query hydration the full path uses (which over-fetched the whole
-// org row + full employment history only for toSlimLead to drop them).
-export async function fetchBasicLeadRows(f: BasicLeadFilters): Promise<BasicLeadRow[]> {
-  const rows = await sql<RawBasicRow[]>`
+function basicLeadQuery(
+  f: BasicLeadFilters,
+  cursor: BasicLeadCursor | null,
+  limit: number | null,
+) {
+  return sql<RawBasicRow[]>`
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
-      lc.served_at, lc.workflow_slug, lc.feature_slug,
+      lc.served_at, lc.workflow_slug, lc.feature_slug, lc.created_at,
       l.id AS l_id, l.apollo_person_id, l.first_name, l.last_name, l.name,
       l.headline, l.linkedin_url, l.photo_url,
       org.org_id AS org_id_inner, org.org_name, org.logo_url, org.primary_domain, org.website_url,
@@ -186,6 +204,40 @@ export async function fetchBasicLeadRows(f: BasicLeadFilters): Promise<BasicLead
       ${f.queryOrgId ? sql`AND lc.org_id = ${f.queryOrgId}` : sql``}
       ${f.userId ? sql`AND lc.user_id = ${f.userId}` : sql``}
       ${f.workflowSlug ? sql`AND lc.workflow_slug = ${f.workflowSlug}` : sql``}
+      ${cursor ? sql`AND (lc.created_at, lc.id) > (${cursor.createdAt}, ${cursor.id})` : sql``}
+    ORDER BY lc.created_at ASC, lc.id ASC
+    ${limit == null ? sql`` : sql`LIMIT ${limit}`}
   `;
+}
+
+// Single flat query for the basic view: leads_campaigns ⋈ leads ⋈ current-employer
+// org (5 cols) ⋈ primary email — no per-lead loop, no full-lead hydration.
+export async function fetchBasicLeadChunk(
+  f: BasicLeadFilters,
+  cursor: BasicLeadCursor | null,
+  limit: number,
+): Promise<BasicLeadRow[]> {
+  const rows = await basicLeadQuery(f, cursor, limit);
   return rows.map(mapRow);
+}
+
+export async function fetchBasicLeadRows(f: BasicLeadFilters): Promise<BasicLeadRow[]> {
+  const rows: BasicLeadRow[] = [];
+  const limit = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
+
+  for await (const chunk of streamBasicLeadChunks(f, limit)) {
+    rows.push(...chunk);
+  }
+
+  return rows;
+}
+
+export async function* streamBasicLeadChunks(
+  f: BasicLeadFilters,
+  limit: number,
+): AsyncGenerator<BasicLeadRow[]> {
+  for await (const rows of basicLeadQuery(f, null, null).cursor(Math.max(1, limit))) {
+    if (rows.length === 0) continue;
+    yield rows.map(mapRow);
+  }
 }

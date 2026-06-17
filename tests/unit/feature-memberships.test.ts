@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -23,7 +23,6 @@ function compile(call: unknown): { sql: string; params: unknown[] } {
 }
 
 async function buildApp() {
-  vi.resetModules();
   const { default: route } = await import("../../src/routes/feature-memberships.js");
   const app = express();
   app.use(express.json());
@@ -32,12 +31,17 @@ async function buildApp() {
 }
 
 describe("GET /internal/feature-memberships", () => {
+  let app: express.Express;
+
+  beforeAll(async () => {
+    app = await buildApp();
+  }, 30_000);
+
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
   });
 
   it("rejects missing x-api-key with 401", async () => {
-    const app = await buildApp();
     const res = await request(app).get("/internal/feature-memberships?featureSlugs=sales-cold-email-outreach");
     expect(res.status).toBe(401);
     expect(execute).not.toHaveBeenCalled();
@@ -49,7 +53,6 @@ describe("GET /internal/feature-memberships", () => {
       { org_id: "org-1", brand_id: "brand-2", workflow_slug: "sales-cold-email-outreach-bronze-2" },
     ]);
 
-    const app = await buildApp();
     const res = await request(app)
       .get("/internal/feature-memberships?featureSlugs=sales-cold-email-outreach")
       .set("x-api-key", "test-api-key");
@@ -73,7 +76,6 @@ describe("GET /internal/feature-memberships", () => {
   });
 
   it("parses comma-separated featureSlugs (trim + drop empties)", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .get("/internal/feature-memberships?featureSlugs=a, b ,,c")
       .set("x-api-key", "test-api-key");
@@ -85,7 +87,6 @@ describe("GET /internal/feature-memberships", () => {
   });
 
   it("returns empty memberships and skips the query when featureSlugs is missing", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .get("/internal/feature-memberships")
       .set("x-api-key", "test-api-key");
@@ -96,7 +97,6 @@ describe("GET /internal/feature-memberships", () => {
   });
 
   it("returns empty memberships and skips the query when featureSlugs has only empties", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .get("/internal/feature-memberships?featureSlugs=,, ,")
       .set("x-api-key", "test-api-key");
@@ -108,7 +108,6 @@ describe("GET /internal/feature-memberships", () => {
 
   it("returns empty memberships when the query matches no rows", async () => {
     execute.mockResolvedValueOnce([]);
-    const app = await buildApp();
     const res = await request(app)
       .get("/internal/feature-memberships?featureSlugs=nonexistent-feature")
       .set("x-api-key", "test-api-key");
