@@ -158,6 +158,11 @@ export const leadsCampaigns = pgTable(
     userId: text("user_id"),
     workflowSlug: text("workflow_slug"),
     featureSlug: text("feature_slug"),
+    goal: text("goal"),
+    activeGoalId: text("active_goal_id"),
+    brandProfileId: text("brand_profile_id"),
+    customerPersonaId: text("customer_persona_id"),
+    customerProfileId: text("customer_profile_id"),
     servedAt: timestamp("served_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -169,6 +174,16 @@ export const leadsCampaigns = pgTable(
     index("idx_lc_org").on(table.orgId),
     index("idx_lc_campaign").on(table.campaignId),
     index("idx_lc_user").on(table.userId),
+    index("idx_lc_persona_attribution").on(
+      table.orgId,
+      table.featureSlug,
+      table.goal,
+      table.activeGoalId,
+      table.brandProfileId,
+      table.customerPersonaId,
+      table.customerProfileId,
+      table.status,
+    ),
   ],
 );
 

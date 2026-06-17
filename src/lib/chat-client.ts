@@ -27,6 +27,11 @@ export interface ChatTrackingHeaders {
   brandId?: string | null;
   workflowSlug?: string | null;
   featureSlug?: string | null;
+  goal?: string | null;
+  activeGoalId?: string | null;
+  brandProfileId?: string | null;
+  customerPersonaId?: string | null;
+  customerProfileId?: string | null;
 }
 
 export async function chatComplete(
@@ -44,6 +49,11 @@ export async function chatComplete(
   if (tracking.brandId) headers["x-brand-id"] = tracking.brandId;
   if (tracking.workflowSlug) headers["x-workflow-slug"] = tracking.workflowSlug;
   if (tracking.featureSlug) headers["x-feature-slug"] = tracking.featureSlug;
+  if (tracking.goal) headers["x-goal"] = tracking.goal;
+  if (tracking.activeGoalId) headers["x-active-goal-id"] = tracking.activeGoalId;
+  if (tracking.brandProfileId) headers["x-brand-profile-id"] = tracking.brandProfileId;
+  if (tracking.customerPersonaId) headers["x-customer-persona-id"] = tracking.customerPersonaId;
+  if (tracking.customerProfileId) headers["x-customer-profile-id"] = tracking.customerProfileId;
 
   const body: Record<string, unknown> = {
     message: params.message,

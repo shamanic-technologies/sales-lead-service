@@ -17,7 +17,16 @@ interface WorkflowDynastyEntry {
 
 function buildHeaders(
   apiKey: string,
-  context?: { orgId?: string; userId?: string; runId?: string },
+  context?: {
+    orgId?: string;
+    userId?: string;
+    runId?: string;
+    goal?: string;
+    activeGoalId?: string;
+    brandProfileId?: string;
+    customerPersonaId?: string;
+    customerProfileId?: string;
+  },
 ): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -26,6 +35,11 @@ function buildHeaders(
   if (context?.orgId) headers["x-org-id"] = context.orgId;
   if (context?.userId) headers["x-user-id"] = context.userId;
   if (context?.runId) headers["x-run-id"] = context.runId;
+  if (context?.goal) headers["x-goal"] = context.goal;
+  if (context?.activeGoalId) headers["x-active-goal-id"] = context.activeGoalId;
+  if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
+  if (context?.customerPersonaId) headers["x-customer-persona-id"] = context.customerPersonaId;
+  if (context?.customerProfileId) headers["x-customer-profile-id"] = context.customerProfileId;
   return headers;
 }
 
@@ -35,7 +49,7 @@ function buildHeaders(
  */
 export async function resolveFeatureDynastySlugs(
   dynastySlug: string,
-  context?: { orgId?: string; userId?: string; runId?: string },
+  context?: Parameters<typeof buildHeaders>[1],
 ): Promise<string[]> {
   try {
     const url = `${FEATURES_SERVICE_URL}/features/dynasty/slugs?dynastySlug=${encodeURIComponent(dynastySlug)}`;
@@ -61,7 +75,7 @@ export async function resolveFeatureDynastySlugs(
  */
 export async function resolveWorkflowDynastySlugs(
   dynastySlug: string,
-  context?: { orgId?: string; userId?: string; runId?: string },
+  context?: Parameters<typeof buildHeaders>[1],
 ): Promise<string[]> {
   try {
     const url = `${WORKFLOW_SERVICE_URL}/workflows/dynasty/slugs?workflowDynastySlug=${encodeURIComponent(dynastySlug)}`;
@@ -85,7 +99,7 @@ export async function resolveWorkflowDynastySlugs(
  * Fetch all feature dynasties and build a reverse map: slug → dynastySlug.
  */
 export async function fetchFeatureDynastyMap(
-  context?: { orgId?: string; userId?: string; runId?: string },
+  context?: Parameters<typeof buildHeaders>[1],
 ): Promise<Map<string, string>> {
   try {
     const url = `${FEATURES_SERVICE_URL}/features/dynasties`;
@@ -109,7 +123,7 @@ export async function fetchFeatureDynastyMap(
  * Fetch all workflow dynasties and build a reverse map: slug → dynastySlug.
  */
 export async function fetchWorkflowDynastyMap(
-  context?: { orgId?: string; userId?: string; runId?: string },
+  context?: Parameters<typeof buildHeaders>[1],
 ): Promise<Map<string, string>> {
   try {
     const url = `${WORKFLOW_SERVICE_URL}/workflows/dynasties`;

@@ -29,6 +29,11 @@ function rawRow(servedAt: unknown) {
     served_at: servedAt,
     workflow_slug: null,
     feature_slug: null,
+    goal: null,
+    active_goal_id: null,
+    brand_profile_id: null,
+    customer_persona_id: null,
+    customer_profile_id: null,
     l_id: "lead-1",
     apollo_person_id: "apollo-1",
     first_name: "Jane",
@@ -60,6 +65,7 @@ describe("fetchBasicLeadRows", () => {
     const rows = await fetchBasicLeadRows({ orgId: "org-1", brandId: "brand-1" });
 
     expect(rows[0].servedAt).toBe("2026-06-17T01:44:59.123Z");
+    expect(rows[0].customerProfileId).toBeNull();
   });
 
   it("keeps Date timestamps compatible with the full path", async () => {

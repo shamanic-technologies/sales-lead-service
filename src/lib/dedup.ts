@@ -119,6 +119,11 @@ export async function checkContacted(
     brandId?: string;
     workflowSlug?: string;
     featureSlug?: string;
+    goal?: string;
+    activeGoalId?: string;
+    brandProfileId?: string;
+    customerPersonaId?: string;
+    customerProfileId?: string;
   },
 ): Promise<Map<string, EmailCheckResult>> {
   const result = new Map<string, EmailCheckResult>();

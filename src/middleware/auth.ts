@@ -10,6 +10,11 @@ export interface ServiceContext {
   brandId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -21,6 +26,11 @@ export interface AuthenticatedRequest extends Request {
   brandIds?: string[];
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }
 
 function applySentryTags(req: AuthenticatedRequest): void {
@@ -31,6 +41,11 @@ function applySentryTags(req: AuthenticatedRequest): void {
   if (req.brandId) Sentry.setTag("brandId", req.brandId);
   if (req.workflowSlug) Sentry.setTag("workflowSlug", req.workflowSlug);
   if (req.featureSlug) Sentry.setTag("featureSlug", req.featureSlug);
+  if (req.goal) Sentry.setTag("goal", req.goal);
+  if (req.activeGoalId) Sentry.setTag("activeGoalId", req.activeGoalId);
+  if (req.brandProfileId) Sentry.setTag("brandProfileId", req.brandProfileId);
+  if (req.customerPersonaId) Sentry.setTag("customerPersonaId", req.customerPersonaId);
+  if (req.customerProfileId) Sentry.setTag("customerProfileId", req.customerProfileId);
 }
 
 export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
@@ -42,6 +57,11 @@ export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
     brandId: req.brandId,
     workflowSlug: req.workflowSlug,
     featureSlug: req.featureSlug,
+    goal: req.goal,
+    activeGoalId: req.activeGoalId,
+    brandProfileId: req.brandProfileId,
+    customerPersonaId: req.customerPersonaId,
+    customerProfileId: req.customerProfileId,
   };
 }
 
@@ -90,6 +110,11 @@ export function requireOrgId(
   const brandIdRaw = req.headers["x-brand-id"] as string | undefined;
   const workflowSlug = req.headers["x-workflow-slug"] as string | undefined;
   const featureSlug = req.headers["x-feature-slug"] as string | undefined;
+  const goal = req.headers["x-goal"] as string | undefined;
+  const activeGoalId = req.headers["x-active-goal-id"] as string | undefined;
+  const brandProfileId = req.headers["x-brand-profile-id"] as string | undefined;
+  const customerPersonaId = req.headers["x-customer-persona-id"] as string | undefined;
+  const customerProfileId = req.headers["x-customer-profile-id"] as string | undefined;
 
   req.orgId = orgId;
   if (userId) req.userId = userId;
@@ -103,6 +128,11 @@ export function requireOrgId(
   }
   if (workflowSlug) req.workflowSlug = workflowSlug;
   if (featureSlug) req.featureSlug = featureSlug;
+  if (goal) req.goal = goal;
+  if (activeGoalId) req.activeGoalId = activeGoalId;
+  if (brandProfileId) req.brandProfileId = brandProfileId;
+  if (customerPersonaId) req.customerPersonaId = customerPersonaId;
+  if (customerProfileId) req.customerProfileId = customerProfileId;
 
   applySentryTags(req);
   next();

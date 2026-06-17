@@ -101,6 +101,11 @@ function row(i: number, status = "buffered") {
     servedAt: null,
     workflowSlug: null,
     featureSlug: null,
+    goal: null,
+    activeGoalId: null,
+    brandProfileId: null,
+    customerPersonaId: null,
+    customerProfileId: null,
     createdAt: new Date(`2026-01-01T00:00:0${i}.000Z`),
     leadApolloPersonId: `apollo-${i}`,
   };
@@ -185,6 +190,7 @@ describe("GET /orgs/leads chunked streaming", () => {
     ]);
     expect(res.body.leads[0].email).toBe("lead-1@example.com");
     expect(res.body.leads[0].apolloPersonId).toBe("apollo-1");
+    expect(res.body.leads[0].customerProfileId).toBeNull();
   });
 
   it("hydrates per chunk (ceil(N/chunk) batches, each <= chunk size)", async () => {

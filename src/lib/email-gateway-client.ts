@@ -70,18 +70,22 @@ async function checkDeliveryStatusBatch(
   return (await response.json()) as DeliveryStatusResponse;
 }
 
-export async function checkDeliveryStatus(
-  brandId: string,
-  campaignId: string | undefined,
-  items: DeliveryStatusItem[],
-  context?: { orgId?: string; userId?: string; runId?: string; campaignId?: string; brandId?: string; workflowSlug?: string; featureSlug?: string }
-): Promise<DeliveryStatusResponse> {
-  if (items.length === 0) return { results: [] };
+interface ServiceContext {
+  orgId?: string;
+  userId?: string;
+  runId?: string;
+  campaignId?: string;
+  brandId?: string;
+  workflowSlug?: string;
+  featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
+}
 
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-API-Key": EMAIL_GATEWAY_SERVICE_API_KEY,
-  };
+function addContextHeaders(headers: Record<string, string>, context?: ServiceContext): void {
   if (context?.orgId) headers["x-org-id"] = context.orgId;
   if (context?.userId) headers["x-user-id"] = context.userId;
   if (context?.runId) headers["x-run-id"] = context.runId;
@@ -89,6 +93,26 @@ export async function checkDeliveryStatus(
   if (context?.brandId) headers["x-brand-id"] = context.brandId;
   if (context?.workflowSlug) headers["x-workflow-slug"] = context.workflowSlug;
   if (context?.featureSlug) headers["x-feature-slug"] = context.featureSlug;
+  if (context?.goal) headers["x-goal"] = context.goal;
+  if (context?.activeGoalId) headers["x-active-goal-id"] = context.activeGoalId;
+  if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
+  if (context?.customerPersonaId) headers["x-customer-persona-id"] = context.customerPersonaId;
+  if (context?.customerProfileId) headers["x-customer-profile-id"] = context.customerProfileId;
+}
+
+export async function checkDeliveryStatus(
+  brandId: string,
+  campaignId: string | undefined,
+  items: DeliveryStatusItem[],
+  context?: ServiceContext,
+): Promise<DeliveryStatusResponse> {
+  if (items.length === 0) return { results: [] };
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "X-API-Key": EMAIL_GATEWAY_SERVICE_API_KEY,
+  };
+  addContextHeaders(headers, context);
 
   if (items.length <= BATCH_SIZE) {
     return await checkDeliveryStatusBatch(brandId, campaignId, items, headers);
@@ -158,7 +182,7 @@ export async function fetchEmailGatewayStats(
     featureSlugs?: string;
     groupBy?: string;
   },
-  context?: { orgId?: string; userId?: string; runId?: string; campaignId?: string; brandId?: string; workflowSlug?: string; featureSlug?: string }
+  context?: ServiceContext,
 ): Promise<EmailGatewayStatsResponse | EmailGatewayGroupedStatsResponse> {
   const queryParams = new URLSearchParams();
   if (params.brandId) queryParams.set("brandId", params.brandId);
@@ -170,13 +194,7 @@ export async function fetchEmailGatewayStats(
   const headers: Record<string, string> = {
     "X-API-Key": EMAIL_GATEWAY_SERVICE_API_KEY,
   };
-  if (context?.orgId) headers["x-org-id"] = context.orgId;
-  if (context?.userId) headers["x-user-id"] = context.userId;
-  if (context?.runId) headers["x-run-id"] = context.runId;
-  if (context?.campaignId) headers["x-campaign-id"] = context.campaignId;
-  if (context?.brandId) headers["x-brand-id"] = context.brandId;
-  if (context?.workflowSlug) headers["x-workflow-slug"] = context.workflowSlug;
-  if (context?.featureSlug) headers["x-feature-slug"] = context.featureSlug;
+  addContextHeaders(headers, context);
 
   const qs = queryParams.toString();
   const url = `${EMAIL_GATEWAY_SERVICE_URL}/orgs/stats${qs ? `?${qs}` : ""}`;

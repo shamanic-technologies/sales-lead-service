@@ -219,6 +219,36 @@
             "nullable": true,
             "description": "Apollo person ID — same value as data.apolloPersonId.",
             "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
+          },
+          "goal": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit active goal tag for this served lead. null means unattributed.",
+            "example": "signup"
+          },
+          "activeGoalId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit active goal ID tag for this served lead. null means unattributed.",
+            "example": "goal_123"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit brand profile ID tag for this served lead. null means unattributed.",
+            "example": "brand_profile_123"
+          },
+          "customerPersonaId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit customer persona ID tag for this served lead. null means unattributed.",
+            "example": "persona_123"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit customer profile ID tag for this served lead. null means unattributed.",
+            "example": "customer_profile_123"
           }
         },
         "required": [
@@ -1219,6 +1249,36 @@
             "description": "Feature slug for tracking.",
             "example": "outreach"
           },
+          "goal": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit active goal tag stored on the leads_campaigns row. null means unattributed.",
+            "example": "signup"
+          },
+          "activeGoalId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit active goal ID stored on the leads_campaigns row. null means unattributed.",
+            "example": "goal_123"
+          },
+          "brandProfileId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit brand profile ID stored on the leads_campaigns row. null means unattributed.",
+            "example": "brand_profile_123"
+          },
+          "customerPersonaId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
+            "example": "persona_123"
+          },
+          "customerProfileId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explicit customer profile ID stored on the leads_campaigns row. null means unattributed.",
+            "example": "customer_profile_123"
+          },
           "servedAt": {
             "type": "string",
             "nullable": true,
@@ -1900,6 +1960,51 @@
               "type": "string"
             },
             "description": "Feature slug for tracking (propagated through the call chain)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-persona-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
           }
         ],
         "requestBody": {
@@ -2016,6 +2121,51 @@
             "description": "Feature slug for tracking (propagated through the call chain)"
           },
           {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-persona-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
             "in": "query",
             "name": "brandId",
             "required": false,
@@ -2090,7 +2240,7 @@
     "/orgs/stats": {
       "get": {
         "summary": "Get lead stats by status",
-        "description": "Returns lead stats with outreach status from email-gateway. totalLeads = served leads count, byOutreachStatus = full recipientStats (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replies*), repliesDetail = granular reply breakdown, buffered/skipped = buffer counts.",
+        "description": "Returns lead stats with outreach status from email-gateway. totalLeads = served leads count, byOutreachStatus = full recipientStats (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replies*), repliesDetail = granular reply breakdown, buffered/skipped = buffer counts. When filtering or grouping by goal/profile/persona attribution fields, lead-service joins explicit leads_campaigns tags to recipient-level email-gateway evidence. Untagged rows stay unattributed and do not produce persona/profile groups.",
         "parameters": [
           {
             "in": "header",
@@ -2163,6 +2313,51 @@
               "type": "string"
             },
             "description": "Feature slug for tracking (propagated through the call chain)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-persona-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-customer-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
           },
           {
             "in": "query",
@@ -2261,9 +2456,54 @@
           },
           {
             "in": "query",
+            "name": "goal",
+            "required": false,
+            "description": "Filter stats to rows explicitly tagged with this active goal.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "activeGoalId",
+            "required": false,
+            "description": "Filter stats to rows explicitly tagged with this active goal ID.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "brandProfileId",
+            "required": false,
+            "description": "Filter stats to rows explicitly tagged with this brand profile ID.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "customerPersonaId",
+            "required": false,
+            "description": "Filter stats to rows explicitly tagged with this customer persona ID.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "customerProfileId",
+            "required": false,
+            "description": "Filter stats to rows explicitly tagged with this customer profile ID.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "groupBy",
             "required": false,
-            "description": "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats.",
+            "description": "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Persona/profile groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown persona.",
             "schema": {
               "type": "string",
               "enum": [
@@ -2272,7 +2512,12 @@
                 "workflowSlug",
                 "featureSlug",
                 "workflowDynastySlug",
-                "featureDynastySlug"
+                "featureDynastySlug",
+                "goal",
+                "activeGoalId",
+                "brandProfileId",
+                "customerPersonaId",
+                "customerProfileId"
               ]
             }
           }
