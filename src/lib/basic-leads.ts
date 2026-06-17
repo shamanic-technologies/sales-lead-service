@@ -36,7 +36,7 @@ export interface BasicLeadRow {
   statusDetails: string | null;
   parentRunId: string | null;
   runId: string | null;
-  servedAt: Date | null;
+  servedAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
   leadApolloPersonId: string | null;
@@ -53,6 +53,8 @@ export interface BasicLeadFilters {
   workflowSlug?: string;
 }
 
+type RawTimestamp = Date | string | null;
+
 interface RawBasicRow {
   id: string;
   lead_id: string;
@@ -65,7 +67,7 @@ interface RawBasicRow {
   status_details: string | null;
   parent_run_id: string | null;
   run_id: string | null;
-  served_at: Date | null;
+  served_at: RawTimestamp;
   workflow_slug: string | null;
   feature_slug: string | null;
   l_id: string | null;
@@ -83,6 +85,17 @@ interface RawBasicRow {
   website_url: string | null;
   email_value: string | null;
   email_status: string | null;
+}
+
+function toIsoTimestamp(value: RawTimestamp): string | null {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`[lead-service] invalid served_at timestamp: ${value}`);
+  }
+  return parsed.toISOString();
 }
 
 function mapRow(r: RawBasicRow): BasicLeadRow {
@@ -125,7 +138,7 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     statusDetails: r.status_details,
     parentRunId: r.parent_run_id,
     runId: r.run_id,
-    servedAt: r.served_at,
+    servedAt: toIsoTimestamp(r.served_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
     leadApolloPersonId: r.apollo_person_id,
