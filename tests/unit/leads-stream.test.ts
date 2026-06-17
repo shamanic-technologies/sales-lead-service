@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
@@ -26,9 +26,9 @@ vi.mock("../../src/db/index.js", () => ({
   },
 }));
 
-const fetchBasicLeadRowsMock = vi.fn();
+const streamBasicLeadChunksMock = vi.fn();
 vi.mock("../../src/lib/basic-leads.js", () => ({
-  fetchBasicLeadRows: (...args: unknown[]) => fetchBasicLeadRowsMock(...args),
+  streamBasicLeadChunks: (...args: unknown[]) => streamBasicLeadChunksMock(...args),
 }));
 
 const buildFullLeadsBatchMock = vi.fn();
@@ -137,6 +137,10 @@ function basicRow(i: number, status = "buffered") {
   };
 }
 
+async function* basicChunks(chunks: Array<ReturnType<typeof basicRow>[]>) {
+  for (const chunk of chunks) yield chunk;
+}
+
 // Chunk size must be set BEFORE the route module is imported (read at module load).
 process.env.LEADS_STREAM_CHUNK_SIZE = "2";
 
@@ -149,11 +153,17 @@ async function buildApp() {
 }
 
 describe("GET /orgs/leads chunked streaming", () => {
+  let app: express.Express;
+
+  beforeAll(async () => {
+    app = await buildApp();
+  }, 30_000);
+
   beforeEach(() => {
     mockRows = [];
     mockDbCallIndex = 0;
-    fetchBasicLeadRowsMock.mockReset();
-    fetchBasicLeadRowsMock.mockResolvedValue([]);
+    streamBasicLeadChunksMock.mockReset();
+    streamBasicLeadChunksMock.mockImplementation(() => basicChunks([]));
     buildFullLeadsBatchMock.mockReset();
     buildFullLeadsBatchMock.mockImplementation((ids: string[]) => Promise.resolve(fullLeadMapFor(ids)));
     checkDeliveryStatusMock.mockReset();
@@ -161,7 +171,6 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("returns { leads: [] } for an empty result set", async () => {
-    const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -174,7 +183,6 @@ describe("GET /orgs/leads chunked streaming", () => {
 
   it("streams N rows spanning multiple chunks as one valid JSON, order preserved", async () => {
     mockRows = [row(1), row(2), row(3), row(4), row(5)];
-    const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -195,7 +203,6 @@ describe("GET /orgs/leads chunked streaming", () => {
 
   it("hydrates per chunk (ceil(N/chunk) batches, each <= chunk size)", async () => {
     mockRows = [row(1), row(2), row(3), row(4), row(5)];
-    const app = await buildApp();
     await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -209,23 +216,25 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("view=basic returns the slim Gold projection without full-lead hydration", async () => {
-    fetchBasicLeadRowsMock.mockResolvedValue([basicRow(1)]);
-    const app = await buildApp();
+    streamBasicLeadChunksMock.mockImplementationOnce(() => basicChunks([[basicRow(1)]]));
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
       .set("x-api-key", "test-api-key")
       .set("x-org-id", ORG);
 
     expect(res.status).toBe(200);
-    expect(fetchBasicLeadRowsMock).toHaveBeenCalledTimes(1);
-    expect(fetchBasicLeadRowsMock).toHaveBeenCalledWith({
-      orgId: ORG,
-      brandId: BRAND,
-      campaignId: undefined,
-      queryOrgId: undefined,
-      userId: undefined,
-      workflowSlug: undefined,
-    });
+    expect(streamBasicLeadChunksMock).toHaveBeenCalledTimes(1);
+    expect(streamBasicLeadChunksMock.mock.calls[0]).toEqual([
+      {
+        orgId: ORG,
+        brandId: BRAND,
+        campaignId: undefined,
+        queryOrgId: undefined,
+        userId: undefined,
+        workflowSlug: undefined,
+      },
+      2,
+    ]);
     expect(buildFullLeadsBatchMock).not.toHaveBeenCalled();
     expect(res.body.leads[0].servedAt).toBe("2026-01-01T00:00:00.000Z");
     const lead = res.body.leads[0].lead;
@@ -247,8 +256,26 @@ describe("GET /orgs/leads chunked streaming", () => {
     expect(lead.organization.seoDescription).toBeUndefined();
   });
 
+  it("view=basic streams multiple slim chunks as one valid JSON response", async () => {
+    streamBasicLeadChunksMock.mockImplementationOnce(() => basicChunks([
+      [basicRow(1), basicRow(2)],
+      [basicRow(3)],
+    ]));
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    expect(res.body.leads.map((l: { id: string }) => l.id)).toEqual(["lc-1", "lc-2", "lc-3"]);
+    expect(streamBasicLeadChunksMock).toHaveBeenCalledTimes(1);
+    expect(buildFullLeadsBatchMock).not.toHaveBeenCalled();
+  });
+
   it("view=basic applies delivery overlay in one batch over served slim rows", async () => {
-    fetchBasicLeadRowsMock.mockResolvedValue([basicRow(1, "served"), basicRow(2, "served")]);
+    streamBasicLeadChunksMock.mockImplementationOnce(() => basicChunks([
+      [basicRow(1, "served"), basicRow(2, "served")],
+    ]));
     checkDeliveryStatusMock.mockResolvedValue({
       results: [
         {
@@ -258,7 +285,6 @@ describe("GET /orgs/leads chunked streaming", () => {
         },
       ],
     });
-    const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
       .set("x-api-key", "test-api-key")
@@ -277,7 +303,6 @@ describe("GET /orgs/leads chunked streaming", () => {
 
   it("view absent returns the full lead shape (backward-compatible)", async () => {
     mockRows = [row(1)];
-    const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -301,7 +326,6 @@ describe("GET /orgs/leads chunked streaming", () => {
         },
       ],
     });
-    const app = await buildApp();
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
