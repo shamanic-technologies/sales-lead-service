@@ -110,7 +110,7 @@ function basicRow(i: number, status = "buffered") {
   return {
     ...row(i, status),
     leadApolloPersonId: `apollo-lead-${i}`,
-    servedAt: null,
+    servedAt: "2026-01-01T00:00:00.000Z",
     lead: {
       leadId: `lead-${i}`,
       apolloPersonId: `apollo-lead-${i}`,
@@ -221,6 +221,7 @@ describe("GET /orgs/leads chunked streaming", () => {
       workflowSlug: undefined,
     });
     expect(buildFullLeadsBatchMock).not.toHaveBeenCalled();
+    expect(res.body.leads[0].servedAt).toBe("2026-01-01T00:00:00.000Z");
     const lead = res.body.leads[0].lead;
     // Kept fields
     expect(lead.firstName).toBe("Jane");
