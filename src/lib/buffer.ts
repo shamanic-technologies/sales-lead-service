@@ -31,7 +31,7 @@ import {
   type StrategyContext,
 } from "./strategy-generator.js";
 import { fetchCampaign } from "./campaign-client.js";
-import { extractBrandFields } from "./brand-client.js";
+import { extractBrandFields, listActivePersonas } from "./brand-client.js";
 
 // Servable email-verdict statuses, provider-agnostic (the gateway normalizes
 // both providers into one neutral Person; do NOT branch on provider here):
@@ -71,7 +71,7 @@ async function bufferedCount(orgId: string, campaignId: string): Promise<number>
   return row?.c ?? 0;
 }
 
-async function buildStrategyContext(params: {
+export async function buildStrategyContext(params: {
   orgId: string;
   campaignId: string;
   brandIdCsv: string;
@@ -132,6 +132,26 @@ async function buildStrategyContext(params: {
         const value = typeof field.value === "string" ? field.value : JSON.stringify(field.value);
         lines.push(`${label}: ${value}`);
       }
+    }
+  }
+
+  // Append the brand's ACTIVE customer personas — the user-defined structured
+  // targeting filters. Without these the LLM re-guesses targeting from a single
+  // free-text sentence and pulls off-target people. Multi-brand campaigns carry
+  // a comma-joined brandIdCsv; fetch personas for each brand and append all.
+  // Empty persona list (brand defines none) appends nothing — same as before.
+  const brandIds = params.brandIdCsv.split(",").map((id) => id.trim()).filter(Boolean);
+  const personasByBrand = await Promise.all(
+    brandIds.map((brandId) => listActivePersonas(brandId, params.orgId, serviceContext)),
+  );
+  const personas = personasByBrand.flat();
+  if (personas.length > 0) {
+    lines.push("Active customer personas (prioritize matching these):");
+    for (const persona of personas) {
+      const filterParts = Object.entries(persona.filters)
+        .filter(([, values]) => Array.isArray(values) && values.length > 0)
+        .map(([key, values]) => `${key}=[${values.join(", ")}]`);
+      lines.push(`- ${persona.name}: ${filterParts.join("; ")}`);
     }
   }
 
