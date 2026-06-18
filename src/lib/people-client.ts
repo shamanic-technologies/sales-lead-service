@@ -107,6 +107,11 @@ interface ServiceContext {
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }
 
 function buildHeaders(ctx: ServiceContext): Record<string, string> {
@@ -121,6 +126,11 @@ function buildHeaders(ctx: ServiceContext): Record<string, string> {
   if (ctx.campaignId) headers["x-campaign-id"] = ctx.campaignId;
   if (ctx.workflowSlug) headers["x-workflow-slug"] = ctx.workflowSlug;
   if (ctx.featureSlug) headers["x-feature-slug"] = ctx.featureSlug;
+  if (ctx.goal) headers["x-goal"] = ctx.goal;
+  if (ctx.activeGoalId) headers["x-active-goal-id"] = ctx.activeGoalId;
+  if (ctx.brandProfileId) headers["x-brand-profile-id"] = ctx.brandProfileId;
+  if (ctx.customerPersonaId) headers["x-customer-persona-id"] = ctx.customerPersonaId;
+  if (ctx.customerProfileId) headers["x-customer-profile-id"] = ctx.customerProfileId;
   return headers;
 }
 
@@ -190,6 +200,11 @@ export async function peopleSearch(options: {
   campaignId: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }): Promise<PeopleSearchResult> {
   const body: Record<string, unknown> = { provider: options.provider };
   if (options.filters) body.filters = options.filters;
@@ -207,6 +222,11 @@ export async function peopleSearch(options: {
       campaignId: options.campaignId,
       workflowSlug: options.workflowSlug,
       featureSlug: options.featureSlug,
+      goal: options.goal,
+      activeGoalId: options.activeGoalId,
+      brandProfileId: options.brandProfileId,
+      customerPersonaId: options.customerPersonaId,
+      customerProfileId: options.customerProfileId,
     },
   });
 }
@@ -228,6 +248,11 @@ export async function peopleDryRun(options: {
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }): Promise<PeopleDryRunResult> {
   return callGateway<PeopleDryRunResult>("/orgs/people/search/dry-run", {
     method: "POST",
@@ -240,6 +265,11 @@ export async function peopleDryRun(options: {
       campaignId: options.campaignId,
       workflowSlug: options.workflowSlug,
       featureSlug: options.featureSlug,
+      goal: options.goal,
+      activeGoalId: options.activeGoalId,
+      brandProfileId: options.brandProfileId,
+      customerPersonaId: options.customerPersonaId,
+      customerProfileId: options.customerProfileId,
     },
   });
 }
@@ -271,6 +301,11 @@ export async function resolveEmail(options: {
   campaignId?: string;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string;
+  activeGoalId?: string;
+  brandProfileId?: string;
+  customerPersonaId?: string;
+  customerProfileId?: string;
 }): Promise<ResolveEmailResult> {
   const body: Record<string, unknown> = { provider: options.provider };
   if (options.providerPersonId) body.providerPersonId = options.providerPersonId;
@@ -290,6 +325,11 @@ export async function resolveEmail(options: {
       campaignId: options.campaignId,
       workflowSlug: options.workflowSlug,
       featureSlug: options.featureSlug,
+      goal: options.goal,
+      activeGoalId: options.activeGoalId,
+      brandProfileId: options.brandProfileId,
+      customerPersonaId: options.customerPersonaId,
+      customerProfileId: options.customerProfileId,
     },
   });
 }

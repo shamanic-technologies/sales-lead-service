@@ -31,7 +31,7 @@ import {
   type StrategyContext,
 } from "./strategy-generator.js";
 import { fetchCampaign } from "./campaign-client.js";
-import { extractBrandFields } from "./brand-client.js";
+import { extractBrandFields, listActivePersonas } from "./brand-client.js";
 
 // Servable email-verdict statuses, provider-agnostic (the gateway normalizes
 // both providers into one neutral Person; do NOT branch on provider here):
@@ -71,7 +71,7 @@ async function bufferedCount(orgId: string, campaignId: string): Promise<number>
   return row?.c ?? 0;
 }
 
-async function buildStrategyContext(params: {
+export async function buildStrategyContext(params: {
   orgId: string;
   campaignId: string;
   brandIdCsv: string;
@@ -80,6 +80,11 @@ async function buildStrategyContext(params: {
   userId?: string | null;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string | null;
+  activeGoalId?: string | null;
+  brandProfileId?: string | null;
+  customerPersonaId?: string | null;
+  customerProfileId?: string | null;
 }): Promise<StrategyContext> {
   const serviceContext = {
     userId: params.userId ?? undefined,
@@ -88,6 +93,11 @@ async function buildStrategyContext(params: {
     brandId: params.brandIdCsv,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
+    goal: params.goal ?? undefined,
+    activeGoalId: params.activeGoalId ?? undefined,
+    brandProfileId: params.brandProfileId ?? undefined,
+    customerPersonaId: params.customerPersonaId ?? undefined,
+    customerProfileId: params.customerProfileId ?? undefined,
   };
 
   const [campaign, brandFields] = await Promise.all([
@@ -125,6 +135,26 @@ async function buildStrategyContext(params: {
     }
   }
 
+  // Append the brand's ACTIVE customer personas — the user-defined structured
+  // targeting filters. Without these the LLM re-guesses targeting from a single
+  // free-text sentence and pulls off-target people. Multi-brand campaigns carry
+  // a comma-joined brandIdCsv; fetch personas for each brand and append all.
+  // Empty persona list (brand defines none) appends nothing — same as before.
+  const brandIds = params.brandIdCsv.split(",").map((id) => id.trim()).filter(Boolean);
+  const personasByBrand = await Promise.all(
+    brandIds.map((brandId) => listActivePersonas(brandId, params.orgId, serviceContext)),
+  );
+  const personas = personasByBrand.flat();
+  if (personas.length > 0) {
+    lines.push("Active customer personas (prioritize matching these):");
+    for (const persona of personas) {
+      const filterParts = Object.entries(persona.filters)
+        .filter(([, values]) => Array.isArray(values) && values.length > 0)
+        .map(([key, values]) => `${key}=[${values.join(", ")}]`);
+      lines.push(`- ${persona.name}: ${filterParts.join("; ")}`);
+    }
+  }
+
   return {
     orgId: params.orgId,
     userId: params.userId ?? null,
@@ -147,6 +177,11 @@ interface IngestParams {
   userId?: string | null;
   workflowSlug?: string;
   featureSlug?: string;
+  goal?: string | null;
+  activeGoalId?: string | null;
+  brandProfileId?: string | null;
+  customerPersonaId?: string | null;
+  customerProfileId?: string | null;
 }
 
 /**
@@ -198,6 +233,11 @@ async function ingestPerson(person: Person, params: IngestParams, signal?: Abort
       userId: params.userId ?? null,
       workflowSlug: params.workflowSlug ?? null,
       featureSlug: params.featureSlug ?? null,
+      goal: params.goal ?? null,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+      customerPersonaId: params.customerPersonaId ?? null,
+      customerProfileId: params.customerProfileId ?? null,
     })
     .onConflictDoNothing()
     .returning({ id: leadsCampaigns.id });
@@ -219,6 +259,11 @@ export async function topUpApolloLeadBuffer(
     userId: params.userId,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
+    goal: params.goal,
+    activeGoalId: params.activeGoalId,
+    brandProfileId: params.brandProfileId,
+    customerPersonaId: params.customerPersonaId,
+    customerProfileId: params.customerProfileId,
   });
 
   let totalInserted = 0;
@@ -270,6 +315,11 @@ export async function topUpApolloLeadBuffer(
         userId: params.userId ?? null,
         workflowSlug: params.workflowSlug,
         featureSlug: params.featureSlug,
+        goal: params.goal ?? undefined,
+        activeGoalId: params.activeGoalId ?? undefined,
+        brandProfileId: params.brandProfileId ?? undefined,
+        customerPersonaId: params.customerPersonaId ?? undefined,
+        customerProfileId: params.customerProfileId ?? undefined,
       });
     } catch (err) {
       // Provider rejected the persisted strategy (e.g. validation error after schema tightening,
@@ -345,6 +395,11 @@ export async function topUpApolloLeadBuffer(
 interface ClaimedRow {
   leadCampaignId: string;
   leadId: string;
+  goal: string | null;
+  activeGoalId: string | null;
+  brandProfileId: string | null;
+  customerPersonaId: string | null;
+  customerProfileId: string | null;
   apolloPersonId: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -372,6 +427,11 @@ async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise
   const claimed = await pgSql<{
     id: string;
     lead_id: string;
+    goal: string | null;
+    active_goal_id: string | null;
+    brand_profile_id: string | null;
+    customer_persona_id: string | null;
+    customer_profile_id: string | null;
   }[]>`
     UPDATE leads_campaigns
     SET status = 'claimed', updated_at = NOW()
@@ -383,10 +443,18 @@ async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise
       ORDER BY created_at ASC
       LIMIT 1
     )
-    RETURNING id, lead_id
+    RETURNING id, lead_id, goal, active_goal_id, brand_profile_id, customer_persona_id, customer_profile_id
   `;
   if (claimed.length === 0) return null;
-  const { id: leadCampaignId, lead_id: leadId } = claimed[0];
+  const {
+    id: leadCampaignId,
+    lead_id: leadId,
+    goal,
+    active_goal_id: activeGoalId,
+    brand_profile_id: brandProfileId,
+    customer_persona_id: customerPersonaId,
+    customer_profile_id: customerProfileId,
+  } = claimed[0];
 
   const lead = await db.query.leads.findFirst({
     where: eq(leads.id, leadId),
@@ -397,6 +465,11 @@ async function claimNextLeadCampaign(orgId: string, campaignId: string): Promise
   return {
     leadCampaignId,
     leadId,
+    goal,
+    activeGoalId,
+    brandProfileId,
+    customerPersonaId,
+    customerProfileId,
     apolloPersonId: lead?.apolloPersonId ?? null,
     firstName: lead?.firstName ?? null,
     lastName: lead?.lastName ?? null,
@@ -413,6 +486,13 @@ async function setLeadCampaignStatus(
   status: "skipped" | "served",
   reason?: string,
   details?: string,
+  attribution?: {
+    goal?: string | null;
+    activeGoalId?: string | null;
+    brandProfileId?: string | null;
+    customerPersonaId?: string | null;
+    customerProfileId?: string | null;
+  },
 ): Promise<void> {
   await db
     .update(leadsCampaigns)
@@ -421,6 +501,15 @@ async function setLeadCampaignStatus(
       statusReason: reason ?? null,
       statusDetails: details ?? null,
       ...(status === "served" ? { servedAt: new Date() } : {}),
+      ...(attribution
+        ? {
+            goal: attribution.goal ?? null,
+            activeGoalId: attribution.activeGoalId ?? null,
+            brandProfileId: attribution.brandProfileId ?? null,
+            customerPersonaId: attribution.customerPersonaId ?? null,
+            customerProfileId: attribution.customerProfileId ?? null,
+          }
+        : {}),
       updatedAt: new Date(),
     })
     .where(eq(leadsCampaigns.id, leadCampaignId));
@@ -437,6 +526,11 @@ export async function pullNext(
     userId?: string | null;
     workflowSlug?: string;
     featureSlug?: string;
+    goal?: string | null;
+    activeGoalId?: string | null;
+    brandProfileId?: string | null;
+    customerPersonaId?: string | null;
+    customerProfileId?: string | null;
   },
   signal?: AbortSignal,
 ): Promise<{
@@ -449,6 +543,11 @@ export async function pullNext(
     orgId: string | null;
     userId: string | null;
     apolloPersonId: string | null;
+    goal: string | null;
+    activeGoalId: string | null;
+    brandProfileId: string | null;
+    customerPersonaId: string | null;
+    customerProfileId: string | null;
   };
   reason?: CreditInsufficientReason;
 }> {
@@ -468,6 +567,11 @@ export async function pullNext(
           userId: params.userId,
           workflowSlug: params.workflowSlug,
           featureSlug: params.featureSlug,
+          goal: params.goal ?? null,
+          activeGoalId: params.activeGoalId ?? null,
+          brandProfileId: params.brandProfileId ?? null,
+          customerPersonaId: params.customerPersonaId ?? null,
+          customerProfileId: params.customerProfileId ?? null,
         },
         signal,
       );
@@ -482,10 +586,18 @@ export async function pullNext(
       return { found: false };
     }
 
+    const attribution = {
+      goal: params.goal ?? claimed.goal,
+      activeGoalId: params.activeGoalId ?? claimed.activeGoalId,
+      brandProfileId: params.brandProfileId ?? claimed.brandProfileId,
+      customerPersonaId: params.customerPersonaId ?? claimed.customerPersonaId,
+      customerProfileId: params.customerProfileId ?? claimed.customerProfileId,
+    };
+
     // Release the claim back to 'buffered' if processing throws below — caller can retry.
     let claimSettled = false;
     const settleSkip = async (reason: string, details: string) => {
-      await setLeadCampaignStatus(claimed.leadCampaignId, "skipped", reason, details);
+      await setLeadCampaignStatus(claimed.leadCampaignId, "skipped", reason, details, attribution);
       claimSettled = true;
     };
 
@@ -538,6 +650,11 @@ export async function pullNext(
             campaignId: params.campaignId,
             workflowSlug: params.workflowSlug,
             featureSlug: params.featureSlug,
+            goal: attribution.goal ?? undefined,
+            activeGoalId: attribution.activeGoalId ?? undefined,
+            brandProfileId: attribution.brandProfileId ?? undefined,
+            customerPersonaId: attribution.customerPersonaId ?? undefined,
+            customerProfileId: attribution.customerProfileId ?? undefined,
           });
         } catch (err) {
           if (isPeopleCreditInsufficientError(err)) {
@@ -650,6 +767,11 @@ export async function pullNext(
         brandId: brandIdCsv,
         workflowSlug: params.workflowSlug,
         featureSlug: params.featureSlug,
+        goal: attribution.goal ?? undefined,
+        activeGoalId: attribution.activeGoalId ?? undefined,
+        brandProfileId: attribution.brandProfileId ?? undefined,
+        customerPersonaId: attribution.customerPersonaId ?? undefined,
+        customerProfileId: attribution.customerProfileId ?? undefined,
       });
       const gw = statusMap.get(email);
       if (gw?.contacted) {
@@ -683,6 +805,11 @@ export async function pullNext(
           servedAt: new Date(),
           parentRunId: params.parentRunId ?? null,
           runId: params.runId ?? null,
+          goal: attribution.goal,
+          activeGoalId: attribution.activeGoalId,
+          brandProfileId: attribution.brandProfileId,
+          customerPersonaId: attribution.customerPersonaId,
+          customerProfileId: attribution.customerProfileId,
           updatedAt: new Date(),
         })
         .where(eq(leadsCampaigns.id, claimed.leadCampaignId));
@@ -703,6 +830,11 @@ export async function pullNext(
           orgId: params.orgId,
           userId: params.userId ?? null,
           apolloPersonId: claimed.apolloPersonId,
+          goal: attribution.goal,
+          activeGoalId: attribution.activeGoalId,
+          brandProfileId: attribution.brandProfileId,
+          customerPersonaId: attribution.customerPersonaId,
+          customerProfileId: attribution.customerProfileId,
         },
       };
     } finally {

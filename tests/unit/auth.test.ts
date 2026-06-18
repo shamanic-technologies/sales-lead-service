@@ -80,6 +80,11 @@ describe("requireOrgId", () => {
       "x-brand-id": "brand-1,brand-2",
       "x-workflow-slug": "wf-slug",
       "x-feature-slug": "feat-slug",
+      "x-goal": "signup",
+      "x-active-goal-id": "goal-1",
+      "x-brand-profile-id": "brand-profile-1",
+      "x-customer-persona-id": "persona-1",
+      "x-customer-profile-id": "customer-profile-1",
     });
     const res = makeRes();
     const next = vi.fn() as NextFunction;
@@ -92,6 +97,11 @@ describe("requireOrgId", () => {
     expect(req.brandIds).toEqual(["brand-1", "brand-2"]);
     expect(req.workflowSlug).toBe("wf-slug");
     expect(req.featureSlug).toBe("feat-slug");
+    expect(req.goal).toBe("signup");
+    expect(req.activeGoalId).toBe("goal-1");
+    expect(req.brandProfileId).toBe("brand-profile-1");
+    expect(req.customerPersonaId).toBe("persona-1");
+    expect(req.customerProfileId).toBe("customer-profile-1");
     expect(next).toHaveBeenCalledOnce();
 
     const tags = Object.fromEntries(setTagMock.mock.calls);
@@ -103,6 +113,11 @@ describe("requireOrgId", () => {
       brandId: "brand-1,brand-2",
       workflowSlug: "wf-slug",
       featureSlug: "feat-slug",
+      goal: "signup",
+      activeGoalId: "goal-1",
+      brandProfileId: "brand-profile-1",
+      customerPersonaId: "persona-1",
+      customerProfileId: "customer-profile-1",
     });
   });
 });

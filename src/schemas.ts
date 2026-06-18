@@ -71,6 +71,41 @@ const AuthHeaders = [
     schema: { type: "string" as const },
     description: "Feature slug for tracking (propagated through the call chain)",
   },
+  {
+    in: "header" as const,
+    name: "x-goal",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Active goal enum/name for the campaign activity, when explicitly tagged by the caller.",
+  },
+  {
+    in: "header" as const,
+    name: "x-active-goal-id",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Active goal identifier for the campaign activity, when explicitly tagged by the caller.",
+  },
+  {
+    in: "header" as const,
+    name: "x-brand-profile-id",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller.",
+  },
+  {
+    in: "header" as const,
+    name: "x-customer-persona-id",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller.",
+  },
+  {
+    in: "header" as const,
+    name: "x-customer-profile-id",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller.",
+  },
 ];
 
 // buffer/next requires x-campaign-id and x-brand-id
@@ -944,6 +979,46 @@ const ServedLeadSchema = z
         description: "Apollo person ID — same value as data.apolloPersonId.",
         example: "5f2a3b4c5d6e7f8a9b0c1d2e",
       }),
+    goal: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit active goal tag for this served lead. null means unattributed.",
+        example: "signup",
+      }),
+    activeGoalId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit active goal ID tag for this served lead. null means unattributed.",
+        example: "goal_123",
+      }),
+    brandProfileId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit brand profile ID tag for this served lead. null means unattributed.",
+        example: "brand_profile_123",
+      }),
+    customerPersonaId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit customer persona ID tag for this served lead. null means unattributed.",
+        example: "persona_123",
+      }),
+    customerProfileId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit customer profile ID tag for this served lead. null means unattributed.",
+        example: "customer_profile_123",
+      }),
   })
   .openapi("ServedLead", {
     description:
@@ -1183,6 +1258,46 @@ const LeadDetailSchema = z
       .openapi({
         description: "Feature slug for tracking.",
         example: "outreach",
+      }),
+    goal: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit active goal tag stored on the leads_campaigns row. null means unattributed.",
+        example: "signup",
+      }),
+    activeGoalId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit active goal ID stored on the leads_campaigns row. null means unattributed.",
+        example: "goal_123",
+      }),
+    brandProfileId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit brand profile ID stored on the leads_campaigns row. null means unattributed.",
+        example: "brand_profile_123",
+      }),
+    customerPersonaId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
+        example: "persona_123",
+      }),
+    customerProfileId: z
+      .string()
+      .nullable()
+      .optional()
+      .openapi({
+        description: "Explicit customer profile ID stored on the leads_campaigns row. null means unattributed.",
+        example: "customer_profile_123",
       }),
     servedAt: z
       .string()
@@ -1468,7 +1583,8 @@ registry.registerPath({
   path: "/orgs/stats",
   summary: "Get lead stats by status",
   description:
-    "Returns lead stats with outreach status from email-gateway. totalLeads = served leads count, byOutreachStatus = full recipientStats (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replies*), repliesDetail = granular reply breakdown, buffered/skipped = buffer counts.",
+    "Returns lead stats with outreach status from email-gateway. totalLeads = served leads count, byOutreachStatus = full recipientStats (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replies*), repliesDetail = granular reply breakdown, buffered/skipped = buffer counts. " +
+    "When filtering or grouping by goal/profile/persona attribution fields, lead-service joins explicit leads_campaigns tags to recipient-level email-gateway evidence. Untagged rows stay unattributed and do not produce persona/profile groups.",
   parameters: [
     ...AuthHeaders,
     {
@@ -1550,10 +1666,45 @@ registry.registerPath({
     },
     {
       in: "query" as const,
+      name: "goal",
+      required: false,
+      description: "Filter stats to rows explicitly tagged with this active goal.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
+      name: "activeGoalId",
+      required: false,
+      description: "Filter stats to rows explicitly tagged with this active goal ID.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
+      name: "brandProfileId",
+      required: false,
+      description: "Filter stats to rows explicitly tagged with this brand profile ID.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
+      name: "customerPersonaId",
+      required: false,
+      description: "Filter stats to rows explicitly tagged with this customer persona ID.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
+      name: "customerProfileId",
+      required: false,
+      description: "Filter stats to rows explicitly tagged with this customer profile ID.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
       name: "groupBy",
       required: false,
       description:
-        "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats.",
+        "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Persona/profile groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown persona.",
       schema: {
         type: "string" as const,
         enum: [
@@ -1563,6 +1714,11 @@ registry.registerPath({
           "featureSlug",
           "workflowDynastySlug",
           "featureDynastySlug",
+          "goal",
+          "activeGoalId",
+          "brandProfileId",
+          "customerPersonaId",
+          "customerProfileId",
         ],
       },
     },
