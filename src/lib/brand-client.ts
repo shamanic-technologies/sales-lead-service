@@ -97,6 +97,50 @@ export async function extractBrandFields(
   }
 }
 
+export interface ActivePersona {
+  name: string;
+  /** Structured targeting filters, e.g. { jobTitles: [...], seniority: [...] }. */
+  filters: Record<string, string[]>;
+}
+
+/**
+ * List a brand's ACTIVE customer personas (the user-defined targeting filters).
+ * Fail-loud on >=500 (mirrors extractBrandFields). An empty persona list is
+ * valid (a brand may define none) and returns [] — NOT a silent fallback.
+ */
+export async function listActivePersonas(
+  brandId: string,
+  orgId?: string | null,
+  context?: ServiceContext,
+): Promise<ActivePersona[]> {
+  try {
+    const response = await fetch(
+      `${BRAND_SERVICE_URL}/orgs/brands/${brandId}/personas?status=active`,
+      {
+        headers: buildHeaders(orgId, context),
+        signal: AbortSignal.timeout(300_000),
+      },
+    );
+
+    if (!response.ok) {
+      const msg = `[brand-client] list personas failed for brand ${brandId}: ${response.status}`;
+      if (response.status >= 500) {
+        throw new Error(msg);
+      }
+      console.warn(msg);
+      return [];
+    }
+
+    const data = (await response.json()) as {
+      personas: Array<{ name: string; filters: Record<string, string[]> }>;
+    };
+    return data.personas.map((p) => ({ name: p.name, filters: p.filters }));
+  } catch (error) {
+    console.error("[brand-client] Error listing personas:", error);
+    throw error;
+  }
+}
+
 export async function fetchExtractedFields(
   brandId: string,
   orgId?: string | null,
