@@ -35,15 +35,25 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
   }
 
-  // Provider selector: explicit apollo|apify, else apollo (today's behavior).
-  const provider = parsed.data.provider ?? "apollo";
-
   const campaignId = req.campaignId;
   const brandIds = req.brandIds ?? [];
 
   if (!campaignId || brandIds.length === 0) {
     return res.status(400).json({ error: "x-campaign-id and x-brand-id headers required" });
   }
+
+  // The audience is resolved per (brand, feature, goal) from features-service,
+  // so all three are required — a missing one is a 400, never a silent default.
+  const featureSlug = req.featureSlug;
+  const goal = req.goal;
+  if (!featureSlug) {
+    return res.status(400).json({ error: "x-feature-slug header required" });
+  }
+  if (!goal) {
+    return res.status(400).json({ error: "x-goal header required" });
+  }
+  // Audiences are per-brand; resolve against the primary (first) brand id.
+  const brandId = brandIds[0];
 
   const workflowSlug = req.workflowSlug;
   const runId = req.runId as string;
@@ -116,13 +126,13 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         orgId: req.orgId!,
         campaignId,
         brandIds,
-        provider,
+        brandId,
+        featureSlug,
+        goal,
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,
         workflowSlug,
-        featureSlug: req.featureSlug,
-        goal: req.goal ?? null,
         activeGoalId: req.activeGoalId ?? null,
         brandProfileId: req.brandProfileId ?? null,
         customerPersonaId: req.customerPersonaId ?? null,
