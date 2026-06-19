@@ -10,8 +10,8 @@ export interface ExtractedField {
 }
 
 type ServiceContext = {
-  userId?: string;
-  runId?: string;
+  userId?: string | null;
+  runId?: string | null;
   campaignId?: string;
   brandId?: string;
   workflowSlug?: string;
@@ -95,6 +95,34 @@ export async function extractBrandFields(
     console.error("[brand-client] Error extracting brand fields:", error);
     throw error;
   }
+}
+
+export type CurrentGoal = "signup" | "meetingBooked" | "purchase";
+
+/**
+ * Fetch the brand's canonical current goal from brand-service.
+ * The brand owns its goal (brands.currentGoal); lead-service reads it here
+ * instead of taking it as an x-goal header. Fails loud on any non-2xx — a
+ * brand with no goal set returns 404, and that is a config error (a brand in a
+ * lead-finding workflow must have a goal), not an empty/exhausted result.
+ */
+export async function getCurrentGoal(
+  brandId: string,
+  orgId?: string | null,
+  context?: ServiceContext,
+): Promise<CurrentGoal> {
+  const response = await fetch(`${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`, {
+    headers: buildHeaders(orgId, context),
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(
+      `[brand-client] runtime-context failed for brand ${brandId}: ${response.status} ${text}`,
+    );
+  }
+  const data = (await response.json()) as { currentGoal: CurrentGoal };
+  return data.currentGoal;
 }
 
 export async function fetchExtractedFields(

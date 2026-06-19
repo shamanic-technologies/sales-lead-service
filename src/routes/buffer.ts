@@ -42,15 +42,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.status(400).json({ error: "x-campaign-id and x-brand-id headers required" });
   }
 
-  // The audience is resolved per (brand, feature, goal) from features-service,
-  // so all three are required — a missing one is a 400, never a silent default.
+  // The audience is resolved per (brand, feature) from features-service; the goal
+  // is the brand's own (brands.currentGoal), fetched from brand-service inside
+  // pullNext — NOT a caller input. So x-feature-slug is required; x-goal is not.
   const featureSlug = req.featureSlug;
-  const goal = req.goal;
   if (!featureSlug) {
     return res.status(400).json({ error: "x-feature-slug header required" });
-  }
-  if (!goal) {
-    return res.status(400).json({ error: "x-goal header required" });
   }
   // Audiences are per-brand; resolve against the primary (first) brand id.
   const brandId = brandIds[0];
@@ -128,7 +125,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         brandIds,
         brandId,
         featureSlug,
-        goal,
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,
