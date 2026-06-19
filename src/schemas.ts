@@ -921,17 +921,11 @@ export const FullLeadSchema = z
 // --- Buffer Next ---
 
 export const BufferNextRequestSchema = z
-  .object({
-    provider: z
-      .enum(["apollo", "apify"])
-      .optional()
-      .openapi({
-        description:
-          "Lead provider to source through the human-service people gateway. 'apollo' (rich search + reveal) or 'apify' (verified-email waterfall). Omitted = apollo (today's behavior, preserved for existing callers).",
-        example: "apollo",
-      }),
-  })
-  .openapi("BufferNextRequest");
+  .object({})
+  .openapi("BufferNextRequest", {
+    description:
+      "Empty body. The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both.",
+  });
 
 const ServedLeadSchema = z
   .object({

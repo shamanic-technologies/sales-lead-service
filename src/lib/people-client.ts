@@ -2,15 +2,15 @@ import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import { isCreditInsufficientError } from "./credit-errors.js";
 
 /**
- * Client for the human-service people gateway (POST /orgs/people/*).
+ * Client for human-service.
  *
- * The gateway is provider-agnostic: it routes to apollo-service (rich search +
- * enrich) OR apify-service (verified-email waterfall) and normalizes both into
- * one neutral Person shape. lead-service no longer talks to apollo/apify directly.
- *
- * Routing: explicit `provider` wins; else `need:"verified_email"` -> apify; else apollo.
- * Pagination: apollo uses a server-managed cursor (nextPage:true advances it, keyed
- * by org + x-campaign-id); apify uses client-managed offset/nextOffset.
+ * lead-service no longer decides filters or provider. Each iteration it asks
+ * features-service for the brand's most-relevant audience id, then asks
+ * human-service to serve the next person of that audience via
+ * POST /orgs/audiences/{id}/serve-next. human-service owns the audience's
+ * canonical filters, provider routing (apollo OR apify), and dedup/suppression,
+ * and returns one neutral Person already recorded as served — so the next call
+ * returns someone new. lead-service just records the person and feeds it down.
  */
 
 export type PeopleProvider = "apollo" | "apify";
@@ -37,29 +37,6 @@ export function isPeopleCreditInsufficientError(error: unknown): boolean {
   return isCreditInsufficientError(error);
 }
 
-// Neutral filter shape (gateway-locked). Field names are provider-agnostic; the
-// gateway maps them to each provider's native vocabulary. Some fields are honored
-// by only one provider (documented per-field in the gateway OpenAPI).
-export interface PeopleFilters {
-  titles?: string[];
-  seniorities?: string[];
-  functions?: string[];
-  locationCountries?: string[];
-  locationStates?: string[];
-  locationCities?: string[];
-  companyNames?: string[];
-  companyDomains?: string[];
-  industries?: string[];
-  keywords?: string[];
-  employeeMin?: number;
-  employeeMax?: number;
-  companySizes?: string[];
-  revenueRanges?: string[];
-  fundingStages?: string[];
-  technologies?: string[];
-  [key: string]: unknown;
-}
-
 // Neutral organization (gateway-locked, mirrors lead-service columns).
 export interface PersonOrganization {
   name: string | null;
@@ -76,7 +53,8 @@ export interface PersonOrganization {
 
 // Neutral Person (gateway-locked, mirrors FullLead). Slimmer than Apollo's raw
 // firehose: single email (no personalEmails[]), no employment-history array,
-// no funding/tech org detail.
+// no funding/tech org detail. `provider` reports which provider human-service
+// used to source the person (informational — NOT an input to lead-service).
 export interface Person {
   firstName: string | null;
   lastName: string | null;
@@ -99,7 +77,7 @@ export interface Person {
   organization: PersonOrganization | null;
 }
 
-interface ServiceContext {
+export interface ServiceContext {
   orgId: string;
   userId?: string | null;
   runId?: string | null;
@@ -134,14 +112,13 @@ function buildHeaders(ctx: ServiceContext): Record<string, string> {
   return headers;
 }
 
-async function callGateway<T>(
+async function callHuman<T>(
   path: string,
-  options: { method?: string; body?: unknown; ctx: ServiceContext; query?: Record<string, string> },
+  options: { method?: string; body?: unknown; ctx: ServiceContext },
 ): Promise<T> {
-  const { method = "GET", body, ctx, query } = options;
-  const qs = query ? `?${new URLSearchParams(query).toString()}` : "";
+  const { method = "GET", body, ctx } = options;
 
-  const response = await fetch(`${HUMAN_SERVICE_URL}${path}${qs}`, {
+  const response = await fetch(`${HUMAN_SERVICE_URL}${path}`, {
     method,
     headers: buildHeaders(ctx),
     body: body ? JSON.stringify(body) : undefined,
@@ -156,180 +133,19 @@ async function callGateway<T>(
   return response.json() as Promise<T>;
 }
 
-// --- Filters Prompt (provider-specific LLM filter-shape doc) ---
+// --- Serve Next (the next unserved person of an audience) ---
+// human-service uses the audience's stored canonical filters + provider; the
+// request body carries NO filters and NO provider. The returned person is
+// already recorded as served, so the next call returns someone new.
 
-export interface FiltersPrompt {
-  provider: PeopleProvider;
-  prompt: string;
-  schemaVersion: string;
-}
-
-export async function fetchFiltersPrompt(opts: {
-  provider: PeopleProvider;
-  orgId: string;
-  userId?: string | null;
-}): Promise<FiltersPrompt> {
-  return callGateway<FiltersPrompt>("/orgs/people/filters-prompt", {
-    ctx: { orgId: opts.orgId, userId: opts.userId },
-    query: { provider: opts.provider },
-  });
-}
-
-// --- Search (one page of normalized people) ---
-
-export interface PeopleSearchResult {
-  provider: PeopleProvider;
-  people: Person[];
-  done: boolean;
-  total: number;
-  nextOffset: number | null;
-}
-
-export async function peopleSearch(options: {
-  provider: PeopleProvider;
-  /** First page (apollo) / every page (apify): the neutral filter set. */
-  filters?: PeopleFilters;
-  /** apollo only: advance the server-managed cursor for the next page. */
-  nextPage?: boolean;
-  /** apify only: pagination offset (pass back nextOffset from the prior page). */
-  offset?: number;
-  orgId: string;
-  userId?: string | null;
-  runId?: string | null;
-  brandId: string;
-  campaignId: string;
-  workflowSlug?: string;
-  featureSlug?: string;
-  goal?: string;
-  activeGoalId?: string;
-  brandProfileId?: string;
-  customerPersonaId?: string;
-  customerProfileId?: string;
-}): Promise<PeopleSearchResult> {
-  const body: Record<string, unknown> = { provider: options.provider };
-  if (options.filters) body.filters = options.filters;
-  if (options.nextPage) body.nextPage = true;
-  if (options.offset !== undefined) body.offset = options.offset;
-
-  return callGateway<PeopleSearchResult>("/orgs/people/search", {
-    method: "POST",
-    body,
-    ctx: {
-      orgId: options.orgId,
-      userId: options.userId,
-      runId: options.runId,
-      brandId: options.brandId,
-      campaignId: options.campaignId,
-      workflowSlug: options.workflowSlug,
-      featureSlug: options.featureSlug,
-      goal: options.goal,
-      activeGoalId: options.activeGoalId,
-      brandProfileId: options.brandProfileId,
-      customerPersonaId: options.customerPersonaId,
-      customerProfileId: options.customerProfileId,
-    },
-  });
-}
-
-// --- Dry Run (count matches without consuming credits) ---
-
-export interface PeopleDryRunResult {
-  provider: PeopleProvider;
-  totalEntries: number;
-}
-
-export async function peopleDryRun(options: {
-  provider: PeopleProvider;
-  filters: PeopleFilters;
-  orgId: string;
-  userId?: string | null;
-  runId?: string | null;
-  brandId?: string;
-  campaignId?: string;
-  workflowSlug?: string;
-  featureSlug?: string;
-  goal?: string;
-  activeGoalId?: string;
-  brandProfileId?: string;
-  customerPersonaId?: string;
-  customerProfileId?: string;
-}): Promise<PeopleDryRunResult> {
-  return callGateway<PeopleDryRunResult>("/orgs/people/search/dry-run", {
-    method: "POST",
-    body: { provider: options.provider, filters: options.filters },
-    ctx: {
-      orgId: options.orgId,
-      userId: options.userId,
-      runId: options.runId,
-      brandId: options.brandId,
-      campaignId: options.campaignId,
-      workflowSlug: options.workflowSlug,
-      featureSlug: options.featureSlug,
-      goal: options.goal,
-      activeGoalId: options.activeGoalId,
-      brandProfileId: options.brandProfileId,
-      customerPersonaId: options.customerPersonaId,
-      customerProfileId: options.customerProfileId,
-    },
-  });
-}
-
-// --- Resolve Email (reveal a verified email for a known person) ---
-// The gateway is generic: reveal EITHER by `providerPersonId` (the id the same
-// provider returned at search time — apollo routes it to /enrich, the billed
-// path) OR by `firstName` + `lastName` + `domain` (identity match). lead-service
-// passes whatever identity it stored; the gateway picks the reveal path. The
-// pair (provider, providerPersonId) is what makes the id unambiguous.
-
-export interface ResolveEmailResult {
-  provider: PeopleProvider;
+export interface ServeNextResult {
+  status: "served" | "exhausted";
   person: Person | null;
 }
 
-export async function resolveEmail(options: {
-  provider: PeopleProvider;
-  /** Reveal by the provider's person id (apollo /enrich, the billed path). */
-  providerPersonId?: string;
-  firstName?: string;
-  lastName?: string;
-  domain?: string;
-  includeInferred?: boolean;
-  orgId: string;
-  userId?: string | null;
-  runId?: string | null;
-  brandId?: string;
-  campaignId?: string;
-  workflowSlug?: string;
-  featureSlug?: string;
-  goal?: string;
-  activeGoalId?: string;
-  brandProfileId?: string;
-  customerPersonaId?: string;
-  customerProfileId?: string;
-}): Promise<ResolveEmailResult> {
-  const body: Record<string, unknown> = { provider: options.provider };
-  if (options.providerPersonId) body.providerPersonId = options.providerPersonId;
-  if (options.firstName) body.firstName = options.firstName;
-  if (options.lastName) body.lastName = options.lastName;
-  if (options.domain) body.domain = options.domain;
-  if (options.includeInferred !== undefined) body.includeInferred = options.includeInferred;
-
-  return callGateway<ResolveEmailResult>("/orgs/people/resolve-email", {
-    method: "POST",
-    body,
-    ctx: {
-      orgId: options.orgId,
-      userId: options.userId,
-      runId: options.runId,
-      brandId: options.brandId,
-      campaignId: options.campaignId,
-      workflowSlug: options.workflowSlug,
-      featureSlug: options.featureSlug,
-      goal: options.goal,
-      activeGoalId: options.activeGoalId,
-      brandProfileId: options.brandProfileId,
-      customerPersonaId: options.customerPersonaId,
-      customerProfileId: options.customerProfileId,
-    },
-  });
+export async function serveNext(audienceId: string, ctx: ServiceContext): Promise<ServeNextResult> {
+  return callHuman<ServeNextResult>(
+    `/orgs/audiences/${encodeURIComponent(audienceId)}/serve-next`,
+    { method: "POST", body: {}, ctx },
+  );
 }
