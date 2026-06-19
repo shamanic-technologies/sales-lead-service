@@ -11,6 +11,11 @@ vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
 }));
 
+const getCurrentGoal = vi.fn();
+vi.mock("../../src/lib/brand-client.js", () => ({
+  getCurrentGoal: (...args: unknown[]) => getCurrentGoal(...args),
+}));
+
 const upsertLeadFromPerson = vi.fn();
 const recordEmploymentHistory = vi.fn();
 const upsertContactMethod = vi.fn();
@@ -70,7 +75,6 @@ const baseParams = {
   brandIds: ["brand-1"],
   brandId: "brand-1",
   featureSlug: "lead-finder-v1",
-  goal: "signup",
   runId: "run-1",
   userId: "user-1",
 };
@@ -78,8 +82,37 @@ const baseParams = {
 describe("pullNext (audience serve-next flow)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // goal is brand-owned — default the brand-service lookup to "signup".
+    getCurrentGoal.mockResolvedValue("signup");
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  it("fetches the goal from brand-service and uses it for the audience + attribution", async () => {
+    getCurrentGoal.mockResolvedValueOnce("meetingBooked");
+    getTopAudienceId.mockResolvedValueOnce("aud-1");
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    upsertContactMethod.mockResolvedValueOnce({ inserted: true });
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    const result = await pullNext(baseParams);
+
+    // goal came from brand-service for THIS brand, not from a caller input
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object));
+    expect((getTopAudienceId.mock.calls[0][0] as Record<string, unknown>).goal).toBe("meetingBooked");
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ goal: "meetingBooked" }));
+    expect(result.lead?.goal).toBe("meetingBooked");
+  });
+
+  it("fails loud when the brand has no goal set (brand-service throws)", async () => {
+    getCurrentGoal.mockRejectedValueOnce(
+      new Error("[brand-client] runtime-context failed for brand brand-1: 404 Brand not found"),
+    );
+
+    await expect(pullNext(baseParams)).rejects.toThrow(/runtime-context failed/);
+    expect(getTopAudienceId).not.toHaveBeenCalled();
   });
 
   it("resolves the audience, serves the next person, records it, and returns FullLead", async () => {

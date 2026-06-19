@@ -8,6 +8,7 @@ import {
   upsertContactMethod,
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
+import { getCurrentGoal } from "./brand-client.js";
 
 interface PullNextParams {
   orgId: string;
@@ -17,7 +18,6 @@ interface PullNextParams {
   /** Primary brand the audience is resolved for (per-brand audiences). */
   brandId: string;
   featureSlug: string;
-  goal: string;
   parentRunId?: string | null;
   runId?: string | null;
   userId?: string | null;
@@ -72,23 +72,29 @@ export async function pullNext(
     campaignId: params.campaignId,
     workflowSlug: params.workflowSlug,
     featureSlug: params.featureSlug,
-    goal: params.goal,
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     customerPersonaId: params.customerPersonaId ?? undefined,
     customerProfileId: params.customerProfileId ?? undefined,
   };
 
+  // 0. The goal belongs to the brand (brands.currentGoal), not the caller — read
+  // it from brand-service. No goal set ⟹ brand-service 404 ⟹ this fails loud.
+  const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx);
+  const ctx: ServiceContext = { ...baseCtx, goal };
+
+  if (signal?.aborted) return { found: false };
+
   // 1. Most-relevant audience id for this brand + feature + goal.
   const audienceId = await getTopAudienceId({
     featureSlug: params.featureSlug,
     brandId: params.brandId,
-    goal: params.goal,
-    ctx: baseCtx,
+    goal,
+    ctx,
   });
   if (!audienceId) {
     console.log(
-      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=no_audience brand=${params.brandId} feature=${params.featureSlug} goal=${params.goal}`,
+      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=no_audience brand=${params.brandId} feature=${params.featureSlug} goal=${goal}`,
     );
     return { found: false };
   }
@@ -97,7 +103,7 @@ export async function pullNext(
 
   // 2. Next unserved person of that audience (human-service owns filters/provider/dedup).
   // Attribute the serve to the resolved audience id (= customer profile id).
-  const serveCtx: ServiceContext = { ...baseCtx, customerProfileId: audienceId };
+  const serveCtx: ServiceContext = { ...ctx, customerProfileId: audienceId };
   const served = await serveNext(audienceId, serveCtx);
 
   if (served.status === "exhausted" || !served.person) {
@@ -150,7 +156,7 @@ export async function pullNext(
       userId: params.userId ?? null,
       workflowSlug: params.workflowSlug ?? null,
       featureSlug: params.featureSlug ?? null,
-      goal: params.goal ?? null,
+      goal,
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       customerPersonaId: params.customerPersonaId ?? null,
@@ -174,7 +180,7 @@ export async function pullNext(
       orgId: params.orgId,
       userId: params.userId ?? null,
       apolloPersonId: person.providerPersonId,
-      goal: params.goal ?? null,
+      goal,
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       customerPersonaId: params.customerPersonaId ?? null,
