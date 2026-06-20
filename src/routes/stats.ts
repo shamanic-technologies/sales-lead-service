@@ -27,12 +27,12 @@ const VALID_GROUP_BY = [
   "activeGoalId",
   "brandProfileId",
   "customerPersonaId",
-  "customerProfileId",
+  "audienceId",
 ] as const;
 type GroupByField = (typeof VALID_GROUP_BY)[number];
 type AttributionGroupByField = Extract<
   GroupByField,
-  "goal" | "activeGoalId" | "brandProfileId" | "customerPersonaId" | "customerProfileId"
+  "goal" | "activeGoalId" | "brandProfileId" | "customerPersonaId" | "audienceId"
 >;
 
 const COLUMN_MAP = {
@@ -43,7 +43,7 @@ const COLUMN_MAP = {
   activeGoalId: leadsCampaigns.activeGoalId,
   brandProfileId: leadsCampaigns.brandProfileId,
   customerPersonaId: leadsCampaigns.customerPersonaId,
-  customerProfileId: leadsCampaigns.customerProfileId,
+  audienceId: leadsCampaigns.audienceId,
 } as const;
 
 const ATTRIBUTION_GROUP_BY = new Set<AttributionGroupByField>([
@@ -51,7 +51,7 @@ const ATTRIBUTION_GROUP_BY = new Set<AttributionGroupByField>([
   "activeGoalId",
   "brandProfileId",
   "customerPersonaId",
-  "customerProfileId",
+  "audienceId",
 ]);
 
 const EG_GROUP_BY_MAP: Record<string, string> = {
@@ -110,7 +110,7 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
     activeGoalId,
     brandProfileId,
     customerPersonaId,
-    customerProfileId,
+    audienceId,
   } = req.query;
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
   const brandIdStr = str(brandId);
@@ -121,7 +121,7 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   const activeGoalIdStr = str(activeGoalId);
   const brandProfileIdStr = str(brandProfileId);
   const customerPersonaIdStr = str(customerPersonaId);
-  const customerProfileIdStr = str(customerProfileId);
+  const audienceIdStr = str(audienceId);
   const runIdList = typeof runIds === "string" ? runIds.split(",").filter(Boolean) : [];
 
   const conds: SQL[] = [eq(leadsCampaigns.orgId, req.orgId!)];
@@ -133,7 +133,7 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   if (activeGoalIdStr) conds.push(eq(leadsCampaigns.activeGoalId, activeGoalIdStr));
   if (brandProfileIdStr) conds.push(eq(leadsCampaigns.brandProfileId, brandProfileIdStr));
   if (customerPersonaIdStr) conds.push(eq(leadsCampaigns.customerPersonaId, customerPersonaIdStr));
-  if (customerProfileIdStr) conds.push(eq(leadsCampaigns.customerProfileId, customerProfileIdStr));
+  if (audienceIdStr) conds.push(eq(leadsCampaigns.audienceId, audienceIdStr));
   if (runIdList.length > 0) {
     conds.push(
       sql`(${leadsCampaigns.parentRunId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]) OR ${leadsCampaigns.runId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]) OR ${leadsCampaigns.pushRunId} = ANY(ARRAY[${sql.join(runIdList.map((id) => sql`${id}`), sql`, `)}]))`,
@@ -156,7 +156,7 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
       !!activeGoalIdStr ||
       !!brandProfileIdStr ||
       !!customerPersonaIdStr ||
-      !!customerProfileIdStr,
+      !!audienceIdStr,
   };
 }
 
@@ -251,7 +251,7 @@ interface RecipientEvidenceRow {
   activeGoalId: string | null;
   brandProfileId: string | null;
   customerPersonaId: string | null;
-  customerProfileId: string | null;
+  audienceId: string | null;
   email: string;
 }
 
@@ -345,7 +345,7 @@ async function fetchRecipientEvidenceRows(conds: SQL[]): Promise<RecipientEviden
       leads_campaigns.active_goal_id AS "activeGoalId",
       leads_campaigns.brand_profile_id AS "brandProfileId",
       leads_campaigns.customer_persona_id AS "customerPersonaId",
-      leads_campaigns.customer_profile_id AS "customerProfileId",
+      leads_campaigns.audience_id AS "audienceId",
       em.value AS "email"
     FROM leads_campaigns
     JOIN LATERAL (

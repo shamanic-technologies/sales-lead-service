@@ -14,7 +14,7 @@ export interface ServiceContext {
   activeGoalId?: string;
   brandProfileId?: string;
   customerPersonaId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
 }
 
 export interface AuthenticatedRequest extends Request {
@@ -30,7 +30,7 @@ export interface AuthenticatedRequest extends Request {
   activeGoalId?: string;
   brandProfileId?: string;
   customerPersonaId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
 }
 
 function applySentryTags(req: AuthenticatedRequest): void {
@@ -45,7 +45,7 @@ function applySentryTags(req: AuthenticatedRequest): void {
   if (req.activeGoalId) Sentry.setTag("activeGoalId", req.activeGoalId);
   if (req.brandProfileId) Sentry.setTag("brandProfileId", req.brandProfileId);
   if (req.customerPersonaId) Sentry.setTag("customerPersonaId", req.customerPersonaId);
-  if (req.customerProfileId) Sentry.setTag("customerProfileId", req.customerProfileId);
+  if (req.audienceId) Sentry.setTag("audienceId", req.audienceId);
 }
 
 export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
@@ -61,7 +61,7 @@ export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
     activeGoalId: req.activeGoalId,
     brandProfileId: req.brandProfileId,
     customerPersonaId: req.customerPersonaId,
-    customerProfileId: req.customerProfileId,
+    audienceId: req.audienceId,
   };
 }
 
@@ -114,7 +114,7 @@ export function requireOrgId(
   const activeGoalId = req.headers["x-active-goal-id"] as string | undefined;
   const brandProfileId = req.headers["x-brand-profile-id"] as string | undefined;
   const customerPersonaId = req.headers["x-customer-persona-id"] as string | undefined;
-  const customerProfileId = req.headers["x-customer-profile-id"] as string | undefined;
+  const audienceId = req.headers["x-audience-id"] as string | undefined;
 
   req.orgId = orgId;
   if (userId) req.userId = userId;
@@ -132,7 +132,7 @@ export function requireOrgId(
   if (activeGoalId) req.activeGoalId = activeGoalId;
   if (brandProfileId) req.brandProfileId = brandProfileId;
   if (customerPersonaId) req.customerPersonaId = customerPersonaId;
-  if (customerProfileId) req.customerProfileId = customerProfileId;
+  if (audienceId) req.audienceId = audienceId;
 
   applySentryTags(req);
   next();

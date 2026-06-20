@@ -25,7 +25,7 @@ interface PullNextParams {
   activeGoalId?: string | null;
   brandProfileId?: string | null;
   customerPersonaId?: string | null;
-  customerProfileId?: string | null;
+  audienceId?: string | null;
 }
 
 interface PullNextResult {
@@ -42,7 +42,7 @@ interface PullNextResult {
     activeGoalId: string | null;
     brandProfileId: string | null;
     customerPersonaId: string | null;
-    customerProfileId: string | null;
+    audienceId: string | null;
   };
 }
 
@@ -75,7 +75,7 @@ export async function pullNext(
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     customerPersonaId: params.customerPersonaId ?? undefined,
-    customerProfileId: params.customerProfileId ?? undefined,
+    audienceId: params.audienceId ?? undefined,
   };
 
   // 0. The goal belongs to the brand (brands.currentGoal), not the caller — read
@@ -102,8 +102,8 @@ export async function pullNext(
   if (signal?.aborted) return { found: false };
 
   // 2. Next unserved person of that audience (human-service owns filters/provider/dedup).
-  // Attribute the serve to the resolved audience id (= customer profile id).
-  const serveCtx: ServiceContext = { ...ctx, customerProfileId: audienceId };
+  // Attribute the serve to the resolved audience id.
+  const serveCtx: ServiceContext = { ...ctx, audienceId: audienceId };
   const served = await serveNext(audienceId, serveCtx);
 
   if (served.status === "exhausted" || !served.person) {
@@ -160,7 +160,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       customerPersonaId: params.customerPersonaId ?? null,
-      customerProfileId: audienceId,
+      audienceId: audienceId,
     })
     .onConflictDoNothing();
 
@@ -184,7 +184,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       customerPersonaId: params.customerPersonaId ?? null,
-      customerProfileId: audienceId,
+      audienceId: audienceId,
     },
   };
 }
