@@ -82,7 +82,7 @@ interface ServiceContext {
   activeGoalId?: string;
   brandProfileId?: string;
   customerPersonaId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
 }
 
 function addContextHeaders(headers: Record<string, string>, context?: ServiceContext): void {
@@ -97,7 +97,7 @@ function addContextHeaders(headers: Record<string, string>, context?: ServiceCon
   if (context?.activeGoalId) headers["x-active-goal-id"] = context.activeGoalId;
   if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
   if (context?.customerPersonaId) headers["x-customer-persona-id"] = context.customerPersonaId;
-  if (context?.customerProfileId) headers["x-customer-profile-id"] = context.customerProfileId;
+  if (context?.audienceId) headers["x-audience-id"] = context.audienceId;
 }
 
 export async function checkDeliveryStatus(

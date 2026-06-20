@@ -27,11 +27,11 @@ describe("features-client getTopAudienceId", () => {
     vi.unstubAllGlobals();
   });
 
-  it("GETs persona-stats(limit=1) and returns the top row's customerProfileId as the audience id", async () => {
+  it("GETs persona-stats(limit=1) and returns the top row's audienceId as the audience id", async () => {
     const { calls } = mockFetch({
       personas: [
-        { customerProfileId: "aud-top", sortMetric: 0.9 },
-        { customerProfileId: "aud-second", sortMetric: 0.4 },
+        { audienceId: "aud-top", sortMetric: 0.9 },
+        { audienceId: "aud-second", sortMetric: 0.4 },
       ],
     });
 

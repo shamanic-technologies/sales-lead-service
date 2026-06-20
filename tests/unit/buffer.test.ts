@@ -129,17 +129,17 @@ describe("pullNext (audience serve-next flow)", () => {
     const featuresArg = getTopAudienceId.mock.calls[0][0] as Record<string, unknown>;
     expect(featuresArg).toMatchObject({ featureSlug: "lead-finder-v1", brandId: "brand-1", goal: "signup" });
     // serve-next consumed for that audience id, attributed to it
-    expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ customerProfileId: "aud-1" }));
+    expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1" }));
     // person persisted into silver
     expect(upsertLeadFromPerson).toHaveBeenCalledWith(person, { enriched: true });
     expect(insertValues).toHaveBeenCalledWith(
-      expect.objectContaining({ leadId: "lead-1", status: "served", customerProfileId: "aud-1" }),
+      expect.objectContaining({ leadId: "lead-1", status: "served", audienceId: "aud-1" }),
     );
 
     expect(result.found).toBe(true);
     expect(result.lead?.leadId).toBe("lead-1");
     expect(result.lead?.email).toBe("sara@cascobay.com");
-    expect(result.lead?.customerProfileId).toBe("aud-1");
+    expect(result.lead?.audienceId).toBe("aud-1");
     expect(result.lead?.apolloPersonId).toBe("apollo-person-1");
     expect(result.lead?.data).toEqual({ leadId: "lead-1", firstName: "Sara" });
   });

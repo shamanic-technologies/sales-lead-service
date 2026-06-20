@@ -33,7 +33,7 @@ function rawRow(servedAt: unknown) {
     active_goal_id: null,
     brand_profile_id: null,
     customer_persona_id: null,
-    customer_profile_id: null,
+    audience_id: null,
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     l_id: "lead-1",
     apollo_person_id: "apollo-1",
@@ -66,7 +66,7 @@ describe("fetchBasicLeadRows", () => {
     const rows = await fetchBasicLeadChunk({ orgId: "org-1", brandId: "brand-1" }, null, 500);
 
     expect(rows[0].servedAt).toBe("2026-06-17T01:44:59.123Z");
-    expect(rows[0].customerProfileId).toBeNull();
+    expect(rows[0].audienceId).toBeNull();
   });
 
   it("keeps Date timestamps compatible with the full path", async () => {

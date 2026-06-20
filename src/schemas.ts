@@ -101,10 +101,10 @@ const AuthHeaders = [
   },
   {
     in: "header" as const,
-    name: "x-customer-profile-id",
+    name: "x-audience-id",
     required: false,
     schema: { type: "string" as const },
-    description: "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller.",
+    description: "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller.",
   },
 ];
 
@@ -1005,13 +1005,13 @@ const ServedLeadSchema = z
         description: "Explicit customer persona ID tag for this served lead. null means unattributed.",
         example: "persona_123",
       }),
-    customerProfileId: z
+    audienceId: z
       .string()
       .nullable()
       .optional()
       .openapi({
-        description: "Explicit customer profile ID tag for this served lead. null means unattributed.",
-        example: "customer_profile_123",
+        description: "Audience ID (human-service audience.id) this served lead is attributed to. null means unattributed.",
+        example: "audience_123",
       }),
   })
   .openapi("ServedLead", {
@@ -1285,13 +1285,13 @@ const LeadDetailSchema = z
         description: "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
         example: "persona_123",
       }),
-    customerProfileId: z
+    audienceId: z
       .string()
       .nullable()
       .optional()
       .openapi({
-        description: "Explicit customer profile ID stored on the leads_campaigns row. null means unattributed.",
-        example: "customer_profile_123",
+        description: "Audience ID (human-service audience.id) stored on the leads_campaigns row. null means unattributed.",
+        example: "audience_123",
       }),
     servedAt: z
       .string()
@@ -1688,9 +1688,9 @@ registry.registerPath({
     },
     {
       in: "query" as const,
-      name: "customerProfileId",
+      name: "audienceId",
       required: false,
-      description: "Filter stats to rows explicitly tagged with this customer profile ID.",
+      description: "Filter stats to rows explicitly tagged with this audience ID.",
       schema: { type: "string" as const },
     },
     {
@@ -1712,7 +1712,7 @@ registry.registerPath({
           "activeGoalId",
           "brandProfileId",
           "customerPersonaId",
-          "customerProfileId",
+          "audienceId",
         ],
       },
     },
