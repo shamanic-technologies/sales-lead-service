@@ -10,9 +10,13 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `npm run build` — compile TypeScript + generate OpenAPI spec
 - `npm run dev` — local dev server with hot reload
 - `npm run generate:openapi` — regenerate openapi.json from Zod schemas
-- `npm run db:generate` — generate Drizzle migrations
+- `npm run db:generate` — generate Drizzle migrations (⚠️ see Migrations below — do NOT use)
 - `npm run db:migrate` — run Drizzle migrations
 - `npm run db:push` — push schema directly (dev only)
+
+## Migrations — hand-author, do NOT `db:generate`
+
+The drizzle meta snapshots (`drizzle/meta/*_snapshot.json`) stop at `0007`; migrations `0008`+ were all hand-authored. So `npm run db:generate` (`drizzle-kit generate`) has no recent snapshot to diff against and drops into an interactive prompt asking to **recreate every table** — it cannot produce a clean incremental migration. Convention: **hand-author the `.sql` file + add the journal entry to `drizzle/meta/_journal.json` yourself**. Make every statement idempotent (`DROP COLUMN IF EXISTS`, `DROP INDEX IF EXISTS`, `CREATE INDEX IF NOT EXISTS`, or `DO $$ … IF EXISTS … $$`) — see `0022`/`0023` as templates. `npm run db:migrate` (`drizzle-kit migrate`) applies the journal's `.sql` files and does NOT need the snapshots, so this works at boot.
 
 ## Architecture
 
