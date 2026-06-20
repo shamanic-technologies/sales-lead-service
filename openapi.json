@@ -244,11 +244,11 @@
             "description": "Explicit customer persona ID tag for this served lead. null means unattributed.",
             "example": "persona_123"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
-            "description": "Explicit customer profile ID tag for this served lead. null means unattributed.",
-            "example": "customer_profile_123"
+            "description": "Audience ID (human-service audience.id) this served lead is attributed to. null means unattributed.",
+            "example": "audience_123"
           }
         },
         "required": [
@@ -1264,11 +1264,11 @@
             "description": "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
             "example": "persona_123"
           },
-          "customerProfileId": {
+          "audienceId": {
             "type": "string",
             "nullable": true,
-            "description": "Explicit customer profile ID stored on the leads_campaigns row. null means unattributed.",
-            "example": "customer_profile_123"
+            "description": "Audience ID (human-service audience.id) stored on the leads_campaigns row. null means unattributed.",
+            "example": "audience_123"
           },
           "servedAt": {
             "type": "string",
@@ -1990,12 +1990,12 @@
           },
           {
             "in": "header",
-            "name": "x-customer-profile-id",
+            "name": "x-audience-id",
             "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
           }
         ],
         "requestBody": {
@@ -2149,12 +2149,12 @@
           },
           {
             "in": "header",
-            "name": "x-customer-profile-id",
+            "name": "x-audience-id",
             "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
           },
           {
             "in": "query",
@@ -2343,12 +2343,12 @@
           },
           {
             "in": "header",
-            "name": "x-customer-profile-id",
+            "name": "x-audience-id",
             "required": false,
             "schema": {
               "type": "string"
             },
-            "description": "Customer profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
           },
           {
             "in": "query",
@@ -2483,9 +2483,9 @@
           },
           {
             "in": "query",
-            "name": "customerProfileId",
+            "name": "audienceId",
             "required": false,
-            "description": "Filter stats to rows explicitly tagged with this customer profile ID.",
+            "description": "Filter stats to rows explicitly tagged with this audience ID.",
             "schema": {
               "type": "string"
             }
@@ -2508,7 +2508,7 @@
                 "activeGoalId",
                 "brandProfileId",
                 "customerPersonaId",
-                "customerProfileId"
+                "audienceId"
               ]
             }
           }

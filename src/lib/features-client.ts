@@ -6,7 +6,7 @@ import type { ServiceContext } from "./people-client.js";
  *
  * The most-relevant audience for a (brand, feature, goal) is the top row of
  * GET /features/{featureSlug}/persona-stats?brandId=&goal=&status=active&limit=1.
- * That row's `customerProfileId` IS the human-service audience id. An empty
+ * That row's `audienceId` IS the human-service audience id. An empty
  * `personas` array means there is no audience for the brand/goal — returned as
  * null (a clean "no audience", NOT a silent fallback).
  */
@@ -27,17 +27,17 @@ function buildHeaders(ctx: ServiceContext): Record<string, string> {
   if (ctx.activeGoalId) headers["x-active-goal-id"] = ctx.activeGoalId;
   if (ctx.brandProfileId) headers["x-brand-profile-id"] = ctx.brandProfileId;
   if (ctx.customerPersonaId) headers["x-customer-persona-id"] = ctx.customerPersonaId;
-  if (ctx.customerProfileId) headers["x-customer-profile-id"] = ctx.customerProfileId;
+  if (ctx.audienceId) headers["x-audience-id"] = ctx.audienceId;
   return headers;
 }
 
 interface PersonaStatsResponse {
-  personas: Array<{ customerProfileId: string }>;
+  personas: Array<{ audienceId: string }>;
 }
 
 /**
  * Fetch the most-relevant audience id for a (brand, feature, goal).
- * Returns the top persona-stats row's customerProfileId, or null when there is
+ * Returns the top persona-stats row's audienceId, or null when there is
  * no active audience for that brand/goal. Fails loud on any non-2xx.
  */
 export async function getTopAudienceId(params: {
@@ -67,5 +67,5 @@ export async function getTopAudienceId(params: {
   }
 
   const data = (await response.json()) as PersonaStatsResponse;
-  return data.personas[0]?.customerProfileId ?? null;
+  return data.personas[0]?.audienceId ?? null;
 }

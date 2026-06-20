@@ -89,7 +89,7 @@ export interface ServiceContext {
   activeGoalId?: string;
   brandProfileId?: string;
   customerPersonaId?: string;
-  customerProfileId?: string;
+  audienceId?: string;
 }
 
 function buildHeaders(ctx: ServiceContext): Record<string, string> {
@@ -108,7 +108,7 @@ function buildHeaders(ctx: ServiceContext): Record<string, string> {
   if (ctx.activeGoalId) headers["x-active-goal-id"] = ctx.activeGoalId;
   if (ctx.brandProfileId) headers["x-brand-profile-id"] = ctx.brandProfileId;
   if (ctx.customerPersonaId) headers["x-customer-persona-id"] = ctx.customerPersonaId;
-  if (ctx.customerProfileId) headers["x-customer-profile-id"] = ctx.customerProfileId;
+  if (ctx.audienceId) headers["x-audience-id"] = ctx.audienceId;
   return headers;
 }
 

@@ -94,7 +94,7 @@ function evidence(overrides: Partial<Record<string, unknown>>) {
     activeGoalId: "goal-1",
     brandProfileId: "brand-profile-1",
     customerPersonaId: "persona-1",
-    customerProfileId: "profile-1",
+    audienceId: "profile-1",
     email: "lead@example.com",
     ...overrides,
   };
@@ -116,14 +116,14 @@ describe("GET /orgs/stats persona attribution", () => {
     fetchEmailGatewayStatsMock.mockReset();
   });
 
-  it("keeps tagged customer profiles as separate evidence rows with their own outcomes", async () => {
+  it("keeps tagged audiences as separate evidence rows with their own outcomes", async () => {
     statusRows = [
       { key: "profile-a", status: "served", count: 1 },
       { key: "profile-b", status: "served", count: 1 },
     ];
     evidenceRows = [
-      evidence({ id: "lc-a", campaignId: "campaign-a", customerProfileId: "profile-a", email: "a@example.com" }),
-      evidence({ id: "lc-b", campaignId: "campaign-b", customerProfileId: "profile-b", email: "b@example.com" }),
+      evidence({ id: "lc-a", campaignId: "campaign-a", audienceId: "profile-a", email: "a@example.com" }),
+      evidence({ id: "lc-b", campaignId: "campaign-b", audienceId: "profile-b", email: "b@example.com" }),
     ];
     fetchEmailGatewayStatsMock.mockImplementation((params: { campaignId?: string }) => {
       if (params.campaignId === "campaign-a") {
@@ -164,7 +164,7 @@ describe("GET /orgs/stats persona attribution", () => {
         brandId: BRAND,
         featureSlug: "feat-1",
         goal: "signup",
-        groupBy: "customerProfileId",
+        groupBy: "audienceId",
       })
       .set("x-api-key", "test-api-key")
       .set("x-org-id", ORG);
@@ -189,8 +189,8 @@ describe("GET /orgs/stats persona attribution", () => {
       { key: null, status: "served", count: 1 },
     ];
     evidenceRows = [
-      evidence({ id: "lc-a", customerProfileId: "profile-a", email: "a@example.com" }),
-      evidence({ id: "lc-untagged", customerProfileId: null, email: "untagged@example.com" }),
+      evidence({ id: "lc-a", audienceId: "profile-a", email: "a@example.com" }),
+      evidence({ id: "lc-untagged", audienceId: null, email: "untagged@example.com" }),
     ];
     fetchEmailGatewayStatsMock.mockResolvedValue({
       groups: [
@@ -208,7 +208,7 @@ describe("GET /orgs/stats persona attribution", () => {
     const app = await buildApp();
     const res = await request(app)
       .get("/orgs/stats")
-      .query({ brandId: BRAND, featureSlug: "feat-1", groupBy: "customerProfileId" })
+      .query({ brandId: BRAND, featureSlug: "feat-1", groupBy: "audienceId" })
       .set("x-api-key", "test-api-key")
       .set("x-org-id", ORG);
 
