@@ -1,7 +1,6 @@
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { serveNext, type Person, type ServiceContext } from "./people-client.js";
-import { getTopAudienceId } from "./features-client.js";
 import {
   upsertLeadFromPerson,
   recordEmploymentHistory,
@@ -47,22 +46,35 @@ interface PullNextResult {
 }
 
 /**
- * Return the next real person to contact for this brand + feature + goal:
- *   1. Ask features-service for the brand's most-relevant audience id.
+ * Return the next real person to contact for the audience the campaign selected:
+ *   1. Use the audience id the campaign passed in (x-audience-id header).
+ *      campaign-service owns audience selection per run and propagates it down
+ *      the workflow DAG; lead-service does NOT re-rank or re-select.
  *   2. Ask human-service serve-next for that audience's next unserved person.
  *   3. Record the person into lead-service silver (leads + leads_campaigns) and
  *      return it in the same FullLead shape the workflow already consumes.
  *
  * lead-service generates NO filters and takes NO provider — human-service owns
  * the audience's canonical filters, provider routing, and dedup/suppression.
- * No audience (empty persona-stats) or an exhausted audience surfaces cleanly as
- * found:false; real errors (features/serve-next non-2xx, network) fail loud.
+ * No audience id (campaign selected none) or an exhausted audience surfaces
+ * cleanly as found:false; real errors (serve-next non-2xx, network) fail loud.
  */
 export async function pullNext(
   params: PullNextParams,
   signal?: AbortSignal,
 ): Promise<PullNextResult> {
   if (signal?.aborted) return { found: false };
+
+  // 1. The audience is selected by campaign-service per run and passed in via the
+  // x-audience-id header. lead-service does NOT re-rank or re-select. No audience
+  // id (campaign selected none) ⟹ clean found:false, no serve, no brand call.
+  const audienceId = params.audienceId ?? null;
+  if (!audienceId) {
+    console.log(
+      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=no_audience brand=${params.brandId} feature=${params.featureSlug}`,
+    );
+    return { found: false };
+  }
 
   const baseCtx: ServiceContext = {
     orgId: params.orgId,
@@ -75,36 +87,19 @@ export async function pullNext(
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     customerPersonaId: params.customerPersonaId ?? undefined,
-    audienceId: params.audienceId ?? undefined,
+    audienceId,
   };
 
-  // 0. The goal belongs to the brand (brands.currentGoal), not the caller — read
-  // it from brand-service. No goal set ⟹ brand-service 404 ⟹ this fails loud.
+  // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
+  // it from brand-service for attribution/storage. No goal set ⟹ brand-service
+  // 404 ⟹ this fails loud.
   const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx);
   const ctx: ServiceContext = { ...baseCtx, goal };
 
   if (signal?.aborted) return { found: false };
 
-  // 1. Most-relevant audience id for this brand + feature + goal.
-  const audienceId = await getTopAudienceId({
-    featureSlug: params.featureSlug,
-    brandId: params.brandId,
-    goal,
-    ctx,
-  });
-  if (!audienceId) {
-    console.log(
-      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=no_audience brand=${params.brandId} feature=${params.featureSlug} goal=${goal}`,
-    );
-    return { found: false };
-  }
-
-  if (signal?.aborted) return { found: false };
-
-  // 2. Next unserved person of that audience (human-service owns filters/provider/dedup).
-  // Attribute the serve to the resolved audience id.
-  const serveCtx: ServiceContext = { ...ctx, audienceId: audienceId };
-  const served = await serveNext(audienceId, serveCtx);
+  // 3. Next unserved person of that audience (human-service owns filters/provider/dedup).
+  const served = await serveNext(audienceId, ctx);
 
   if (served.status === "exhausted" || !served.person) {
     console.log(
@@ -122,7 +117,7 @@ export async function pullNext(
     );
   }
 
-  // 3. Record into silver (leads + organization + contact + lifecycle row).
+  // 4. Record into silver (leads + organization + contact + lifecycle row).
   const leadId = await upsertLeadFromPerson(person, { enriched: true });
   await recordEmploymentHistory({ leadId, person });
 

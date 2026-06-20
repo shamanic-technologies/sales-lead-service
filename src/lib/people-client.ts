@@ -37,6 +37,25 @@ export function isPeopleCreditInsufficientError(error: unknown): boolean {
   return isCreditInsufficientError(error);
 }
 
+/** Reason returned to the caller when the resolved audience cannot be served. */
+export const AUDIENCE_NOT_SERVEABLE_REASON = "audience_not_serveable" as const;
+
+/**
+ * True when serve-next refused because the audience has no committed provider.
+ * human-service returns 422 `{ error: "Audience has no committed provider ..." }`
+ * when the campaign-selected audience was never counted/committed. That is a
+ * clean terminal "no lead right now" state for this run — NOT a 500. The
+ * audience-lifecycle fix lives in human-service; this classifier keeps a stray
+ * uncommitted audience from crash-looping the workflow.
+ */
+export function isAudienceNotServeableError(error: unknown): boolean {
+  if (!(error instanceof PeopleServiceError)) return false;
+  if (error.status !== 422) return false;
+  const body = error.body as { error?: unknown } | null;
+  const message = typeof body?.error === "string" ? body.error : error.responseText;
+  return message.toLowerCase().includes("committed provider");
+}
+
 // Neutral organization (gateway-locked, mirrors lead-service columns).
 export interface PersonOrganization {
   name: string | null;
