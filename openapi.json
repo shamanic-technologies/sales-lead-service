@@ -238,12 +238,6 @@
             "description": "Explicit brand profile ID tag for this served lead. null means unattributed.",
             "example": "brand_profile_123"
           },
-          "customerPersonaId": {
-            "type": "string",
-            "nullable": true,
-            "description": "Explicit customer persona ID tag for this served lead. null means unattributed.",
-            "example": "persona_123"
-          },
           "audienceId": {
             "type": "string",
             "nullable": true,
@@ -1258,12 +1252,6 @@
             "description": "Explicit brand profile ID stored on the leads_campaigns row. null means unattributed.",
             "example": "brand_profile_123"
           },
-          "customerPersonaId": {
-            "type": "string",
-            "nullable": true,
-            "description": "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
-            "example": "persona_123"
-          },
           "audienceId": {
             "type": "string",
             "nullable": true,
@@ -1981,15 +1969,6 @@
           },
           {
             "in": "header",
-            "name": "x-customer-persona-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
-          },
-          {
-            "in": "header",
             "name": "x-audience-id",
             "required": false,
             "schema": {
@@ -2137,15 +2116,6 @@
               "type": "string"
             },
             "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
-          },
-          {
-            "in": "header",
-            "name": "x-customer-persona-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
           },
           {
             "in": "header",
@@ -2334,15 +2304,6 @@
           },
           {
             "in": "header",
-            "name": "x-customer-persona-id",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller."
-          },
-          {
-            "in": "header",
             "name": "x-audience-id",
             "required": false,
             "schema": {
@@ -2474,15 +2435,6 @@
           },
           {
             "in": "query",
-            "name": "customerPersonaId",
-            "required": false,
-            "description": "Filter stats to rows explicitly tagged with this customer persona ID.",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "query",
             "name": "audienceId",
             "required": false,
             "description": "Filter stats to rows explicitly tagged with this audience ID.",
@@ -2494,7 +2446,7 @@
             "in": "query",
             "name": "groupBy",
             "required": false,
-            "description": "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Persona/profile groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown persona.",
+            "description": "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Attribution groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown bucket.",
             "schema": {
               "type": "string",
               "enum": [
@@ -2507,7 +2459,6 @@
                 "goal",
                 "activeGoalId",
                 "brandProfileId",
-                "customerPersonaId",
                 "audienceId"
               ]
             }

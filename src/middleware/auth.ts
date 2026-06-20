@@ -13,7 +13,6 @@ export interface ServiceContext {
   goal?: string;
   activeGoalId?: string;
   brandProfileId?: string;
-  customerPersonaId?: string;
   audienceId?: string;
 }
 
@@ -29,7 +28,6 @@ export interface AuthenticatedRequest extends Request {
   goal?: string;
   activeGoalId?: string;
   brandProfileId?: string;
-  customerPersonaId?: string;
   audienceId?: string;
 }
 
@@ -44,7 +42,6 @@ function applySentryTags(req: AuthenticatedRequest): void {
   if (req.goal) Sentry.setTag("goal", req.goal);
   if (req.activeGoalId) Sentry.setTag("activeGoalId", req.activeGoalId);
   if (req.brandProfileId) Sentry.setTag("brandProfileId", req.brandProfileId);
-  if (req.customerPersonaId) Sentry.setTag("customerPersonaId", req.customerPersonaId);
   if (req.audienceId) Sentry.setTag("audienceId", req.audienceId);
 }
 
@@ -60,7 +57,6 @@ export function getServiceContext(req: AuthenticatedRequest): ServiceContext {
     goal: req.goal,
     activeGoalId: req.activeGoalId,
     brandProfileId: req.brandProfileId,
-    customerPersonaId: req.customerPersonaId,
     audienceId: req.audienceId,
   };
 }
@@ -113,7 +109,6 @@ export function requireOrgId(
   const goal = req.headers["x-goal"] as string | undefined;
   const activeGoalId = req.headers["x-active-goal-id"] as string | undefined;
   const brandProfileId = req.headers["x-brand-profile-id"] as string | undefined;
-  const customerPersonaId = req.headers["x-customer-persona-id"] as string | undefined;
   const audienceId = req.headers["x-audience-id"] as string | undefined;
 
   req.orgId = orgId;
@@ -131,7 +126,6 @@ export function requireOrgId(
   if (goal) req.goal = goal;
   if (activeGoalId) req.activeGoalId = activeGoalId;
   if (brandProfileId) req.brandProfileId = brandProfileId;
-  if (customerPersonaId) req.customerPersonaId = customerPersonaId;
   if (audienceId) req.audienceId = audienceId;
 
   applySentryTags(req);

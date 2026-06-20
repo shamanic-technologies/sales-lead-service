@@ -32,7 +32,6 @@ function rawRow(servedAt: unknown) {
     goal: null,
     active_goal_id: null,
     brand_profile_id: null,
-    customer_persona_id: null,
     audience_id: null,
     created_at: new Date("2026-01-01T00:00:00.000Z"),
     l_id: "lead-1",

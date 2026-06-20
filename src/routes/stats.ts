@@ -26,13 +26,12 @@ const VALID_GROUP_BY = [
   "goal",
   "activeGoalId",
   "brandProfileId",
-  "customerPersonaId",
   "audienceId",
 ] as const;
 type GroupByField = (typeof VALID_GROUP_BY)[number];
 type AttributionGroupByField = Extract<
   GroupByField,
-  "goal" | "activeGoalId" | "brandProfileId" | "customerPersonaId" | "audienceId"
+  "goal" | "activeGoalId" | "brandProfileId" | "audienceId"
 >;
 
 const COLUMN_MAP = {
@@ -42,7 +41,6 @@ const COLUMN_MAP = {
   goal: leadsCampaigns.goal,
   activeGoalId: leadsCampaigns.activeGoalId,
   brandProfileId: leadsCampaigns.brandProfileId,
-  customerPersonaId: leadsCampaigns.customerPersonaId,
   audienceId: leadsCampaigns.audienceId,
 } as const;
 
@@ -50,7 +48,6 @@ const ATTRIBUTION_GROUP_BY = new Set<AttributionGroupByField>([
   "goal",
   "activeGoalId",
   "brandProfileId",
-  "customerPersonaId",
   "audienceId",
 ]);
 
@@ -109,7 +106,6 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
     goal,
     activeGoalId,
     brandProfileId,
-    customerPersonaId,
     audienceId,
   } = req.query;
   const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
@@ -120,7 +116,6 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   const goalStr = str(goal);
   const activeGoalIdStr = str(activeGoalId);
   const brandProfileIdStr = str(brandProfileId);
-  const customerPersonaIdStr = str(customerPersonaId);
   const audienceIdStr = str(audienceId);
   const runIdList = typeof runIds === "string" ? runIds.split(",").filter(Boolean) : [];
 
@@ -132,7 +127,6 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
   if (goalStr) conds.push(eq(leadsCampaigns.goal, goalStr));
   if (activeGoalIdStr) conds.push(eq(leadsCampaigns.activeGoalId, activeGoalIdStr));
   if (brandProfileIdStr) conds.push(eq(leadsCampaigns.brandProfileId, brandProfileIdStr));
-  if (customerPersonaIdStr) conds.push(eq(leadsCampaigns.customerPersonaId, customerPersonaIdStr));
   if (audienceIdStr) conds.push(eq(leadsCampaigns.audienceId, audienceIdStr));
   if (runIdList.length > 0) {
     conds.push(
@@ -155,7 +149,6 @@ function buildConditions(req: AuthenticatedRequest, dynastyResolved: { workflowS
       !!goalStr ||
       !!activeGoalIdStr ||
       !!brandProfileIdStr ||
-      !!customerPersonaIdStr ||
       !!audienceIdStr,
   };
 }
@@ -250,7 +243,6 @@ interface RecipientEvidenceRow {
   goal: string | null;
   activeGoalId: string | null;
   brandProfileId: string | null;
-  customerPersonaId: string | null;
   audienceId: string | null;
   email: string;
 }
@@ -344,7 +336,6 @@ async function fetchRecipientEvidenceRows(conds: SQL[]): Promise<RecipientEviden
       leads_campaigns.goal AS "goal",
       leads_campaigns.active_goal_id AS "activeGoalId",
       leads_campaigns.brand_profile_id AS "brandProfileId",
-      leads_campaigns.customer_persona_id AS "customerPersonaId",
       leads_campaigns.audience_id AS "audienceId",
       em.value AS "email"
     FROM leads_campaigns

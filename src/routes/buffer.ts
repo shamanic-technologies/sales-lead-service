@@ -132,7 +132,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         workflowSlug,
         activeGoalId: req.activeGoalId ?? null,
         brandProfileId: req.brandProfileId ?? null,
-        customerPersonaId: req.customerPersonaId ?? null,
         audienceId: req.audienceId ?? null,
       },
       pullSignal,
