@@ -104,7 +104,6 @@ function row(i: number, status = "buffered") {
     goal: null,
     activeGoalId: null,
     brandProfileId: null,
-    customerPersonaId: null,
     audienceId: null,
     createdAt: new Date(`2026-01-01T00:00:0${i}.000Z`),
     leadApolloPersonId: `apollo-${i}`,

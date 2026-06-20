@@ -23,7 +23,6 @@ interface PullNextParams {
   workflowSlug?: string;
   activeGoalId?: string | null;
   brandProfileId?: string | null;
-  customerPersonaId?: string | null;
   audienceId?: string | null;
 }
 
@@ -40,7 +39,6 @@ interface PullNextResult {
     goal: string | null;
     activeGoalId: string | null;
     brandProfileId: string | null;
-    customerPersonaId: string | null;
     audienceId: string | null;
   };
 }
@@ -86,7 +84,6 @@ export async function pullNext(
     featureSlug: params.featureSlug,
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
-    customerPersonaId: params.customerPersonaId ?? undefined,
     audienceId,
   };
 
@@ -154,7 +151,6 @@ export async function pullNext(
       goal,
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
-      customerPersonaId: params.customerPersonaId ?? null,
       audienceId: audienceId,
     })
     .onConflictDoNothing();
@@ -178,7 +174,6 @@ export async function pullNext(
       goal,
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
-      customerPersonaId: params.customerPersonaId ?? null,
       audienceId: audienceId,
     },
   };

@@ -93,7 +93,6 @@ function evidence(overrides: Partial<Record<string, unknown>>) {
     goal: "signup",
     activeGoalId: "goal-1",
     brandProfileId: "brand-profile-1",
-    customerPersonaId: "persona-1",
     audienceId: "profile-1",
     email: "lead@example.com",
     ...overrides,
