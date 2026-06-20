@@ -83,7 +83,6 @@ describe("requireOrgId", () => {
       "x-goal": "signup",
       "x-active-goal-id": "goal-1",
       "x-brand-profile-id": "brand-profile-1",
-      "x-customer-persona-id": "persona-1",
       "x-audience-id": "audience-1",
     });
     const res = makeRes();
@@ -100,7 +99,6 @@ describe("requireOrgId", () => {
     expect(req.goal).toBe("signup");
     expect(req.activeGoalId).toBe("goal-1");
     expect(req.brandProfileId).toBe("brand-profile-1");
-    expect(req.customerPersonaId).toBe("persona-1");
     expect(req.audienceId).toBe("audience-1");
     expect(next).toHaveBeenCalledOnce();
 
@@ -116,7 +114,6 @@ describe("requireOrgId", () => {
       goal: "signup",
       activeGoalId: "goal-1",
       brandProfileId: "brand-profile-1",
-      customerPersonaId: "persona-1",
       audienceId: "audience-1",
     });
   });

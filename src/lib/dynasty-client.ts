@@ -24,7 +24,6 @@ function buildHeaders(
     goal?: string;
     activeGoalId?: string;
     brandProfileId?: string;
-    customerPersonaId?: string;
     audienceId?: string;
   },
 ): Record<string, string> {
@@ -38,7 +37,6 @@ function buildHeaders(
   if (context?.goal) headers["x-goal"] = context.goal;
   if (context?.activeGoalId) headers["x-active-goal-id"] = context.activeGoalId;
   if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
-  if (context?.customerPersonaId) headers["x-customer-persona-id"] = context.customerPersonaId;
   if (context?.audienceId) headers["x-audience-id"] = context.audienceId;
   return headers;
 }

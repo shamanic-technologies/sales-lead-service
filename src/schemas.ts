@@ -94,13 +94,6 @@ const AuthHeaders = [
   },
   {
     in: "header" as const,
-    name: "x-customer-persona-id",
-    required: false,
-    schema: { type: "string" as const },
-    description: "Customer persona identifier for persona-scoped attribution, when explicitly tagged by the caller.",
-  },
-  {
-    in: "header" as const,
     name: "x-audience-id",
     required: false,
     schema: { type: "string" as const },
@@ -997,14 +990,6 @@ const ServedLeadSchema = z
         description: "Explicit brand profile ID tag for this served lead. null means unattributed.",
         example: "brand_profile_123",
       }),
-    customerPersonaId: z
-      .string()
-      .nullable()
-      .optional()
-      .openapi({
-        description: "Explicit customer persona ID tag for this served lead. null means unattributed.",
-        example: "persona_123",
-      }),
     audienceId: z
       .string()
       .nullable()
@@ -1276,14 +1261,6 @@ const LeadDetailSchema = z
       .openapi({
         description: "Explicit brand profile ID stored on the leads_campaigns row. null means unattributed.",
         example: "brand_profile_123",
-      }),
-    customerPersonaId: z
-      .string()
-      .nullable()
-      .optional()
-      .openapi({
-        description: "Explicit customer persona ID stored on the leads_campaigns row. null means unattributed.",
-        example: "persona_123",
       }),
     audienceId: z
       .string()
@@ -1681,13 +1658,6 @@ registry.registerPath({
     },
     {
       in: "query" as const,
-      name: "customerPersonaId",
-      required: false,
-      description: "Filter stats to rows explicitly tagged with this customer persona ID.",
-      schema: { type: "string" as const },
-    },
-    {
-      in: "query" as const,
       name: "audienceId",
       required: false,
       description: "Filter stats to rows explicitly tagged with this audience ID.",
@@ -1698,7 +1668,7 @@ registry.registerPath({
       name: "groupBy",
       required: false,
       description:
-        "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Persona/profile groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown persona.",
+        "Group stats by this dimension. When set, returns { groups: [...] } instead of flat stats. Attribution groupings are explicit-only: null attribution rows are omitted, not assigned to an unknown bucket.",
       schema: {
         type: "string" as const,
         enum: [
@@ -1711,7 +1681,6 @@ registry.registerPath({
           "goal",
           "activeGoalId",
           "brandProfileId",
-          "customerPersonaId",
           "audienceId",
         ],
       },

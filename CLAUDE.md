@@ -10,9 +10,13 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `npm run build` — compile TypeScript + generate OpenAPI spec
 - `npm run dev` — local dev server with hot reload
 - `npm run generate:openapi` — regenerate openapi.json from Zod schemas
-- `npm run db:generate` — generate Drizzle migrations
+- `npm run db:generate` — generate Drizzle migrations (⚠️ see Migrations below — do NOT use)
 - `npm run db:migrate` — run Drizzle migrations
 - `npm run db:push` — push schema directly (dev only)
+
+## Migrations — hand-author, do NOT `db:generate`
+
+The drizzle meta snapshots (`drizzle/meta/*_snapshot.json`) stop at `0007`; migrations `0008`+ were all hand-authored. So `npm run db:generate` (`drizzle-kit generate`) has no recent snapshot to diff against and drops into an interactive prompt asking to **recreate every table** — it cannot produce a clean incremental migration. Convention: **hand-author the `.sql` file + add the journal entry to `drizzle/meta/_journal.json` yourself**. Make every statement idempotent (`DROP COLUMN IF EXISTS`, `DROP INDEX IF EXISTS`, `CREATE INDEX IF NOT EXISTS`, or `DO $$ … IF EXISTS … $$`) — see `0022`/`0023` as templates. `npm run db:migrate` (`drizzle-kit migrate`) applies the journal's `.sql` files and does NOT need the snapshots, so this works at boot.
 
 ## Architecture
 
@@ -45,5 +49,6 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 
 - **Minimal request body.** Everything that workflow-service auto-injects as headers (`x-org-id`, `x-user-id`, `x-run-id`, `x-campaign-id`, `x-brand-id`, `x-workflow-slug`, `x-feature-slug`) MUST be read from headers, never duplicated in the body.
 - **No `.default()` on Zod fields.** If a field is needed, make it required. A missing field is a 400, not a silent default.
-- **No optional "convenience" fields.** If the service can fetch data internally (campaign context from campaign-service, brand fields from brand-service), do NOT accept it as a body parameter. Fetch it yourself. **This extends to identity HEADERS, not just body fields: a header carrying a producer-owned attribute that is *derivable* from an entity already identified by another header must be fetched, not required.** The `goal` (signup|meetingBooked|purchase) is a brand attribute (brand-service `brands.currentGoal`), derivable from `x-brand-id` via `GET /internal/brands/:brandId/runtime-context` — so lead-service fetches it inside buffer/next, never requires `x-goal` (v0.25). Carve-out: headers that ARE the request's identity (`x-org-id`, `x-campaign-id`, `x-brand-id`, `x-run-id`) stay headers — they name *which* entity, they are not derivable attributes OF it.
+- **No optional "convenience" fields.** If the service can fetch data internally (campaign context from campaign-service, brand fields from brand-service), do NOT accept it as a body parameter. Fetch it yourself. **This extends to identity HEADERS, not just body fields: a header carrying a producer-owned attribute that is *derivable* from an entity already identified by another header must be fetched, not required.** The `goal` (signup|meetingBooked|purchase) is a brand attribute (brand-service `brands.currentGoal`), derivable from `x-brand-id` via `GET /internal/brands/:brandId/runtime-context` — so lead-service fetches it inside buffer/next, never requires `x-goal` (v0.25). Carve-out: headers that ARE the request's identity (`x-org-id`, `x-campaign-id`, `x-brand-id`, `x-run-id`, `x-audience-id`) stay headers — they name *which* entity, they are not derivable attributes OF it.
+- **Audience selection is campaign-owned — lead-service NEVER re-ranks/re-selects.** campaign-service decides the priority audience per run (`internal.ts` → features persona-stats) and propagates it as `x-audience-id` to every downstream DAG node. `buffer/next` serves the audience named by `x-audience-id` (`req.audienceId`) directly; no `x-audience-id` ⟹ clean `found:false` (campaign selected none). Do NOT re-introduce a features-service `persona-stats`/`getTopAudienceId` call in lead-service — that duplicated, divergent selection let an uncommitted audience be picked and 422 at serve-next (v0.26.1 removed it). Serveability (audience has a committed provider) is enforced upstream in human-service; lead-service treats serve-next 422 "no committed provider" as `found:false` (reason `audience_not_serveable`), never a 500.
 - **Idempotency is internal.** Use `x-run-id` as the idempotency key. Never expose idempotency keys in the API surface.
