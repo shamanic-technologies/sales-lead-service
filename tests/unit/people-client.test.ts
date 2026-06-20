@@ -3,6 +3,7 @@ import {
   PeopleServiceError,
   serveNext,
   isPeopleCreditInsufficientError,
+  isAudienceNotServeableError,
   type Person,
 } from "../../src/lib/people-client.js";
 
@@ -118,5 +119,32 @@ describe("people-client serveNext", () => {
     }
     expect(caught).toBeInstanceOf(PeopleServiceError);
     expect(isPeopleCreditInsufficientError(caught)).toBe(true);
+  });
+
+  it("classifies a serve-next 422 'no committed provider' as audience-not-serveable", async () => {
+    const fetchSpy = vi.fn(async () =>
+      new Response(
+        JSON.stringify({ error: "Audience has no committed provider — cannot serve people." }),
+        { status: 422, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let caught: unknown;
+    try {
+      await serveNext("aud-123", ctx);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(PeopleServiceError);
+    expect(isAudienceNotServeableError(caught)).toBe(true);
+    expect(isPeopleCreditInsufficientError(caught)).toBe(false);
+  });
+
+  it("does NOT classify other errors as audience-not-serveable", () => {
+    expect(isAudienceNotServeableError(new PeopleServiceError(500, "boom"))).toBe(false);
+    expect(isAudienceNotServeableError(new PeopleServiceError(422, JSON.stringify({ error: "Audience exhausted" })))).toBe(false);
+    expect(isAudienceNotServeableError(new Error("network"))).toBe(false);
+    expect(isAudienceNotServeableError(null)).toBe(false);
   });
 });

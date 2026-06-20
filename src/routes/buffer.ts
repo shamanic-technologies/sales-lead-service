@@ -10,6 +10,7 @@ import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
+import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 
 const router = Router();
 
@@ -162,6 +163,22 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         await updateRun(serveRunId, "completed", runMeta);
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after credit-insufficient response:", runErr);
+      }
+      return res.json(result);
+    }
+
+    if (isAudienceNotServeableError(error)) {
+      // The campaign-selected audience has no committed provider — a clean "no
+      // lead this run", not a server error. (Audience lifecycle is fixed in
+      // human-service; this prevents a stray uncommitted audience from looping
+      // the workflow on 500s.)
+      console.warn(`[lead-service] buffer/next found=false reason=audience_not_serveable campaign=${campaignId}`);
+      const result = { found: false, reason: AUDIENCE_NOT_SERVEABLE_REASON };
+      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-audience-not-serveable", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
+      try {
+        await updateRun(serveRunId, "completed", runMeta);
+      } catch (runErr) {
+        console.error("[lead-service] Failed to close run after audience-not-serveable response:", runErr);
       }
       return res.json(result);
     }
