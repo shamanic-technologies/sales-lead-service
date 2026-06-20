@@ -1,11 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Person } from "../../src/lib/people-client.js";
 
-const getTopAudienceId = vi.fn();
-vi.mock("../../src/lib/features-client.js", () => ({
-  getTopAudienceId: (...args: unknown[]) => getTopAudienceId(...args),
-}));
-
 const serveNext = vi.fn();
 vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
@@ -77,6 +72,8 @@ const baseParams = {
   featureSlug: "lead-finder-v1",
   runId: "run-1",
   userId: "user-1",
+  // Audience is selected by campaign-service and arrives as x-audience-id.
+  audienceId: "aud-1",
 };
 
 describe("pullNext (audience serve-next flow)", () => {
@@ -88,35 +85,7 @@ describe("pullNext (audience serve-next flow)", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
-  it("fetches the goal from brand-service and uses it for the audience + attribution", async () => {
-    getCurrentGoal.mockResolvedValueOnce("meetingBooked");
-    getTopAudienceId.mockResolvedValueOnce("aud-1");
-    serveNext.mockResolvedValueOnce({ status: "served", person });
-    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
-    recordEmploymentHistory.mockResolvedValueOnce(undefined);
-    upsertContactMethod.mockResolvedValueOnce({ inserted: true });
-    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
-
-    const result = await pullNext(baseParams);
-
-    // goal came from brand-service for THIS brand, not from a caller input
-    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object));
-    expect((getTopAudienceId.mock.calls[0][0] as Record<string, unknown>).goal).toBe("meetingBooked");
-    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ goal: "meetingBooked" }));
-    expect(result.lead?.goal).toBe("meetingBooked");
-  });
-
-  it("fails loud when the brand has no goal set (brand-service throws)", async () => {
-    getCurrentGoal.mockRejectedValueOnce(
-      new Error("[brand-client] runtime-context failed for brand brand-1: 404 Brand not found"),
-    );
-
-    await expect(pullNext(baseParams)).rejects.toThrow(/runtime-context failed/);
-    expect(getTopAudienceId).not.toHaveBeenCalled();
-  });
-
-  it("resolves the audience, serves the next person, records it, and returns FullLead", async () => {
-    getTopAudienceId.mockResolvedValueOnce("aud-1");
+  it("serves the next person of the x-audience-id audience, records it, returns FullLead", async () => {
     serveNext.mockResolvedValueOnce({ status: "served", person });
     upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
     recordEmploymentHistory.mockResolvedValueOnce(undefined);
@@ -125,10 +94,7 @@ describe("pullNext (audience serve-next flow)", () => {
 
     const result = await pullNext(baseParams);
 
-    // audience came from features top row
-    const featuresArg = getTopAudienceId.mock.calls[0][0] as Record<string, unknown>;
-    expect(featuresArg).toMatchObject({ featureSlug: "lead-finder-v1", brandId: "brand-1", goal: "signup" });
-    // serve-next consumed for that audience id, attributed to it
+    // serve-next consumed for the campaign-selected audience, attributed to it
     expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1" }));
     // person persisted into silver
     expect(upsertLeadFromPerson).toHaveBeenCalledWith(person, { enriched: true });
@@ -144,18 +110,41 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(result.lead?.data).toEqual({ leadId: "lead-1", firstName: "Sara" });
   });
 
-  it("returns found=false without calling serve-next when the brand/goal has no audience", async () => {
-    getTopAudienceId.mockResolvedValueOnce(null);
+  it("fetches the brand goal and uses it for attribution/storage (NOT for selection)", async () => {
+    getCurrentGoal.mockResolvedValueOnce("meetingBooked");
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    upsertContactMethod.mockResolvedValueOnce({ inserted: true });
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
 
     const result = await pullNext(baseParams);
 
+    // goal came from brand-service for THIS brand, not from a caller input
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object));
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ goal: "meetingBooked", audienceId: "aud-1" }));
+    expect(result.lead?.goal).toBe("meetingBooked");
+  });
+
+  it("returns found=false WITHOUT serving or fetching goal when no x-audience-id is supplied", async () => {
+    const result = await pullNext({ ...baseParams, audienceId: undefined });
+
     expect(result).toEqual({ found: false });
+    expect(getCurrentGoal).not.toHaveBeenCalled();
     expect(serveNext).not.toHaveBeenCalled();
     expect(upsertLeadFromPerson).not.toHaveBeenCalled();
   });
 
+  it("fails loud when the brand has no goal set (brand-service throws)", async () => {
+    getCurrentGoal.mockRejectedValueOnce(
+      new Error("[brand-client] runtime-context failed for brand brand-1: 404 Brand not found"),
+    );
+
+    await expect(pullNext(baseParams)).rejects.toThrow(/runtime-context failed/);
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+
   it("returns found=false when serve-next reports the audience exhausted", async () => {
-    getTopAudienceId.mockResolvedValueOnce("aud-1");
     serveNext.mockResolvedValueOnce({ status: "exhausted", person: null });
 
     const result = await pullNext(baseParams);
@@ -165,7 +154,6 @@ describe("pullNext (audience serve-next flow)", () => {
   });
 
   it("fails loud when serve-next returns status=served but no email", async () => {
-    getTopAudienceId.mockResolvedValueOnce("aud-1");
     serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, email: null } });
 
     await expect(pullNext(baseParams)).rejects.toThrow(/served without an email/);
