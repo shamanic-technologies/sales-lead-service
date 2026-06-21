@@ -30,6 +30,7 @@ const ctx = {
   campaignId: "campaign-1",
   featureSlug: "lead-finder-v1",
   goal: "signup",
+  audienceId: "aud-123",
 };
 
 const person: Person = {
@@ -78,6 +79,9 @@ describe("people-client serveNext", () => {
     expect(headers["x-run-id"]).toBe("run-1");
     expect(headers["x-feature-slug"]).toBe("lead-finder-v1");
     expect(headers["x-goal"]).toBe("signup");
+    // Regression guard: x-audience-id MUST be forwarded on internal egress so
+    // runs-service can attribute the downstream (human-service) spend per audience.
+    expect(headers["x-audience-id"]).toBe("aud-123");
     expect(headers["X-API-Key"]).toBeDefined();
 
     expect(result.status).toBe("served");

@@ -28,6 +28,36 @@ describe("runs-client", () => {
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("createRun forwards x-audience-id header so runs-service tags the run + cost rows per audience", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: "run-1" }) });
+    const { createRun } = await import("../../src/lib/runs-client.js");
+
+    await createRun({
+      orgId: "org-1",
+      serviceName: "lead-service",
+      taskName: "lead-serve",
+      audienceId: "aud-123",
+    });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [, opts] = fetchSpy.mock.calls[0];
+    // Regression guard: audience attribution rides the header (runs-service:
+    // "header takes precedence, inherited from parent run"). Dropping it sends
+    // ~97% of campaign spend to the unattributed bucket.
+    expect(opts.headers["x-audience-id"]).toBe("aud-123");
+  });
+
+  it("updateRun forwards x-audience-id header", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+    const { updateRun } = await import("../../src/lib/runs-client.js");
+
+    await updateRun("run-1", "completed", { orgId: "org-1", audienceId: "aud-123" });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [, opts] = fetchSpy.mock.calls[0];
+    expect(opts.headers["x-audience-id"]).toBe("aud-123");
+  });
+
   it("updateRun attaches a 5s AbortSignal", async () => {
     fetchSpy.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
     const { updateRun } = await import("../../src/lib/runs-client.js");
