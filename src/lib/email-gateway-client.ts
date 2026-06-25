@@ -16,6 +16,7 @@ export interface ScopedStatus {
   bounced: boolean;
   unsubscribed: boolean;
   lastDeliveredAt: string | null;
+  firstClickedAt: string | null;
 }
 
 export interface GlobalStatus {
