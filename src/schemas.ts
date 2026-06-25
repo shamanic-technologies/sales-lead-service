@@ -1359,6 +1359,16 @@ const LeadDetailSchema = z
         description: "ISO timestamp of the last delivered message in this scope.",
         example: "2026-01-02T00:00:00.000Z",
       }),
+    firstClickedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a click in this scope; " +
+          "null if the lead never clicked in scope. Scoped identically to `clicked` " +
+          "(brand-scoped when brandId is passed, campaign-scoped when campaignId is passed).",
+        example: "2026-01-02T00:00:00.000Z",
+      }),
     global: z
       .object({
         bounced: z.boolean().openapi({ description: "Lead has bounced anywhere across the platform.", example: false }),
@@ -1488,7 +1498,7 @@ registry.registerPath({
   summary: "List leads with full enrichment and delivery status",
   description:
     "Returns leads_campaigns rows. Each row includes the full canonical lead payload (FullLead — see schema) under `lead`, " +
-    "plus delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, global). " +
+    "plus delivery status (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification, lastDeliveredAt, firstClickedAt, global). " +
     "Delivery status is fetched from email-gateway when brandId or campaignId is provided. " +
     "With campaignId: campaign-scoped status. With brandId only: brand-scoped (cross-campaign). " +
     "Without either: status fields default to false/null.",

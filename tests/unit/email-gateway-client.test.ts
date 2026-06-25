@@ -172,7 +172,7 @@ describe("email-gateway-client", () => {
   describe("isContacted", () => {
     const emptyScoped: ScopedStatus = {
       contacted: false, sent: false, delivered: false, opened: false, clicked: false, replied: false,
-      replyClassification: null, bounced: false, unsubscribed: false, lastDeliveredAt: null,
+      replyClassification: null, bounced: false, unsubscribed: false, lastDeliveredAt: null, firstClickedAt: null,
     };
 
     const emptyGlobal = {
@@ -251,7 +251,7 @@ describe("email-gateway-client", () => {
   describe("checkEmailStatus", () => {
     const emptyScoped: ScopedStatus = {
       contacted: false, sent: false, delivered: false, opened: false, clicked: false, replied: false,
-      replyClassification: null, bounced: false, unsubscribed: false, lastDeliveredAt: null,
+      replyClassification: null, bounced: false, unsubscribed: false, lastDeliveredAt: null, firstClickedAt: null,
     };
 
     const emptyGlobal = {

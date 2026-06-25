@@ -27,7 +27,15 @@ interface FlattenedStatus {
   replied: boolean;
   replyClassification: "positive" | "negative" | "neutral" | null;
   lastDeliveredAt: string | null;
+  firstClickedAt: string | null;
   global: { bounced: boolean; unsubscribed: boolean };
+}
+
+/** First-occurrence (MIN) merge: earliest non-null ISO timestamp across providers. */
+function earliestIso(a: string | null, b: string | null): string | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a <= b ? a : b;
 }
 
 function pickScoped(s: ScopedStatus | null | undefined) {
@@ -42,6 +50,7 @@ function pickScoped(s: ScopedStatus | null | undefined) {
     replied: !!s?.replied,
     replyClassification: s?.replyClassification ?? null,
     lastDeliveredAt: s?.lastDeliveredAt ?? null,
+    firstClickedAt: s?.firstClickedAt ?? null,
   };
 }
 
@@ -67,6 +76,7 @@ function mergeProviders(
     replied: bcScope.replied || txScope.replied,
     replyClassification: bcScope.replyClassification ?? txScope.replyClassification ?? null,
     lastDeliveredAt: bcScope.lastDeliveredAt ?? txScope.lastDeliveredAt ?? null,
+    firstClickedAt: earliestIso(bcScope.firstClickedAt, txScope.firstClickedAt),
   };
 }
 
@@ -88,6 +98,7 @@ export function flattenBrandStatus(result: StatusResult): FlattenedStatus {
 const DEFAULT_STATUS: FlattenedStatus = {
   contacted: false, sent: false, delivered: false, opened: false, clicked: false,
   bounced: false, unsubscribed: false, replied: false, replyClassification: null, lastDeliveredAt: null,
+  firstClickedAt: null,
   global: { bounced: false, unsubscribed: false },
 };
 
