@@ -97,7 +97,7 @@ interface RawBasicRow {
   email_status: string | null;
 }
 
-function toIsoTimestamp(value: RawTimestamp): string | null {
+export function toIsoTimestamp(value: RawTimestamp): string | null {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
 

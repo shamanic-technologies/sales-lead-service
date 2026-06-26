@@ -10,7 +10,7 @@ import {
 } from "../lib/email-gateway-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
-import { streamBasicLeadChunks, type BasicLeadRow } from "../lib/basic-leads.js";
+import { streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import { leadCampaignBaseRelation, type LeadListScope } from "../lib/lead-list-query.js";
 
 const router = Router();
@@ -125,7 +125,8 @@ interface RawLeadCampaignRow {
   status_details: string | null;
   parent_run_id: string | null;
   run_id: string | null;
-  served_at: Date | null;
+  // postgres.js returns timestamptz as Date OR string depending on the path; normalize via toIsoTimestamp.
+  served_at: Date | string | null;
   workflow_slug: string | null;
   feature_slug: string | null;
   goal: string | null;
@@ -148,7 +149,7 @@ interface LeadCampaignRow {
   statusDetails: string | null;
   parentRunId: string | null;
   runId: string | null;
-  servedAt: Date | null;
+  servedAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
   goal: string | null;
@@ -200,7 +201,7 @@ async function fetchLeadCampaignChunk(
     statusDetails: r.status_details,
     parentRunId: r.parent_run_id,
     runId: r.run_id,
-    servedAt: r.served_at,
+    servedAt: toIsoTimestamp(r.served_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
     goal: r.goal,
@@ -411,7 +412,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           activeGoalId: row.activeGoalId ?? null,
           brandProfileId: row.brandProfileId ?? null,
           audienceId: row.audienceId ?? null,
-          servedAt: row.servedAt ? row.servedAt.toISOString() : null,
+          servedAt: row.servedAt,
           status: row.status as "buffered" | "skipped" | "claimed" | "served",
           emailStatus,
           lead: fullLead,
