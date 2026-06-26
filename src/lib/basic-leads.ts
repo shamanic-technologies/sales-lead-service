@@ -1,4 +1,5 @@
 import { sql } from "../db/index.js";
+import { leadCampaignBaseRelation, type LeadListScope } from "./lead-list-query.js";
 
 // Slim per-lead shape for `?view=basic` — the SAME object the route's toSlimLead
 // produced, but assembled in ONE flat SQL pass instead of hydrating the full lead
@@ -49,14 +50,8 @@ export interface BasicLeadRow {
   email: { value: string; status: string | null } | null;
 }
 
-export interface BasicLeadFilters {
-  orgId: string;
-  brandId?: string;
-  campaignId?: string;
-  queryOrgId?: string;
-  userId?: string;
-  workflowSlug?: string;
-}
+// The basic-view filters are exactly the shared list scope.
+export type BasicLeadFilters = LeadListScope;
 
 export interface BasicLeadCursor {
   createdAt: Date;
@@ -193,7 +188,7 @@ function basicLeadQuery(
       l.headline, l.linkedin_url, l.photo_url,
       org.org_id AS org_id_inner, org.org_name, org.logo_url, org.primary_domain, org.website_url,
       em.value AS email_value, em.status AS email_status
-    FROM leads_campaigns lc
+    FROM ${leadCampaignBaseRelation(f)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
       SELECT o.id AS org_id, o.name AS org_name, o.logo_url, o.primary_domain, o.website_url

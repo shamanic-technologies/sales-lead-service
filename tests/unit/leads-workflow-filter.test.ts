@@ -1,28 +1,18 @@
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
-import { PgDialect } from "drizzle-orm/pg-core";
-import type { SQL } from "drizzle-orm";
 
-// Capture the argument passed to .where() so we can assert on the compiled SQL.
-let capturedWhere: unknown = null;
+// Capture every `sql` tagged-template invocation (the full path now builds its query
+// from raw postgres.js fragments, not a drizzle query builder). The workflow_slug
+// filter is a conditional `sql`AND lc.workflow_slug = ${slug}`` fragment, so when it is
+// applied it shows up as a captured call whose strings mention workflow_slug and whose
+// values carry the slug; when absent, the conditional emits an empty `sql```` instead.
+let mockSqlCalls: Array<{ strings: readonly string[]; values: unknown[] }> = [];
 
 vi.mock("../../src/db/index.js", () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        leftJoin: () => ({
-          where: (arg: unknown) => {
-            capturedWhere = arg;
-            return {
-              orderBy: () => ({
-                limit: () => Promise.resolve([]),
-              }),
-            };
-          },
-        }),
-      }),
-    }),
+  sql: (strings: readonly string[], ...values: unknown[]) => {
+    mockSqlCalls.push({ strings, values });
+    return { then: (resolve: (rows: unknown[]) => void) => Promise.resolve([]).then(resolve) };
   },
 }));
 
@@ -42,9 +32,12 @@ vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
 }));
 
-const dialect = new PgDialect();
+// Flatten all captured sql fragments into one text blob + the union of their values.
 function compileWhere(): { sql: string; params: unknown[] } {
-  return dialect.sqlToQuery(capturedWhere as SQL);
+  return {
+    sql: mockSqlCalls.map((c) => c.strings.join(" ")).join(" "),
+    params: mockSqlCalls.flatMap((c) => c.values),
+  };
 }
 
 const ORG = "30000000-0000-0000-0000-000000000001";
@@ -66,7 +59,7 @@ describe("GET /orgs/leads workflowSlug filter", () => {
   }, 30_000);
 
   beforeEach(() => {
-    capturedWhere = null;
+    mockSqlCalls = [];
   });
 
   it("rejects missing x-api-key with 401", async () => {
@@ -84,7 +77,8 @@ describe("GET /orgs/leads workflowSlug filter", () => {
     expect(res.body).toEqual({ leads: [] });
 
     const { sql, params } = compileWhere();
-    expect(sql.toLowerCase()).toContain("workflow_slug");
+    // The column is always SELECTed; assert the FILTER predicate + bound value.
+    expect(sql.toLowerCase()).toContain("workflow_slug =");
     expect(params).toContain("sales-cold-email-outreach-lithium");
   });
 
@@ -98,7 +92,8 @@ describe("GET /orgs/leads workflowSlug filter", () => {
     expect(res.body).toEqual({ leads: [] });
 
     const { sql, params } = compileWhere();
-    expect(sql.toLowerCase()).not.toContain("workflow_slug");
+    // No filter predicate (the column is still SELECTed, but never compared).
+    expect(sql.toLowerCase()).not.toContain("workflow_slug =");
     expect(params).not.toContain("sales-cold-email-outreach-lithium");
   });
 });
