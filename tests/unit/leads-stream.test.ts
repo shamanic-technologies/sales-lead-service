@@ -2,28 +2,25 @@ import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
 import express from "express";
 import request from "supertest";
 
-// Mutable result set the mocked db query resolves to.
+// Mutable result set the mocked sql query resolves to (snake_case raw rows, the
+// shape postgres.js returns; fetchLeadCampaignChunk maps them to camelCase).
 let mockRows: Array<Record<string, unknown>> = [];
-let mockDbCallIndex = 0;
+let mockSqlChunkIndex = 0;
 
+// `sql` is a postgres.js tagged template. Every call returns a thenable; only the
+// OUTER executed query is ever awaited (fragments built by leadCampaignBaseRelation
+// and the conditional AND/cursor clauses are interpolated, never awaited), so each
+// `await fetchLeadCampaignChunk` advances exactly one chunk. Chunk size mirrors the
+// LEADS_STREAM_CHUNK_SIZE env the route reads at import.
 vi.mock("../../src/db/index.js", () => ({
-  db: {
-    select: () => ({
-      from: () => ({
-        leftJoin: () => ({
-          where: () => ({
-            orderBy: () => ({
-              limit: (n: number) => {
-                const start = mockDbCallIndex * n;
-                mockDbCallIndex += 1;
-                return Promise.resolve(mockRows.slice(start, start + n));
-              },
-            }),
-          }),
-        }),
-      }),
-    }),
-  },
+  sql: () => ({
+    then: (resolve: (rows: unknown[]) => void) => {
+      const chunk = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
+      const start = mockSqlChunkIndex * chunk;
+      mockSqlChunkIndex += 1;
+      return Promise.resolve(mockRows.slice(start, start + chunk)).then(resolve);
+    },
+  }),
 }));
 
 const streamBasicLeadChunksMock = vi.fn();
@@ -110,6 +107,32 @@ function row(i: number, status = "buffered") {
   };
 }
 
+// Snake_case raw row, the postgres.js shape the deduped full-path query returns.
+function rawRow(i: number, status = "buffered") {
+  return {
+    id: `lc-${i}`,
+    lead_id: `lead-${i}`,
+    campaign_id: `camp-${i}`,
+    org_id: ORG,
+    user_id: null,
+    brand_ids: [BRAND],
+    status,
+    status_reason: null,
+    status_details: null,
+    parent_run_id: null,
+    run_id: null,
+    served_at: null,
+    workflow_slug: null,
+    feature_slug: null,
+    goal: null,
+    active_goal_id: null,
+    brand_profile_id: null,
+    audience_id: null,
+    created_at: new Date(`2026-01-01T00:00:0${i}.000Z`),
+    lead_apollo_person_id: `apollo-${i}`,
+  };
+}
+
 function basicRow(i: number, status = "buffered") {
   return {
     ...row(i, status),
@@ -160,7 +183,7 @@ describe("GET /orgs/leads chunked streaming", () => {
 
   beforeEach(() => {
     mockRows = [];
-    mockDbCallIndex = 0;
+    mockSqlChunkIndex = 0;
     streamBasicLeadChunksMock.mockReset();
     streamBasicLeadChunksMock.mockImplementation(() => basicChunks([]));
     buildFullLeadsBatchMock.mockReset();
@@ -181,7 +204,7 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("streams N rows spanning multiple chunks as one valid JSON, order preserved", async () => {
-    mockRows = [row(1), row(2), row(3), row(4), row(5)];
+    mockRows = [rawRow(1), rawRow(2), rawRow(3), rawRow(4), rawRow(5)];
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -201,7 +224,7 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("hydrates per chunk (ceil(N/chunk) batches, each <= chunk size)", async () => {
-    mockRows = [row(1), row(2), row(3), row(4), row(5)];
+    mockRows = [rawRow(1), rawRow(2), rawRow(3), rawRow(4), rawRow(5)];
     await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -301,7 +324,7 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("view absent returns the full lead shape (backward-compatible)", async () => {
-    mockRows = [row(1)];
+    mockRows = [rawRow(1)];
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
       .set("x-api-key", "test-api-key")
@@ -315,7 +338,7 @@ describe("GET /orgs/leads chunked streaming", () => {
   });
 
   it("applies delivery overlay to served rows within a chunk", async () => {
-    mockRows = [row(1, "served")];
+    mockRows = [rawRow(1, "served")];
     checkDeliveryStatusMock.mockResolvedValue({
       results: [
         {

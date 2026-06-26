@@ -1,8 +1,6 @@
 import { Router } from "express";
-import { asc, eq, and, gt, or, sql, type SQL } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
-import { db } from "../db/index.js";
-import { leadsCampaigns, leads } from "../db/schema.js";
+import { sql } from "../db/index.js";
 import {
   checkDeliveryStatus,
   type StatusResult,
@@ -13,6 +11,7 @@ import {
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import { streamBasicLeadChunks, type BasicLeadRow } from "../lib/basic-leads.js";
+import { leadCampaignBaseRelation, type LeadListScope } from "../lib/lead-list-query.js";
 
 const router = Router();
 
@@ -114,45 +113,103 @@ interface LeadCampaignCursor {
   id: string;
 }
 
-async function fetchLeadCampaignChunk(conditions: SQL[], cursor: LeadCampaignCursor | null) {
-  const pagedConditions = cursor
-    ? [
-        ...conditions,
-        or(
-          gt(leadsCampaigns.createdAt, cursor.createdAt),
-          and(eq(leadsCampaigns.createdAt, cursor.createdAt), gt(leadsCampaigns.id, cursor.id)),
-        )!,
-      ]
-    : conditions;
+interface RawLeadCampaignRow {
+  id: string;
+  lead_id: string;
+  campaign_id: string;
+  org_id: string;
+  user_id: string | null;
+  brand_ids: string[];
+  status: string;
+  status_reason: string | null;
+  status_details: string | null;
+  parent_run_id: string | null;
+  run_id: string | null;
+  served_at: Date | null;
+  workflow_slug: string | null;
+  feature_slug: string | null;
+  goal: string | null;
+  active_goal_id: string | null;
+  brand_profile_id: string | null;
+  audience_id: string | null;
+  created_at: Date;
+  lead_apollo_person_id: string | null;
+}
 
-  return db
-    .select({
-      id: leadsCampaigns.id,
-      leadId: leadsCampaigns.leadId,
-      campaignId: leadsCampaigns.campaignId,
-      orgId: leadsCampaigns.orgId,
-      userId: leadsCampaigns.userId,
-      brandIds: leadsCampaigns.brandIds,
-      status: leadsCampaigns.status,
-      statusReason: leadsCampaigns.statusReason,
-      statusDetails: leadsCampaigns.statusDetails,
-      parentRunId: leadsCampaigns.parentRunId,
-      runId: leadsCampaigns.runId,
-      servedAt: leadsCampaigns.servedAt,
-      workflowSlug: leadsCampaigns.workflowSlug,
-      featureSlug: leadsCampaigns.featureSlug,
-      goal: leadsCampaigns.goal,
-      activeGoalId: leadsCampaigns.activeGoalId,
-      brandProfileId: leadsCampaigns.brandProfileId,
-      audienceId: leadsCampaigns.audienceId,
-      createdAt: leadsCampaigns.createdAt,
-      leadApolloPersonId: leads.apolloPersonId,
-    })
-    .from(leadsCampaigns)
-    .leftJoin(leads, eq(leads.id, leadsCampaigns.leadId))
-    .where(and(...pagedConditions))
-    .orderBy(asc(leadsCampaigns.createdAt), asc(leadsCampaigns.id))
-    .limit(LEADS_STREAM_CHUNK_SIZE);
+interface LeadCampaignRow {
+  id: string;
+  leadId: string;
+  campaignId: string;
+  orgId: string;
+  userId: string | null;
+  brandIds: string[];
+  status: string;
+  statusReason: string | null;
+  statusDetails: string | null;
+  parentRunId: string | null;
+  runId: string | null;
+  servedAt: Date | null;
+  workflowSlug: string | null;
+  featureSlug: string | null;
+  goal: string | null;
+  activeGoalId: string | null;
+  brandProfileId: string | null;
+  audienceId: string | null;
+  createdAt: Date;
+  leadApolloPersonId: string | null;
+}
+
+// Brand/org scope collapses leads_campaigns to one row per lead_id (see
+// leadCampaignBaseRelation); campaign scope stays flat. Keyset-paginate the DEDUPED
+// relation by (created_at, id) so dedup is GLOBAL, not per-chunk. Scope filters live
+// both inside the dedup subquery (so the winner is chosen within scope) and on the
+// outer WHERE (required for the non-deduped campaign path; a no-op for the dedup path).
+async function fetchLeadCampaignChunk(
+  scope: LeadListScope,
+  cursor: LeadCampaignCursor | null,
+): Promise<LeadCampaignRow[]> {
+  const rows = await sql<RawLeadCampaignRow[]>`
+    SELECT
+      lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
+      lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
+      lc.served_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
+      lc.brand_profile_id, lc.audience_id, lc.created_at,
+      l.apollo_person_id AS lead_apollo_person_id
+    FROM ${leadCampaignBaseRelation(scope)}
+    LEFT JOIN leads l ON l.id = lc.lead_id
+    WHERE lc.org_id = ${scope.orgId}
+      ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
+      ${scope.campaignId ? sql`AND lc.campaign_id = ${scope.campaignId}` : sql``}
+      ${scope.queryOrgId ? sql`AND lc.org_id = ${scope.queryOrgId}` : sql``}
+      ${scope.userId ? sql`AND lc.user_id = ${scope.userId}` : sql``}
+      ${scope.workflowSlug ? sql`AND lc.workflow_slug = ${scope.workflowSlug}` : sql``}
+      ${cursor ? sql`AND (lc.created_at, lc.id) > (${cursor.createdAt}, ${cursor.id})` : sql``}
+    ORDER BY lc.created_at ASC, lc.id ASC
+    LIMIT ${LEADS_STREAM_CHUNK_SIZE}
+  `;
+
+  return rows.map((r) => ({
+    id: r.id,
+    leadId: r.lead_id,
+    campaignId: r.campaign_id,
+    orgId: r.org_id,
+    userId: r.user_id,
+    brandIds: r.brand_ids,
+    status: r.status,
+    statusReason: r.status_reason,
+    statusDetails: r.status_details,
+    parentRunId: r.parent_run_id,
+    runId: r.run_id,
+    servedAt: r.served_at,
+    workflowSlug: r.workflow_slug,
+    featureSlug: r.feature_slug,
+    goal: r.goal,
+    activeGoalId: r.active_goal_id,
+    brandProfileId: r.brand_profile_id,
+    audienceId: r.audience_id,
+    createdAt: r.created_at,
+    leadApolloPersonId: r.lead_apollo_person_id,
+  }));
 }
 
 async function buildStatusMapForBasicRows(
@@ -192,28 +249,23 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     }
 
     const { brandId, campaignId, orgId: queryOrgId, userId, workflowSlug } = req.query;
-    const conditions: SQL[] = [eq(leadsCampaigns.orgId, req.orgId!)];
-    if (brandId && typeof brandId === "string") {
-      conditions.push(sql`${brandId} = ANY(${leadsCampaigns.brandIds})`);
-    }
-    if (campaignId && typeof campaignId === "string") {
-      conditions.push(eq(leadsCampaigns.campaignId, campaignId));
-    }
-    if (queryOrgId && typeof queryOrgId === "string") {
-      conditions.push(eq(leadsCampaigns.orgId, queryOrgId));
-    }
-    if (userId && typeof userId === "string") {
-      conditions.push(eq(leadsCampaigns.userId, userId));
-    }
-    if (workflowSlug && typeof workflowSlug === "string") {
-      conditions.push(eq(leadsCampaigns.workflowSlug, workflowSlug));
-    }
-
     const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
     const brandIdStr = typeof brandId === "string" ? brandId : undefined;
     const queryOrgIdStr = typeof queryOrgId === "string" ? queryOrgId : undefined;
     const userIdStr = typeof userId === "string" ? userId : undefined;
     const workflowSlugStr = typeof workflowSlug === "string" ? workflowSlug : undefined;
+
+    // One shared scope for both the slim (`?view=basic`) and full paths. Brand/org
+    // scope is collapsed to one row per lead_id downstream; campaign scope stays flat.
+    const scope: LeadListScope = {
+      orgId: req.orgId!,
+      brandId: brandIdStr,
+      campaignId: campaignIdStr,
+      queryOrgId: queryOrgIdStr,
+      userId: userIdStr,
+      workflowSlug: workflowSlugStr,
+    };
+
     const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
     const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
     const context = getServiceContext(req);
@@ -225,22 +277,13 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     // streamed in cursor chunks. This keeps the list shape compatible with api-service
     // while avoiding the "load a whole large brand before first byte" failure mode.
     if (slim) {
-      const basicFilters = {
-        orgId: req.orgId!,
-        brandId: brandIdStr,
-        campaignId: campaignIdStr,
-        queryOrgId: queryOrgIdStr,
-        userId: userIdStr,
-        workflowSlug: workflowSlugStr,
-      };
-
       res.setHeader("Content-Type", "application/json");
       res.write('{"leads":[');
       streamingStarted = true;
 
       let wroteFirstBasic = false;
       let rowCount = 0;
-      for await (const basicRows of streamBasicLeadChunks(basicFilters, LEADS_STREAM_CHUNK_SIZE)) {
+      for await (const basicRows of streamBasicLeadChunks(scope, LEADS_STREAM_CHUNK_SIZE)) {
         rowCount += basicRows.length;
 
         const statusMap = hasScopeForStatus
@@ -312,7 +355,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     let cursor: LeadCampaignCursor | null = null;
     let rowCount = 0;
     while (true) {
-      const chunkRows = await fetchLeadCampaignChunk(conditions, cursor);
+      const chunkRows = await fetchLeadCampaignChunk(scope, cursor);
       if (chunkRows.length === 0) break;
       rowCount += chunkRows.length;
       const chunkLeadIds = Array.from(new Set(chunkRows.map((r) => r.leadId)));
