@@ -24,7 +24,8 @@ vi.mock("../../src/db/index.js", () => ({
 }));
 
 const streamBasicLeadChunksMock = vi.fn();
-vi.mock("../../src/lib/basic-leads.js", () => ({
+vi.mock("../../src/lib/basic-leads.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/basic-leads.js")>()),
   streamBasicLeadChunks: (...args: unknown[]) => streamBasicLeadChunksMock(...args),
 }));
 
@@ -221,6 +222,20 @@ describe("GET /orgs/leads chunked streaming", () => {
     expect(res.body.leads[0].email).toBe("lead-1@example.com");
     expect(res.body.leads[0].apolloPersonId).toBe("apollo-1");
     expect(res.body.leads[0].audienceId).toBeNull();
+  });
+
+  it("normalizes a postgres string served_at on the full path (no toISOString crash)", async () => {
+    // postgres.js can return timestamptz as a raw string; the full path used to call
+    // .toISOString() on it and crash mid-stream (TypeError: ...toISOString is not a function).
+    mockRows = [{ ...rawRow(1, "served"), served_at: "2026-01-01 00:00:01.5+00" }];
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    expect(res.body.leads).toHaveLength(1);
+    expect(res.body.leads[0].servedAt).toBe("2026-01-01T00:00:01.500Z");
   });
 
   it("hydrates per chunk (ceil(N/chunk) batches, each <= chunk size)", async () => {
