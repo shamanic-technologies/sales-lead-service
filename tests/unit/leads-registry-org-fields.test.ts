@@ -25,6 +25,7 @@ const PERSON_WITH_ORG = {
     websiteUrl: "https://cascobay.com",
     industry: "marketing",
     estimatedNumEmployees: 12,
+    annualRevenue: 1000000,
     linkedinUrl: "https://linkedin.com/company/cascobay",
     logoUrl: "https://logo.com/x.png",
     city: "Portland",
@@ -54,6 +55,8 @@ describe("pickOrgFields (via upsertOrganizationFromPerson) maps the neutral orga
     expect(payload.websiteUrl).toBe("https://cascobay.com");
     expect(payload.industry).toBe("marketing");
     expect(payload.estimatedNumEmployees).toBe(12);
+    // numeric column write-type is string; the basic-view projection passes it back verbatim.
+    expect(payload.annualRevenue).toBe("1000000");
     expect(payload.linkedinUrl).toBe("https://linkedin.com/company/cascobay");
     expect(payload.logoUrl).toBe("https://logo.com/x.png");
     expect(payload.city).toBe("Portland");
@@ -77,6 +80,7 @@ describe("pickOrgFields (via upsertOrganizationFromPerson) maps the neutral orga
     expect(payload.websiteUrl).toBeUndefined();
     expect(payload.industry).toBeUndefined();
     expect(payload.estimatedNumEmployees).toBeUndefined();
+    expect(payload.annualRevenue).toBeUndefined();
   });
 
   it("returns null when the person has no organization", async () => {
