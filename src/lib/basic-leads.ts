@@ -14,12 +14,33 @@ export interface BasicSlimLead {
   headline: string | null;
   linkedinUrl: string | null;
   photoUrl: string | null;
+  // Additive firmographic fields (#327) — same names/types as FullLead.
+  // Still excludes the heavy stuff (subdepartments, twitter/github/etc, full
+  // employmentHistory) to keep basic ~10x smaller than full.
+  seniority: string | null;
+  departments: string[] | null;
+  functions: string[] | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
   organization: {
     id: string;
     name: string | null;
     logoUrl: string | null;
     primaryDomain: string | null;
     websiteUrl: string | null;
+    // Additive firmographic fields (#327) — same names/types as OrganizationView.
+    // Excludes the heavy arrays (technologyNames, secondaryIndustries) and
+    // funding events to keep basic lean.
+    industry: string | null;
+    industries: string[] | null;
+    estimatedNumEmployees: number | null;
+    annualRevenue: string | null;
+    foundedYear: number | null;
+    shortDescription: string | null;
+    city: string | null;
+    state: string | null;
+    country: string | null;
   } | null;
 }
 
@@ -88,11 +109,26 @@ interface RawBasicRow {
   headline: string | null;
   linkedin_url: string | null;
   photo_url: string | null;
+  seniority: string | null;
+  departments: string[] | null;
+  functions: string[] | null;
+  l_city: string | null;
+  l_state: string | null;
+  l_country: string | null;
   org_id_inner: string | null;
   org_name: string | null;
   logo_url: string | null;
   primary_domain: string | null;
   website_url: string | null;
+  industry: string | null;
+  industries: string[] | null;
+  estimated_num_employees: number | null;
+  annual_revenue: string | null;
+  founded_year: number | null;
+  short_description: string | null;
+  org_city: string | null;
+  org_state: string | null;
+  org_country: string | null;
   email_value: string | null;
   email_status: string | null;
 }
@@ -134,6 +170,12 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
         headline: r.headline,
         linkedinUrl: r.linkedin_url,
         photoUrl: r.photo_url,
+        seniority: r.seniority,
+        departments: r.departments,
+        functions: r.functions,
+        city: r.l_city,
+        state: r.l_state,
+        country: r.l_country,
         organization: r.org_id_inner
           ? {
               id: r.org_id_inner,
@@ -141,6 +183,15 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
               logoUrl: r.logo_url,
               primaryDomain: r.primary_domain,
               websiteUrl: r.website_url,
+              industry: r.industry,
+              industries: r.industries,
+              estimatedNumEmployees: r.estimated_num_employees,
+              annualRevenue: r.annual_revenue,
+              foundedYear: r.founded_year,
+              shortDescription: r.short_description,
+              city: r.org_city,
+              state: r.org_state,
+              country: r.org_country,
             }
           : null,
       }
@@ -186,12 +237,20 @@ function basicLeadQuery(
       lc.created_at,
       l.id AS l_id, l.apollo_person_id, l.first_name, l.last_name, l.name,
       l.headline, l.linkedin_url, l.photo_url,
+      l.seniority, l.departments, l.functions,
+      l.city AS l_city, l.state AS l_state, l.country AS l_country,
       org.org_id AS org_id_inner, org.org_name, org.logo_url, org.primary_domain, org.website_url,
+      org.industry, org.industries, org.estimated_num_employees, org.annual_revenue,
+      org.founded_year, org.short_description,
+      org.org_city, org.org_state, org.org_country,
       em.value AS email_value, em.status AS email_status
     FROM ${leadCampaignBaseRelation(f)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
-      SELECT o.id AS org_id, o.name AS org_name, o.logo_url, o.primary_domain, o.website_url
+      SELECT o.id AS org_id, o.name AS org_name, o.logo_url, o.primary_domain, o.website_url,
+             o.industry, o.industries, o.estimated_num_employees, o.annual_revenue,
+             o.founded_year, o.short_description,
+             o.city AS org_city, o.state AS org_state, o.country AS org_country
       FROM leads_organizations lo
       LEFT JOIN organizations o ON o.id = lo.organization_id
       WHERE lo.lead_id = lc.lead_id AND lo.current = true
