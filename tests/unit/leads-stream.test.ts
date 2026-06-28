@@ -317,7 +317,20 @@ describe("GET /orgs/leads chunked streaming", () => {
       results: [
         {
           email: "lead-1@example.com",
-          broadcast: { campaign: null, brand: { contacted: true, sent: true, delivered: true }, global: null },
+          broadcast: {
+            campaign: null,
+            brand: {
+              contacted: true, sent: true, delivered: true, opened: true,
+              firstContactedAt: "2026-01-01T00:00:00.000Z",
+              firstSentAt: "2026-01-01T00:01:00.000Z",
+              firstDeliveredAt: "2026-01-01T00:02:00.000Z",
+              firstOpenedAt: "2026-01-02T00:00:00.000Z",
+              firstRepliedAt: null,
+              firstBouncedAt: null,
+              firstUnsubscribedAt: null,
+            },
+            global: null,
+          },
           transactional: null,
         },
       ],
@@ -336,6 +349,18 @@ describe("GET /orgs/leads chunked streaming", () => {
     ]);
     expect(res.body.leads[0].delivered).toBe(true);
     expect(res.body.leads[1].delivered).toBe(false);
+    // Per-event first-occurrence timestamps mapped through onto the slim row (view=basic).
+    expect(res.body.leads[0].firstContactedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(res.body.leads[0].firstSentAt).toBe("2026-01-01T00:01:00.000Z");
+    expect(res.body.leads[0].firstDeliveredAt).toBe("2026-01-01T00:02:00.000Z");
+    expect(res.body.leads[0].firstOpenedAt).toBe("2026-01-02T00:00:00.000Z");
+    // Events that never occurred in scope are null.
+    expect(res.body.leads[0].firstRepliedAt).toBeNull();
+    expect(res.body.leads[0].firstBouncedAt).toBeNull();
+    expect(res.body.leads[0].firstUnsubscribedAt).toBeNull();
+    // A row with no status result at all carries all-null timeline fields.
+    expect(res.body.leads[1].firstContactedAt).toBeNull();
+    expect(res.body.leads[1].firstOpenedAt).toBeNull();
   });
 
   it("view absent returns the full lead shape (backward-compatible)", async () => {
@@ -358,7 +383,16 @@ describe("GET /orgs/leads chunked streaming", () => {
       results: [
         {
           email: "lead-1@example.com",
-          broadcast: { campaign: null, brand: { contacted: true, sent: true, delivered: true }, global: null },
+          broadcast: {
+            campaign: null,
+            brand: {
+              contacted: true, sent: true, delivered: true, opened: true,
+              firstContactedAt: "2026-01-01T00:00:00.000Z",
+              firstOpenedAt: "2026-01-02T00:00:00.000Z",
+              firstRepliedAt: null,
+            },
+            global: null,
+          },
           transactional: null,
         },
       ],
@@ -371,6 +405,10 @@ describe("GET /orgs/leads chunked streaming", () => {
     expect(res.status).toBe(200);
     expect(res.body.leads[0].delivered).toBe(true);
     expect(res.body.leads[0].sent).toBe(true);
+    // Per-event first-occurrence timestamps mapped through onto the full row too.
+    expect(res.body.leads[0].firstContactedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(res.body.leads[0].firstOpenedAt).toBe("2026-01-02T00:00:00.000Z");
+    expect(res.body.leads[0].firstRepliedAt).toBeNull();
     expect(checkDeliveryStatusMock).toHaveBeenCalledTimes(1);
   });
 });

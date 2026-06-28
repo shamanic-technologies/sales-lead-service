@@ -26,7 +26,14 @@ interface FlattenedStatus {
   replied: boolean;
   replyClassification: "positive" | "negative" | "neutral" | null;
   lastDeliveredAt: string | null;
+  firstContactedAt: string | null;
+  firstSentAt: string | null;
+  firstDeliveredAt: string | null;
+  firstOpenedAt: string | null;
   firstClickedAt: string | null;
+  firstRepliedAt: string | null;
+  firstBouncedAt: string | null;
+  firstUnsubscribedAt: string | null;
   global: { bounced: boolean; unsubscribed: boolean };
 }
 
@@ -49,7 +56,14 @@ function pickScoped(s: ScopedStatus | null | undefined) {
     replied: !!s?.replied,
     replyClassification: s?.replyClassification ?? null,
     lastDeliveredAt: s?.lastDeliveredAt ?? null,
+    firstContactedAt: s?.firstContactedAt ?? null,
+    firstSentAt: s?.firstSentAt ?? null,
+    firstDeliveredAt: s?.firstDeliveredAt ?? null,
+    firstOpenedAt: s?.firstOpenedAt ?? null,
     firstClickedAt: s?.firstClickedAt ?? null,
+    firstRepliedAt: s?.firstRepliedAt ?? null,
+    firstBouncedAt: s?.firstBouncedAt ?? null,
+    firstUnsubscribedAt: s?.firstUnsubscribedAt ?? null,
   };
 }
 
@@ -75,7 +89,14 @@ function mergeProviders(
     replied: bcScope.replied || txScope.replied,
     replyClassification: bcScope.replyClassification ?? txScope.replyClassification ?? null,
     lastDeliveredAt: bcScope.lastDeliveredAt ?? txScope.lastDeliveredAt ?? null,
+    firstContactedAt: earliestIso(bcScope.firstContactedAt, txScope.firstContactedAt),
+    firstSentAt: earliestIso(bcScope.firstSentAt, txScope.firstSentAt),
+    firstDeliveredAt: earliestIso(bcScope.firstDeliveredAt, txScope.firstDeliveredAt),
+    firstOpenedAt: earliestIso(bcScope.firstOpenedAt, txScope.firstOpenedAt),
     firstClickedAt: earliestIso(bcScope.firstClickedAt, txScope.firstClickedAt),
+    firstRepliedAt: earliestIso(bcScope.firstRepliedAt, txScope.firstRepliedAt),
+    firstBouncedAt: earliestIso(bcScope.firstBouncedAt, txScope.firstBouncedAt),
+    firstUnsubscribedAt: earliestIso(bcScope.firstUnsubscribedAt, txScope.firstUnsubscribedAt),
   };
 }
 
@@ -97,7 +118,8 @@ export function flattenBrandStatus(result: StatusResult): FlattenedStatus {
 const DEFAULT_STATUS: FlattenedStatus = {
   contacted: false, sent: false, delivered: false, opened: false, clicked: false,
   bounced: false, unsubscribed: false, replied: false, replyClassification: null, lastDeliveredAt: null,
-  firstClickedAt: null,
+  firstContactedAt: null, firstSentAt: null, firstDeliveredAt: null, firstOpenedAt: null,
+  firstClickedAt: null, firstRepliedAt: null, firstBouncedAt: null, firstUnsubscribedAt: null,
   global: { bounced: false, unsubscribed: false },
 };
 
