@@ -63,6 +63,7 @@ export interface PersonOrganization {
   websiteUrl: string | null;
   industry: string | null;
   estimatedNumEmployees: number | null;
+  annualRevenue: number | null;
   linkedinUrl: string | null;
   logoUrl: string | null;
   city: string | null;
