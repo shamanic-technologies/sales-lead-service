@@ -1542,11 +1542,16 @@ registry.registerPath({
       name: "view",
       required: false,
       description:
-        "Per-lead payload size. `basic` returns a slim `lead` object (firstName, lastName, name, " +
-        "headline, linkedinUrl, photoUrl, apolloPersonId + organization {id, name, logoUrl, " +
-        "primaryDomain, websiteUrl}); drops employmentHistory, funding events, and the extra " +
-        "organization columns. Absent or any other value => the full FullLead payload (default, " +
-        "backward-compatible). Use `basic` for list views to cut the response ~10x.",
+        "Per-lead payload size. `basic` returns a slim `lead` object: " +
+        "firstName, lastName, name, headline, linkedinUrl, photoUrl, apolloPersonId, " +
+        "seniority, departments, functions, city, state, country " +
+        "+ organization {id, name, logoUrl, primaryDomain, websiteUrl, industry, industries, " +
+        "estimatedNumEmployees, annualRevenue, foundedYear, shortDescription, city, state, country}. " +
+        "Field names/types are identical to the full FullLead/OrganizationView. " +
+        "Still drops the heavy stuff (employmentHistory, subdepartments, technologyNames, " +
+        "secondaryIndustries, funding events) so basic stays ~10x smaller than full. " +
+        "Absent or any other value => the full FullLead payload (default, " +
+        "backward-compatible). Use `basic` for list views.",
       schema: { type: "string" as const, enum: ["basic", "full"] },
     },
   ],
