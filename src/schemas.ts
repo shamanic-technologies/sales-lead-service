@@ -1608,7 +1608,7 @@ registry.registerPath({
       description:
         "Per-lead payload size. `basic` returns a slim `lead` object: " +
         "firstName, lastName, name, headline, linkedinUrl, photoUrl, apolloPersonId, " +
-        "seniority, departments, functions, city, state, country " +
+        "seniority, departments, functions, currentTitle, city, state, country " +
         "+ organization {id, name, logoUrl, primaryDomain, websiteUrl, industry, industries, " +
         "estimatedNumEmployees, annualRevenue, foundedYear, shortDescription, city, state, country}. " +
         "Field names/types are identical to the full FullLead/OrganizationView. " +

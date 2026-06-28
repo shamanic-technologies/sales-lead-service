@@ -20,6 +20,10 @@ export interface BasicSlimLead {
   seniority: string | null;
   departments: string[] | null;
   functions: string[] | null;
+  // Current-employer job title (#336) — same name/type as FullLead.currentTitle.
+  // Sourced from the current employment row (leads_organizations.title), NOT nested
+  // inside organization, matching the full lead shape.
+  currentTitle: string | null;
   city: string | null;
   state: string | null;
   country: string | null;
@@ -112,6 +116,7 @@ interface RawBasicRow {
   seniority: string | null;
   departments: string[] | null;
   functions: string[] | null;
+  current_title: string | null;
   l_city: string | null;
   l_state: string | null;
   l_country: string | null;
@@ -173,6 +178,7 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
         seniority: r.seniority,
         departments: r.departments,
         functions: r.functions,
+        currentTitle: r.current_title,
         city: r.l_city,
         state: r.l_state,
         country: r.l_country,
@@ -239,6 +245,7 @@ function basicLeadQuery(
       l.headline, l.linkedin_url, l.photo_url,
       l.seniority, l.departments, l.functions,
       l.city AS l_city, l.state AS l_state, l.country AS l_country,
+      org.current_title,
       org.org_id AS org_id_inner, org.org_name, org.logo_url, org.primary_domain, org.website_url,
       org.industry, org.industries, org.estimated_num_employees, org.annual_revenue,
       org.founded_year, org.short_description,
@@ -247,7 +254,8 @@ function basicLeadQuery(
     FROM ${leadCampaignBaseRelation(f)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
-      SELECT o.id AS org_id, o.name AS org_name, o.logo_url, o.primary_domain, o.website_url,
+      SELECT lo.title AS current_title,
+             o.id AS org_id, o.name AS org_name, o.logo_url, o.primary_domain, o.website_url,
              o.industry, o.industries, o.estimated_num_employees, o.annual_revenue,
              o.founded_year, o.short_description,
              o.city AS org_city, o.state AS org_state, o.country AS org_country
