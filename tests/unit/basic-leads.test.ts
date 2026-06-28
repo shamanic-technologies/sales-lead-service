@@ -45,6 +45,7 @@ function rawRow(servedAt: unknown) {
     seniority: "founder",
     departments: ["c_suite"],
     functions: ["entrepreneurship"],
+    current_title: "Founder & CEO",
     l_city: "Portland",
     l_state: "ME",
     l_country: "USA",
@@ -103,6 +104,7 @@ describe("fetchBasicLeadRows", () => {
     expect(lead.seniority).toBe("founder");
     expect(lead.departments).toEqual(["c_suite"]);
     expect(lead.functions).toEqual(["entrepreneurship"]);
+    expect(lead.currentTitle).toBe("Founder & CEO");
     expect(lead.city).toBe("Portland");
     expect(lead.state).toBe("ME");
     expect(lead.country).toBe("USA");
