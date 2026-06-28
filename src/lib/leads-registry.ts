@@ -49,6 +49,7 @@ function pickOrgFields(org: NonNullable<Person["organization"]>): Partial<NewOrg
   if (org.state) out.state = org.state;
   if (org.country) out.country = org.country;
   if (org.estimatedNumEmployees != null) out.estimatedNumEmployees = org.estimatedNumEmployees;
+  if (org.annualRevenue != null) out.annualRevenue = String(org.annualRevenue);
   return out;
 }
 
