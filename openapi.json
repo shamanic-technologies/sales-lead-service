@@ -1350,6 +1350,48 @@
             "description": "First-occurrence (MIN) ISO 8601 timestamp of a click in this scope; null if the lead never clicked in scope. Scoped identically to `clicked` (brand-scoped when brandId is passed, campaign-scoped when campaignId is passed).",
             "example": "2026-01-02T00:00:00.000Z"
           },
+          "firstContactedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of a contacted event in this scope; null if it never happened in scope. Passed through from email-gateway status. For building the per-lead event timeline.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstSentAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of a sent event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstDeliveredAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of a delivered event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstOpenedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of an opened event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstRepliedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of a replied event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstBouncedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of a bounced event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
+          "firstUnsubscribedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First-occurrence (MIN) ISO 8601 timestamp of an unsubscribed event in this scope; null if it never happened in scope. Passed through from email-gateway status.",
+            "example": "2026-01-01T00:00:00.000Z"
+          },
           "global": {
             "type": "object",
             "properties": {
@@ -1402,6 +1444,13 @@
           "replyClassification",
           "lastDeliveredAt",
           "firstClickedAt",
+          "firstContactedAt",
+          "firstSentAt",
+          "firstDeliveredAt",
+          "firstOpenedAt",
+          "firstRepliedAt",
+          "firstBouncedAt",
+          "firstUnsubscribedAt",
           "global"
         ],
         "description": "One leads_campaigns row enriched with the full canonical lead payload (FullLead) and delivery status from email-gateway."

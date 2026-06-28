@@ -1369,6 +1369,70 @@ const LeadDetailSchema = z
           "(brand-scoped when brandId is passed, campaign-scoped when campaignId is passed).",
         example: "2026-01-02T00:00:00.000Z",
       }),
+    firstContactedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a contacted event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status. " +
+          "For building the per-lead event timeline.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstSentAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a sent event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstDeliveredAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a delivered event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstOpenedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of an opened event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstRepliedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a replied event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstBouncedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of a bounced event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
+    firstUnsubscribedAt: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "First-occurrence (MIN) ISO 8601 timestamp of an unsubscribed event in this scope; " +
+          "null if it never happened in scope. Passed through from email-gateway status.",
+        example: "2026-01-01T00:00:00.000Z",
+      }),
     global: z
       .object({
         bounced: z.boolean().openapi({ description: "Lead has bounced anywhere across the platform.", example: false }),
