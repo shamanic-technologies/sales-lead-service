@@ -87,6 +87,12 @@ export interface FullLead {
   city: string | null;
   state: string | null;
   country: string | null;
+  /**
+   * Recipient's IANA timezone (e.g. "America/New_York"). Forwarded from upstream
+   * so the send chain (email-gateway-service → instantly-service) can schedule
+   * cold email in the recipient's local business hours. null when unknown.
+   */
+  timezone: string | null;
   seniority: string | null;
   departments: string[] | null;
   subdepartments: string[] | null;
@@ -265,6 +271,7 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
     city: lead.city ?? null,
     state: lead.state ?? null,
     country: lead.country ?? null,
+    timezone: lead.timezone ?? null,
     seniority: lead.seniority ?? null,
     departments: lead.departments ?? null,
     subdepartments: lead.subdepartments ?? null,
@@ -364,6 +371,7 @@ export async function buildFullLeadsBatch(
       city: lead.city ?? null,
       state: lead.state ?? null,
       country: lead.country ?? null,
+      timezone: lead.timezone ?? null,
       seniority: lead.seniority ?? null,
       departments: lead.departments ?? null,
       subdepartments: lead.subdepartments ?? null,

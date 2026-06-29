@@ -76,6 +76,7 @@
                   "city": "Portland",
                   "state": "ME",
                   "country": "USA",
+                  "timezone": "America/New_York",
                   "seniority": "founder",
                   "departments": [
                     "c_suite"
@@ -322,6 +323,12 @@
             "description": "Lead's country.",
             "example": "USA"
           },
+          "timezone": {
+            "type": "string",
+            "nullable": true,
+            "description": "Recipient's IANA timezone (e.g. 'America/New_York'), resolved upstream from the lead's location. Forward this to the send path so cold email is scheduled in the recipient's local business hours (email-gateway-service → instantly-service). null when upstream provides none — the send path falls back to a safe default.",
+            "example": "America/New_York"
+          },
           "seniority": {
             "type": "string",
             "nullable": true,
@@ -440,6 +447,7 @@
           "city",
           "state",
           "country",
+          "timezone",
           "seniority",
           "departments",
           "subdepartments",
@@ -466,6 +474,7 @@
           "city": "Portland",
           "state": "ME",
           "country": "USA",
+          "timezone": "America/New_York",
           "seniority": "founder",
           "departments": [
             "c_suite"

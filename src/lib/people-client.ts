@@ -91,6 +91,13 @@ export interface Person {
   city: string | null;
   state: string | null;
   country: string | null;
+  /**
+   * Recipient's IANA timezone (e.g. "America/New_York"), resolved upstream from
+   * the person's location. Forwarded onto the lead so the send chain
+   * (email-gateway-service → instantly-service) can schedule cold email in the
+   * recipient's local business hours. null when upstream provides none.
+   */
+  timezone: string | null;
   provider: PeopleProvider;
   /** apollo person id (usable for a later enrich). null for apify. */
   providerPersonId: string | null;

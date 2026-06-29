@@ -106,6 +106,7 @@ describe("buildFullLead", () => {
       city: "Portland",
       state: "ME",
       country: "USA",
+      timezone: "America/New_York",
       seniority: "founder",
       departments: ["c_suite"],
       subdepartments: null,
@@ -197,6 +198,7 @@ describe("buildFullLead", () => {
       current: true,
     });
     expect(result.enrichedAt).toBe("2026-01-01T00:00:00.000Z");
+    expect(result.timezone).toBe("America/New_York");
     expect(result.currentTitle).toBe("Founder");
     expect(result.organization?.latestFundingStage).toBe("series_a");
     expect(result.organization?.latestFundingRoundDate).toBe("2024-06-01");
