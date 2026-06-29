@@ -726,6 +726,16 @@ export const FullLeadSchema = z
         description: "Lead's country.",
         example: "USA",
       }),
+    timezone: z
+      .string()
+      .nullable()
+      .openapi({
+        description:
+          "Recipient's IANA timezone (e.g. 'America/New_York'), resolved upstream from the lead's location. " +
+          "Forward this to the send path so cold email is scheduled in the recipient's local business hours " +
+          "(email-gateway-service → instantly-service). null when upstream provides none — the send path falls back to a safe default.",
+        example: "America/New_York",
+      }),
     seniority: z
       .string()
       .nullable()
@@ -835,6 +845,7 @@ export const FullLeadSchema = z
       city: "Portland",
       state: "ME",
       country: "USA",
+      timezone: "America/New_York",
       seniority: "founder",
       departments: ["c_suite"],
       subdepartments: ["founders"],
@@ -1045,6 +1056,7 @@ export const BufferNextResponseSchema = z
               city: "Portland",
               state: "ME",
               country: "USA",
+              timezone: "America/New_York",
               seniority: "founder",
               departments: ["c_suite"],
               subdepartments: null,
