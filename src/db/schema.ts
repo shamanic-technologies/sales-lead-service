@@ -29,6 +29,12 @@ export const leads = pgTable(
     state: text("state"),
     country: text("country"),
     seniority: text("seniority"),
+    // Recipient's IANA timezone (e.g. "America/New_York"), sourced from upstream
+    // (human-service / apollo-service) off the person's location. Forwarded on the
+    // canonical lead so downstream send paths (email-gateway → instantly-service)
+    // can schedule cold email in the recipient's local business hours. Null when
+    // upstream provides none — downstream falls back to a safe default.
+    timezone: text("timezone"),
     departments: text("departments").array(),
     subdepartments: text("subdepartments").array(),
     functions: text("functions").array(),

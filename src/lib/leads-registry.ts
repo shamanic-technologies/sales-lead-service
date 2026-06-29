@@ -24,6 +24,7 @@ const PERSON_FIELDS = [
   "state",
   "country",
   "seniority",
+  "timezone",
 ] as const;
 
 function pickPersonFields(person: Person): Partial<NewLead> {

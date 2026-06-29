@@ -59,6 +59,7 @@ const person: Person = {
   city: null,
   state: null,
   country: null,
+  timezone: "America/New_York",
   provider: "apollo",
   providerPersonId: "apollo-person-1",
   organization: null,

@@ -32,6 +32,7 @@ const minimalLead = {
   city: null,
   state: null,
   country: null,
+  timezone: null,
   seniority: null,
   departments: null,
   subdepartments: null,
@@ -139,6 +140,15 @@ describe("FullLeadSchema", () => {
     const without = { ...minimalLead };
     delete (without as Record<string, unknown>).currentTitle;
     expect(FullLeadSchema.safeParse(without).success).toBe(false);
+  });
+
+  it("accepts timezone as an IANA string and as null", () => {
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, timezone: "America/New_York" }).success,
+    ).toBe(true);
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, timezone: null }).success,
+    ).toBe(true);
   });
 
   it("accepts an organization with empty fundingEvents array", () => {
