@@ -1282,6 +1282,22 @@ const LeadDetailSchema = z
         description: "Audience ID (human-service audience.id) stored on the leads_campaigns row. null means unattributed.",
         example: "audience_123",
       }),
+    audience: z
+      .object({
+        id: z.string().openapi({ description: "Audience UUID (human-service audience.id).", example: "audience_123" }),
+        name: z.string().openapi({ description: "Audience display name.", example: "US SaaS founders" }),
+        avatarUrl: z
+          .string()
+          .nullable()
+          .openapi({ description: "Audience avatar URL. null when the audience has no avatar yet.", example: "https://cdn.example.com/aud.png" }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The lead's ACTIVE audience for this brand, resolved server-side by human-service " +
+          "(by tagged audience_id and/or by email → active-audience membership, brand-correct). " +
+          "null when the lead belongs to no active audience for the brand. Present on every lead in both views.",
+      }),
     servedAt: z
       .string()
       .nullable()
