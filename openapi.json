@@ -1267,6 +1267,34 @@
             "description": "Audience ID (human-service audience.id) stored on the leads_campaigns row. null means unattributed.",
             "example": "audience_123"
           },
+          "audience": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Audience UUID (human-service audience.id).",
+                "example": "audience_123"
+              },
+              "name": {
+                "type": "string",
+                "description": "Audience display name.",
+                "example": "US SaaS founders"
+              },
+              "avatarUrl": {
+                "type": "string",
+                "nullable": true,
+                "description": "Audience avatar URL. null when the audience has no avatar yet.",
+                "example": "https://cdn.example.com/aud.png"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "avatarUrl"
+            ],
+            "description": "The lead's ACTIVE audience for this brand, resolved server-side by human-service (by tagged audience_id and/or by email → active-audience membership, brand-correct). null when the lead belongs to no active audience for the brand. Present on every lead in both views."
+          },
           "servedAt": {
             "type": "string",
             "nullable": true,
@@ -1438,6 +1466,7 @@
           "userId",
           "workflowSlug",
           "featureSlug",
+          "audience",
           "servedAt",
           "apolloPersonId",
           "emailStatus",

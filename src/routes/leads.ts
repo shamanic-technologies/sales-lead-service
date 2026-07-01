@@ -12,6 +12,7 @@ import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import { streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import { leadCampaignBaseRelation, type LeadListScope } from "../lib/lead-list-query.js";
+import { resolveAudiences, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
 
 const router = Router();
 
@@ -235,6 +236,36 @@ async function fetchLeadCampaignChunk(
   }));
 }
 
+// Resolve each lead's ACTIVE audience for its brand, server-to-server via
+// human-service. Runs per chunk (bounded set), grouped by the brand the audience
+// must be correct for: the explicitly-scoped brandId when present (the dashboard
+// leads page always scopes by brand), else the row's primary brand. Both keys the
+// lead carries — its tagged audienceId (~5% of rows) AND its email (historical
+// coverage) — are forwarded; human-service owns the brand-correct pick. Fail-loud:
+// a resolver failure rejects and aborts the request (never a silently-blank field).
+async function buildAudienceMapForRows(
+  descriptors: Array<{ leadId: string; email: string | null; audienceId: string | null; brandIds: string[] }>,
+  scopeBrandId: string | undefined,
+  ctx: AudienceResolveContext,
+): Promise<Map<string, AudienceCard>> {
+  const groups = new Map<string, { leadId: string; email: string | null; audienceId: string | null }[]>();
+  for (const d of descriptors) {
+    const brandId = scopeBrandId ?? d.brandIds[0];
+    if (!brandId) continue;
+    if (!groups.has(brandId)) groups.set(brandId, []);
+    groups.get(brandId)!.push({ leadId: d.leadId, email: d.email, audienceId: d.audienceId });
+  }
+
+  const merged = new Map<string, AudienceCard>();
+  await Promise.all(
+    Array.from(groups.entries()).map(async ([brandId, leads]) => {
+      const map = await resolveAudiences(brandId, leads, ctx);
+      for (const [leadId, card] of map) merged.set(leadId, card);
+    }),
+  );
+  return merged;
+}
+
 async function buildStatusMapForBasicRows(
   rows: BasicLeadRow[],
   campaignId: string | undefined,
@@ -292,6 +323,11 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     const hasScopeForStatus = !!(campaignIdStr || brandIdStr);
     const flatten = campaignIdStr ? flattenCampaignStatus : flattenBrandStatus;
     const context = getServiceContext(req);
+    const audienceCtx: AudienceResolveContext = {
+      orgId: req.orgId!,
+      userId: req.userId ?? null,
+      runId: req.runId ?? null,
+    };
     // `?view=basic` => slim per-lead payload. Anything else (incl. absent) => full
     // FullLead, the existing default. No Zod default: a missing param is full.
     const slim = req.query.view === "basic";
@@ -312,6 +348,17 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         const statusMap = hasScopeForStatus
           ? await buildStatusMapForBasicRows(basicRows, campaignIdStr, context)
           : new Map<string, StatusResult>();
+
+        const audienceMap = await buildAudienceMapForRows(
+          basicRows.map((r) => ({
+            leadId: r.leadId,
+            email: r.email?.value ?? null,
+            audienceId: r.audienceId,
+            brandIds: r.brandIds,
+          })),
+          brandIdStr,
+          audienceCtx,
+        );
 
         for (const r of basicRows) {
           const emailValue = r.email?.value ?? "";
@@ -339,6 +386,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
             activeGoalId: r.activeGoalId ?? null,
             brandProfileId: r.brandProfileId ?? null,
             audienceId: r.audienceId ?? null,
+            audience: audienceMap.get(r.leadId) ?? null,
             servedAt: r.servedAt,
             status: r.status as "buffered" | "skipped" | "claimed" | "served",
             emailStatus,
@@ -383,6 +431,17 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       rowCount += chunkRows.length;
       const chunkLeadIds = Array.from(new Set(chunkRows.map((r) => r.leadId)));
       const fullLeadByLeadId = await buildFullLeadsBatch(chunkLeadIds);
+
+      const audienceMap = await buildAudienceMapForRows(
+        chunkRows.map((row) => ({
+          leadId: row.leadId,
+          email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
+          audienceId: row.audienceId,
+          brandIds: row.brandIds,
+        })),
+        brandIdStr,
+        audienceCtx,
+      );
 
       // Delivery-status overlay, scoped to this chunk's served rows only.
       const statusMap = new Map<string, StatusResult>();
@@ -434,6 +493,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           activeGoalId: row.activeGoalId ?? null,
           brandProfileId: row.brandProfileId ?? null,
           audienceId: row.audienceId ?? null,
+          audience: audienceMap.get(row.leadId) ?? null,
           servedAt: row.servedAt,
           status: row.status as "buffered" | "skipped" | "claimed" | "served",
           emailStatus,
