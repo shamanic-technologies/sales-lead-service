@@ -2,7 +2,7 @@ import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 /**
- * Client for human-service's server-to-server audience resolver.
+ * Client for human-service's internal bulk audience resolver (#166 / #346).
  *
  * The dashboard Leads page must show each lead's ACTIVE audience for a brand.
  * Resolving that in the browser meant POSTing every brand lead email in one
@@ -13,10 +13,9 @@ import { fetchWithRetry } from "./fetch-retry.js";
  * lead-service owns only ~5% of `leads_campaigns.audience_id` tags; historical
  * leads resolve by EMAIL → active-audience membership. Both keys are sent to
  * human-service, which owns the brand-correct pick (audience.brandId +
- * status='active' + membership) and the deterministic tie-break. This client is
- * purely a bulk transport: it batches the identity set, calls the resolver, and
- * returns a leadId → { id, name, avatarUrl } map. leadIds with no active
- * audience for the brand are simply absent from the map (⟹ null on the lead).
+ * status + membership) and the deprecated→canonical audience mapping. This
+ * client is a bulk transport: it sends the brand's distinct audienceIds + emails
+ * and returns the two lookup maps human-service produces.
  *
  * Fail-loud: a non-2xx resolver response or a network failure throws. The
  * `GET /orgs/leads` handler resolves the audience BEFORE writing each chunk, so
@@ -24,28 +23,24 @@ import { fetchWithRetry } from "./fetch-retry.js";
  * (mid-stream) — never a silently-blank "-" that masks the outage (AC4).
  */
 
-// Locked wire contract (lead-service ↔ human-service, server-to-server, direct
-// to HUMAN_SERVICE_URL — NOT via the api-service gateway, so no 100KB body cap):
+// Deployed wire contract (lead-service ↔ human-service, server-to-server, direct
+// to HUMAN_SERVICE_URL — NOT via the api-service gateway; the resolver mounts its
+// own 25MB parser BEFORE human-service's global 100KB json parser, so no body cap):
 //
-//   POST {HUMAN_SERVICE_URL}/orgs/audiences/resolve
-//   Headers: X-API-Key: <internal>, x-org-id: <orgId>
-//   Body:    { "brandId": "<uuid>",
-//              "leads": [ { "leadId": "<opaque string>",
-//                           "email": "<string|null>",
-//                           "audienceId": "<uuid|null>" } ] }   // lead-service batches ≤ RESOLVE_BATCH_SIZE
-//   200:     { "audiences": { "<leadId>": { "id","name","avatarUrl": string|null } } }
-//            (a leadId is present only when it maps to an ACTIVE audience for brandId;
-//             absent ⟹ the lead has no active audience for the brand ⟹ null.)
+//   POST {HUMAN_SERVICE_URL}/internal/audiences/resolve
+//   Headers: X-API-Key: <internal>   (requireApiKey; orgId travels in the body)
+//   Body:    { "orgId": "<uuid>", "brandId": "<uuid>",
+//              "audienceIds"?: string[],   // tagged audience_ids on the leads (~5%)
+//              "emails"?: string[] }        // lead emails — HISTORICAL key (raw; normalized server-side)
+//            (at least one of audienceIds / emails must be non-empty)
+//   200:     { "byAudienceId": { "<audienceId>": Card|null },
+//              "byEmail":       { "<rawEmail>":  Card|null } }
+//   Card = { id, name, avatarUrl: string|null }. Only this brand's active audiences
+//   are ever returned (brand-correct); a non-matching / retired key resolves to null.
 export interface AudienceCard {
   id: string;
   name: string;
   avatarUrl: string | null;
-}
-
-export interface AudienceResolveLead {
-  leadId: string;
-  email: string | null;
-  audienceId: string | null;
 }
 
 export interface AudienceResolveContext {
@@ -54,8 +49,9 @@ export interface AudienceResolveContext {
   runId?: string | null;
 }
 
-interface ResolveResponse {
-  audiences: Record<string, AudienceCard>;
+export interface AudienceResolveResult {
+  byAudienceId: Record<string, AudienceCard | null>;
+  byEmail: Record<string, AudienceCard | null>;
 }
 
 export class AudienceServiceError extends Error {
@@ -70,32 +66,41 @@ export class AudienceServiceError extends Error {
   }
 }
 
-// One brand's identity set per call. A single leads chunk (LEADS_STREAM_CHUNK_SIZE,
-// default 500) stays well under this, but keep the batch bounded so a large chunk
-// or a future bigger chunk size never sends an unbounded body / query to a
-// Neon-backed sibling.
-const RESOLVE_BATCH_SIZE = Math.max(1, Number(process.env.AUDIENCE_RESOLVE_BATCH_SIZE) || 1000);
-
 function buildHeaders(ctx: AudienceResolveContext): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-API-Key": HUMAN_SERVICE_API_KEY,
-    "x-org-id": ctx.orgId,
   };
   if (ctx.userId) headers["x-user-id"] = ctx.userId;
   if (ctx.runId) headers["x-run-id"] = ctx.runId;
   return headers;
 }
 
-async function resolveBatch(
+const EMPTY: AudienceResolveResult = { byAudienceId: {}, byEmail: {} };
+
+/**
+ * Resolve, for a single brand, the active-audience card behind each distinct
+ * tagged audienceId and/or lead email. Returns human-service's two lookup maps
+ * ({ byAudienceId, byEmail }); the caller correlates them back onto each lead.
+ * A call with no keys short-circuits (the resolver 400s on an empty request).
+ * Throws on any resolver / network failure (fail-loud).
+ */
+export async function resolveAudiencesForBrand(
   brandId: string,
-  leads: AudienceResolveLead[],
+  keys: { audienceIds: string[]; emails: string[] },
   ctx: AudienceResolveContext,
-): Promise<Record<string, AudienceCard>> {
-  const response = await fetchWithRetry(`${HUMAN_SERVICE_URL}/orgs/audiences/resolve`, {
+): Promise<AudienceResolveResult> {
+  if (keys.audienceIds.length === 0 && keys.emails.length === 0) return EMPTY;
+
+  const response = await fetchWithRetry(`${HUMAN_SERVICE_URL}/internal/audiences/resolve`, {
     method: "POST",
     headers: buildHeaders(ctx),
-    body: JSON.stringify({ brandId, leads }),
+    body: JSON.stringify({
+      orgId: ctx.orgId,
+      brandId,
+      audienceIds: keys.audienceIds,
+      emails: keys.emails,
+    }),
     signal: AbortSignal.timeout(120_000),
   });
 
@@ -103,30 +108,9 @@ async function resolveBatch(
     throw new AudienceServiceError(response.status, await response.text());
   }
 
-  const parsed = (await response.json()) as ResolveResponse;
-  return parsed.audiences ?? {};
-}
-
-/**
- * Resolve the active audience card for each lead of a single brand, batching
- * internally. Returns a leadId → AudienceCard map; leads without an active
- * audience are absent. Throws on any resolver / network failure (fail-loud).
- */
-export async function resolveAudiences(
-  brandId: string,
-  leads: AudienceResolveLead[],
-  ctx: AudienceResolveContext,
-): Promise<Map<string, AudienceCard>> {
-  const map = new Map<string, AudienceCard>();
-  if (leads.length === 0) return map;
-
-  for (let i = 0; i < leads.length; i += RESOLVE_BATCH_SIZE) {
-    const batch = leads.slice(i, i + RESOLVE_BATCH_SIZE);
-    const audiences = await resolveBatch(brandId, batch, ctx);
-    for (const [leadId, card] of Object.entries(audiences)) {
-      map.set(leadId, card);
-    }
-  }
-
-  return map;
+  const parsed = (await response.json()) as Partial<AudienceResolveResult>;
+  return {
+    byAudienceId: parsed.byAudienceId ?? {},
+    byEmail: parsed.byEmail ?? {},
+  };
 }

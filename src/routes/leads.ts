@@ -12,7 +12,7 @@ import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import { streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import { leadCampaignBaseRelation, type LeadListScope } from "../lib/lead-list-query.js";
-import { resolveAudiences, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
+import { resolveAudiencesForBrand, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
 
 const router = Router();
 
@@ -243,24 +243,54 @@ async function fetchLeadCampaignChunk(
 // lead carries — its tagged audienceId (~5% of rows) AND its email (historical
 // coverage) — are forwarded; human-service owns the brand-correct pick. Fail-loud:
 // a resolver failure rejects and aborts the request (never a silently-blank field).
+interface AudienceRowDescriptor {
+  leadId: string;
+  email: string | null;
+  audienceId: string | null;
+  brandIds: string[];
+}
+
 async function buildAudienceMapForRows(
-  descriptors: Array<{ leadId: string; email: string | null; audienceId: string | null; brandIds: string[] }>,
+  descriptors: AudienceRowDescriptor[],
   scopeBrandId: string | undefined,
   ctx: AudienceResolveContext,
 ): Promise<Map<string, AudienceCard>> {
-  const groups = new Map<string, { leadId: string; email: string | null; audienceId: string | null }[]>();
+  // Group rows by the brand the audience must be correct for: the explicitly-
+  // scoped brandId when present, else the row's primary brand. human-service
+  // resolves by DISTINCT audienceId + email arrays, so per group we send the
+  // deduped key sets and correlate the two returned maps back onto each lead.
+  const groups = new Map<string, AudienceRowDescriptor[]>();
   for (const d of descriptors) {
     const brandId = scopeBrandId ?? d.brandIds[0];
     if (!brandId) continue;
     if (!groups.has(brandId)) groups.set(brandId, []);
-    groups.get(brandId)!.push({ leadId: d.leadId, email: d.email, audienceId: d.audienceId });
+    groups.get(brandId)!.push(d);
   }
 
   const merged = new Map<string, AudienceCard>();
   await Promise.all(
-    Array.from(groups.entries()).map(async ([brandId, leads]) => {
-      const map = await resolveAudiences(brandId, leads, ctx);
-      for (const [leadId, card] of map) merged.set(leadId, card);
+    Array.from(groups.entries()).map(async ([brandId, rows]) => {
+      const audienceIds = Array.from(
+        new Set(rows.map((r) => r.audienceId).filter((x): x is string => !!x)),
+      );
+      const emails = Array.from(
+        new Set(rows.map((r) => r.email).filter((x): x is string => !!x)),
+      );
+
+      const { byAudienceId, byEmail } = await resolveAudiencesForBrand(
+        brandId,
+        { audienceIds, emails },
+        ctx,
+      );
+
+      for (const r of rows) {
+        // Prefer the tagged audience's card; fall back to the email membership
+        // when the tag is absent / not this brand / retired (null).
+        const byTag = r.audienceId ? byAudienceId[r.audienceId] : null;
+        const byMail = r.email ? byEmail[r.email] : null;
+        const card = byTag ?? byMail ?? null;
+        if (card) merged.set(r.leadId, card);
+      }
     }),
   );
   return merged;
