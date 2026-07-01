@@ -39,10 +39,10 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
   checkDeliveryStatus: (...args: unknown[]) => checkDeliveryStatusMock(...args),
 }));
 
-const resolveAudiencesMock = vi.fn();
+const resolveAudiencesForBrandMock = vi.fn();
 vi.mock("../../src/lib/audience-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/audience-client.js")>()),
-  resolveAudiences: (...args: unknown[]) => resolveAudiencesMock(...args),
+  resolveAudiencesForBrand: (...args: unknown[]) => resolveAudiencesForBrandMock(...args),
 }));
 
 vi.mock("../../src/lib/trace-event.js", () => ({
@@ -197,8 +197,8 @@ describe("GET /orgs/leads chunked streaming", () => {
     buildFullLeadsBatchMock.mockImplementation((ids: string[]) => Promise.resolve(fullLeadMapFor(ids)));
     checkDeliveryStatusMock.mockReset();
     checkDeliveryStatusMock.mockResolvedValue({ results: [] });
-    resolveAudiencesMock.mockReset();
-    resolveAudiencesMock.mockResolvedValue(new Map());
+    resolveAudiencesForBrandMock.mockReset();
+    resolveAudiencesForBrandMock.mockResolvedValue({ byAudienceId: {}, byEmail: {} });
   });
 
   it("returns { leads: [] } for an empty result set", async () => {
@@ -234,11 +234,13 @@ describe("GET /orgs/leads chunked streaming", () => {
     expect(res.body.leads[0].audience).toBeNull();
   });
 
-  it("attaches the resolved audience card per lead (full view)", async () => {
+  it("attaches the resolved audience card per lead, correlating byEmail (full view)", async () => {
     mockRows = [rawRow(1), rawRow(2)];
-    resolveAudiencesMock.mockResolvedValue(
-      new Map([["lead-1", { id: "aud-1", name: "US SaaS founders", avatarUrl: "https://cdn/x.png" }]]),
-    );
+    // Full path email = `${leadId}@example.com` (from the primary email contact).
+    resolveAudiencesForBrandMock.mockResolvedValue({
+      byAudienceId: {},
+      byEmail: { "lead-1@example.com": { id: "aud-1", name: "US SaaS founders", avatarUrl: "https://cdn/x.png" } },
+    });
 
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}`)
@@ -246,23 +248,41 @@ describe("GET /orgs/leads chunked streaming", () => {
       .set("x-org-id", ORG);
 
     expect(res.status).toBe(200);
-    // human-service is asked with the scoped brandId + each lead's identity keys.
-    expect(resolveAudiencesMock).toHaveBeenCalled();
-    expect(resolveAudiencesMock.mock.calls[0][0]).toBe(BRAND);
+    // human-service is asked with the scoped brandId + deduped key arrays.
+    expect(resolveAudiencesForBrandMock).toHaveBeenCalled();
+    expect(resolveAudiencesForBrandMock.mock.calls[0][0]).toBe(BRAND);
+    expect(resolveAudiencesForBrandMock.mock.calls[0][1].emails).toContain("lead-1@example.com");
     expect(res.body.leads[0].audience).toEqual({
       id: "aud-1",
       name: "US SaaS founders",
       avatarUrl: "https://cdn/x.png",
     });
-    // lead-2 has no active audience => null (absent from the map).
+    // lead-2 has no active audience => null.
     expect(res.body.leads[1].audience).toBeNull();
+  });
+
+  it("prefers the tagged audienceId card over the email membership", async () => {
+    mockRows = [{ ...rawRow(1), audience_id: "tag-1" }];
+    resolveAudiencesForBrandMock.mockResolvedValue({
+      byAudienceId: { "tag-1": { id: "tag-1", name: "Tagged", avatarUrl: null } },
+      byEmail: { "lead-1@example.com": { id: "mail-1", name: "ByEmail", avatarUrl: null } },
+    });
+
+    const res = await request(app)
+      .get(`/orgs/leads?brandId=${BRAND}`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG);
+
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].audience).toEqual({ id: "tag-1", name: "Tagged", avatarUrl: null });
   });
 
   it("attaches the resolved audience card per lead (view=basic)", async () => {
     streamBasicLeadChunksMock.mockImplementationOnce(() => basicChunks([[basicRow(1)]]));
-    resolveAudiencesMock.mockResolvedValue(
-      new Map([["lead-1", { id: "aud-9", name: "EU ecommerce", avatarUrl: null }]]),
-    );
+    resolveAudiencesForBrandMock.mockResolvedValue({
+      byAudienceId: {},
+      byEmail: { "lead-1@example.com": { id: "aud-9", name: "EU ecommerce", avatarUrl: null } },
+    });
 
     const res = await request(app)
       .get(`/orgs/leads?brandId=${BRAND}&view=basic`)
@@ -275,7 +295,7 @@ describe("GET /orgs/leads chunked streaming", () => {
 
   it("fails loud when audience resolution errors (does not blank to null)", async () => {
     mockRows = [rawRow(1)];
-    resolveAudiencesMock.mockRejectedValue(new Error("human-service 502"));
+    resolveAudiencesForBrandMock.mockRejectedValue(new Error("human-service 502"));
 
     // Resolution runs before the chunk is written; the stream is aborted, so the
     // client sees an error rather than a 200 with a silently-blank audience.
