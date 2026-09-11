@@ -640,3 +640,246 @@ describe("assembleLeadHistory — the copy we produced", () => {
     expect(emptyBody.bodyStatus).toBe("empty");
   });
 });
+
+const GENERATED_URL =
+  "https://opsfolio.com/lp/cmmc/level-1-free-assessment/?utm_source=landing_page&utm_medium=email&utm_campaign=cmmc_level1&utm_id=distribute";
+const SEEN_URL = "https://opsfolio.com/lp/cmmc/level-1-free-assessment/";
+
+function generation(over: Record<string, unknown> = {}) {
+  return {
+    ok: true as const,
+    data: {
+      id: "gen-1",
+      campaignId: "camp-1",
+      subject: "CMMC Level 1 readiness",
+      bodyText: `Hi Tom,\n\nSee how it works here: ${GENERATED_URL}`,
+      bodyHtml: null,
+      sequence: null,
+      model: "gemini-3.5-flash-lite",
+      promptType: "cold",
+      createdAt: "2026-01-01T06:00:00.000Z",
+      ...over,
+    } as never,
+  };
+}
+
+describe("assembleLeadHistory — one event per email", () => {
+  it("states the message that went out and NOT the copy we drafted of it", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation(),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "CMMC Level 1 readiness",
+                text: `Hi Tom,\nSee how it works here: ${SEEN_URL}\n--\nKevin\n\nunsubscribe`,
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    expect(events.filter((e) => e.type === "generated_email")).toHaveLength(0);
+    const messages = events.filter((e) => e.type === "message");
+    expect(messages).toHaveLength(1);
+    expect((messages[0] as { bodyText: string }).bodyText).toContain("unsubscribe");
+  });
+
+  it("states one event per email sent when a sequence sent several", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation(),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "CMMC Level 1 readiness",
+                text: `first ${SEEN_URL}`,
+              },
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-05T09:00:00.000Z",
+                subject: "Re: CMMC Level 1 readiness",
+                text: `follow-up ${SEEN_URL}`,
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    expect(events.filter((e) => e.type === "generated_email")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "message")).toHaveLength(2);
+  });
+
+  it("still states the drafted copy for a person nothing has been sent to yet", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({ servedAt: null, generation: generation(), conversation: { ok: true, data: null } }),
+        ],
+      }),
+    );
+
+    const drafted = events.filter((e) => e.type === "generated_email");
+    expect(drafted).toHaveLength(1);
+    expect((drafted[0] as { bodyText: string }).bodyText).toContain(GENERATED_URL);
+  });
+
+  it("keeps the drafted copy when the only message we hold is an INBOUND one", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation(),
+            conversation: conversation([
+              {
+                direction: "inbound",
+                from: "prospect@example.com",
+                to: "sender@ours.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "Re: CMMC",
+                text: "not interested",
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    expect(events.filter((e) => e.type === "generated_email")).toHaveLength(1);
+  });
+});
+
+describe("assembleLeadHistory — where a link in a message leads", () => {
+  it("names what the prospect saw and the destination we wrote, parameters included", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation(),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "CMMC Level 1 readiness",
+                text: `See how it works here: ${SEEN_URL}`,
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    const message = events.find((e) => e.type === "message") as { links: Array<{ text: string; href: string | null }> };
+    expect(message.links).toEqual([{ text: SEEN_URL, href: GENERATED_URL }]);
+  });
+
+  it("states a link it cannot resolve with only what it knows, and never invents parameters", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation(),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "CMMC Level 1 readiness",
+                text: "read this https://example.org/some/other/page and this https://click.instantly.ai/t/abc123",
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    const message = events.find((e) => e.type === "message") as { links: Array<{ text: string; href: string | null }> };
+    expect(message.links).toEqual([
+      { text: "https://example.org/some/other/page", href: null },
+      { text: "https://click.instantly.ai/t/abc123", href: null },
+    ]);
+  });
+
+  it("resolves a follow-up's link out of the planned sequence's own copy", () => {
+    const followupUrl = "https://opsfolio.com/lp/cmmc/book?utm_campaign=cmmc_level1&utm_id=distribute";
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation({
+              sequence: [{ step: 2, bodyText: `book a slot: ${followupUrl}` }],
+            }),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-05T09:00:00.000Z",
+                subject: "Re: CMMC Level 1 readiness",
+                text: "book a slot: https://opsfolio.com/lp/cmmc/book",
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    const message = events.find((e) => e.type === "message") as { links: Array<{ text: string; href: string | null }> };
+    expect(message.links).toEqual([
+      { text: "https://opsfolio.com/lp/cmmc/book", href: followupUrl },
+    ]);
+  });
+
+  it("refuses to choose when two copies point at one page with different parameters", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation({
+              sequence: [
+                { step: 2, bodyText: `${SEEN_URL}?utm_campaign=other&utm_id=distribute` },
+              ],
+            }),
+            conversation: conversation([
+              {
+                direction: "outbound",
+                from: "sender@ours.com",
+                to: "prospect@example.com",
+                at: "2026-01-02T09:00:00.000Z",
+                subject: "CMMC Level 1 readiness",
+                text: `here: ${SEEN_URL}`,
+              },
+            ]),
+          }),
+        ],
+      }),
+    );
+
+    const message = events.find((e) => e.type === "message") as { links: Array<{ text: string; href: string | null }> };
+    expect(message.links).toEqual([{ text: SEEN_URL, href: null }]);
+  });
+});
