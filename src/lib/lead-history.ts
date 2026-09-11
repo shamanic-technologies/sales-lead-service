@@ -33,13 +33,23 @@
  *     customer their prospect said nothing.
  *
  * (4) **THE DE-DUPLICATION THE BROWSER WAS DOING HAPPENS HERE.** A send whose words we hold is one
- *     event, not a message plus a "sent" milestone; the same thread mirrored on both the outreach
- *     side and the customer's mailbox is one message, not two. What a consumer receives is
- *     already merged — that is the whole point of moving it.
+ *     event, not a message plus a "sent" milestone; not the copy we DRAFTED beside the message
+ *     that actually went out; and the same thread mirrored on both the outreach side and the
+ *     customer's mailbox is one message, not two. What a consumer receives is already merged —
+ *     that is the whole point of moving it. The drafted copy is still stated for a person nothing
+ *     has been sent to yet, because there it is the only thing we have.
+ *
+ * (5) **A LINK IN A MESSAGE SAYS WHERE IT ACTUALLY LEADS.** The sending side strips our tracking
+ *     parameters from the visible text and swaps the destination for the provider's click-tracking
+ *     redirect, so the body we hold carries neither. Each link therefore names what the prospect
+ *     SAW and, resolved against the copy we generated, where it truly goes — see
+ *     `message-links.ts`. The redirect is never a destination: following one from a dashboard
+ *     would register a click the prospect never made.
  */
 import type { FlattenedStatus } from "./delivery-flatten.js";
 import type { GeneratedEmail } from "./generated-email-client.js";
 import type { MailboxConversation } from "./mailbox-client.js";
+import { LinkDestinationIndex, resolveMessageLinks, type MessageLink } from "./message-links.js";
 import type {
   OutreachConversation,
   OutreachOptOut,
@@ -112,6 +122,12 @@ export interface HistoryMessageEvent extends HistoryEventBase {
   heldBy: HistorySource[];
   /** `mirror` is the copy that outlives the outreach provider's subscription. */
   copy: string | null;
+  /** The links in this message: what the prospect SAW, and where each truly leads. The visible
+   * text is what the sending side left in the body (our tracking parameters stripped from it);
+   * the destination is resolved against the copy we generated, so it carries those parameters
+   * back. Null `href` when it cannot be resolved — never the provider's click-tracking redirect,
+   * and never a guess. */
+  links: MessageLink[];
 }
 
 export interface HistoryDeliveryEvent extends HistoryEventBase {
@@ -361,6 +377,31 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
 
   noteSource("lead-service", "ok", null);
 
+  // ── Where the links in a message actually lead ──
+  //
+  // The sending side strips our tracking parameters from a link's visible text and replaces its
+  // destination with the provider's own click-tracking redirect, so the body we hold carries
+  // neither. The copy we generated carries the same URL WITH its parameters, so the destinations
+  // are indexed off it and nothing new is fetched. A link matching no URL we wrote resolves to
+  // null; the redirect is unreachable here because it appears in no generated copy.
+  const destinations = new LinkDestinationIndex();
+  for (const campaign of input.campaigns) {
+    if (!campaign.generation.ok) continue;
+    const generation = campaign.generation.data;
+    if (!generation) continue;
+    destinations.add(generation.bodyText);
+    destinations.add(generation.bodyHtml);
+    // The follow-ups of the sequence carry their own copy, and a message we hold may be one of
+    // them. The shape is the producer's, so it is scanned as text rather than walked as a schema.
+    if (generation.sequence != null) {
+      try {
+        destinations.add(JSON.stringify(generation.sequence));
+      } catch {
+        // A sequence that cannot be serialized simply contributes no destinations.
+      }
+    }
+  }
+
   // ── The messages, from both holders, de-duplicated ──
   //
   // The outreach copy is preferred when both hold a message: it is campaign-attributable and the
@@ -395,6 +436,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
         threadId: null,
         heldBy: ["outreach"],
         copy: conversation.source ?? null,
+        links: resolveMessageLinks(message.text ?? null, destinations),
       };
       const existing = byKey.get(key);
       if (existing) {
@@ -438,6 +480,10 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
             threadId: message.threadId,
             heldBy: ["mailbox"],
             copy: "gmail_mirror",
+            links: resolveMessageLinks(
+              message.bodyStatus === "unavailable" ? null : body,
+              destinations,
+            ),
           });
         }
       }
@@ -470,7 +516,13 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
     } else {
       noteSource("content", "ok", null);
       const generation = campaign.generation.data;
-      if (generation) {
+      // The copy we DRAFTED is stated only while it is the only thing we have. Once we hold the
+      // message that actually went out, that message IS the event: the two are the same email —
+      // hours or a day apart, worded differently (the draft carries no signature and no
+      // unsubscribe line) and with the link written differently in each — so stating both showed
+      // one email twice and left the reader unable to tell which one was real. A person still
+      // sitting in the sending queue has no message yet, and there the draft is all there is.
+      if (generation && !hasOutbound.has(campaign.campaignId)) {
         events.push({
           id: `generated_email:${generation.id}`,
           at: generation.createdAt,

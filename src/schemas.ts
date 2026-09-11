@@ -4438,7 +4438,7 @@ const HistoryEventSchema = z
       ])
       .openapi({
         description:
-          "What kind of thing this is. A reply whose WORDS we hold is a `message`; a reply somebody wrote down because it never reached us is a `reply_statement` and carries no body — the two are different facts and a consumer renders them differently without having to guess.",
+          "What kind of thing this is. A reply whose WORDS we hold is a `message`; a reply somebody wrote down because it never reached us is a `reply_statement` and carries no body — the two are different facts and a consumer renders them differently without having to guess. A `generated_email` is the copy we DRAFTED, and it is stated only while nothing has been sent yet: once we hold the message that went out, that message is the one event for that email.",
       }),
     evidence: z.enum(["observed", "asserted"]).openapi({
       description:
@@ -4474,6 +4474,24 @@ const HistoryEventSchema = z
       description:
         "Which copy it was read from. `mirror` is the outreach provider's mailbox as we hold it — the copy that outlives the subscription being cancelled.",
     }),
+    links: z
+      .array(
+        z.object({
+          text: z.string().openapi({
+            description:
+              "The link's text, verbatim as it appears in the body the prospect read. The sending side strips our tracking parameters from it on purpose, so this is the clean URL the prospect saw.",
+          }),
+          href: z.string().nullable().openapi({
+            description:
+              "Where the link truly leads, carrying the tracking parameters we put on it — resolved against the copy we generated. Null when it cannot be resolved to a URL we wrote; never a guess, and NEVER the outreach provider's click-tracking redirect, which following from a dashboard would register a click the prospect never made.",
+          }),
+        }),
+      )
+      .optional()
+      .openapi({
+        description:
+          "On a `message`: the links in it, so a consumer can render real links — what the prospect saw, and where each actually goes.",
+      }),
     plannedSequence: z.unknown().optional().openapi({
       description:
         "On a `generated_email`: the cadence the sequence PLANNED, verbatim from its producer. It is a plan, not a promise — what is still owed is the `followup` event, read from live state.",
