@@ -42,6 +42,37 @@ describe("brand-client getCurrentGoal", () => {
     expect(headers["X-API-Key"]).toBeDefined();
   });
 
+  it("names the offer the campaign sells with ?offerId= (multi-offer brand)", async () => {
+    const { calls } = mockFetch({
+      brand: { id: "brand-1" },
+      currentGoal: "meetingBooked",
+      brandProfile: null,
+    });
+
+    const goal = await getCurrentGoal("brand-1", "org-1", { runId: "run-1" }, "offer-7");
+
+    expect(goal).toBe("meetingBooked");
+    // brand-service's own per-offer param — the offer, never a guessed one.
+    expect(calls[0].url).toBe(
+      "http://brand:3005/internal/brands/brand-1/runtime-context?offerId=offer-7",
+    );
+  });
+
+  it("keeps the brand-scoped read byte-identically when no offer is named", async () => {
+    const { calls } = mockFetch({
+      brand: { id: "brand-1" },
+      currentGoal: "meetingBooked",
+      brandProfile: null,
+    });
+
+    await getCurrentGoal("brand-1", "org-1", { runId: "run-1" }, null);
+    await getCurrentGoal("brand-1", "org-1");
+
+    for (const call of calls) {
+      expect(call.url).toBe("http://brand:3005/internal/brands/brand-1/runtime-context");
+    }
+  });
+
   it("throws on non-2xx (no goal set → 404 → fail loud)", async () => {
     const fetchSpy = vi.fn(async () => new Response("Brand not found", { status: 404 }));
     vi.stubGlobal("fetch", fetchSpy);

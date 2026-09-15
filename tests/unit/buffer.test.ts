@@ -25,6 +25,11 @@ vi.mock("../../src/lib/retry-pool.js", () => ({
   pickRetryCandidate: (...args: unknown[]) => pickRetryCandidate(...args),
 }));
 
+const fetchCampaign = vi.fn();
+vi.mock("../../src/lib/campaign-client.js", () => ({
+  fetchCampaign: (...args: unknown[]) => fetchCampaign(...args),
+}));
+
 const buildFullLead = vi.fn();
 vi.mock("../../src/lib/lead-shape.js", () => ({
   buildFullLead: (...args: unknown[]) => buildFullLead(...args),
@@ -90,6 +95,8 @@ describe("pullNext (audience serve-next flow)", () => {
     // Default: nobody in the already-paid pool, so the serve-next path is exercised
     // exactly as it was before the pool existed.
     pickRetryCandidate.mockResolvedValue(null);
+    // Default: an offer-less campaign — the goal read stays brand-scoped, byte-identically.
+    fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: null });
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
@@ -129,8 +136,9 @@ describe("pullNext (audience serve-next flow)", () => {
 
     const result = await pullNext(baseParams);
 
-    // goal came from brand-service for THIS brand, not from a caller input
-    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object));
+    // goal came from brand-service for THIS brand, not from a caller input.
+    // Offer-less campaign (the default fixture) keeps the brand-scoped read.
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), null);
     expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ goal: "meetingBooked", audienceId: "aud-1" }));
     expect(result.lead?.goal).toBe("meetingBooked");
   });
@@ -157,6 +165,38 @@ describe("pullNext (audience serve-next flow)", () => {
 
     await expect(pullNext(baseParams)).rejects.toThrow(/runtime-context failed/);
     expect(serveNext).not.toHaveBeenCalled();
+  });
+
+  it("scopes the goal read on the OFFER the campaign sells (multi-offer brand)", async () => {
+    // A brand selling several offers refuses brand-scoped reads (409 SEVERAL_OFFERS),
+    // so the goal read must name the campaign's own offer — read off the campaign row,
+    // never guessed.
+    fetchCampaign.mockResolvedValueOnce({ id: "campaign-1", offerId: "offer-9" });
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    await pullNext(baseParams);
+
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), "offer-9");
+  });
+
+  it("falls back to brand scope (which fails loud on a multi-offer brand) when the campaign cannot be read", async () => {
+    // Fail-soft on the offer resolution — campaign-service must not become a new hard
+    // dependency of the serve path — because the loud guard is the goal read itself:
+    // without an offer, brand-service answers 409 SEVERAL_OFFERS verbatim.
+    fetchCampaign.mockRejectedValueOnce(new Error("campaign-service unreachable"));
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    await pullNext(baseParams);
+
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), null);
   });
 
   it("returns found=false when serve-next reports the audience exhausted", async () => {

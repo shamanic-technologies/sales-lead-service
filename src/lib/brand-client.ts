@@ -122,13 +122,27 @@ export type CurrentGoal = "signup" | "meetingBooked" | "purchase";
  * goal. Fails loud on any non-2xx — a brand with no goal set returns 404, and
  * that is a config error (a brand in a lead-finding workflow must have a goal),
  * not an empty/exhausted result.
+ *
+ * `offerId` names WHICH offer of the brand this read is for (brand-service's own
+ * `?offerId=` param): a brand selling several offers refuses every brand-scoped
+ * read with 409 SEVERAL_OFFERS, so the campaign's own offer makes the read
+ * answerable there. The campaign sells exactly one offer and carries it — the
+ * caller passes the offer the campaign names, never a guess. Omitted (absent or
+ * null — single-offer brands and the pre-offer population) keeps today's
+ * brand-scoped answer byte-identically, which fails loud with SEVERAL_OFFERS on
+ * a multi-offer brand rather than silently picking one.
  */
 export async function getCurrentGoal(
   brandId: string,
   orgId: string,
   context?: ServiceContext,
+  offerId?: string | null,
 ): Promise<CurrentGoal> {
-  const response = await fetch(`${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`, {
+  let url = `${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`;
+  if (offerId && offerId.trim() !== "") {
+    url += `?offerId=${encodeURIComponent(offerId)}`;
+  }
+  const response = await fetch(url, {
     headers: buildHeaders(orgId, context),
     signal: AbortSignal.timeout(300_000),
   });
