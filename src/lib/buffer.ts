@@ -8,6 +8,7 @@ import {
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
 import { getCurrentGoal } from "./brand-client.js";
+import { fetchCampaign } from "./campaign-client.js";
 import { pickRetryCandidate } from "./retry-pool.js";
 import {
   AUDIENCE_EXHAUSTED_REASON,
@@ -115,7 +116,27 @@ export async function pullNext(
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
   // it from brand-service for attribution/storage. No goal set ⟹ brand-service
   // 404 ⟹ this fails loud.
-  const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx);
+  //
+  // A brand selling SEVERAL offers refuses every brand-scoped read with 409
+  // SEVERAL_OFFERS, so the read is scoped to the OFFER the campaign sells: the
+  // campaign names exactly one (campaign-service `campaigns.offer_id`), so the
+  // offer comes from the campaign row, never guessed. Resolving the campaign is
+  // fail-soft with a loud log — campaign-service unreachable must not add a new
+  // hard dependency to the serve path — because the goal read itself is the loud
+  // guard: without an offer on a multi-offer brand it surfaces the brand-service
+  // SEVERAL_OFFERS 409 verbatim, and single-offer brands are byte-identical.
+  let offerId: string | null = null;
+  try {
+    const campaign = await fetchCampaign(params.campaignId, params.orgId, baseCtx);
+    offerId = campaign?.offerId ?? null;
+  } catch (err) {
+    console.warn(
+      `[lead-service] campaign offer unresolved for campaign=${params.campaignId} — ` +
+        `the goal read falls back to brand scope, which brand-service refuses on a multi-offer brand: ` +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
+  const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx, offerId);
   const ctx: ServiceContext = { ...baseCtx, goal };
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
