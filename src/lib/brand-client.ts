@@ -1,4 +1,5 @@
 import { BRAND_SERVICE_URL, BRAND_SERVICE_API_KEY } from "../config.js";
+import { fetchCampaign } from "./campaign-client.js";
 
 export interface ExtractedField {
   key: string;
@@ -20,6 +21,7 @@ type ServiceContext = {
   activeGoalId?: string;
   brandProfileId?: string;
   audienceId?: string;
+  offerId?: string;
 };
 
 /**
@@ -128,7 +130,42 @@ export async function getCurrentGoal(
   orgId: string,
   context?: ServiceContext,
 ): Promise<CurrentGoal> {
-  const response = await fetch(`${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`, {
+  try {
+    return await fetchCurrentGoal(brandId, orgId, context);
+  } catch (error) {
+    // A brand selling SEVERAL offers refuses every brand-scoped read with 409
+    // SEVERAL_OFFERS: each offer carries its own value proposition and economics, so
+    // brand-service will not pick between them. The DAG knows the campaign this run
+    // serves, and a campaign sells exactly ONE offer — so name the CAMPAIGN's offer
+    // and the read answers. Only a campaign that states no offer leaves the refusal
+    // standing (fail loud, never a guessed offer).
+    if (!isSeveralOffersRefusal(error) || !context?.campaignId) throw error;
+    const campaign = await fetchCampaign(context.campaignId, orgId, context);
+    const offerId = campaign?.offerId;
+    if (!offerId) {
+      throw new Error(
+        `[brand-client] brand ${brandId} sells several offers and campaign ${context.campaignId} states none — ` +
+          "the goal read has no single answer; name the offer the campaign sells",
+      );
+    }
+    return await fetchCurrentGoal(brandId, orgId, context, offerId);
+  }
+}
+
+function isSeveralOffersRefusal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("409") && message.includes("SEVERAL_OFFERS");
+}
+
+async function fetchCurrentGoal(
+  brandId: string,
+  orgId: string,
+  context?: ServiceContext,
+  offerId?: string,
+): Promise<CurrentGoal> {
+  const url = new URL(`${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`);
+  if (offerId) url.searchParams.set("offerId", offerId);
+  const response = await fetch(url, {
     headers: buildHeaders(orgId, context),
     signal: AbortSignal.timeout(300_000),
   });

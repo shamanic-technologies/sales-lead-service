@@ -35,7 +35,7 @@ describe("brand-client getCurrentGoal", () => {
     const goal = await getCurrentGoal("brand-1", "org-1", { runId: "run-1" });
 
     expect(goal).toBe("meetingBooked");
-    expect(calls[0].url).toBe("http://brand:3005/internal/brands/brand-1/runtime-context");
+    expect(String(calls[0].url)).toBe("http://brand:3005/internal/brands/brand-1/runtime-context");
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers["x-org-id"]).toBe("org-1");
     expect(headers["x-run-id"]).toBe("run-1");
@@ -85,5 +85,67 @@ describe("brand-client getCurrentGoal", () => {
     await expect(getCurrentGoal("brand-1", "")).rejects.toThrow(/orgId is required/);
     await expect(fetchExtractedFields("brand-1", "")).rejects.toThrow(/orgId is required/);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("getCurrentGoal — a brand selling SEVERAL offers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("names the CAMPAIGN's offer and retries, instead of failing the run", async () => {
+    process.env.CAMPAIGN_SERVICE_URL = "http://campaign:8080";
+    process.env.CAMPAIGN_SERVICE_API_KEY = "svc-key";
+    const calls: Array<{ url: URL; init: RequestInit }> = [];
+    const fetchSpy = vi.fn(async (url: URL | string, init: RequestInit) => {
+      const u = new URL(String(url));
+      calls.push({ url: u, init });
+      if (u.pathname.endsWith("/runtime-context") && !u.searchParams.has("offerId")) {
+        return new Response(
+          JSON.stringify({
+            error: "Brand brand-1 sells 2 offers (Product-led, Sales-led)",
+            code: "SEVERAL_OFFERS",
+          }),
+          { status: 409 },
+        );
+      }
+      if (u.pathname.endsWith("/campaigns/camp-1")) {
+        return new Response(JSON.stringify({ campaign: { id: "camp-1", offerId: "offer-1" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ currentGoal: "signup" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const goal = await getCurrentGoal("brand-1", "org-1", { campaignId: "camp-1" });
+
+    expect(goal).toBe("signup");
+    const retry = calls.find((c) => c.url.searchParams.has("offerId"));
+    expect(retry?.url.searchParams.get("offerId")).toBe("offer-1");
+  });
+
+  it("fails loud when the campaign states NO offer — never a guessed one", async () => {
+    process.env.CAMPAIGN_SERVICE_URL = "http://campaign:8080";
+    process.env.CAMPAIGN_SERVICE_API_KEY = "svc-key";
+    const fetchSpy = vi.fn(async (url: URL | string) => {
+      const u = new URL(String(url));
+      if (u.pathname.endsWith("/campaigns/camp-1")) {
+        return new Response(JSON.stringify({ campaign: { id: "camp-1", offerId: null } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ code: "SEVERAL_OFFERS" }), { status: 409 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(getCurrentGoal("brand-1", "org-1", { campaignId: "camp-1" })).rejects.toThrow(
+      /states none/,
+    );
   });
 });
