@@ -45,6 +45,17 @@
  *     SAW and, resolved against the copy we generated, where it truly goes — see
  *     `message-links.ts`. The redirect is never a destination: following one from a dashboard
  *     would register a click the prospect never made.
+ *
+ * (6) **A CLICK SAYS WHERE IT WENT, OR SAYS IT CANNOT.** A `clicked` milestone is the moment a
+ *     cold prospect became interested, and stating it without naming the page reads as a bare
+ *     claim. The delivery layer measures THAT a click happened and never where it went, so the
+ *     destination is worked out from the copy we wrote to that person on that campaign: when it
+ *     points at exactly one place, that is the place. When it points at several, the answer is
+ *     `ambiguous` — there is nowhere honest to point — and when nothing is resolvable it is
+ *     `unknown`. Those two are different facts and a consumer can tell them apart. `resolution`
+ *     says whether the answer was OBSERVED (a record of the destination itself) or DEDUCED (worked
+ *     out from what we wrote), because a destination we measured and one we reasoned to are not
+ *     the same claim.
  */
 import type { FlattenedStatus } from "./delivery-flatten.js";
 import type { GeneratedEmail } from "./generated-email-client.js";
@@ -130,9 +141,29 @@ export interface HistoryMessageEvent extends HistoryEventBase {
   links: MessageLink[];
 }
 
+/** Whether a destination is a record of where the click went, or a deduction from what we wrote. */
+export type ClickDestinationResolution = "observed" | "deduced";
+
+/** Where a click went, when it can be known without guessing. */
+export interface ClickDestination {
+  /** known: we can say where it went. ambiguous: the copy pointed at several places, so there is
+   * nowhere honest to point. unknown: nothing resolvable at all. The last two are different facts
+   * — "there is nowhere to point" is not "we have no opinion". */
+  state: "known" | "ambiguous" | "unknown";
+  /** The URL we wrote, tracking parameters included. Null unless `state` is `known` — never a
+   * guess, and never the outreach provider's click-tracking redirect (which appears in no copy we
+   * wrote, so it is unreachable here by construction). */
+  href: string | null;
+  /** How the destination was arrived at. Null unless `state` is `known`. */
+  resolution: ClickDestinationResolution | null;
+}
+
 export interface HistoryDeliveryEvent extends HistoryEventBase {
   type: "delivery";
   milestone: "sent" | "delivered" | "opened" | "clicked" | "replied" | "bounced" | "unsubscribed";
+  /** Present ONLY on a `clicked` milestone — every other milestone is byte-identical to what it
+   * always was. */
+  destination?: ClickDestination;
 }
 
 export interface HistoryLifecycleEvent extends HistoryEventBase {
@@ -332,9 +363,11 @@ function pushDelivery(
   milestone: HistoryDeliveryEvent["milestone"],
   at: string | null,
   direction: "inbound" | "outbound" | null,
+  /** Only a `clicked` milestone carries one; omitted everywhere else. */
+  destination?: ClickDestination,
 ): void {
   if (!at) return;
-  events.push({
+  const event: HistoryDeliveryEvent = {
     id: `delivery:${campaignId}:${milestone}`,
     at,
     type: "delivery",
@@ -343,7 +376,29 @@ function pushDelivery(
     campaignId,
     direction,
     milestone,
-  });
+  };
+  if (destination) event.destination = destination;
+  events.push(event);
+}
+
+/**
+ * Where a click on this campaign's mail went.
+ *
+ * The delivery layer reports THAT a click happened and never where it went — the outreach
+ * provider's click webhook carries no URL at all — so the answer comes from the copy we wrote to
+ * this person on this campaign. Measured across production, nine of every ten generated emails
+ * carry exactly one distinct destination, which is the case this resolves; the rest are stated as
+ * ambiguous rather than picked between.
+ *
+ * `observed` is reserved for a record of the destination ITSELF. The service that holds those
+ * records does not serve them today, so every destination this produces is a DEDUCTION and says
+ * so — a destination we measured and one we reasoned to are not the same claim.
+ */
+function clickDestinationOf(index: LinkDestinationIndex | undefined): ClickDestination {
+  if (!index || index.size === 0) return { state: "unknown", href: null, resolution: null };
+  const href = index.sole();
+  if (!href) return { state: "ambiguous", href: null, resolution: null };
+  return { state: "known", href, resolution: "deduced" };
 }
 
 /**
@@ -384,18 +439,30 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   // neither. The copy we generated carries the same URL WITH its parameters, so the destinations
   // are indexed off it and nothing new is fetched. A link matching no URL we wrote resolves to
   // null; the redirect is unreachable here because it appears in no generated copy.
+  //
+  // The same destinations are indexed PER CAMPAIGN as well, which is what answers where a click on
+  // that campaign's mail went: a click belongs to one campaign, so its candidates are what we
+  // wrote on THAT campaign and never what we wrote to the same person elsewhere.
   const destinations = new LinkDestinationIndex();
+  const destinationsByCampaign = new Map<string, LinkDestinationIndex>();
   for (const campaign of input.campaigns) {
     if (!campaign.generation.ok) continue;
     const generation = campaign.generation.data;
     if (!generation) continue;
-    destinations.add(generation.bodyText);
-    destinations.add(generation.bodyHtml);
+    const existing = destinationsByCampaign.get(campaign.campaignId);
+    const perCampaign = existing ?? new LinkDestinationIndex();
+    if (!existing) destinationsByCampaign.set(campaign.campaignId, perCampaign);
+    const addCopy = (text: string | null | undefined): void => {
+      destinations.add(text);
+      perCampaign.add(text);
+    };
+    addCopy(generation.bodyText);
+    addCopy(generation.bodyHtml);
     // The follow-ups of the sequence carry their own copy, and a message we hold may be one of
     // them. The shape is the producer's, so it is scanned as text rather than walked as a schema.
     if (generation.sequence != null) {
       try {
-        destinations.add(JSON.stringify(generation.sequence));
+        addCopy(JSON.stringify(generation.sequence));
       } catch {
         // A sequence that cannot be serialized simply contributes no destinations.
       }
@@ -575,7 +642,14 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
       }
       pushDelivery(events, campaign.campaignId, "delivered", delivery.firstDeliveredAt, "outbound");
       pushDelivery(events, campaign.campaignId, "opened", delivery.firstOpenedAt, "inbound");
-      pushDelivery(events, campaign.campaignId, "clicked", delivery.firstClickedAt, "inbound");
+      pushDelivery(
+        events,
+        campaign.campaignId,
+        "clicked",
+        delivery.firstClickedAt,
+        "inbound",
+        clickDestinationOf(destinationsByCampaign.get(campaign.campaignId)),
+      );
       if (!hasInbound.has(campaign.campaignId)) {
         pushDelivery(events, campaign.campaignId, "replied", delivery.firstRepliedAt, "inbound");
       }
