@@ -7,22 +7,29 @@ export interface CampaignDetails {
   targetOutcome: string | null;
   valueForTarget: string | null;
   featureInputs: Record<string, unknown> | null;
+  /**
+   * The brand-service offer this campaign sells (campaign-service `campaigns.offer_id`).
+   * Null = the campaign states no offer (pre-offer campaigns, non-offer channels).
+   * Names WHICH offer's per-offer brand reads answer for — a brand selling several
+   * offers refuses brand-scoped reads with 409 SEVERAL_OFFERS.
+   */
+  offerId: string | null;
 }
 
 export async function fetchCampaign(
   campaignId: string,
   orgId?: string | null,
   context?: {
-    userId?: string;
-    runId?: string;
-    campaignId?: string;
-    brandId?: string;
-    workflowSlug?: string;
-    featureSlug?: string;
-    goal?: string;
-    activeGoalId?: string;
-    brandProfileId?: string;
-    audienceId?: string;
+    userId?: string | null;
+    runId?: string | null;
+    campaignId?: string | null;
+    brandId?: string | null;
+    workflowSlug?: string | null;
+    featureSlug?: string | null;
+    goal?: string | null;
+    activeGoalId?: string | null;
+    brandProfileId?: string | null;
+    audienceId?: string | null;
   }
 ): Promise<CampaignDetails | null> {
   try {
