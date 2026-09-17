@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fetchExtractedFields, getCurrentGoal } from "../../src/lib/brand-client.js";
+import { getCurrentGoal } from "../../src/lib/brand-client.js";
 
 type CapturedRequest = { url: string; init: RequestInit };
 
@@ -85,15 +85,6 @@ describe("brand-client getCurrentGoal", () => {
   // Per-brand configuration belongs to an (org, brand) pair: brand-service
   // refuses to guess for a brand several orgs claim. These guard the org
   // identity actually reaching the wire, so it cannot be dropped silently.
-  it("sends x-org-id on every internal per-brand configuration read", async () => {
-    const { calls } = mockFetch({ brandId: "brand-1", fields: [] });
-
-    await fetchExtractedFields("brand-1", "org-2", { runId: "run-1" });
-
-    expect(calls[0].url).toBe("http://brand:3005/internal/brands/brand-1/extracted-fields");
-    expect((calls[0].init.headers as Record<string, string>)["x-org-id"]).toBe("org-2");
-  });
-
   it("asks for the requesting org's configuration, not a fixed one", async () => {
     const { calls } = mockFetch({
       brand: { id: "brand-shared" },
@@ -114,7 +105,37 @@ describe("brand-client getCurrentGoal", () => {
     const { calls } = mockFetch({ currentGoal: "signup" });
 
     await expect(getCurrentGoal("brand-1", "")).rejects.toThrow(/orgId is required/);
-    await expect(fetchExtractedFields("brand-1", "")).rejects.toThrow(/orgId is required/);
     expect(calls).toHaveLength(0);
+  });
+
+  // This is the serve path's own brand read, so a sibling mid-restart resetting the
+  // connection must not fail a serve that would otherwise have succeeded.
+  it("retries a connect-phase reset", async () => {
+    const reset = Object.assign(new TypeError("fetch failed"), {
+      cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+    });
+    const ok = new Response(JSON.stringify({ currentGoal: "signup" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+    const fetchSpy = vi.fn().mockRejectedValueOnce(reset).mockResolvedValueOnce(ok);
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(getCurrentGoal("brand-1", "org-1")).resolves.toBe("signup");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // A non-2xx is a real answer brand-service produced — including the 409 a
+  // multi-offer brand returns for an unscoped read. Retrying it would turn a
+  // loud configuration error into a slow one.
+  it("does not retry a 409 SEVERAL_OFFERS — it fails loud, once", async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ code: "SEVERAL_OFFERS" }), { status: 409 }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(getCurrentGoal("brand-1", "org-1")).rejects.toThrow(/409/);
+    expect(fetchSpy).toHaveBeenCalledOnce();
   });
 });
