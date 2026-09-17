@@ -4547,6 +4547,41 @@
             },
             "description": "On a `message`: the links in it, so a consumer can render real links — what the prospect saw, and where each actually goes."
           },
+          "destination": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "known",
+                  "ambiguous",
+                  "unknown"
+                ],
+                "description": "known: we can say where this click went. ambiguous: the copy we wrote on this campaign pointed at several places, so there is nowhere honest to point. unknown: nothing resolvable at all. The last two are different facts — \"there is nowhere to point\" is not \"we have no opinion\"."
+              },
+              "href": {
+                "type": "string",
+                "nullable": true,
+                "description": "The URL we wrote, tracking parameters included. Null unless `state` is `known` — never a guess between candidates, and NEVER the outreach provider's click-tracking redirect, which following from a dashboard would register a click the prospect never made."
+              },
+              "resolution": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "observed",
+                  "deduced",
+                  null
+                ],
+                "description": "observed: a record of the destination itself. deduced: worked out from the copy we wrote to this person on this campaign, because the delivery layer measures THAT a click happened and never where it went. Null unless `state` is `known`."
+              }
+            },
+            "required": [
+              "state",
+              "href",
+              "resolution"
+            ],
+            "description": "On a `delivery` event whose milestone is `clicked`: where that click went. Present on no other milestone — a history with no click is byte-identical to what it always was."
+          },
           "plannedSequence": {
             "nullable": true,
             "description": "On a `generated_email`: the cadence the sequence PLANNED, verbatim from its producer. It is a plan, not a promise — what is still owed is the `followup` event, read from live state."

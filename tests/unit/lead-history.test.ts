@@ -883,3 +883,169 @@ describe("assembleLeadHistory — where a link in a message leads", () => {
     expect(message.links).toEqual([{ text: SEEN_URL, href: null }]);
   });
 });
+
+describe("assembleLeadHistory — where a click went", () => {
+  const clicked = { ...DEFAULT_STATUS, clicked: true, firstClickedAt: "2026-01-03T10:00:00.000Z" };
+  const clickEvent = (events: ReturnType<typeof assembleLeadHistory>["events"]) =>
+    events.find((e) => e.type === "delivery" && e.milestone === "clicked") as {
+      destination?: { state: string; href: string | null; resolution: string | null };
+    };
+
+  it("names the destination when the copy we wrote pointed at exactly one place", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [campaign({ delivery: clicked, generation: generation() })],
+      }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "known",
+      href: GENERATED_URL,
+      resolution: "deduced",
+    });
+  });
+
+  it("reads one destination written in both the text and the HTML part as ONE place", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            delivery: clicked,
+            generation: generation({
+              bodyHtml: `<p>See it <a href="${GENERATED_URL.replace(/&/g, "&amp;")}">here</a></p>`,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "known",
+      href: GENERATED_URL,
+      resolution: "deduced",
+    });
+  });
+
+  it("names none when the copy pointed at several places, and says there is nowhere to point", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            delivery: clicked,
+            generation: generation({
+              bodyText: `Read this: ${GENERATED_URL}\nOr book here: https://opsfolio.com/book-a-call`,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "ambiguous",
+      href: null,
+      resolution: null,
+    });
+  });
+
+  it("refuses to pick between two parameterizations of the same page", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            delivery: clicked,
+            generation: generation({
+              bodyText: `Step one: ${GENERATED_URL}\nStep two: ${SEEN_URL}?utm_campaign=followup`,
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "ambiguous",
+      href: null,
+      resolution: null,
+    });
+  });
+
+  it("says unknown — not ambiguous — when nothing is resolvable at all", () => {
+    const { events } = assembleLeadHistory(
+      input({ campaigns: [campaign({ delivery: clicked })] }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "unknown",
+      href: null,
+      resolution: null,
+    });
+  });
+
+  it("answers for the campaign the click belongs to, never for what we wrote elsewhere", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({ delivery: clicked, generation: generation() }),
+          campaign({
+            leadCampaignId: "lc-2",
+            campaignId: "camp-2",
+            delivery: null,
+            generation: generation({
+              id: "gen-2",
+              campaignId: "camp-2",
+              bodyText: "Book a call: https://opsfolio.com/book-a-call",
+            }),
+          }),
+        ],
+      }),
+    );
+
+    expect(clickEvent(events).destination).toEqual({
+      state: "known",
+      href: GENERATED_URL,
+      resolution: "deduced",
+    });
+  });
+
+  it("carries a destination on the clicked milestone and on no other", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            delivery: {
+              ...clicked,
+              firstSentAt: "2026-01-02T09:00:00.000Z",
+              firstOpenedAt: "2026-01-03T09:00:00.000Z",
+            },
+            generation: generation(),
+          }),
+        ],
+      }),
+    );
+
+    const deliveries = events.filter((e) => e.type === "delivery") as Array<{
+      milestone: string;
+      destination?: unknown;
+    }>;
+    expect(deliveries.length).toBeGreaterThan(1);
+    for (const event of deliveries) {
+      expect("destination" in event).toBe(event.milestone === "clicked");
+    }
+  });
+
+  it("leaves a history with no click byte-identical", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            delivery: { ...DEFAULT_STATUS, firstSentAt: "2026-01-02T09:00:00.000Z" },
+            generation: generation(),
+          }),
+        ],
+      }),
+    );
+
+    for (const event of events) {
+      expect("destination" in event).toBe(false);
+    }
+  });
+});
