@@ -69,6 +69,16 @@ export function extractUrls(text: string | null | undefined): string[] {
  * Null when the string is not a URL at all — an unparseable link resolves to nothing rather than
  * to a key that could collide with a real one.
  */
+/**
+ * `&amp;` is how an HTML body spells `&`. The same URL written once in the text part and once in
+ * the HTML part of one email is ONE destination, and treating the two spellings as different would
+ * make almost every message look like it points at two places — which, under the ambiguity rule
+ * below, would answer "we cannot say" for a destination we can say perfectly well.
+ */
+function decodeAmpersands(url: string): string {
+  return url.replace(/&amp;/gi, "&");
+}
+
 export function destinationKey(url: string): string | null {
   let parsed: URL;
   try {
@@ -94,7 +104,8 @@ export class LinkDestinationIndex {
 
   /** Every URL in one blob of generated copy. Repeats of the same URL are one destination. */
   add(text: string | null | undefined): void {
-    for (const url of extractUrls(text)) {
+    for (const raw of extractUrls(text)) {
+      const url = decodeAmpersands(raw);
       const key = destinationKey(url);
       if (!key) continue;
       const existing = this.byKey.get(key);
@@ -104,12 +115,27 @@ export class LinkDestinationIndex {
   }
 
   /** The destination for one link the prospect saw, or null when we cannot say. */
-  resolve(url: string): string | null {
+  resolve(rawUrl: string): string | null {
+    const url = decodeAmpersands(rawUrl);
     const key = destinationKey(url);
     if (!key) return null;
     const candidates = this.byKey.get(key);
     if (!candidates || candidates.size !== 1) return null;
     return [...candidates][0];
+  }
+
+  /**
+   * The ONE destination this copy points at, or null when it does not point at exactly one.
+   *
+   * Null covers two different situations on purpose, and the caller tells them apart with `size`:
+   * nothing was indexed at all, or several candidates were — several pages, or several
+   * parameterizations of one page. Picking between candidates would be inventing the tracking
+   * parameters of a link nobody can attribute, which is the same guess `resolve` refuses.
+   */
+  sole(): string | null {
+    if (this.byKey.size !== 1) return null;
+    const [urls] = [...this.byKey.values()];
+    return urls.size === 1 ? [...urls][0] : null;
   }
 
   get size(): number {
