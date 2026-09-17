@@ -1,4 +1,5 @@
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
+import { fetchWithRetry } from "./fetch-retry.js";
 
 export interface CampaignDetails {
   id: string;
@@ -49,7 +50,16 @@ export async function fetchCampaign(
     if (context?.brandProfileId) headers["x-brand-profile-id"] = context.brandProfileId;
     if (context?.audienceId) headers["x-audience-id"] = context.audienceId;
 
-    const response = await fetch(`${CAMPAIGN_SERVICE_URL}/campaigns/${campaignId}`, {
+    // Connect-phase retry, not a raw `fetch`: this read sits on the serve path
+    // (`pullNext` names the campaign's offer on the goal read from it), so a
+    // sibling mid-restart resetting the connection would otherwise drop the
+    // offer and send a multi-offer brand's serve back into brand-service's
+    // SEVERAL_OFFERS refusal. The retry is write-safe — a connect-phase
+    // rejection never reached the server. The 5s budget stays deliberate (a DAG
+    // retry must not wait minutes on a hung campaign-service) and bounds the
+    // retries with it: the backoff is shared with the request's own deadline,
+    // so an exhausted budget degrades to exactly today's behaviour.
+    const response = await fetchWithRetry(`${CAMPAIGN_SERVICE_URL}/campaigns/${campaignId}`, {
       headers,
       signal: AbortSignal.timeout(5_000),
     });
