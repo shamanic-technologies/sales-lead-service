@@ -192,9 +192,18 @@ function isoCreatedAt(createdAtText: string): string {
   return toIsoTimestamp(createdAtText)!;
 }
 
-/** How many people are in each bucket. Every bucket key is present; nobody in it is 0, never absent. */
-export function countBuckets(rows: readonly EnrichedLeadIndexRow[]): Record<LeadBucket, number> {
-  const counts = zeroBucketCounts();
+/**
+ * Add one chunk's rows to a running bucket tally.
+ *
+ * Incremental rather than whole-population on purpose: the counters are the ONLY thing that
+ * survives a chunk, so a count over a brand of any size costs the same O(1) of this process's heap
+ * (see lead-plan-store.ts for what the array form cost). Every bucket key is present in the tally
+ * from the start; a bucket nobody is in stays 0, never absent.
+ */
+export function addBucketCounts(
+  counts: Record<LeadBucket, number>,
+  rows: readonly EnrichedLeadIndexRow[],
+): Record<LeadBucket, number> {
   for (const row of rows) {
     for (const bucket of row.buckets) counts[bucket] += 1;
   }

@@ -29,16 +29,27 @@ import {
 } from "../lib/lead-list-query.js";
 import { parseLeadSearch } from "../lib/lead-search.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
+import { ResponseWriter } from "../lib/stream-writer.js";
 import { leadExportHeader, leadExportLine } from "../lib/lead-export.js";
 import { parseLeadBucket, zeroBucketCounts, type LeadBucket } from "../lib/lead-buckets.js";
-import { countLeadListRows, fetchLeadIndex } from "../lib/lead-index.js";
-import { countBuckets, enrichLeadIndex, type EngagementContext } from "../lib/lead-engagement.js";
+import { countLeadListRows, streamLeadIndex } from "../lib/lead-index.js";
+import { addBucketCounts, enrichLeadIndex, type EngagementContext } from "../lib/lead-engagement.js";
 import {
+  addStandingCounts,
   attachLeadStandings,
-  countStandings,
   standingDelivery,
 } from "../lib/lead-standing-index.js";
-import { parseLeadSort, planLeadPage, type LeadPagePlan, type LeadSortOrder } from "../lib/lead-page-plan.js";
+import {
+  leadRowInRead,
+  parseLeadSort,
+  standingFilterSet,
+  type LeadSortOrder,
+} from "../lib/lead-page-plan.js";
+import {
+  openLeadPlanStore,
+  type LeadPlanPage,
+  type LeadPlanStore,
+} from "../lib/lead-plan-store.js";
 import { resolveAudiencesForBrand, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
 import { createOfferCardResolver, type OfferCard } from "../lib/offer-card-client.js";
 import {
@@ -78,6 +89,18 @@ export { flattenBrandStatus, flattenCampaignStatus, flattenFamilyStatus };
 // bounded by LEADS_STREAM_CHUNK_SIZE regardless of the brand's lead count.
 // The wire shape is byte-identical to the old res.json({ leads }) — `{"leads":[...]}`.
 const LEADS_STREAM_CHUNK_SIZE = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
+
+/**
+ * How many people one pass of the index walk holds at once.
+ *
+ * This is the number that bounds a filtered read's peak memory: the walk indexes this many rows,
+ * fetches their evidence, judges them and writes the survivors' positions to the database-side
+ * plan, and then the chunk is garbage. It is deliberately a CONSTANT and not a function of the
+ * population — that is the whole fix (see lead-plan-store.ts for what the population-sized version
+ * cost). Bigger means fewer round trips and more heap; 1,000 keeps each gateway fan-out at ten
+ * requests and each plan INSERT at one statement.
+ */
+const LEAD_INDEX_CHUNK_SIZE = Math.max(1, Number(process.env.LEAD_INDEX_CHUNK_SIZE) || 1000);
 
 // postgres.js returns timestamptz as Date OR string depending on the path; the cursor carries
 // whichever came back and normalizes at encode time (see LeadListCursor).
@@ -455,15 +478,27 @@ function inIndexOrder<T extends { id: string }>(rows: T[], ids: readonly string[
  */
 async function* streamChunksByIds<T extends { id: string }>(
   scope: LeadListScope,
-  ids: readonly string[],
-  chunkSize: number,
+  batches: AsyncGenerator<string[]>,
   fetch: (scope: LeadListScope, count: number) => Promise<T[]>,
 ): AsyncGenerator<T[]> {
-  for (let i = 0; i < ids.length; i += chunkSize) {
-    const slice = ids.slice(i, i + chunkSize);
+  for await (const slice of batches) {
     const rows = await fetch({ ...scope, rowIds: slice }, slice.length);
     const ordered = inIndexOrder(rows, slice);
     if (ordered.length > 0) yield ordered;
+  }
+}
+
+/**
+ * A read this service refuses, stated with the status the caller should see.
+ *
+ * Thrown from the plan walk, which runs before a byte is written, so the handler's own catch can
+ * answer it properly. FAIL LOUD: a filtered read whose filter could not be evaluated must never
+ * come back 200 with a differently-filtered list.
+ */
+class LeadReadRefused extends Error {
+  constructor(readonly status: number, readonly payload: string) {
+    super(payload);
+    this.name = "LeadReadRefused";
   }
 }
 
@@ -677,6 +712,13 @@ async function resolveLeadReadScope(
 
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
+  // The database-side plan of a filtered read, when there is one. Closed in the `finally` below,
+  // however the read ends — it holds a reserved connection and two temp tables.
+  let planStore: LeadPlanStore | null = null;
+  // Every byte of a streamed response goes through this: it batches the per-row writes and waits
+  // when the socket is full, so what this process holds is one batch rather than the difference
+  // between database speed and network speed (see stream-writer.ts).
+  const writer = new ResponseWriter(res);
   // Whether anyone is still listening. A whole-population walk holds a database connection for its
   // whole duration, so a caller that gave up at its own HTTP timeout must stop it — see
   // src/lib/client-abort.ts for what that cost when nothing checked.
@@ -823,29 +865,53 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     // A standing is read FROM the delivery overlay (a click is the measured half of a website
     // visit), so asking for one column of the board is asking about evidence too.
     const needsEvidence = bucket !== null || standings !== null || sort === "activity";
-    let plan: LeadPagePlan | null = null;
+    let plan: LeadPlanPage | null = null;
     if (indexed) {
-      const indexRows = await fetchLeadIndex(scope, searchTokens);
-      const enriched = await enrichLeadIndex(
-        indexRows,
-        engagementContext(req, scope, brandIdStr, statusCampaignIdStr, flatten, hasScopeForStatus),
-        needsEvidence,
+      // The plan lives in the database for the whole read (see lead-plan-store.ts); closing it is
+      // the `finally` at the bottom of this handler, so a stream that dies mid-write still hands
+      // the connection back and takes its temp tables with it.
+      const store = await openLeadPlanStore();
+      planStore = store;
+      const standingSet = standingFilterSet(standings);
+      const ctx = engagementContext(
+        req,
+        scope,
+        brandIdStr,
+        statusCampaignIdStr,
+        flatten,
+        hasScopeForStatus,
       );
-      // FAIL LOUD, unlike the per-row standing on the walk: there a standing nobody could resolve
-      // is one field of a row, here it decides WHICH rows come back at all, so a resolver that
-      // throws must not quietly answer a differently-filtered list with a 200.
-      if (standings !== null) {
-        try {
-          await attachLeadStandings(enriched, standingResolver);
-        } catch (error) {
-          console.error(
-            "[lead-service] a standing-filtered read is refused: where these leads stand could " +
-              `not be resolved, and a wrongly-filtered list is worse than none: ${(error as Error).message}`,
-          );
-          return res.status(502).json({ error: "lead standing unavailable" });
+      // ONE chunk of the population at a time: indexed, given its evidence, filtered, and reduced
+      // to the (id, position) pairs the order needs. Nothing about the chunk outlives the loop —
+      // which is the whole point, because holding it all is what killed the process.
+      for await (const indexChunk of streamLeadIndex(scope, searchTokens, LEAD_INDEX_CHUNK_SIZE)) {
+        client.stopIfGone(0);
+        const enriched = await enrichLeadIndex(indexChunk, ctx, needsEvidence);
+        // FAIL LOUD, unlike the per-row standing on the walk: there a standing nobody could resolve
+        // is one field of a row, here it decides WHICH rows come back at all, so a resolver that
+        // throws must not quietly answer a differently-filtered list with a 200.
+        if (standings !== null) {
+          try {
+            await attachLeadStandings(enriched, standingResolver);
+          } catch (error) {
+            console.error(
+              "[lead-service] a standing-filtered read is refused: where these leads stand could " +
+                `not be resolved, and a wrongly-filtered list is worse than none: ${(error as Error).message}`,
+            );
+            throw new LeadReadRefused(502, "lead standing unavailable");
+          }
         }
+        await store.add(
+          enriched
+            .filter((row) => leadRowInRead(row, bucket, standingSet))
+            .map((row) => ({
+              id: row.id,
+              activityAt: row.activityAt,
+              createdAtText: row.createdAtText,
+            })),
+        );
       }
-      plan = planLeadPage(enriched, bucket, sort, page, standings);
+      plan = await store.page(sort, page);
     }
 
     // How many rows match what the caller asked for — the number that labels the page, not the
@@ -877,10 +943,10 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           "Content-Disposition",
           `attachment; filename="leads-${brandIdStr ?? req.orgId}-${new Date().toISOString().slice(0, 10)}.csv"`,
         );
-        res.write(leadExportHeader());
+        await writer.write(leadExportHeader());
       } else {
         res.setHeader("Content-Type", "application/json");
-        res.write('{"leads":[');
+        await writer.write('{"leads":[');
       }
       streamingStarted = true;
 
@@ -890,7 +956,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       // An index-driven read hydrates the ids it already chose, in that order; every other read
       // walks the relation exactly as before.
       const basicSource = plan
-        ? streamChunksByIds(scope, plan.ids, LEADS_STREAM_CHUNK_SIZE, (s, count) =>
+        ? streamChunksByIds(scope, plan.ids(LEADS_STREAM_CHUNK_SIZE), (s, count) =>
             fetchBasicLeadChunk(s, null, count),
           )
         : streamBasicLeadChunks(scope, LEADS_STREAM_CHUNK_SIZE, page);
@@ -1004,24 +1070,24 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           };
 
           if (format === "csv") {
-            res.write(leadExportLine(leadOut as unknown as Record<string, unknown>));
+            await writer.write(leadExportLine(leadOut as unknown as Record<string, unknown>));
           } else {
-            res.write((wroteFirstBasic ? "," : "") + JSON.stringify(leadOut));
+            await writer.write((wroteFirstBasic ? "," : "") + JSON.stringify(leadOut));
           }
           wroteFirstBasic = true;
         }
       }
 
       if (format === "csv") {
-        res.end();
+        await writer.end();
       } else {
         const nextCursor = plan ? plan.nextCursor : nextCursorFor(page, rowCount, lastPosition);
-        res.write(
+        await writer.write(
           `],"nextCursor":${JSON.stringify(nextCursor)}` +
             (total === null ? "" : `,"total":${total}`) +
             "}",
         );
-        res.end();
+        await writer.end();
       }
 
       if (req.runId) {
@@ -1039,7 +1105,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     // The DB query above is the last point a clean 500 can be sent. Everything below
     // writes to the socket; from here on, failures destroy the stream (headers are sent).
     res.setHeader("Content-Type", "application/json");
-    res.write('{"leads":[');
+    await writer.write('{"leads":[');
     streamingStarted = true;
 
     let wroteFirst = false;
@@ -1047,7 +1113,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     let rowCount = 0;
     // Same two sources as the slim path: the ids an index-driven read chose, or the keyset walk.
     const fullSource = plan
-      ? streamChunksByIds(scope, plan.ids, LEADS_STREAM_CHUNK_SIZE, (s, count) =>
+      ? streamChunksByIds(scope, plan.ids(LEADS_STREAM_CHUNK_SIZE), (s, count) =>
           fetchLeadCampaignChunk(s, null, count),
         )
       : streamFullLeadChunks(scope, page, LEADS_STREAM_CHUNK_SIZE);
@@ -1145,7 +1211,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           breakdownMap ? (breakdownMap.get(row.id) ?? []) : null,
         );
 
-        res.write((wroteFirst ? "," : "") + JSON.stringify(leadOut));
+        await writer.write((wroteFirst ? "," : "") + JSON.stringify(leadOut));
         wroteFirst = true;
       }
 
@@ -1154,12 +1220,12 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     }
 
     const nextCursor = plan ? plan.nextCursor : nextCursorFor(page, rowCount, cursor);
-    res.write(
+    await writer.write(
       `],"nextCursor":${JSON.stringify(nextCursor)}` +
         (total === null ? "" : `,"total":${total}`) +
         "}",
     );
-    res.end();
+    await writer.end();
 
     if (req.runId) {
       traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rowCount}`, data: { count: rowCount } }, req.headers).catch(() => {});
@@ -1170,6 +1236,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
       // held. Said out loud (a truncated stream is never a complete one), and not as an error.
       console.warn(`[lead-service] leads read abandoned by the caller: ${error.message}`);
       res.destroy();
+    } else if (error instanceof LeadReadRefused && !streamingStarted && !res.headersSent) {
+      res.status(error.status).json({ error: error.payload });
     } else {
       console.error("[lead-service] Leads error:", error);
       if (streamingStarted || res.headersSent) {
@@ -1182,6 +1250,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     }
   } finally {
     client.dispose();
+    if (planStore) await planStore.close();
   }
 });
 
@@ -1232,22 +1301,30 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
-    const indexRows = await fetchLeadIndex(resolved.scope, searchTokens);
+    const ctx = engagementContext(
+      req,
+      resolved.scope,
+      brandId,
+      resolved.statusCampaignIdStr,
+      resolved.flatten,
+      resolved.hasScopeForStatus,
+    );
 
-    let enriched;
+    // Counted a CHUNK at a time: a count is a number, and holding a population to reach one is
+    // what took this service down when the export did it (see lead-plan-store.ts). The counters
+    // are the only thing that survives a chunk, and they are O(1).
+    const counts = zeroBucketCounts();
+    let total = 0;
     try {
-      enriched = await enrichLeadIndex(
-        indexRows,
-        engagementContext(
-          req,
-          resolved.scope,
-          brandId,
-          resolved.statusCampaignIdStr,
-          resolved.flatten,
-          resolved.hasScopeForStatus,
-        ),
-        true,
-      );
+      for await (const indexChunk of streamLeadIndex(
+        resolved.scope,
+        searchTokens,
+        LEAD_INDEX_CHUNK_SIZE,
+      )) {
+        const enriched = await enrichLeadIndex(indexChunk, ctx, true);
+        total += enriched.length;
+        addBucketCounts(counts, enriched);
+      }
     } catch (error) {
       console.error(
         "[lead-service] bucket counts refused: the delivery evidence they are counted from could " +
@@ -1256,7 +1333,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
       return res.status(502).json({ error: "email-gateway unavailable" });
     }
 
-    return res.json({ total: enriched.length, counts: countBuckets(enriched) });
+    return res.json({ total, counts });
   } catch (error) {
     console.error("[lead-service] Bucket counts error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -1307,30 +1384,14 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
-    const indexRows = await fetchLeadIndex(resolved.scope, searchTokens);
-
-    let enriched;
-    try {
-      enriched = await enrichLeadIndex(
-        indexRows,
-        engagementContext(
-          req,
-          resolved.scope,
-          brandId,
-          resolved.statusCampaignIdStr,
-          resolved.flatten,
-          resolved.hasScopeForStatus,
-        ),
-        true,
-      );
-    } catch (error) {
-      console.error(
-        "[lead-service] standing counts refused: the delivery evidence they are read from could " +
-          `not be read: ${(error as Error).message}`,
-      );
-      return res.status(502).json({ error: "email-gateway unavailable" });
-    }
-
+    const ctx = engagementContext(
+      req,
+      resolved.scope,
+      brandId,
+      resolved.statusCampaignIdStr,
+      resolved.flatten,
+      resolved.hasScopeForStatus,
+    );
     // The same resolver the list builds, with the same identity and the same delivery scope: one
     // campaign-service read for the whole request, reused by every chunk.
     const standingResolver = createLeadStandingResolver({
@@ -1340,17 +1401,40 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       brandId: brandId ?? null,
       deliveryQueried: resolved.hasScopeForStatus,
     });
-    try {
-      await attachLeadStandings(enriched, standingResolver);
-    } catch (error) {
-      console.error(
-        "[lead-service] standing counts refused: where these leads stand could not be resolved: " +
-          `${(error as Error).message}`,
-      );
-      return res.status(502).json({ error: "lead standing unavailable" });
+
+    // Counted a CHUNK at a time, exactly as the bucket counts are: a column's size is a number and
+    // must not cost the population it is the size of.
+    const counts = zeroStandingCounts();
+    let total = 0;
+    for await (const indexChunk of streamLeadIndex(
+      resolved.scope,
+      searchTokens,
+      LEAD_INDEX_CHUNK_SIZE,
+    )) {
+      let enriched;
+      try {
+        enriched = await enrichLeadIndex(indexChunk, ctx, true);
+      } catch (error) {
+        console.error(
+          "[lead-service] standing counts refused: the delivery evidence they are read from could " +
+            `not be read: ${(error as Error).message}`,
+        );
+        return res.status(502).json({ error: "email-gateway unavailable" });
+      }
+      try {
+        await attachLeadStandings(enriched, standingResolver);
+      } catch (error) {
+        console.error(
+          "[lead-service] standing counts refused: where these leads stand could not be resolved: " +
+            `${(error as Error).message}`,
+        );
+        return res.status(502).json({ error: "lead standing unavailable" });
+      }
+      total += enriched.length;
+      addStandingCounts(counts, enriched);
     }
 
-    return res.json({ total: enriched.length, counts: countStandings(enriched) });
+    return res.json({ total, counts });
   } catch (error) {
     console.error("[lead-service] Standing counts error:", error);
     return res.status(500).json({ error: "Internal server error" });

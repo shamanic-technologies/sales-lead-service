@@ -15,9 +15,27 @@ import { eq } from "drizzle-orm";
 const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations } =
   await import("../../src/db/schema.js");
-const { countLeadListRows, fetchLeadIndex, fetchOutcomesByLead } = await import(
+const { countLeadListRows, streamLeadIndex, fetchOutcomesByLead } = await import(
   "../../src/lib/lead-index.js"
 );
+
+type IndexRow = Awaited<ReturnType<typeof collectIndex>>[number];
+
+/**
+ * The whole population, collected from the chunked walk — for ASSERTIONS only.
+ *
+ * Production never does this: holding the population is the outage this walk exists to prevent
+ * (see src/lib/lead-plan-store.ts). Three rows in a test is a different proposition.
+ */
+async function collectIndex(
+  scope: Parameters<typeof streamLeadIndex>[0],
+  tokens: Parameters<typeof streamLeadIndex>[1],
+  chunkSize = 2,
+) {
+  const rows = [];
+  for await (const chunk of streamLeadIndex(scope, tokens, chunkSize)) rows.push(...chunk);
+  return rows;
+}
 const { fetchBasicLeadChunk } = await import("../../src/lib/basic-leads.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -108,9 +126,16 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
   });
 
   it("indexes the whole scoped population, and counts the same number", async () => {
-    const rows = await fetchLeadIndex(scope, null);
+    const rows = await collectIndex(scope, null);
     expect(rows).toHaveLength(3);
-    expect(rows.map((r) => r.email).sort()).toEqual(seeded.map((s) => s.email).sort());
+    // The walk is CHUNKED and keyset-driven: a chunk size smaller than the population must return
+    // every row exactly once, in the same total order, with no gaps and no repeats.
+    expect(new Set(rows.map((r: IndexRow) => r.id)).size).toBe(3);
+    expect(rows.map((r: IndexRow) => r.createdAtText)).toEqual(
+      [...rows].sort((a: IndexRow, b: IndexRow) => (a.createdAtText < b.createdAtText ? -1 : 1))
+        .map((r: IndexRow) => r.createdAtText),
+    );
+    expect(rows.map((r: IndexRow) => r.email).sort()).toEqual(seeded.map((s) => s.email).sort());
     expect(await countLeadListRows(scope)).toBe(3);
     // Every row carries the position a default-ordered cursor is built from.
     expect(rows.every((r) => typeof r.createdAtText === "string" && r.createdAtText.length > 0)).toBe(true);
@@ -123,22 +148,22 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
       ["financial", "john.doe@globex.test"],
       ["globex.test", "john.doe@globex.test"],
     ] as const) {
-      const rows = await fetchLeadIndex(scope, [query]);
-      expect(rows.map((r) => r.email)).toEqual([email]);
+      const rows = await collectIndex(scope, [query]);
+      expect(rows.map((r: IndexRow) => r.email)).toEqual([email]);
     }
   });
 
   it("requires EVERY word to match, so two words narrow rather than widen", async () => {
-    expect(await fetchLeadIndex(scope, ["jane", "acme"])).toHaveLength(1);
-    expect(await fetchLeadIndex(scope, ["jane", "globex"])).toHaveLength(0);
+    expect(await collectIndex(scope, ["jane", "acme"])).toHaveLength(1);
+    expect(await collectIndex(scope, ["jane", "globex"])).toHaveLength(0);
   });
 
   it("takes a LIKE metacharacter literally rather than as a wildcard", async () => {
-    expect((await fetchLeadIndex(scope, ["percent_off"])).map((r) => r.email)).toEqual([
+    expect((await collectIndex(scope, ["percent_off"])).map((r) => r.email)).toEqual([
       "ten@disco.test",
     ]);
     // `_` matched literally: nothing here spells "percentXoff".
-    expect(await fetchLeadIndex(scope, ["percentaoff"])).toHaveLength(0);
+    expect(await collectIndex(scope, ["percentaoff"])).toHaveLength(0);
   });
 
   it("hydrates exactly the rows an index-driven page named, and nothing else", async () => {

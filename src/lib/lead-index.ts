@@ -19,7 +19,9 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import {
   campaignScopeIds,
   leadCampaignBaseRelation,
+  leadCursorTimestampParam,
   leadStatusScope,
+  type LeadListCursor,
   type LeadListScope,
 } from "./lead-list-query.js";
 import { leadSearchPattern } from "./lead-search.js";
@@ -70,17 +72,20 @@ function searchPredicate(tokens: readonly string[] | null) {
 }
 
 /**
- * The whole scoped (and optionally searched) population, one row per person under brand scope and
- * one row per membership under a single-campaign scope — the same collapse the list applies.
+ * One chunk of the scoped (and optionally searched) population: one row per person under brand
+ * scope and one row per membership under a single-campaign scope — the same collapse the list
+ * applies.
  *
  * Ordered `(created_at, id)` ascending, which is the list's own total order, so an index-driven
  * default-ordered page and a plain keyset page return the same rows in the same order.
  */
-export async function fetchLeadIndex(
+function leadIndexChunk(
   scope: LeadListScope,
   tokens: readonly string[] | null,
-): Promise<LeadIndexRow[]> {
-  const rows = await sql<RawIndexRow[]>`
+  after: LeadListCursor | null,
+  chunkSize: number,
+) {
+  return sql<RawIndexRow[]>`
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.status, lc.served_at,
       lc.created_at::text AS created_at_cursor,
@@ -112,10 +117,14 @@ export async function fetchLeadIndex(
       ${scope.userId ? sql`AND lc.user_id = ${scope.userId}` : sql``}
       ${scope.workflowSlug ? sql`AND lc.workflow_slug = ${scope.workflowSlug}` : sql``}
       ${searchPredicate(tokens)}
+      ${after ? sql`AND (lc.created_at, lc.id) > (${leadCursorTimestampParam(after)}::timestamptz, ${after.id}::uuid)` : sql``}
     ORDER BY lc.created_at ASC, lc.id ASC
+    LIMIT ${chunkSize}
   `;
+}
 
-  return rows.map((r) => ({
+function mapIndexRow(r: RawIndexRow): LeadIndexRow {
+  return {
     id: r.id,
     leadId: r.lead_id,
     campaignId: r.campaign_id,
@@ -124,7 +133,40 @@ export async function fetchLeadIndex(
     email: r.email_value,
     servedAt: toIsoTimestamp(r.served_at),
     createdAtText: r.created_at_cursor,
-  }));
+  };
+}
+
+/**
+ * The same population, one BOUNDED chunk at a time, walked by keyset over `(created_at, id)`.
+ *
+ * This is the only way a filtered read is allowed to see the population, and the reason is a
+ * production outage: the array form held every matching row — with its delivery overlay, its
+ * buckets and its outcome set — before a single byte was written, which is about 3.4 KB per person
+ * and 160 MB of peak heap on one brand's 16,599-row export. The process died on V8's heap limit
+ * with exit code 0, the restart policy brought it straight back, and every other org's Leads page
+ * got `ECONNREFUSED` for the seconds it was gone. One customer pressing a button was a
+ * platform-wide outage, and nothing anywhere went red.
+ *
+ * `id` is unique, so `(created_at, id)` is a TOTAL order and the walk visits every row exactly
+ * once — no gaps, no repeats — and it holds no connection between chunks (each chunk is its own
+ * statement), so a long read cannot pin one of the pool's twenty.
+ */
+export async function* streamLeadIndex(
+  scope: LeadListScope,
+  tokens: readonly string[] | null,
+  chunkSize: number,
+): AsyncGenerator<LeadIndexRow[]> {
+  const size = Math.max(1, chunkSize);
+  let after: LeadListCursor | null = null;
+  while (true) {
+    const rows = await leadIndexChunk(scope, tokens, after, size);
+    if (rows.length === 0) return;
+    const mapped = rows.map(mapIndexRow);
+    yield mapped;
+    if (rows.length < size) return;
+    const last = mapped[mapped.length - 1];
+    after = { createdAt: last.createdAtText, id: last.id };
+  }
 }
 
 /**
