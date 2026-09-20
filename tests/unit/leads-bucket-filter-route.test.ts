@@ -63,13 +63,26 @@ let outcomes = new Map<string, { steps: Set<string>; latestAt: string | null }>(
 
 vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/lead-index.js")>()),
-  fetchLeadIndex: (_scope: unknown, tokens: unknown) => {
+  // The population is walked in CHUNKS and never held; two here, so the route's own loop is what
+  // assembles the read rather than one convenient array.
+  streamLeadIndex: async function* (_scope: unknown, tokens: unknown) {
     searchSeen = tokens;
-    return Promise.resolve(indexRows);
+    const half = Math.ceil(indexRows.length / 2);
+    if (indexRows.length === 0) return;
+    yield indexRows.slice(0, half);
+    if (indexRows.length > half) yield indexRows.slice(half);
   },
   fetchOutcomesByLead: () => Promise.resolve(outcomes),
   countLeadListRows: () => Promise.resolve(indexRows.length),
 }));
+
+// The plan is a temp table on a reserved connection in production; `sql` is a `vi.fn()` here, so
+// the read gets the in-memory double instead. The SQL itself is covered in
+// tests/integration/lead-plan-store-sql.test.ts.
+vi.mock("../../src/lib/lead-plan-store.js", async () => {
+  const { fakePlanStoreModule } = await import("../helpers/fake-lead-plan-store.js");
+  return fakePlanStoreModule();
+});
 
 let statusByEmail: Record<string, Record<string, unknown>> = {};
 let gatewayFails = false;

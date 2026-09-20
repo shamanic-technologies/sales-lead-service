@@ -95,10 +95,10 @@ export async function attachLeadStandings(
  * Unlike the engagement buckets, standing IS a partition: a row has exactly one standing, so these
  * counts DO sum to the scoped population.
  */
-export function countStandings(
+export function addStandingCounts(
+  counts: Record<LeadStandingState, number>,
   rows: readonly EnrichedLeadIndexRow[],
 ): Record<LeadStandingState, number> {
-  const counts = zeroStandingCounts();
   for (const row of rows) counts[row.standing ?? "unresolved"] += 1;
   return counts;
 }

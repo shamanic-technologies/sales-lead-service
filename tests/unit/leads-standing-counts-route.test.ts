@@ -62,10 +62,24 @@ let indexRows: Array<{
 
 vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/lead-index.js")>()),
-  fetchLeadIndex: () => Promise.resolve(indexRows),
+  // Chunked, never held: the counts and the filtered page are both assembled by the route's own
+  // loop over a population it only ever sees a piece of at a time.
+  streamLeadIndex: async function* () {
+    const half = Math.ceil(indexRows.length / 2);
+    if (indexRows.length === 0) return;
+    yield indexRows.slice(0, half);
+    if (indexRows.length > half) yield indexRows.slice(half);
+  },
   fetchOutcomesByLead: () => Promise.resolve(new Map()),
   countLeadListRows: () => Promise.resolve(indexRows.length),
 }));
+
+// The plan is a temp table on a reserved connection in production; `sql` is mocked here, so the
+// read gets the in-memory double. The SQL is covered in tests/integration/lead-plan-store-sql.test.ts.
+vi.mock("../../src/lib/lead-plan-store.js", async () => {
+  const { fakePlanStoreModule } = await import("../helpers/fake-lead-plan-store.js");
+  return fakePlanStoreModule();
+});
 
 let gatewayFails = false;
 vi.mock("../../src/lib/email-gateway-client.js", () => ({
@@ -346,7 +360,11 @@ describe("GET /orgs/leads?standing=", () => {
     standingByRow = Object.fromEntries(indexRows.map((r) => [r.id, "contacted"]));
     const res = await counts(`?brandId=${BRAND}`);
     expect(res.status).toBe(200);
-    expect(standingChunks).toEqual([1000, 1000, 500]);
+    // Bounded twice over: the population is walked a chunk at a time, and each of those chunks is
+    // resolved in bounded slices. No single bind carries the brand.
+    expect(standingChunks.every((n) => n <= 1_000)).toBe(true);
+    expect(standingChunks.reduce((a, b) => a + b, 0)).toBe(2_500);
+    expect(res.body.total).toBe(2_500);
   });
 });
 
