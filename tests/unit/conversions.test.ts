@@ -178,6 +178,9 @@ describe("matchConversion waterfall", () => {
       matchConfidence: "deterministic",
       attributionStatus: "attributed",
       candidateCount: 1,
+      // The winning tier's own candidate list rides along so a caller that must NAME the
+      // alternatives does not need a second matcher. The ingest path ignores it.
+      candidates: [{ leadId: "lead-1" }],
     });
     expect(execute).toHaveBeenCalledOnce();
     const { sql, params } = compile(execute.mock.calls[0][0]);
@@ -244,6 +247,7 @@ describe("matchConversion waterfall", () => {
       matchConfidence: "unmatched",
       attributionStatus: "unmatched",
       candidateCount: 0,
+      candidates: [],
     });
     expect(execute).not.toHaveBeenCalled();
   });
