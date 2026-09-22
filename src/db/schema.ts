@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
   jsonb,
+  doublePrecision,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -499,6 +500,114 @@ export const requeuedServes = pgTable(
   ],
 );
 
+// --- CRM pairings: which people in the customer's own CRM are leads we emailed ---
+//
+// Three tables, one per kind of fact, because they have different lifetimes and different authors.
+// Nothing here is derived on read — a pairing has to resolve the same way twice, or the customer's
+// table changes under them between page loads.
+//
+// `crm_contact_id` is crm-service's own contacts uuid, held as text: it is a FOREIGN key in the
+// plain sense (another service owns that row) and there is nothing here to reference.
+
+/**
+ * The identity waterfall's answer for one CRM contact, FROZEN.
+ *
+ * The matcher is `matchConversion` (src/lib/conversions.ts) — the same one that attributes an
+ * inbound conversion event, reused rather than reimplemented. Its answer is written once and then
+ * read; it is deliberately never recomputed on a read, which is what makes the view stable. What
+ * the answer is WORTH is decided separately, on read, by src/lib/crm-pairing.ts.
+ */
+export const crmPairingMatches = pgTable(
+  "crm_pairing_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    /** crm-service `contacts.id` for the mirrored contact. */
+    crmContactId: text("crm_contact_id").notNull(),
+    /** The winning candidate, or NULL when the waterfall found nobody. */
+    matchedLeadId: uuid("matched_lead_id").references(() => leads.id, { onDelete: "set null" }),
+    /** One of MatchMethod — email | phone | domain_name | full_name | last_name, NULL when unmatched. */
+    matchMethod: text("match_method"),
+    /** One of MatchConfidence — deterministic | strong | probabilistic | unmatched. */
+    matchConfidence: text("match_confidence").notNull(),
+    /** How many candidates the winning tier surfaced. >1 on a weak tier is the ambiguity itself. */
+    candidateCount: integer("candidate_count").notNull().default(0),
+    matchedAt: timestamp("matched_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_cpm_brand_contact").on(table.brandId, table.crmContactId),
+    index("idx_cpm_brand_lead").on(table.brandId, table.matchedLeadId),
+  ],
+);
+
+/**
+ * A similarity judgment, FROZEN with the model release that produced it.
+ *
+ * Asked only where the deterministic signals could not decide, asked once, and never re-asked on
+ * read. The release is stored rather than an alias because an alias moves to a new model without
+ * notice, and a frozen answer nobody can attribute to a release is not auditable.
+ */
+export const crmPairingJudgments = pgTable(
+  "crm_pairing_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    crmContactId: text("crm_contact_id").notNull(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    /** The vendor's own yes-probability, 0..1, stored as it came. Never rounded to a verdict. */
+    samePersonProbability: doublePrecision("same_person_probability").notNull(),
+    /** e.g. `jev-1.13.0` — the release the vendor reported serving, never the alias asked for. */
+    judgmentModel: text("judgment_model").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_cpj_brand_contact_lead_model").on(
+      table.brandId,
+      table.crmContactId,
+      table.leadId,
+      table.judgmentModel,
+    ),
+    index("idx_cpj_brand_contact").on(table.brandId, table.crmContactId),
+  ],
+);
+
+/**
+ * A HUMAN's statement about one pairing. Outranks the signal and the judgment alike.
+ *
+ * Same posture as every other statement in this service: NOTHING IS DELETED. Withdrawing marks the
+ * row and every read filters `withdrawn_at IS NULL`; restating clears the mark through the same
+ * upsert. That is what makes a re-run of the matcher unable to resurrect something a person
+ * already rejected — the ruling is keyed on the PAIR, not on a matcher run.
+ */
+export const crmPairingRulings = pgTable(
+  "crm_pairing_rulings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    crmContactId: text("crm_contact_id").notNull(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    /** `accepted` | `rejected` — the person's own words about whether these are one human. */
+    ruling: text("ruling").notNull(),
+    note: text("note"),
+    statedByUserId: text("stated_by_user_id"),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+    withdrawnByUserId: text("withdrawn_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_cpr_brand_contact_lead").on(table.brandId, table.crmContactId, table.leadId),
+    index("idx_cpr_brand_live").on(table.brandId),
+  ],
+);
+
 // --- Type exports ---
 export type Lead = typeof leads.$inferSelect;
 export type NewLead = typeof leads.$inferInsert;
@@ -522,3 +631,9 @@ export type RequeuedServe = typeof requeuedServes.$inferSelect;
 export type NewRequeuedServe = typeof requeuedServes.$inferInsert;
 export type LeadStepDisqualification = typeof leadStepDisqualifications.$inferSelect;
 export type NewLeadStepDisqualification = typeof leadStepDisqualifications.$inferInsert;
+export type CrmPairingMatch = typeof crmPairingMatches.$inferSelect;
+export type NewCrmPairingMatch = typeof crmPairingMatches.$inferInsert;
+export type CrmPairingJudgmentRow = typeof crmPairingJudgments.$inferSelect;
+export type NewCrmPairingJudgmentRow = typeof crmPairingJudgments.$inferInsert;
+export type CrmPairingRulingRow = typeof crmPairingRulings.$inferSelect;
+export type NewCrmPairingRulingRow = typeof crmPairingRulings.$inferInsert;

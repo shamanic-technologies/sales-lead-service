@@ -172,9 +172,17 @@ export interface MatchResult {
   matchConfidence: MatchConfidence;
   attributionStatus: AttributionStatus;
   candidateCount: number;
+  /**
+   * Every candidate the winning tier surfaced, in the tier's own order (most-engaged first) —
+   * `matchedLeadId` is `candidates[0]`. Carried so a caller that must NAME the alternatives can
+   * do so without re-running the waterfall: the CRM pairing surface asks a similarity judgment
+   * about a specific candidate, and a second matcher to enumerate them would be two answers to
+   * one question. Empty when nothing matched. The conversion ingest path ignores it.
+   */
+  candidates: MatchCandidate[];
 }
 
-interface WaterfallInput {
+export interface WaterfallInput {
   brandId: string;
   email?: string | null;
   phone?: string | null;
@@ -321,6 +329,7 @@ export async function matchConversion(input: WaterfallInput): Promise<MatchResul
       matchConfidence: tier.confidence,
       attributionStatus: resolveAttributionStatus(tier.confidence, candidates.length),
       candidateCount: candidates.length,
+      candidates,
     };
   }
 
@@ -330,5 +339,6 @@ export async function matchConversion(input: WaterfallInput): Promise<MatchResul
     matchConfidence: "unmatched",
     attributionStatus: "unmatched",
     candidateCount: 0,
+    candidates: [],
   };
 }

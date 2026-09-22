@@ -31,6 +31,8 @@ const TEST_ENV_VARS: Record<string, string> = {
   GOOGLE_SERVICE_API_KEY: "test-google-key",
   CONTENT_GENERATION_SERVICE_URL: "http://content-generation:3015",
   CONTENT_GENERATION_SERVICE_API_KEY: "test-content-generation-key",
+  CRM_SERVICE_URL: "http://crm:3016",
+  CRM_SERVICE_API_KEY: "test-crm-key",
   NODE_ENV: "test",
 };
 

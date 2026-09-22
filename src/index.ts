@@ -9,6 +9,7 @@ import { db, sql } from "./db/index.js";
 import { PORT, PULL_NEXT_TIMEOUT_MS } from "./config.js";
 import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
+import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
 import statsRoutes from "./routes/stats.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
@@ -47,6 +48,9 @@ app.use(healthRoutes);
 app.use(requireBootReady);
 
 app.use(bufferRoutes);
+// Registered BEFORE the leads router: its literal `/orgs/leads/crm-pairing*` paths must win
+// over `/orgs/leads/:id`, which matches any single segment.
+app.use(crmPairingsRoutes);
 app.use(leadsRoutes);
 app.use(statsRoutes);
 app.use(transferBrandRoutes);

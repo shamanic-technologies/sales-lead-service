@@ -4662,6 +4662,421 @@
           "campaignId",
           "direction"
         ]
+      },
+      "CrmPairingRow": {
+        "type": "object",
+        "properties": {
+          "crmContact": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "crm-service's own contact id — the key every write here takes."
+              },
+              "externalId": {
+                "type": "string",
+                "nullable": true
+              },
+              "fullName": {
+                "type": "string",
+                "nullable": true
+              },
+              "firstName": {
+                "type": "string",
+                "nullable": true
+              },
+              "lastName": {
+                "type": "string",
+                "nullable": true
+              },
+              "email": {
+                "type": "string",
+                "nullable": true
+              },
+              "phone": {
+                "type": "string",
+                "nullable": true
+              },
+              "company": {
+                "type": "string",
+                "nullable": true,
+                "description": "Their company, when the producer carries one. Absent means we hold no company signal for this person — never a mismatch."
+              },
+              "unsubscribed": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "externalId",
+              "fullName",
+              "firstName",
+              "lastName",
+              "email",
+              "phone",
+              "company",
+              "unsubscribed"
+            ]
+          },
+          "pairing": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "type": "string",
+                "enum": [
+                  "paired",
+                  "unconfirmed",
+                  "rejected",
+                  "unpaired"
+                ],
+                "description": "paired = we say these are one human. unconfirmed = a candidate exists and nothing strong enough has ruled. rejected = a human denied it or a judgment landed below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count."
+              },
+              "decidedBy": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "signal",
+                  "judgment",
+                  "human",
+                  null
+                ],
+                "description": "Null on unconfirmed and unpaired: nobody has decided. Precedence is human > judgment > signal."
+              },
+              "lead": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "leadId": {
+                    "type": "string"
+                  },
+                  "leadCampaignId": {
+                    "type": "string",
+                    "description": "The id GET /orgs/leads/{id} takes, so a consumer can open the lead's own panel."
+                  },
+                  "campaignId": {
+                    "type": "string"
+                  },
+                  "fullName": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "email": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "jobTitle": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "company": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "leadId",
+                  "leadCampaignId",
+                  "campaignId",
+                  "fullName",
+                  "email",
+                  "jobTitle",
+                  "company"
+                ]
+              },
+              "evidence": {
+                "type": "object",
+                "properties": {
+                  "matchMethod": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "email",
+                      "phone",
+                      "domain_name",
+                      "full_name",
+                      "last_name",
+                      null
+                    ]
+                  },
+                  "matchConfidence": {
+                    "type": "string",
+                    "enum": [
+                      "deterministic",
+                      "strong",
+                      "probabilistic",
+                      "unmatched"
+                    ]
+                  },
+                  "candidateCount": {
+                    "type": "number",
+                    "description": "How many candidates the winning tier surfaced. More than one on a weak tier IS the ambiguity."
+                  },
+                  "matchedAt": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "matchMethod",
+                  "matchConfidence",
+                  "candidateCount",
+                  "matchedAt"
+                ]
+              },
+              "judgment": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pair",
+                      "reject",
+                      "undecided",
+                      "not_needed",
+                      "not_asked",
+                      "unavailable"
+                    ],
+                    "description": "pair | reject | undecided once the vendor answered; not_needed when a deterministic signal already decided and nothing was spent; not_asked when this read's judgment budget ran out; unavailable when we tried and could not get an answer. `unavailable` is NOT a verdict."
+                  },
+                  "unavailableReason": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "judgment_service_unavailable",
+                      "judgment_refused_request",
+                      "judgment_answer_unreadable",
+                      "no_run_id",
+                      null
+                    ]
+                  },
+                  "samePersonProbability": {
+                    "type": "number",
+                    "nullable": true,
+                    "description": "The vendor's own yes-probability, 0..1, as it came. Never rounded away to a verdict."
+                  },
+                  "model": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "The model RELEASE that produced the judgment, frozen with it.",
+                    "example": "jev-1.13.0"
+                  },
+                  "judgedAt": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "status",
+                  "unavailableReason",
+                  "samePersonProbability",
+                  "model",
+                  "judgedAt"
+                ]
+              },
+              "ruling": {
+                "$ref": "#/components/schemas/CrmPairingRuling"
+              }
+            },
+            "required": [
+              "state",
+              "decidedBy",
+              "lead",
+              "evidence",
+              "judgment",
+              "ruling"
+            ]
+          },
+          "ourStanding": {
+            "type": "object",
+            "nullable": true,
+            "properties": {},
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired."
+          },
+          "theirStatus": {
+            "$ref": "#/components/schemas/CrmTheirStatus"
+          }
+        },
+        "required": [
+          "crmContact",
+          "pairing",
+          "ourStanding",
+          "theirStatus"
+        ]
+      },
+      "CrmPairingRuling": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "ruling": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "nullable": true
+          },
+          "statedByUserId": {
+            "type": "string",
+            "nullable": true
+          },
+          "statedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ruling",
+          "note",
+          "statedByUserId",
+          "statedAt"
+        ]
+      },
+      "CrmTheirStatus": {
+        "type": "object",
+        "properties": {
+          "opportunities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CrmOpportunity"
+            }
+          },
+          "states": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "open",
+                "won",
+                "lost",
+                "abandoned"
+              ]
+            },
+            "description": "The distinct states this person is in. A SET, not a value: one real person on the first mirrored account is at once a closed-won deal, a free-trial client and a past event attendee."
+          },
+          "stageNamesComparable": {
+            "type": "boolean",
+            "enum": [
+              false
+            ],
+            "description": "Always false. There is no canonical mapping from their stage names to ours."
+          },
+          "stageComparabilityReason": {
+            "type": "string",
+            "example": "stage_names_are_free_text_per_customer"
+          }
+        },
+        "required": [
+          "opportunities",
+          "states",
+          "stageNamesComparable",
+          "stageComparabilityReason"
+        ]
+      },
+      "CrmOpportunity": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "externalId": {
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "open",
+              "won",
+              "lost",
+              "abandoned",
+              null
+            ],
+            "description": "The one field of theirs with a fixed meaning. Null when the word they used is not one we recognise — stated, never guessed and never defaulted to `open`."
+          },
+          "stateRaw": {
+            "type": "string",
+            "nullable": true,
+            "description": "Their word, verbatim, so a null `state` is auditable rather than mysterious."
+          },
+          "monetaryValue": {
+            "type": "number",
+            "nullable": true
+          },
+          "pipelineName": {
+            "type": "string",
+            "nullable": true
+          },
+          "stageName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Free text they chose. Never mapped onto any step vocabulary of ours — see stageComparabilityReason."
+          },
+          "createdAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "externalId",
+          "name",
+          "state",
+          "stateRaw",
+          "monetaryValue",
+          "pipelineName",
+          "stageName",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "CrmPairingRulingRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "description": "The brand this pairing belongs to."
+          },
+          "crmContactId": {
+            "type": "string",
+            "description": "Their contact, as the row carries it."
+          },
+          "leadId": {
+            "type": "string",
+            "description": "Our lead, as the row carries it."
+          },
+          "ruling": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why, in the author's own words. Optional, stored verbatim."
+          }
+        },
+        "required": [
+          "brandId",
+          "crmContactId",
+          "leadId",
+          "ruling"
+        ]
       }
     },
     "parameters": {},
@@ -7576,6 +7991,561 @@
           },
           "404": {
             "description": "No such lead row for this org (or for the requested brand scope)"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/leads/crm-pairings": {
+      "get": {
+        "summary": "Put the customer's CRM and our leads side by side, one row per CRM contact",
+        "description": "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\nA brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not an error. A page whose pairings the deterministic signals could not decide pays for a typed similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the view twice returns the same pairings, and the judgment is never re-asked on read.\n\nBounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who is making the statement. Recorded as the author of a ruling."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Caller's run. REQUIRED in practice for a judgment to be asked at all — chat-service uses it as the parent of its own run, so a read without one reports every judgment as unavailable with reason `no_run_id` rather than fabricating a uuid."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The brand whose mirrored CRM to read. Required — a CRM is keyed to one brand."
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Contacts per page, 1..200. Default 50. Anything else is a 400, never a silent clamp."
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "Where to resume. Use the `nextOffset` the previous page returned."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One row per CRM contact, both sides, the pairing's evidence and any human ruling",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "crmConnected": {
+                      "type": "boolean"
+                    },
+                    "connection": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "brandId": {
+                          "type": "string"
+                        },
+                        "locationId": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "type": "string"
+                        },
+                        "synced": {
+                          "type": "boolean"
+                        },
+                        "lastSyncedAt": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "lastError": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "brandId",
+                        "locationId",
+                        "status",
+                        "synced",
+                        "lastSyncedAt",
+                        "lastError"
+                      ]
+                    },
+                    "pairings": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CrmPairingRow"
+                      }
+                    },
+                    "nextOffset": {
+                      "type": "number",
+                      "nullable": true
+                    },
+                    "judgmentThresholds": {
+                      "type": "object",
+                      "properties": {
+                        "pairAt": {
+                          "type": "number",
+                          "example": 0.85
+                        },
+                        "rejectAt": {
+                          "type": "number",
+                          "example": 0.15
+                        }
+                      },
+                      "required": [
+                        "pairAt",
+                        "rejectAt"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "crmConnected",
+                    "connection",
+                    "pairings",
+                    "nextOffset",
+                    "judgmentThresholds"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "brandId is absent or not a uuid, or limit/offset is unparseable"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "Their CRM could not be read (crm-service unavailable). Never a guessed empty CRM."
+          }
+        }
+      }
+    },
+    "/orgs/leads/crm-pairing-counts": {
+      "get": {
+        "summary": "How much of their CRM we can pair, and how many of our leads it has never heard of",
+        "description": "The summary above the table. Their whole contact population is walked a page at a time and folded into counters, so it costs the same heap on a CRM of any size.\n\nIt never asks for a judgment and never spends: it reports what the stored state already says, so it is safe to poll. `opportunitiesWithUncomparableStage` is the size of the gap their free-text pipeline names leave — measured rather than asserted, which is one of the things this surface exists to learn.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who is making the statement. Recorded as the author of a ruling."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Caller's run. REQUIRED in practice for a judgment to be asked at all — chat-service uses it as the parent of its own run, so a read without one reports every judgment as unavailable with reason `no_run_id` rather than fabricating a uuid."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The brand whose mirrored CRM to summarise."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "crmConnected": {
+                      "type": "boolean"
+                    },
+                    "counts": {
+                      "type": "object",
+                      "properties": {
+                        "crmContacts": {
+                          "type": "number"
+                        },
+                        "crmContactsWithEmail": {
+                          "type": "number"
+                        },
+                        "byState": {
+                          "type": "object",
+                          "properties": {
+                            "paired": {
+                              "type": "number"
+                            },
+                            "unconfirmed": {
+                              "type": "number"
+                            },
+                            "rejected": {
+                              "type": "number"
+                            },
+                            "unpaired": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "byMatchMethod": {
+                          "type": "object",
+                          "properties": {
+                            "email": {
+                              "type": "number"
+                            },
+                            "phone": {
+                              "type": "number"
+                            },
+                            "domain_name": {
+                              "type": "number"
+                            },
+                            "full_name": {
+                              "type": "number"
+                            },
+                            "last_name": {
+                              "type": "number"
+                            },
+                            "none": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "opportunities": {
+                          "type": "number"
+                        },
+                        "opportunitiesByState": {
+                          "type": "object",
+                          "properties": {
+                            "open": {
+                              "type": "number"
+                            },
+                            "won": {
+                              "type": "number"
+                            },
+                            "lost": {
+                              "type": "number"
+                            },
+                            "abandoned": {
+                              "type": "number"
+                            },
+                            "unrecognised": {
+                              "type": "number"
+                            }
+                          }
+                        },
+                        "opportunitiesWithUncomparableStage": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "crmContacts",
+                        "crmContactsWithEmail",
+                        "byState",
+                        "byMatchMethod",
+                        "opportunities",
+                        "opportunitiesByState",
+                        "opportunitiesWithUncomparableStage"
+                      ]
+                    },
+                    "ourLeadsNoCrmContactPointsAt": {
+                      "type": "number",
+                      "description": "Leads we served for this brand that no live pairing points at — people we emailed that their CRM has never heard of. A count, never a list."
+                    }
+                  },
+                  "required": [
+                    "crmConnected",
+                    "counts",
+                    "ourLeadsNoCrmContactPointsAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "brandId is absent or not a uuid"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "Their CRM could not be read (crm-service unavailable)"
+          }
+        }
+      }
+    },
+    "/orgs/leads/crm-pairings/rulings": {
+      "post": {
+        "summary": "Accept or deny a pairing",
+        "description": "A human looking at both rows says whether they are one person. Their statement outranks the signal and the judgment alike, and it SURVIVES A RE-RUN OF THE MATCHER because it is keyed on the pair rather than on a matcher run — nothing can resurrect something a person already rejected.\n\nRestating replaces the previous statement (and clears any withdrawal); it never accumulates a second one.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who is making the statement. Recorded as the author of a ruling."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Caller's run. REQUIRED in practice for a judgment to be asked at all — chat-service uses it as the parent of its own run, so a read without one reports every judgment as unavailable with reason `no_run_id` rather than fabricating a uuid."
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CrmPairingRulingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The statement as recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ruling": {
+                      "type": "object",
+                      "properties": {},
+                      "additionalProperties": {
+                        "nullable": true
+                      }
+                    }
+                  },
+                  "required": [
+                    "ruling"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing or malformed brandId, crmContactId, leadId, ruling or note"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Take a ruling back",
+        "description": "NOTHING IS DELETED: the row survives carrying both what was stated and the fact that it was withdrawn, and the pairing falls back to whatever the judgment and the signal say. Idempotent — withdrawing an already-withdrawn statement writes nothing and says so.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who is making the statement. Recorded as the author of a ruling."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Caller's run. REQUIRED in practice for a judgment to be asked at all — chat-service uses it as the parent of its own run, so a read without one reports every judgment as unavailable with reason `no_run_id` rather than fabricating a uuid."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The brand this pairing belongs to."
+          },
+          {
+            "in": "query",
+            "name": "crmContactId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Their contact."
+          },
+          {
+            "in": "query",
+            "name": "leadId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Our lead."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Withdrawn, or already was",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "withdrawn": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "alreadyWithdrawn": {
+                      "type": "boolean"
+                    },
+                    "brandId": {
+                      "type": "string"
+                    },
+                    "crmContactId": {
+                      "type": "string"
+                    },
+                    "leadId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "withdrawn",
+                    "alreadyWithdrawn",
+                    "brandId",
+                    "crmContactId",
+                    "leadId"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "A missing or malformed brandId, crmContactId or leadId"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Nobody has ruled on this pairing (code nothing_stated)"
           },
           "500": {
             "description": "Internal server error"
