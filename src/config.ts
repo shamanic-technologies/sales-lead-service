@@ -54,6 +54,11 @@ export const WORKFLOW_SERVICE_API_KEY = required("WORKFLOW_SERVICE_API_KEY");
 export const CHAT_SERVICE_URL = required("CHAT_SERVICE_URL");
 export const CHAT_SERVICE_API_KEY = required("CHAT_SERVICE_API_KEY");
 
+// --- The customer's own CRM, as crm-service mirrors it ---
+// Read-only, brand-scoped. Nothing in this service ever writes back to a customer's CRM.
+export const CRM_SERVICE_URL = required("CRM_SERVICE_URL");
+export const CRM_SERVICE_API_KEY = required("CRM_SERVICE_API_KEY");
+
 // --- Sources of a lead's history (GET /orgs/leads/:id/history) ---
 // Every one of these owns a fact about a person that this service does not: the messages
 // exchanged and the reply statements a human recorded (instantly-service), the exchange that

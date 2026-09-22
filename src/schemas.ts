@@ -12,6 +12,18 @@ import {
   LEAD_STANDING_UNRESOLVED_REASONS,
 } from "./lib/lead-standing.js";
 import { FUNNEL_KEYS } from "./lib/funnel-steps.js";
+// The published pairing vocabulary IS the policy's own vocabulary — read from the one module that
+// declares it, so the contract cannot drift from what the routes actually return.
+import {
+  CRM_JUDGMENT_STATUSES,
+  CRM_JUDGMENT_UNAVAILABLE_REASONS,
+  CRM_MATCH_METHOD_KEYS,
+  CRM_OPPORTUNITY_STATES,
+  CRM_OPPORTUNITY_STATE_KEYS,
+  CRM_PAIRING_DECIDERS,
+  CRM_PAIRING_STATES,
+  CRM_STAGE_UNCOMPARABLE_REASON,
+} from "./lib/crm-pairing.js";
 
 
 extendZodWithOpenApi(z);
@@ -4609,6 +4621,406 @@ registry.registerPath({
     400: { description: "id is not a uuid, or scope is not one of campaign | brand" },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org (or for the requested brand scope)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CRM PAIRINGS — which people in the customer's own CRM are leads we emailed
+//
+// A customer runs their own CRM and we mirror it (crm-service). Their CRM already knows things
+// about people we contacted that we do not — a deal closed on a call, a meeting that was attended
+// — and nothing put the two sides in front of a human, so none of it was ever reconciled.
+//
+// Four things this contract makes visible, because each of them is a decision a consumer must be
+// able to render rather than infer:
+//
+//   - WHICH SIGNAL PAIRED THEM, and how strong it was. The pairing comes from the SAME identity
+//     waterfall that attributes an inbound conversion event; there is no second matcher.
+//   - THAT A NAME IS NOT AN IDENTITY. A pairing resting on nothing stronger than a name is
+//     `unconfirmed`, never `paired`. Measured on the first mirrored account, last name alone pairs
+//     164 people — "Jones", "Patel", "Cox".
+//   - WHAT THE JUDGMENT SAID, or why there is none. A typed probability from the fleet's judgment
+//     vendor (via chat-service), frozen with the model release that produced it and never re-asked
+//     on read. A judgment we could not get is `unavailable` — never a merge, never a rejection.
+//   - WHETHER A HUMAN HAS RULED. Their statement outranks both, survives a re-run of the matcher,
+//     and is withdrawable without deleting anything.
+//
+// Their pipeline STAGE names are deliberately not mapped to anything of ours. They are free text
+// chosen per customer ("Free Trail Client", "Showed?", "BOOKED - NO BUY"), there is no canonical
+// mapping, and guessing one produces a confident wrong answer — so every contact carrying an
+// opportunity says so in `stageComparabilityReason` instead.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CrmPairingHeaders = [
+  {
+    in: "header" as const,
+    name: "x-api-key",
+    required: true,
+    schema: { type: "string" as const },
+    description: "API key for authenticating requests",
+  },
+  {
+    in: "header" as const,
+    name: "x-org-id",
+    required: true,
+    schema: { type: "string" as const },
+    description: "Internal organization UUID from client-service",
+  },
+  {
+    in: "header" as const,
+    name: "x-user-id",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Who is making the statement. Recorded as the author of a ruling.",
+  },
+  {
+    in: "header" as const,
+    name: "x-run-id",
+    required: false,
+    schema: { type: "string" as const },
+    description:
+      "Caller's run. REQUIRED in practice for a judgment to be asked at all — chat-service uses it as the parent of its own run, so a read without one reports every judgment as unavailable with reason `no_run_id` rather than fabricating a uuid.",
+  },
+];
+
+const CrmOpportunitySchema = z
+  .object({
+    id: z.string(),
+    externalId: z.string().nullable(),
+    name: z.string().nullable(),
+    state: z
+      .enum(CRM_OPPORTUNITY_STATES)
+      .nullable()
+      .openapi({
+        description:
+          "The one field of theirs with a fixed meaning. Null when the word they used is not one we recognise — stated, never guessed and never defaulted to `open`.",
+      }),
+    stateRaw: z.string().nullable().openapi({
+      description: "Their word, verbatim, so a null `state` is auditable rather than mysterious.",
+    }),
+    monetaryValue: z.number().nullable(),
+    pipelineName: z.string().nullable(),
+    stageName: z.string().nullable().openapi({
+      description:
+        "Free text they chose. Never mapped onto any step vocabulary of ours — see stageComparabilityReason.",
+    }),
+    createdAt: z.string().nullable(),
+    updatedAt: z.string().nullable(),
+  })
+  .openapi("CrmOpportunity");
+
+const CrmTheirStatusSchema = z
+  .object({
+    opportunities: z.array(CrmOpportunitySchema),
+    states: z.array(z.enum(CRM_OPPORTUNITY_STATES)).openapi({
+      description:
+        "The distinct states this person is in. A SET, not a value: one real person on the first mirrored account is at once a closed-won deal, a free-trial client and a past event attendee.",
+    }),
+    stageNamesComparable: z.literal(false).openapi({
+      description: "Always false. There is no canonical mapping from their stage names to ours.",
+    }),
+    stageComparabilityReason: z.string().openapi({ example: CRM_STAGE_UNCOMPARABLE_REASON }),
+  })
+  .openapi("CrmTheirStatus");
+
+const CrmPairingRulingSchema = z
+  .object({
+    ruling: z.enum(["accepted", "rejected"]),
+    note: z.string().nullable(),
+    statedByUserId: z.string().nullable(),
+    statedAt: z.string(),
+  })
+  .openapi("CrmPairingRuling");
+
+const CrmPairingRowSchema = z
+  .object({
+    crmContact: z.object({
+      id: z.string().openapi({ description: "crm-service's own contact id — the key every write here takes." }),
+      externalId: z.string().nullable(),
+      fullName: z.string().nullable(),
+      firstName: z.string().nullable(),
+      lastName: z.string().nullable(),
+      email: z.string().nullable(),
+      phone: z.string().nullable(),
+      company: z.string().nullable().openapi({
+        description:
+          "Their company, when the producer carries one. Absent means we hold no company signal for this person — never a mismatch.",
+      }),
+      unsubscribed: z.boolean(),
+    }),
+    pairing: z.object({
+      state: z.enum(CRM_PAIRING_STATES).openapi({
+        description:
+          "paired = we say these are one human. unconfirmed = a candidate exists and nothing strong enough has ruled. rejected = a human denied it or a judgment landed below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count.",
+      }),
+      decidedBy: z.enum(CRM_PAIRING_DECIDERS).nullable().openapi({
+        description: "Null on unconfirmed and unpaired: nobody has decided. Precedence is human > judgment > signal.",
+      }),
+      lead: z
+        .object({
+          leadId: z.string(),
+          leadCampaignId: z.string().openapi({
+            description: "The id GET /orgs/leads/{id} takes, so a consumer can open the lead's own panel.",
+          }),
+          campaignId: z.string(),
+          fullName: z.string().nullable(),
+          email: z.string().nullable(),
+          jobTitle: z.string().nullable(),
+          company: z.string().nullable(),
+        })
+        .nullable(),
+      evidence: z.object({
+        matchMethod: z.enum(["email", "phone", "domain_name", "full_name", "last_name"]).nullable(),
+        matchConfidence: z.enum(["deterministic", "strong", "probabilistic", "unmatched"]),
+        candidateCount: z.number().openapi({
+          description: "How many candidates the winning tier surfaced. More than one on a weak tier IS the ambiguity.",
+        }),
+        matchedAt: z.string().nullable(),
+      }),
+      judgment: z.object({
+        status: z.enum(CRM_JUDGMENT_STATUSES).openapi({
+          description:
+            "pair | reject | undecided once the vendor answered; not_needed when a deterministic signal already decided and nothing was spent; not_asked when this read's judgment budget ran out; unavailable when we tried and could not get an answer. `unavailable` is NOT a verdict.",
+        }),
+        unavailableReason: z.enum(CRM_JUDGMENT_UNAVAILABLE_REASONS).nullable(),
+        samePersonProbability: z.number().nullable().openapi({
+          description: "The vendor's own yes-probability, 0..1, as it came. Never rounded away to a verdict.",
+        }),
+        model: z.string().nullable().openapi({
+          description: "The model RELEASE that produced the judgment, frozen with it.",
+          example: "jev-1.13.0",
+        }),
+        judgedAt: z.string().nullable(),
+      }),
+      ruling: CrmPairingRulingSchema.nullable(),
+    }),
+    ourStanding: z
+      .object({})
+      .passthrough()
+      .nullable()
+      .openapi({
+        description:
+          "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired.",
+      }),
+    theirStatus: CrmTheirStatusSchema,
+  })
+  .openapi("CrmPairingRow");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/crm-pairings",
+  summary: "Put the customer's CRM and our leads side by side, one row per CRM contact",
+  description:
+    "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident " +
+    "the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\n" +
+    "A brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not " +
+    "an error. A page whose pairings the deterministic signals could not decide pays for a typed " +
+    "similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the " +
+    "view twice returns the same pairings, and the judgment is never re-asked on read.\n\n" +
+    "Bounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.",
+  parameters: [
+    ...CrmPairingHeaders,
+    {
+      in: "query" as const,
+      name: "brandId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The brand whose mirrored CRM to read. Required — a CRM is keyed to one brand.",
+    },
+    {
+      in: "query" as const,
+      name: "limit",
+      required: false,
+      schema: { type: "integer" as const },
+      description: "Contacts per page, 1..200. Default 50. Anything else is a 400, never a silent clamp.",
+    },
+    {
+      in: "query" as const,
+      name: "offset",
+      required: false,
+      schema: { type: "integer" as const },
+      description: "Where to resume. Use the `nextOffset` the previous page returned.",
+    },
+  ],
+  responses: {
+    200: {
+      description: "One row per CRM contact, both sides, the pairing's evidence and any human ruling",
+      content: {
+        "application/json": {
+          schema: z.object({
+            crmConnected: z.boolean(),
+            connection: z
+              .object({
+                id: z.string(),
+                brandId: z.string(),
+                locationId: z.string(),
+                status: z.string(),
+                synced: z.boolean(),
+                lastSyncedAt: z.string().nullable(),
+                lastError: z.string().nullable(),
+              })
+              .nullable(),
+            pairings: z.array(CrmPairingRowSchema),
+            nextOffset: z.number().nullable(),
+            judgmentThresholds: z.object({
+              pairAt: z.number().openapi({ example: 0.85 }),
+              rejectAt: z.number().openapi({ example: 0.15 }),
+            }),
+          }),
+        },
+      },
+    },
+    400: { description: "brandId is absent or not a uuid, or limit/offset is unparseable" },
+    401: { description: "Unauthorized" },
+    502: { description: "Their CRM could not be read (crm-service unavailable). Never a guessed empty CRM." },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/crm-pairing-counts",
+  summary: "How much of their CRM we can pair, and how many of our leads it has never heard of",
+  description:
+    "The summary above the table. Their whole contact population is walked a page at a time and " +
+    "folded into counters, so it costs the same heap on a CRM of any size.\n\n" +
+    "It never asks for a judgment and never spends: it reports what the stored state already says, " +
+    "so it is safe to poll. `opportunitiesWithUncomparableStage` is the size of the gap their free-" +
+    "text pipeline names leave — measured rather than asserted, which is one of the things this " +
+    "surface exists to learn.",
+  parameters: [
+    ...CrmPairingHeaders,
+    {
+      in: "query" as const,
+      name: "brandId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The brand whose mirrored CRM to summarise.",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The counts",
+      content: {
+        "application/json": {
+          schema: z.object({
+            crmConnected: z.boolean(),
+            counts: z.object({
+              crmContacts: z.number(),
+              crmContactsWithEmail: z.number(),
+              byState: z.record(z.enum(CRM_PAIRING_STATES), z.number()),
+              byMatchMethod: z.record(z.enum(CRM_MATCH_METHOD_KEYS), z.number()),
+              opportunities: z.number(),
+              opportunitiesByState: z.record(z.enum(CRM_OPPORTUNITY_STATE_KEYS), z.number()),
+              opportunitiesWithUncomparableStage: z.number(),
+            }),
+            ourLeadsNoCrmContactPointsAt: z.number().openapi({
+              description:
+                "Leads we served for this brand that no live pairing points at — people we emailed that their CRM has never heard of. A count, never a list.",
+            }),
+          }),
+        },
+      },
+    },
+    400: { description: "brandId is absent or not a uuid" },
+    401: { description: "Unauthorized" },
+    502: { description: "Their CRM could not be read (crm-service unavailable)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/leads/crm-pairings/rulings",
+  summary: "Accept or deny a pairing",
+  description:
+    "A human looking at both rows says whether they are one person. Their statement outranks the " +
+    "signal and the judgment alike, and it SURVIVES A RE-RUN OF THE MATCHER because it is keyed on " +
+    "the pair rather than on a matcher run — nothing can resurrect something a person already " +
+    "rejected.\n\nRestating replaces the previous statement (and clears any withdrawal); it never " +
+    "accumulates a second one.",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string().openapi({ description: "The brand this pairing belongs to." }),
+              crmContactId: z.string().openapi({ description: "Their contact, as the row carries it." }),
+              leadId: z.string().openapi({ description: "Our lead, as the row carries it." }),
+              ruling: z.enum(["accepted", "rejected"]),
+              note: z.string().nullable().optional().openapi({
+                description: "Why, in the author's own words. Optional, stored verbatim.",
+              }),
+            })
+            .openapi("CrmPairingRulingRequest"),
+        },
+      },
+    },
+  },
+  parameters: CrmPairingHeaders,
+  responses: {
+    201: {
+      description: "The statement as recorded",
+      content: { "application/json": { schema: z.object({ ruling: z.object({}).passthrough() }) } },
+    },
+    400: { description: "A missing or malformed brandId, crmContactId, leadId, ruling or note" },
+    401: { description: "Unauthorized" },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/leads/crm-pairings/rulings",
+  summary: "Take a ruling back",
+  description:
+    "NOTHING IS DELETED: the row survives carrying both what was stated and the fact that it was " +
+    "withdrawn, and the pairing falls back to whatever the judgment and the signal say. Idempotent — " +
+    "withdrawing an already-withdrawn statement writes nothing and says so.",
+  parameters: [
+    ...CrmPairingHeaders,
+    {
+      in: "query" as const,
+      name: "brandId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The brand this pairing belongs to.",
+    },
+    {
+      in: "query" as const,
+      name: "crmContactId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Their contact.",
+    },
+    {
+      in: "query" as const,
+      name: "leadId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Our lead.",
+    },
+  ],
+  responses: {
+    200: {
+      description: "Withdrawn, or already was",
+      content: {
+        "application/json": {
+          schema: z.object({
+            withdrawn: z.literal(true),
+            alreadyWithdrawn: z.boolean(),
+            brandId: z.string(),
+            crmContactId: z.string(),
+            leadId: z.string(),
+          }),
+        },
+      },
+    },
+    400: { description: "A missing or malformed brandId, crmContactId or leadId" },
+    401: { description: "Unauthorized" },
+    409: { description: "Nobody has ruled on this pairing (code nothing_stated)" },
     500: { description: "Internal server error" },
   },
 });
