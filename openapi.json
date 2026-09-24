@@ -4704,6 +4704,73 @@
               },
               "unsubscribed": {
                 "type": "boolean"
+              },
+              "record": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Their contact type, e.g. `lead`, `customer`.",
+                    "example": "lead"
+                  },
+                  "leadSource": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Their lead source, verbatim.",
+                    "example": "Meta Ads"
+                  },
+                  "tags": {
+                    "type": "array",
+                    "nullable": true,
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "Their tags, verbatim. `[]` = they hold the list and it is empty."
+                  },
+                  "createdAt": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "When the record was created IN THEIR CRM."
+                  },
+                  "updatedAt": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "When the record was last updated in their CRM."
+                  },
+                  "origin": {
+                    "type": "object",
+                    "properties": {
+                      "medium": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "form"
+                      },
+                      "url": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "referrer": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "medium",
+                      "url",
+                      "referrer"
+                    ]
+                  }
+                },
+                "required": [
+                  "type",
+                  "leadSource",
+                  "tags",
+                  "createdAt",
+                  "updatedAt",
+                  "origin"
+                ],
+                "description": "Where the record came from in THEIR CRM, in their own words, carried verbatim from crm-service and never mapped onto any vocabulary of ours. Every field is null when their CRM holds none."
               }
             },
             "required": [
@@ -4715,7 +4782,8 @@
               "email",
               "phone",
               "company",
-              "unsubscribed"
+              "unsubscribed",
+              "record"
             ]
           },
           "pairing": {
@@ -8001,7 +8069,7 @@
     "/orgs/leads/crm-pairings": {
       "get": {
         "summary": "Put the customer's CRM and our leads side by side, one row per CRM contact",
-        "description": "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\nA brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not an error. A page whose pairings the deterministic signals could not decide pays for a typed similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the view twice returns the same pairings, and the judgment is never re-asked on read.\n\nBounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.",
+        "description": "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\nA brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not an error. A page whose pairings the deterministic signals could not decide pays for a typed similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the view twice returns the same pairings, and the judgment is never re-asked on read.\n\nBounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.\n\n`state` narrows the rows to one or more pairing states. Their contact list is then WALKED from `offset` until `limit` matching rows are held, so the read stays bounded and paged, and `/orgs/leads/crm-pairing-counts` remains the authority for how many there are: paging a state to the end visits exactly the contacts its `byState` count reports. `offset`/`nextOffset` stay positions in THEIR contact list, so ruling on a row while paging skips nobody. A filtered read buys judgments only when `state` includes `unconfirmed` (the only state a judgment can move a row out of), and decides each row after any judgment it bought is frozen.",
         "parameters": [
           {
             "in": "header",
@@ -8065,6 +8133,16 @@
               "type": "integer"
             },
             "description": "Where to resume. Use the `nextOffset` the previous page returned."
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "example": "paired,unconfirmed",
+            "description": "Comma-separated pairing states to keep (paired, unconfirmed, rejected, unpaired), read as one set. Absent = every contact, unchanged. An unknown state or an empty list is a 400, never a silently-ignored filter."
           }
         ],
         "responses": {
@@ -8156,7 +8234,7 @@
             }
           },
           "400": {
-            "description": "brandId is absent or not a uuid, or limit/offset is unparseable"
+            "description": "brandId is absent or not a uuid, limit/offset is unparseable, or state names an unknown state"
           },
           "401": {
             "description": "Unauthorized"
