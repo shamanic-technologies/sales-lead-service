@@ -168,7 +168,7 @@ export function readModelKey(scope: ReadModelScope): string {
   return createHash("sha256").update(canonical).digest("hex");
 }
 
-function listScopeOf(scope: ReadModelScope): LeadListScope {
+export function listScopeOf(scope: ReadModelScope): LeadListScope {
   return {
     orgId: scope.orgId,
     brandId: scope.brandId ?? undefined,
@@ -343,7 +343,7 @@ async function writeRows(
 }
 
 /** The oldest transaction that could still be open right now — see `catchUp`. */
-async function currentXmin(): Promise<string> {
+export async function currentXmin(): Promise<string> {
   const rows = await sql<Array<{ xmin: string }>>`
     SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS xmin
   `;
@@ -523,6 +523,7 @@ async function catchUp(model: ReadModel): Promise<number> {
       SELECT seq::text AS seq, lead_id::text AS lead_id, email, kind, created_at
       FROM lead_read_changes
       WHERE org_id = ${model.orgId} AND txid >= ${model.appliedXmin}::xid8
+        AND kind IN ('statement', 'evidence')
     `
   ).filter((change) => !seen.has(change.seq));
   if (changes.length > 0) {

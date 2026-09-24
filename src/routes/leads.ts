@@ -16,6 +16,7 @@ import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
 import { prefetchOne } from "../lib/prefetch.js";
+import { toCompactLead } from "../lib/compact-lead.js";
 import { fetchBasicLeadChunk, streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import {
   campaignScopeIds,
@@ -50,6 +51,15 @@ import {
   type LeadPlanPage,
   type ReadModel,
 } from "../lib/lead-read-model.js";
+import {
+  decodeFeedPosition,
+  feedById,
+  FeedPositionError,
+  openChangeFeed,
+  readChangeFeed,
+  type ChangeFeed,
+  type FeedPosition,
+} from "../lib/lead-change-feed.js";
 import { LeadEvidenceChangedRequestSchema } from "../schemas.js";
 import { resolveAudiencesForBrand, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
 import { createOfferCardResolver, type OfferCard } from "../lib/offer-card-client.js";
@@ -703,61 +713,6 @@ async function resolveLeadReadScope(
         : flattenBrandStatus;
 
   return { kind: "scope", scope, statusCampaignIdStr, hasScopeForStatus, flatten };
-}
-
-/**
- * One row of `?view=compact`: WHO the lead is, WHICH campaign and workflow served them, and what the
- * delivery layer measured — exactly what a consumer computing figures over a brand's whole
- * population reads, and nothing it does not.
- *
- * It exists because features-service computes a brand's revenue, funnel counts and per-lead outcomes
- * by walking the brand's entire population, and `view=basic` answered that walk with ~2.2 KB a row
- * (audience card, offer card, standing, closed deal, run ids, timestamps, headline, LinkedIn URL…)
- * of which the engine read a quarter — 110 MB for the largest brand. Every value here is read off
- * the SAME row and the SAME flattened overlay `view=basic` emits, so a field present in both can
- * never disagree. The audience, offer and standing resolvers are not run at all for this view.
- */
-function toCompactLead(r: BasicLeadRow, delivery: FlattenedStatus) {
-  const org = r.lead?.organization ?? null;
-  return {
-    id: r.id,
-    leadId: r.leadId,
-    campaignId: r.campaignId,
-    workflowSlug: r.workflowSlug ?? null,
-    status: r.status,
-    email: r.email?.value ?? "",
-    lead: r.lead
-      ? {
-          firstName: r.lead.firstName,
-          lastName: r.lead.lastName,
-          photoUrl: r.lead.photoUrl,
-          currentTitle: r.lead.currentTitle,
-          seniority: r.lead.seniority,
-          organization: org
-            ? {
-                id: org.id,
-                name: org.name,
-                logoUrl: org.logoUrl,
-                primaryDomain: org.primaryDomain,
-                websiteUrl: org.websiteUrl,
-                industry: org.industry,
-                estimatedNumEmployees: org.estimatedNumEmployees,
-                city: org.city,
-                country: org.country,
-              }
-            : null,
-        }
-      : null,
-    contacted: delivery.contacted,
-    sent: delivery.sent,
-    delivered: delivery.delivered,
-    opened: delivery.opened,
-    clicked: delivery.clicked,
-    bounced: delivery.bounced,
-    unsubscribed: delivery.unsubscribed,
-    replied: delivery.replied,
-    replyClassification: delivery.replyClassification,
-  };
 }
 
 /**
@@ -1465,6 +1420,128 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
   } catch (error) {
     console.error("[lead-service] Standing counts error:", error);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * Query parameters `GET /orgs/leads/changes` refuses: each one shapes a PAGE of the list, and a
+ * change feed is the whole scope or nothing. Naming one is a 400, never silently dropped — a caller
+ * that believes it filtered a copy it did not filter would compute on the wrong population.
+ */
+const CHANGE_FEED_REFUSED_PARAMS = [
+  "q", "bucket", "standing", "sort", "format", "include", "limit", "offset", "cursor",
+] as const;
+
+/**
+ * GET /orgs/leads/changes — what changed in a scope's compact lead rows since a position the caller
+ * holds, so a consumer keeping a copy of a brand's population stops re-reading all of it.
+ *
+ * Same scope vocabulary as the list (`brandId`, `campaignId` resolved to the whole identity,
+ * `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`) and the same row: every
+ * element of `leads` is exactly what `?view=compact` emits for that row. Without `since` the answer
+ * is the whole scope (`full: true`); with it, every row that changed after it (`leads`) and every
+ * row that left the scope (`removed`, ids). Either way `cursor` is the position to hand back next
+ * time. A `since` that no longer names this scope's feed is answered with the whole scope again,
+ * `full: true` and a `reason` — the consumer replaces its copy. See lead-change-feed.ts.
+ */
+router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async (req: AuthenticatedRequest, res) => {
+  let streamingStarted = false;
+  const writer = new ResponseWriter(res);
+  const client = watchClient(req, res);
+  try {
+    for (const name of CHANGE_FEED_REFUSED_PARAMS) {
+      if (req.query[name] !== undefined) {
+        return res.status(400).json({
+          error: `${name} is not available on /orgs/leads/changes — the feed is always the whole scope`,
+        });
+      }
+    }
+    if (req.query.view !== undefined && req.query.view !== "compact") {
+      return res.status(400).json({ error: "/orgs/leads/changes serves the compact row only (view=compact)" });
+    }
+    let since: FeedPosition | null = null;
+    let statuses: readonly string[];
+    try {
+      statuses = parseLeadStatusFilter(req.query.status);
+      const raw = req.query.since;
+      if (raw !== undefined) {
+        if (typeof raw !== "string" || raw.trim() === "") {
+          throw new FeedPositionError("since must be the cursor a previous /orgs/leads/changes answer returned");
+        }
+        since = decodeFeedPosition(raw.trim());
+      }
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+
+    const resolved = await resolveLeadReadScope(req, statuses);
+    if (resolved.kind === "error") {
+      return res.status(resolved.status).json({ error: resolved.error });
+    }
+    // An offer no campaign sells: nobody is in it, and there is no feed to hold a position in.
+    if (resolved.kind === "empty") {
+      return res.json({ full: true, reason: "empty_scope", cursor: null, leads: [], removed: [] });
+    }
+
+    const brandIdStr = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
+    const feedScope = readModelScopeFor(resolved.scope, brandIdStr, resolved.hasScopeForStatus);
+    let feed: ChangeFeed;
+    try {
+      feed = await openChangeFeed(feedScope);
+    } catch (error) {
+      if (error instanceof ReadModelUnavailableError) {
+        console.error(
+          `[lead-service] lead changes refused: the feed could not be brought up to date: ${error.message}`,
+        );
+        return res.status(502).json({ error: "email-gateway unavailable" });
+      }
+      throw error;
+    }
+
+    // Whether the caller's position is one this scope's feed can continue from.
+    let reason: "no_cursor" | "feed_replaced" | null = since ? null : "no_cursor";
+    if (since && since.feedId !== feed.id) {
+      if (await feedById(since.feedId)) {
+        return res.status(400).json({ error: "since belongs to a different scope than this read names" });
+      }
+      reason = "feed_replaced";
+      since = null;
+    }
+
+    let read;
+    try {
+      read = await readChangeFeed(feed, since ? since.version : null);
+    } catch (error) {
+      if (error instanceof FeedPositionError) return res.status(400).json({ error: error.message });
+      throw error;
+    }
+
+    res.setHeader("Content-Type", "application/json");
+    streamingStarted = true;
+    await writer.write(
+      `{"full":${since === null},"reason":${JSON.stringify(reason)},"cursor":${JSON.stringify(read.position)},"leads":[`,
+    );
+    const removed: string[] = [];
+    let wrote = 0;
+    for await (const chunk of read.chunks) {
+      client.stopIfGone(wrote);
+      for (const payload of chunk.put) {
+        await writer.write((wrote === 0 ? "" : ",") + payload);
+        wrote += 1;
+      }
+      removed.push(...chunk.removed);
+    }
+    await writer.write(`],"removed":${JSON.stringify(removed)}}`);
+    await writer.end();
+  } catch (error) {
+    if (isClientGone(error)) {
+      console.warn(`[lead-service] lead changes: caller left mid-stream (${error.message})`);
+      res.destroy();
+      return;
+    }
+    console.error("[lead-service] lead changes error:", error);
+    if (!streamingStarted) return res.status(500).json({ error: "Internal server error" });
+    res.destroy(error as Error);
   }
 });
 
