@@ -24,6 +24,12 @@ export interface LeadListScope {
    */
   offerId?: string;
   /**
+   * The ONE sales funnel of `offerId` the caller asked for, canonical. Kept for logging/telemetry;
+   * the FILTER is campaignIds, which the route narrows to the offer's campaigns that STATE this
+   * funnel (offer-campaigns-client.ts). Only ever set alongside `offerId`.
+   */
+  funnelKey?: string;
+  /**
    * The campaign IDENTITY's members — every stored campaign row the customer reads as the ONE
    * campaign they asked for (see campaign-identity.ts). Resolved by the route from campaign-service;
    * `[campaignId]` when the identity has a single member or could not be resolved. Absent means the

@@ -2078,6 +2078,22 @@ registry.registerPath({
     },
     {
       in: "query" as const,
+      name: "funnelKey",
+      required: false,
+      description:
+        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
+        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
+        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
+        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
+        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
+        "current keys and their retired spellings (`reply_meeting` = " +
+        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
+        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
+        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
+      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
+    },
+    {
+      in: "query" as const,
       name: "orgId",
       required: false,
       schema: { type: "string" as const },
@@ -2350,6 +2366,22 @@ registry.registerPath({
         "with `campaignId`. An offer no campaign sells yet counts zero, never the brand.",
       schema: { type: "string" as const },
     },
+    {
+      in: "query" as const,
+      name: "funnelKey",
+      required: false,
+      description:
+        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
+        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
+        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
+        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
+        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
+        "current keys and their retired spellings (`reply_meeting` = " +
+        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
+        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
+        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
+      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
+    },
     { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "workflowSlug", required: false, schema: { type: "string" as const } },
@@ -2519,6 +2551,22 @@ registry.registerPath({
         "Restrict the counted population to one offer, exactly as on the list. Mutually exclusive " +
         "with `campaignId`. An offer no campaign sells yet counts zero, never the brand.",
       schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
+      name: "funnelKey",
+      required: false,
+      description:
+        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
+        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
+        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
+        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
+        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
+        "current keys and their retired spellings (`reply_meeting` = " +
+        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
+        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
+        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
+      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
     },
     { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },
