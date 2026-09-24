@@ -302,6 +302,13 @@
       "when": 1783468800000,
       "tag": "0042_lead_change_feeds",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1783555200000,
+      "tag": "0043_lead_read_model_stage",
+      "breakpoints": true
     }
   ]
 }

@@ -2143,6 +2143,26 @@
               "opted_out"
             ],
             "description": "How many leads stand in each state. Every key is ALWAYS present — a state nobody is in is 0, never absent, so a consumer can draw a column per state without guessing. `unresolved` is counted like any other: it is a stated non-answer (the campaign states no funnel, campaign-service could not be reached, the read named no scope so the delivery layer was never asked), and dropping it would make the columns fail to add up to the population they say they are showing. `opted_out` and `disqualified` are two separate keys — the prospect's own act versus a commercial judgement of ours — so each of those columns can state its own size and be paged on its own via `GET /orgs/leads?standing=opted_out` / `?standing=disqualified`."
+          },
+          "salesInterestStages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stage": {
+                  "type": "string",
+                  "example": "meeting_booked"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stage",
+                "count"
+              ]
+            },
+            "description": "Present ONLY when `breakdown=stage` is asked for. The `sales_interest` leads split by WHERE ON THE FUNNEL they stand — the deepest funnel step known to have been reached, else the funnel's entry step (`conversation_reply` for a positive reply on a conversation-led funnel, `website_visit` for a click on a visit-led one). A PARTITION of `counts.sales_interest`: one stage per lead, and the counts SUM to it exactly. When `funnelKey` is named, every stage of that funnel is present in funnel order (0 when nobody stands there) — for `sales_meetings_from_conversation`: `conversation_reply`, `meeting_booked`, `meeting_attended`; a scope spanning several funnels also lists every other stage observed. The funnel's last step is never a stage (a lead who reached it is a `customer`). Page one stage with `GET /orgs/leads?stage=<stage>`."
           }
         },
         "required": [
@@ -6062,6 +6082,15 @@
           },
           {
             "in": "query",
+            "name": "stage",
+            "required": false,
+            "description": "Restrict the read to `sales_interest` leads standing at one or SEVERAL funnel stages, comma-separated, read as ONE set: `conversation_reply`, `website_visit`, `signup`, `form_submission`, `meeting_booked`, `meeting_attended`. A stage is WHERE ON THE FUNNEL a `sales_interest` lead stands: the deepest funnel step known to have been reached (stated, implied by a later step, tracker-reported or CRM-evidenced), else the funnel's entry step that put them there (a positive reply on a conversation-led funnel, a click on a visit-led one). It is a PARTITION of `sales_interest` — one stage per lead, so somebody who attended is under `meeting_attended` and NOT also under `meeting_booked` — which is what lets a board draw one column per funnel step whose sizes add up (the engagement `bucket`s are nested and cannot). Only `sales_interest` rows carry a stage, so naming one narrows to them. `total` is then the column's size, and GET /orgs/leads/standing-counts?breakdown=stage answers every stage's size. Row-level, the same answer is `standing.deepestStep ?? standing.entryStep` on a `sales_interest` row. An unknown value is a 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "sort",
             "required": false,
             "description": "The order rows come back in. ABSENT (or `created`) => `(created_at, id)` ascending, exactly as this endpoint has always answered. `activity` => newest first on the timestamp that proves each lead's most advanced status: an outcome by when it was recorded, a reply by the reply, a click by the click, an open by the open, a send by the send, and down to the moment the lead was served. Ties break on the row id, so both orders are TOTAL and a `limit` + `cursor` walk visits every row exactly once — no gaps, no repeats. An unknown value is a 400.",
@@ -6355,7 +6384,7 @@
     "/orgs/leads/changes": {
       "get": {
         "summary": "What changed in a scope's compact lead rows since your last read",
-        "description": "For a consumer that keeps a copy of a brand's (or campaign identity's, or offer's) whole lead population — the `view=compact` rows — and must stop re-reading all of it on every refresh. Call it once without `since`: the answer is the whole scope (`full: true`) and a `cursor`. Then call it with `since=<cursor>`: the answer is only the rows that changed (`leads`, to put by `id`) and the rows that left the scope (`removed`, ids), plus the next `cursor`. Applying every answer in order leaves you holding exactly what `GET /orgs/leads?view=compact` returns for the same parameters. When `since` can no longer be continued from, the answer is the whole scope again with `full: true` and `reason: feed_replaced` — replace your copy; nothing is ever answered as a partial delta. Same scope vocabulary and meaning as the list: `brandId`, `campaignId` (the whole campaign identity), `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping parameters (`q`, `bucket`, `standing`, `sort`, `format`, `include`, `limit`, `offset`, `cursor`) are a 400: the feed is always the whole scope. Gzipped when the caller accepts it. FRESHNESS: a serve, a re-point, a status, a name, an email or an employer written here, and every delivery event the sender announces (a send, an open, a click, a reply, a bounce, an opt-out), shows on the next read; delivery evidence nobody announced is at most 5 minutes old, enforced — a feed whose last full reconcile is older is reconciled before it answers. email-gateway unreachable is a 502, never a partial answer.",
+        "description": "For a consumer that keeps a copy of a brand's (or campaign identity's, or offer's) whole lead population — the `view=compact` rows — and must stop re-reading all of it on every refresh. Call it once without `since`: the answer is the whole scope (`full: true`) and a `cursor`. Then call it with `since=<cursor>`: the answer is only the rows that changed (`leads`, to put by `id`) and the rows that left the scope (`removed`, ids), plus the next `cursor`. Applying every answer in order leaves you holding exactly what `GET /orgs/leads?view=compact` returns for the same parameters. When `since` can no longer be continued from, the answer is the whole scope again with `full: true` and `reason: feed_replaced` — replace your copy; nothing is ever answered as a partial delta. Same scope vocabulary and meaning as the list: `brandId`, `campaignId` (the whole campaign identity), `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping parameters (`q`, `bucket`, `standing`, `stage`, `sort`, `format`, `include`, `limit`, `offset`, `cursor`) are a 400: the feed is always the whole scope. Gzipped when the caller accepts it. FRESHNESS: a serve, a re-point, a status, a name, an email or an employer written here, and every delivery event the sender announces (a send, an open, a click, a reply, a bounce, an opt-out), shows on the next read; delivery evidence nobody announced is at most 5 minutes old, enforced — a feed whose last full reconcile is older is reconciled before it answers. email-gateway unreachable is a 502, never a partial answer.",
         "parameters": [
           {
             "in": "header",
@@ -6873,6 +6902,18 @@
             "schema": {
               "type": "string",
               "example": "sales_meetings_from_conversation"
+            }
+          },
+          {
+            "in": "query",
+            "name": "breakdown",
+            "required": false,
+            "description": "`stage` adds `salesInterestStages`: the `sales_interest` count split by where on the funnel each lead stands (a partition — sums to `counts.sales_interest`). Absent => the response is exactly what it always was. Any other value is a 400.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "stage"
+              ]
             }
           },
           {

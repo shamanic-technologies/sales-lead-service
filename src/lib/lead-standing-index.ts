@@ -24,7 +24,7 @@
 import type { FlattenedStatus } from "./delivery-flatten.js";
 import type { EnrichedLeadIndexRow } from "./lead-engagement.js";
 import type { LeadStandingResolver, StandingRow } from "./lead-standing-resolver.js";
-import type { LeadStandingDelivery } from "./lead-standing.js";
+import { salesInterestStage, type LeadStandingDelivery } from "./lead-standing.js";
 
 /**
  * How many rows one resolver call covers. The resolver's two reads bind their lead ids as an
@@ -78,7 +78,9 @@ export async function attachLeadStandings(
     }));
     const resolved = await resolver.resolve(standingRows);
     for (const row of slice) {
-      row.standing = resolved.get(row.id)?.standing.state ?? "unresolved";
+      const standing = resolved.get(row.id)?.standing;
+      row.standing = standing?.state ?? "unresolved";
+      row.stage = standing ? salesInterestStage(standing) : null;
     }
   }
   return rows;
