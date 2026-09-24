@@ -2330,6 +2330,12 @@ registry.registerPath({
     "`campaignId` (resolved to the whole campaign identity), `offerId`, `status` and `q`. The set " +
     "counted is therefore exactly the set `GET /orgs/leads` returns for those parameters, so a " +
     "tab's count and what the tab shows cannot disagree. " +
+    "FRESHNESS: answered from this scope's read model, never by walking the population. A person's " +
+    "statement (a funnel step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
+    "very next read; delivery evidence another service pushes through POST /orgs/leads/evidence-changed " +
+    "(an opt-out, a classified reply) shows on the next read too; everything else (delivery evidence " +
+    "nobody pushed, new serves, a campaign's funnel) is at most 5 minutes old, enforced: a model past " +
+    "that is rebuilt before it is read, never served. " +
     "email-gateway unreachable is a 502 — never a count of zero.",
   parameters: [
     ...AuthHeaders,
@@ -2381,6 +2387,55 @@ registry.registerPath({
         "The delivery evidence these counts are counted from could not be read — refused rather than answered with zeros",
       content: { "application/json": { schema: ErrorResponseSchema } },
     },
+  },
+});
+
+export const LeadEvidenceChangedRequestSchema = z
+  .object({
+    emails: z
+      .array(z.string().min(1).max(320))
+      .min(1)
+      .max(1000)
+      .openapi({
+        description:
+          "The addresses whose delivery evidence just changed — a reply somebody classified, an " +
+          "opt-out recorded or withdrawn, an event the provider observed. Case is irrelevant.",
+      }),
+  })
+  .openapi("LeadEvidenceChangedRequest");
+
+const LeadEvidenceChangedResponseSchema = z
+  .object({
+    accepted: z.number().int().openapi({ description: "Distinct addresses recorded." }),
+  })
+  .openapi("LeadEvidenceChangedResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/leads/evidence-changed",
+  summary: "Say that these addresses' delivery evidence changed, so the next Leads read shows it",
+  description:
+    "The Leads page's counts and filtered pages are answered from a read model that keeps each " +
+    "address's delivery evidence (contacted, clicked, replied and how the reply reads, opted out) " +
+    "for at most 5 minutes. A service that CHANGES that evidence — above all when a person " +
+    "classifies a reply or records an opt-out in the product — calls this, and the very next read " +
+    "of any scope holding one of these addresses asks the delivery layer again before it answers. " +
+    "Org-scoped by `x-org-id`. Idempotent and cheap: it records the change and returns; nothing " +
+    "is fetched until a read needs it.",
+  request: {
+    body: { content: { "application/json": { schema: LeadEvidenceChangedRequestSchema } } },
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    202: {
+      description: "Recorded",
+      content: { "application/json": { schema: LeadEvidenceChangedResponseSchema } },
+    },
+    400: {
+      description: "No addresses, too many, or a malformed body",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
   },
 });
 
@@ -2445,6 +2500,12 @@ registry.registerPath({
     "Standing is funnel-aware and per campaign — deliberately NOT the engagement-bucket " +
     "vocabulary, which asks what happened to somebody rather than where they stand; see " +
     "GET /orgs/leads/bucket-counts for that. " +
+    "FRESHNESS: answered from this scope's read model, never by walking the population. A person's " +
+    "statement (a funnel step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
+    "very next read; delivery evidence another service pushes through POST /orgs/leads/evidence-changed " +
+    "(an opt-out, a classified reply) shows on the next read too; everything else (delivery evidence " +
+    "nobody pushed, new serves, a campaign's funnel) is at most 5 minutes old, enforced: a model past " +
+    "that is rebuilt before it is read, never served. " +
     "email-gateway unreachable, or a standing that cannot be resolved, is a 502 — never zeros.",
   parameters: [
     ...AuthHeaders,

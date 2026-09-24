@@ -25,15 +25,14 @@ type IndexRow = Awaited<ReturnType<typeof collectIndex>>[number];
  * The whole population, collected from the chunked walk — for ASSERTIONS only.
  *
  * Production never does this: holding the population is the outage this walk exists to prevent
- * (see src/lib/lead-plan-store.ts). Three rows in a test is a different proposition.
+ * (see src/lib/lead-read-model.ts). Three rows in a test is a different proposition.
  */
 async function collectIndex(
   scope: Parameters<typeof streamLeadIndex>[0],
-  tokens: Parameters<typeof streamLeadIndex>[1],
   chunkSize = 2,
 ) {
   const rows = [];
-  for await (const chunk of streamLeadIndex(scope, tokens, chunkSize)) rows.push(...chunk);
+  for await (const chunk of streamLeadIndex(scope, chunkSize)) rows.push(...chunk);
   return rows;
 }
 const { fetchBasicLeadChunk } = await import("../../src/lib/basic-leads.js");
@@ -126,7 +125,7 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
   });
 
   it("indexes the whole scoped population, and counts the same number", async () => {
-    const rows = await collectIndex(scope, null);
+    const rows = await collectIndex(scope);
     expect(rows).toHaveLength(3);
     // The walk is CHUNKED and keyset-driven: a chunk size smaller than the population must return
     // every row exactly once, in the same total order, with no gaps and no repeats.
@@ -141,29 +140,22 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
     expect(rows.every((r) => typeof r.createdAtText === "string" && r.createdAtText.length > 0)).toBe(true);
   });
 
-  it("searches the person, their title, their company and their address", async () => {
-    for (const [query, email] of [
-      ["jane", "jane.roe@acme.test"],
-      ["acme", "jane.roe@acme.test"],
-      ["financial", "john.doe@globex.test"],
-      ["globex.test", "john.doe@globex.test"],
-    ] as const) {
-      const rows = await collectIndex(scope, [query]);
-      expect(rows.map((r: IndexRow) => r.email)).toEqual([email]);
-    }
-  });
-
-  it("requires EVERY word to match, so two words narrow rather than widen", async () => {
-    expect(await collectIndex(scope, ["jane", "acme"])).toHaveLength(1);
-    expect(await collectIndex(scope, ["jane", "globex"])).toHaveLength(0);
-  });
-
-  it("takes a LIKE metacharacter literally rather than as a wildcard", async () => {
-    expect((await collectIndex(scope, ["percent_off"])).map((r) => r.email)).toEqual([
-      "ten@disco.test",
+  it("carries the text a person is searched by, one field per line", async () => {
+    const rows = await collectIndex(scope);
+    const jane = rows.find((r) => r.email === "jane.roe@acme.test")!;
+    expect(jane.searchText.split("\n")).toEqual([
+      "Jane",
+      "Roe",
+      "Jane Roe",
+      "Head of Growth",
+      "Acme",
+      "jane.roe@acme.test",
     ]);
-    // `_` matched literally: nothing here spells "percentXoff".
-    expect(await collectIndex(scope, ["percentaoff"])).toHaveLength(0);
+  });
+
+  it("narrows to named people without changing who they are", async () => {
+    const rows = await collectIndex({ ...scope, leadIds: [seeded[1].leadId] });
+    expect(rows.map((r) => r.id)).toEqual([seeded[1].rowId]);
   });
 
   it("hydrates exactly the rows an index-driven page named, and nothing else", async () => {

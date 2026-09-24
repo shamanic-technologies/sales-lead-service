@@ -20,6 +20,7 @@ import followupsRoutes from "./routes/followups.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
+import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { withConnectRetry } from "./lib/db-retry.js";
@@ -114,6 +115,8 @@ async function boot(): Promise<void> {
   // What each paired customer's CRM evidences, reflected onto their leads. Armed only once the
   // schema it writes is there.
   startCrmEvidenceWorker();
+  // Keeps the Leads page's read models inside their freshness bound (see lead-read-model.ts).
+  startReadModelWorker();
 
   try {
     await registerProviders();

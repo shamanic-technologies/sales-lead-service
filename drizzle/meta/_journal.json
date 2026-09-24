@@ -288,6 +288,13 @@
       "when": 1783296000000,
       "tag": "0040_crm_evidenced_steps",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1783382400000,
+      "tag": "0041_lead_read_models",
+      "breakpoints": true
     }
   ]
 }
