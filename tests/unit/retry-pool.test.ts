@@ -156,7 +156,7 @@ import {
 const NOW = Date.parse("2026-08-25T12:00:00.000Z");
 const CAMPAIGN = "campaign-1";
 
-function scoped(over: Partial<{ contacted: boolean; sent: boolean }>) {
+function scoped(over: Partial<{ contacted: boolean; sent: boolean; queued: boolean }>) {
   return {
     contacted: false,
     sent: false,
@@ -205,47 +205,76 @@ const base = {
   nowMs: NOW,
 };
 
+/** What the sender answers for a person it holds nothing for and never contacted. */
+function notHeld(email: string) {
+  return { email, broadcast: { campaign: scoped({ queued: false }) } };
+}
+
 beforeEach(() => {
   rows = [];
   executed = [];
   vi.resetAllMocks();
-  checkDeliveryStatus.mockResolvedValue({ results: [] });
+  checkDeliveryStatus.mockImplementation(
+    async (_b: string, _c: string, items: Array<{ email: string }>) => ({
+      results: items.map((i) => notHeld(i.email)),
+    }),
+  );
 });
 
 describe("decideRetry", () => {
   const servedAt = new Date(NOW - 60_000).toISOString();
+  const lostAge = new Date(NOW - RETRY_QUEUE_TTL_MS).toISOString();
 
   it("re-serves a person who was paid for and never handed to the vendor", () => {
-    expect(decideRetry({ contacted: false, sent: false }, servedAt, NOW)).toBe("retry");
+    expect(decideRetry({ contacted: false, sent: false, queued: false }, servedAt, NOW)).toBe("retry");
   });
 
-  it("re-serves a person email-gateway holds no record of at all", () => {
-    expect(decideRetry(null, servedAt, NOW)).toBe("retry");
+  it("never re-serves a person the sender says it still holds, however old the serve", () => {
+    // The production loop: contacted, not sent, 13 days old, sitting in a backlogged queue.
+    const thirteenDays = new Date(NOW - 13 * 24 * 60 * 60 * 1000).toISOString();
+    expect(decideRetry({ contacted: true, sent: false, queued: true }, thirteenDays, NOW)).toBe(
+      "in_vendor_queue",
+    );
+    expect(decideRetry({ contacted: false, sent: false, queued: true }, lostAge, NOW)).toBe(
+      "in_vendor_queue",
+    );
   });
 
-  it("leaves a person the vendor is still holding inside the TTL alone", () => {
-    const queued = new Date(NOW - (RETRY_QUEUE_TTL_MS - 1)).toISOString();
-    expect(decideRetry({ contacted: true, sent: false }, queued, NOW)).toBe("in_vendor_queue");
+  it("does not retry when the sender stated nothing about its queue — no guess from age", () => {
+    expect(decideRetry({ contacted: true, sent: false, queued: null }, lostAge, NOW)).toBe("unknown");
+    expect(decideRetry({ contacted: false, sent: false, queued: null }, servedAt, NOW)).toBe("unknown");
   });
 
-  it("re-serves a queued person once the TTL has elapsed — the vendor lost it", () => {
-    const lost = new Date(NOW - RETRY_QUEUE_TTL_MS).toISOString();
-    expect(decideRetry({ contacted: true, sent: false }, lost, NOW)).toBe("retry");
+  it("does not retry a person email-gateway returned no status for at all", () => {
+    expect(decideRetry(null, lostAge, NOW)).toBe("unknown");
+  });
+
+  it("leaves a handed-over person the sender no longer holds alone inside the TTL", () => {
+    const recent = new Date(NOW - (RETRY_QUEUE_TTL_MS - 1)).toISOString();
+    expect(decideRetry({ contacted: true, sent: false, queued: false }, recent, NOW)).toBe(
+      "in_vendor_queue",
+    );
+  });
+
+  it("re-serves a handed-over person the sender no longer holds once the TTL has elapsed", () => {
+    expect(decideRetry({ contacted: true, sent: false, queued: false }, lostAge, NOW)).toBe("retry");
   });
 
   it("treats a served row with no timestamp as still queued, never as lost", () => {
-    expect(decideRetry({ contacted: true, sent: false }, null, NOW)).toBe("in_vendor_queue");
+    expect(decideRetry({ contacted: true, sent: false, queued: false }, null, NOW)).toBe(
+      "in_vendor_queue",
+    );
   });
 
-  it("is terminal once an email went out, whatever `contacted` says", () => {
-    expect(decideRetry({ contacted: true, sent: true }, servedAt, NOW)).toBe("terminal");
-    expect(decideRetry({ contacted: false, sent: true }, servedAt, NOW)).toBe("terminal");
+  it("is terminal once an email went out, whatever else is stated", () => {
+    expect(decideRetry({ contacted: true, sent: true, queued: true }, servedAt, NOW)).toBe("terminal");
+    expect(decideRetry({ contacted: false, sent: true, queued: null }, servedAt, NOW)).toBe("terminal");
   });
 
   it("accepts a Date served_at as well as a string — raw sql hands back either", () => {
-    expect(decideRetry({ contacted: true, sent: false }, new Date(NOW - 1000), NOW)).toBe(
-      "in_vendor_queue",
-    );
+    expect(
+      decideRetry({ contacted: true, sent: false, queued: false }, new Date(NOW - 1000), NOW),
+    ).toBe("in_vendor_queue");
   });
 });
 
@@ -256,14 +285,53 @@ describe("campaignScopeFlags", () => {
         { email: "a@example.com", broadcast: { campaign: scoped({ contacted: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false });
+    ).toEqual({ contacted: true, sent: false, queued: null });
 
     expect(
       campaignScopeFlags(
         { email: "a@example.com", transactional: { campaign: scoped({ sent: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: true });
+    ).toEqual({ contacted: false, sent: true, queued: null });
+  });
+
+  it("reads `queued` from the broadcast provider only, true winning over false", () => {
+    expect(
+      campaignScopeFlags(
+        {
+          email: "a@example.com",
+          broadcast: {
+            campaign: scoped({ contacted: true, queued: false }),
+            byCampaign: { [CAMPAIGN]: scoped({ contacted: true, queued: true }) },
+          },
+        },
+        CAMPAIGN,
+      ),
+    ).toEqual({ contacted: true, sent: false, queued: true });
+
+    expect(
+      campaignScopeFlags(
+        { email: "a@example.com", broadcast: { campaign: scoped({ queued: false }) } },
+        CAMPAIGN,
+      ),
+    ).toEqual({ contacted: false, sent: false, queued: false });
+
+    // A transactional scope's `queued` is not the sender's statement.
+    expect(
+      campaignScopeFlags(
+        { email: "a@example.com", transactional: { campaign: scoped({ queued: false }) } },
+        CAMPAIGN,
+      ),
+    ).toEqual({ contacted: false, sent: false, queued: null });
+  });
+
+  it("states no queue when the broadcast half is missing — the gateway's partial 200", () => {
+    expect(
+      campaignScopeFlags(
+        { email: "a@example.com", transactional: { campaign: scoped({}) } },
+        CAMPAIGN,
+      )?.queued,
+    ).toBeNull();
   });
 
   it("reads the byCampaign entry for this campaign too", () => {
@@ -275,7 +343,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: true });
+    ).toEqual({ contacted: true, sent: true, queued: null });
   });
 
   it("ignores another campaign's entry — that is human-service's suppression policy, not this pool's", () => {
@@ -287,7 +355,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false });
+    ).toEqual({ contacted: false, sent: false, queued: null });
   });
 
   it("is null when email-gateway has no result for the email", () => {
@@ -303,7 +371,6 @@ describe("pickRetryCandidate", () => {
 
   it("hands back the person who was served and never contacted", async () => {
     rows = [row({ id: "aaaaaaaa-0000-4000-8000-000000000001" })];
-    checkDeliveryStatus.mockResolvedValue({ results: [] });
 
     const picked = await pickRetryCandidate(base);
 
@@ -338,8 +405,9 @@ describe("pickRetryCandidate", () => {
       results: [
         {
           email: "aaaaaaaa-0000-4000-8000-000000000001@example.com",
-          broadcast: { campaign: scoped({ contacted: true }) },
+          broadcast: { campaign: scoped({ contacted: true, queued: true }) },
         },
+        notHeld("aaaaaaaa-0000-4000-8000-000000000002@example.com"),
       ],
     });
 
@@ -376,6 +444,63 @@ describe("pickRetryCandidate", () => {
     checkDeliveryStatus.mockClear();
     expect(await pickRetryCandidate({ ...base, nowMs: NOW + 60_000 })).toBeNull();
     expect(checkDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("never re-serves a lead the sender still holds, however long it has been queued", async () => {
+    // The 2026-09 loop: served 13 days ago, handed over, still in the sender's backlog.
+    rows = [
+      row({
+        id: "aaaaaaaa-0000-4000-8000-000000000001",
+        served_at: new Date(NOW - 13 * 24 * 60 * 60 * 1000).toISOString(),
+        retry_count: 38,
+      }),
+    ];
+    checkDeliveryStatus.mockResolvedValue({
+      results: [
+        {
+          email: "aaaaaaaa-0000-4000-8000-000000000001@example.com",
+          broadcast: { campaign: scoped({ contacted: true, queued: true }) },
+        },
+      ],
+    });
+
+    expect(await pickRetryCandidate(base)).toBeNull();
+    expect(rows[0].retry_count).toBe(38);
+    expect(rows[0].retry_claimed_at).toBeNull();
+  });
+
+  it("does not re-serve anyone when the gateway answered without the sender's half", async () => {
+    rows = [row({ id: "aaaaaaaa-0000-4000-8000-000000000001" })];
+    checkDeliveryStatus.mockResolvedValue({
+      results: [
+        {
+          email: "aaaaaaaa-0000-4000-8000-000000000001@example.com",
+          transactional: { campaign: scoped({}) },
+        },
+      ],
+    });
+
+    expect(await pickRetryCandidate(base)).toBeNull();
+    expect(rows[0].retry_claimed_at).toBeNull();
+  });
+
+  it("still re-serves a lead the sender says it lost, once the TTL has passed", async () => {
+    rows = [
+      row({
+        id: "aaaaaaaa-0000-4000-8000-000000000001",
+        served_at: new Date(NOW - RETRY_QUEUE_TTL_MS - 1000).toISOString(),
+      }),
+    ];
+    checkDeliveryStatus.mockResolvedValue({
+      results: [
+        {
+          email: "aaaaaaaa-0000-4000-8000-000000000001@example.com",
+          broadcast: { campaign: scoped({ contacted: true, queued: false }) },
+        },
+      ],
+    });
+
+    expect((await pickRetryCandidate(base))?.id).toBe("aaaaaaaa-0000-4000-8000-000000000001");
   });
 
   it("falls through to serve-next when email-gateway is unreachable — fail-closed", async () => {

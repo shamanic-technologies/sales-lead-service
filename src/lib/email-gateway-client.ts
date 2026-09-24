@@ -31,6 +31,14 @@ export interface ScopedStatus {
   // forwarded whole by email-gateway. Optional/absent-safe: the deployed gateway
   // omits it until the parallel `sentCount` contract change ships → treat as 0.
   sentCount?: number | null;
+  // Whether the SENDER still holds this lead in its own send queue — i.e. it is not lost,
+  // it is waiting its turn. Stated by the provider that owns the queue (instantly-service)
+  // and forwarded whole by email-gateway. ABSENT (undefined) is a third state: a provider
+  // that keeps no queue (postmark), or an older payload, says nothing — and "not queued"
+  // is a claim this service must not make on the sender's behalf. See `retry-pool.ts`.
+  queued?: boolean;
+  queuedSince?: string | null;
+  awaitingFirstEmail?: boolean;
   lastDeliveredAt: string | null;
   firstContactedAt: string | null;
   firstSentAt: string | null;

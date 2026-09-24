@@ -19,7 +19,18 @@ import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.j
  * new, look at this campaign's own non-terminal serves, ask email-gateway whether they
  * ever reached the vendor, and hand back one we already paid for.
  *
- * Three states, two flags, one TTL — see `decideRetry` for the table.
+ * Four verdicts, three flags, one TTL — see `decideRetry` for the table.
+ *
+ * The SENDER is the only one who knows whether it still holds a lead. Until 2026-09 it
+ * did not say, so this pool guessed from age: contacted, not sent, older than the TTL ⟹
+ * lost. That guess was wrong exactly when it mattered: instantly-service's send queue
+ * backlogged past five days, every lead in it read as lost, and each was re-served —
+ * straight into an idempotent duplicate on the vendor side that sent nothing. One
+ * campaign made 1,643 send attempts over 145 people in a day (one person re-served 38
+ * times) and new-lead serves fell from ~400/day to ~50, because every re-serve takes the
+ * run slot that would have bought someone new. The sender now states `queued`; that
+ * statement decides, and the age guess only applies where the sender says it holds
+ * nothing.
  */
 
 /**
@@ -62,6 +73,12 @@ export type RetryVerdict =
   | "retry"
   /** The vendor holds it inside its own sending window. Leave it alone. */
   | "in_vendor_queue"
+  /**
+   * We cannot tell whether the sender still holds this person (it stated nothing, or it
+   * did not answer). Leave it alone: guessing "lost" is how a lead gets re-served on top
+   * of a queued one, and a person nobody re-serves today is still here tomorrow.
+   */
+  | "unknown"
   /** An email went out. This person is done — mark locally, never query again. */
   | "terminal";
 
@@ -71,6 +88,12 @@ export interface CandidateStatusFlags {
   contacted: boolean;
   /** An email actually went out. Terminal. */
   sent: boolean;
+  /**
+   * The sender's own statement that it still holds this person in its send queue.
+   * `null` = the sender stated nothing (no broadcast answer, or a payload without the
+   * field) — never read as `false`.
+   */
+  queued: boolean | null;
 }
 
 export interface RetryCandidate {
@@ -88,26 +111,34 @@ export interface RetryCandidate {
 /**
  * Decide what to do with one candidate.
  *
- *   | contacted | sent | age since served_at | verdict          |
- *   |-----------|------|---------------------|------------------|
- *   | false     | false| any                 | retry            |
- *   | true      | false| < TTL               | in_vendor_queue  |
- *   | true      | false| >= TTL              | retry            |
- *   | —         | true | any                 | terminal         |
+ *   | sent | queued | contacted | age since served_at | verdict          |
+ *   |------|--------|-----------|---------------------|------------------|
+ *   | true | —      | —         | any                 | terminal         |
+ *   | false| true   | —         | any                 | in_vendor_queue  |
+ *   | false| null   | —         | any                 | unknown          |
+ *   | false| false  | false     | any                 | retry            |
+ *   | false| false  | true      | < TTL               | in_vendor_queue  |
+ *   | false| false  | true      | >= TTL              | retry            |
  *
- * `sent` is checked first: it is terminal regardless of anything else. No status row at
- * all for the email means email-gateway holds no evidence this person was ever
- * contacted, which is exactly the stranded case — retry. An unknown age (a served row
- * with no timestamp at all) counts as still queued rather than lost: the failure we
- * refuse to make is the second email.
+ * `sent` is checked first: it is terminal regardless of anything else. Then the sender's
+ * own `queued` statement: while it holds the person, age means nothing — a backlogged
+ * queue is still a queue. A sender that stated nothing (or no status at all for the
+ * email) is `unknown` and is NOT retried: without its word we cannot tell a stranded
+ * person from a queued one, and only one of those mistakes sends a second email. Only
+ * where the sender says it holds nothing does the old table apply — never handed over ⟹
+ * retry; handed over and older than the TTL ⟹ lost, retry. An unknown age (a served row
+ * with no timestamp at all) counts as still queued rather than lost.
  */
 export function decideRetry(
   flags: CandidateStatusFlags | null,
   servedAt: Date | string | null,
   nowMs: number,
 ): RetryVerdict {
-  if (flags?.sent) return "terminal";
-  if (!flags?.contacted) return "retry";
+  if (!flags) return "unknown";
+  if (flags.sent) return "terminal";
+  if (flags.queued === true) return "in_vendor_queue";
+  if (flags.queued === null) return "unknown";
+  if (!flags.contacted) return "retry";
 
   const servedAtMs = toMillis(servedAt);
   if (servedAtMs === null) return "in_vendor_queue";
@@ -115,7 +146,13 @@ export function decideRetry(
 }
 
 /**
- * Read the campaign-scoped `contacted` / `sent` pair out of one email-gateway result.
+ * Read the campaign-scoped `contacted` / `sent` / `queued` flags out of one email-gateway
+ * result.
+ *
+ * `queued` is the BROADCAST provider's statement (it owns the send queue): true if any
+ * of its scopes for this campaign says so, false only if a scope states false and none
+ * states true, null when the broadcast side is absent (the gateway answers 200 with
+ * only the transactional half when instantly-service fails) or carries no `queued`.
  *
  * The call is campaign-scoped, so `campaign` is the populated scope; `byCampaign` is
  * read as well because the gateway populates it in brand mode and an extra source of
@@ -132,6 +169,7 @@ export function campaignScopeFlags(
 
   let contacted = false;
   let sent = false;
+  let queued: boolean | null = null;
 
   for (const provider of [result.broadcast, result.transactional]) {
     if (!provider) continue;
@@ -140,10 +178,13 @@ export function campaignScopeFlags(
       if (!scope) continue;
       if (scope.contacted) contacted = true;
       if (scope.sent) sent = true;
+      if (provider === result.broadcast && typeof scope.queued === "boolean") {
+        queued = queued === true || scope.queued;
+      }
     }
   }
 
-  return { contacted, sent };
+  return { contacted, sent, queued };
 }
 
 function toMillis(value: Date | string | null): number | null {
@@ -354,12 +395,24 @@ export async function pickRetryCandidate(params: {
 
   const terminalIds: string[] = [];
   const retryable: RetryCandidate[] = [];
+  let queuedCount = 0;
+  let unknownCount = 0;
 
   for (const candidate of candidates) {
     const flags = campaignScopeFlags(byEmail.get(candidate.email.toLowerCase()), params.campaignId);
     const verdict = decideRetry(flags, candidate.servedAt, nowMs);
     if (verdict === "terminal") terminalIds.push(candidate.id);
     else if (verdict === "retry") retryable.push(candidate);
+    else if (verdict === "in_vendor_queue") queuedCount += 1;
+    else unknownCount += 1;
+  }
+
+  // Loud, not silent: a pool whose candidates the sender never states anything about is
+  // a pool that has stopped retrying, and that must be visible in the logs.
+  if (unknownCount > 0) {
+    console.warn(
+      `[lead-service] retry-pool: sender stated no queue state for ${unknownCount}/${candidates.length} candidates campaign=${params.campaignId} — not retried`,
+    );
   }
 
   // Sent people leave the pool whether or not we return anyone this run — that is what
@@ -375,7 +428,7 @@ export async function pickRetryCandidate(params: {
     });
     if (claimed) {
       console.log(
-        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length}`,
+        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} queued=${queuedCount} unknown=${unknownCount}`,
       );
       return candidate;
     }
