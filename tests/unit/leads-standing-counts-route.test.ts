@@ -269,6 +269,18 @@ describe("GET /orgs/leads/standing-counts", () => {
     const res = await counts(`?brandId=${BRAND}&campaignId=c1&offerId=o1`);
     expect(res.status).toBe(400);
   });
+
+  it("counts one funnel of an offer exactly as the offer when that funnel is all it sells", async () => {
+    const offer = await counts(`?brandId=${BRAND}&offerId=o1`);
+    const funnel = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=reply_meeting`);
+    expect(funnel.status).toBe(200);
+    expect(funnel.body).toEqual(offer.body);
+  });
+
+  it("400s a funnel named without its offer, and an unknown funnel", async () => {
+    expect((await counts(`?brandId=${BRAND}&funnelKey=website_purchases`)).status).toBe(400);
+    expect((await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=nope`)).status).toBe(400);
+  });
 });
 
 describe("GET /orgs/leads?standing=", () => {

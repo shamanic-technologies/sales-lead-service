@@ -177,6 +177,7 @@ describe("GET /orgs/leads offer scope", () => {
     expect(resolveOfferCampaignIdsMock).toHaveBeenCalledWith(
       OFFER,
       expect.objectContaining({ orgId: ORG, brandId: BRAND }),
+      null,
     );
   });
 
@@ -275,6 +276,70 @@ describe("GET /orgs/leads offer scope", () => {
     expect(res.body.error).toMatch(/offerId and campaignId/);
     expect(resolveOfferCampaignIdsMock).not.toHaveBeenCalled();
     expect(resolveCampaignFamilyMock).not.toHaveBeenCalled();
+  });
+
+  // One sales funnel of an offer — the offer's campaigns that STATE that funnel.
+  describe("funnelKey narrowing", () => {
+    it("resolves the offer's campaigns on that funnel and filters on exactly those", async () => {
+      resolveOfferCampaignIdsMock.mockResolvedValue([OFFER_CAMPAIGN_A]);
+      mockRows = [rawRow(1, OFFER_CAMPAIGN_A)];
+
+      const res = await get(app, `brandId=${BRAND}&offerId=${OFFER}&funnelKey=sales_meetings_from_conversation`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.leads).toHaveLength(1);
+      expect(resolveOfferCampaignIdsMock).toHaveBeenCalledWith(
+        OFFER,
+        expect.objectContaining({ orgId: ORG, brandId: BRAND }),
+        "sales_meetings_from_conversation",
+      );
+      expect(capturedSqlValues).toContainEqual([OFFER_CAMPAIGN_A]);
+      // A single campaign on the funnel asks email-gateway in campaign mode, like any one-row scope.
+      expect(checkDeliveryStatusMock.mock.calls[0][1]).toBe(OFFER_CAMPAIGN_A);
+    });
+
+    it("accepts the retired spelling and reads it in canonical form", async () => {
+      resolveOfferCampaignIdsMock.mockResolvedValue([OFFER_CAMPAIGN_A]);
+      mockRows = [rawRow(1, OFFER_CAMPAIGN_A)];
+
+      const res = await get(app, `offerId=${OFFER}&funnelKey=reply_meeting`);
+
+      expect(res.status).toBe(200);
+      expect(resolveOfferCampaignIdsMock.mock.calls[0][2]).toBe("sales_meetings_from_conversation");
+    });
+
+    it("answers empty — never the whole offer — when no campaign of the offer is on that funnel", async () => {
+      resolveOfferCampaignIdsMock.mockResolvedValue([]);
+      mockRows = [rawRow(1, OFFER_CAMPAIGN_A)];
+
+      const res = await get(app, `offerId=${OFFER}&funnelKey=website_purchases`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ leads: [], nextCursor: null });
+    });
+
+    it("400s on an unknown funnel key, before resolving anything", async () => {
+      const res = await get(app, `offerId=${OFFER}&funnelKey=not_a_funnel`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/funnelKey/);
+      expect(resolveOfferCampaignIdsMock).not.toHaveBeenCalled();
+    });
+
+    it("400s when a funnel is named without the offer it narrows", async () => {
+      const res = await get(app, `brandId=${BRAND}&funnelKey=website_purchases`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/offerId/);
+      expect(resolveOfferCampaignIdsMock).not.toHaveBeenCalled();
+    });
+
+    it("400s on a repeated funnelKey rather than picking one", async () => {
+      const res = await get(app, `offerId=${OFFER}&funnelKey=website_purchases&funnelKey=form_magnet`);
+
+      expect(res.status).toBe(400);
+      expect(resolveOfferCampaignIdsMock).not.toHaveBeenCalled();
+    });
   });
 
   // No silent fallback in either direction.
