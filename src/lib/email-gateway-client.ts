@@ -39,6 +39,11 @@ export interface ScopedStatus {
   queued?: boolean;
   queuedSince?: string | null;
   awaitingFirstEmail?: boolean;
+  // Whether the SENDER is finished with this person in this scope: it holds their claim, has
+  // nothing left to send, and would answer any further send as a duplicate that sends
+  // nothing. Stated by the provider that owns the claim (instantly-service), forwarded whole
+  // by email-gateway. ABSENT is a third state — nobody said so — and is never read as false.
+  finished?: boolean;
   lastDeliveredAt: string | null;
   firstContactedAt: string | null;
   firstSentAt: string | null;

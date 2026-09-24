@@ -22,6 +22,7 @@ interface Row {
   retry_count: number;
   sent_at: string | null;
   retry_claimed_at: string | null;
+  sender_closed_at?: string | null;
   status: string;
 }
 
@@ -85,6 +86,7 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
       !row ||
       row.status !== "served" ||
       row.sent_at !== null ||
+      (row.sender_closed_at ?? null) !== null ||
       (row.retry_claimed_at !== null && row.retry_claimed_at >= leaseCutoff)
     ) {
       return Promise.resolve([]);
@@ -103,6 +105,7 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
       (r) =>
         r.status === "served" &&
         r.sent_at === null &&
+        (r.sender_closed_at ?? null) === null &&
         (r.retry_claimed_at === null || r.retry_claimed_at < leaseCutoff),
     )
     .sort((a, b) =>
@@ -156,7 +159,9 @@ import {
 const NOW = Date.parse("2026-08-25T12:00:00.000Z");
 const CAMPAIGN = "campaign-1";
 
-function scoped(over: Partial<{ contacted: boolean; sent: boolean; queued: boolean }>) {
+function scoped(
+  over: Partial<{ contacted: boolean; sent: boolean; queued: boolean; finished: boolean }>,
+) {
   return {
     contacted: false,
     sent: false,
@@ -226,23 +231,23 @@ describe("decideRetry", () => {
   const lostAge = new Date(NOW - RETRY_QUEUE_TTL_MS).toISOString();
 
   it("re-serves a person who was paid for and never handed to the vendor", () => {
-    expect(decideRetry({ contacted: false, sent: false, queued: false }, servedAt, NOW)).toBe("retry");
+    expect(decideRetry({ contacted: false, sent: false, queued: false, finished: null }, servedAt, NOW)).toBe("retry");
   });
 
   it("never re-serves a person the sender says it still holds, however old the serve", () => {
     // The production loop: contacted, not sent, 13 days old, sitting in a backlogged queue.
     const thirteenDays = new Date(NOW - 13 * 24 * 60 * 60 * 1000).toISOString();
-    expect(decideRetry({ contacted: true, sent: false, queued: true }, thirteenDays, NOW)).toBe(
+    expect(decideRetry({ contacted: true, sent: false, queued: true, finished: null }, thirteenDays, NOW)).toBe(
       "in_vendor_queue",
     );
-    expect(decideRetry({ contacted: false, sent: false, queued: true }, lostAge, NOW)).toBe(
+    expect(decideRetry({ contacted: false, sent: false, queued: true, finished: null }, lostAge, NOW)).toBe(
       "in_vendor_queue",
     );
   });
 
   it("does not retry when the sender stated nothing about its queue — no guess from age", () => {
-    expect(decideRetry({ contacted: true, sent: false, queued: null }, lostAge, NOW)).toBe("unknown");
-    expect(decideRetry({ contacted: false, sent: false, queued: null }, servedAt, NOW)).toBe("unknown");
+    expect(decideRetry({ contacted: true, sent: false, queued: null, finished: null }, lostAge, NOW)).toBe("unknown");
+    expect(decideRetry({ contacted: false, sent: false, queued: null, finished: null }, servedAt, NOW)).toBe("unknown");
   });
 
   it("does not retry a person email-gateway returned no status for at all", () => {
@@ -251,29 +256,57 @@ describe("decideRetry", () => {
 
   it("leaves a handed-over person the sender no longer holds alone inside the TTL", () => {
     const recent = new Date(NOW - (RETRY_QUEUE_TTL_MS - 1)).toISOString();
-    expect(decideRetry({ contacted: true, sent: false, queued: false }, recent, NOW)).toBe(
+    expect(decideRetry({ contacted: true, sent: false, queued: false, finished: null }, recent, NOW)).toBe(
       "in_vendor_queue",
     );
   });
 
   it("re-serves a handed-over person the sender no longer holds once the TTL has elapsed", () => {
-    expect(decideRetry({ contacted: true, sent: false, queued: false }, lostAge, NOW)).toBe("retry");
+    expect(decideRetry({ contacted: true, sent: false, queued: false, finished: null }, lostAge, NOW)).toBe("retry");
   });
 
   it("treats a served row with no timestamp as still queued, never as lost", () => {
-    expect(decideRetry({ contacted: true, sent: false, queued: false }, null, NOW)).toBe(
+    expect(decideRetry({ contacted: true, sent: false, queued: false, finished: null }, null, NOW)).toBe(
       "in_vendor_queue",
     );
   });
 
   it("is terminal once an email went out, whatever else is stated", () => {
-    expect(decideRetry({ contacted: true, sent: true, queued: true }, servedAt, NOW)).toBe("terminal");
-    expect(decideRetry({ contacted: false, sent: true, queued: null }, servedAt, NOW)).toBe("terminal");
+    expect(decideRetry({ contacted: true, sent: true, queued: true, finished: null }, servedAt, NOW)).toBe("terminal");
+    expect(decideRetry({ contacted: false, sent: true, queued: null, finished: null }, servedAt, NOW)).toBe("terminal");
+  });
+
+  it("closes a person the sender is finished with in this campaign — re-serving can never send", () => {
+    // Campaign 3922c8e1: the sender's sequence ended without an email, every re-send was
+    // answered as a duplicate, and one person was handed out 104 times.
+    const old = new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString();
+    expect(decideRetry({ contacted: true, sent: false, queued: false, finished: true }, old, NOW)).toBe(
+      "sender_closed",
+    );
+    expect(decideRetry({ contacted: true, sent: false, queued: null, finished: true }, servedAt, NOW)).toBe(
+      "sender_closed",
+    );
+  });
+
+  it("a queued or sent statement outranks finished", () => {
+    expect(decideRetry({ contacted: true, sent: false, queued: true, finished: true }, servedAt, NOW)).toBe(
+      "in_vendor_queue",
+    );
+    expect(decideRetry({ contacted: true, sent: true, queued: false, finished: true }, servedAt, NOW)).toBe(
+      "terminal",
+    );
+  });
+
+  it("finished: false changes nothing — the old table still applies", () => {
+    const lostAge2 = new Date(NOW - RETRY_QUEUE_TTL_MS).toISOString();
+    expect(decideRetry({ contacted: true, sent: false, queued: false, finished: false }, lostAge2, NOW)).toBe(
+      "retry",
+    );
   });
 
   it("accepts a Date served_at as well as a string — raw sql hands back either", () => {
     expect(
-      decideRetry({ contacted: true, sent: false, queued: false }, new Date(NOW - 1000), NOW),
+      decideRetry({ contacted: true, sent: false, queued: false, finished: null }, new Date(NOW - 1000), NOW),
     ).toBe("in_vendor_queue");
   });
 });
@@ -285,14 +318,14 @@ describe("campaignScopeFlags", () => {
         { email: "a@example.com", broadcast: { campaign: scoped({ contacted: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false, queued: null });
+    ).toEqual({ contacted: true, sent: false, queued: null, finished: null });
 
     expect(
       campaignScopeFlags(
         { email: "a@example.com", transactional: { campaign: scoped({ sent: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: true, queued: null });
+    ).toEqual({ contacted: false, sent: true, queued: null, finished: null });
   });
 
   it("reads `queued` from the broadcast provider only, true winning over false", () => {
@@ -307,14 +340,14 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false, queued: true });
+    ).toEqual({ contacted: true, sent: false, queued: true, finished: null });
 
     expect(
       campaignScopeFlags(
         { email: "a@example.com", broadcast: { campaign: scoped({ queued: false }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: false });
+    ).toEqual({ contacted: false, sent: false, queued: false, finished: null });
 
     // A transactional scope's `queued` is not the sender's statement.
     expect(
@@ -322,7 +355,29 @@ describe("campaignScopeFlags", () => {
         { email: "a@example.com", transactional: { campaign: scoped({ queued: false }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: null });
+    ).toEqual({ contacted: false, sent: false, queued: null, finished: null });
+  });
+
+  it("reads `finished` from the broadcast provider only, absent staying null", () => {
+    expect(
+      campaignScopeFlags(
+        {
+          email: "a@example.com",
+          broadcast: { campaign: scoped({ contacted: true, queued: false, finished: true }) },
+        },
+        CAMPAIGN,
+      ),
+    ).toEqual({ contacted: true, sent: false, queued: false, finished: true });
+
+    expect(
+      campaignScopeFlags(
+        {
+          email: "a@example.com",
+          transactional: { campaign: scoped({ contacted: true, finished: true }) },
+        },
+        CAMPAIGN,
+      )?.finished,
+    ).toBeNull();
   });
 
   it("states no queue when the broadcast half is missing — the gateway's partial 200", () => {
@@ -343,7 +398,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: true, queued: null });
+    ).toEqual({ contacted: true, sent: true, queued: null, finished: null });
   });
 
   it("ignores another campaign's entry — that is human-service's suppression policy, not this pool's", () => {
@@ -355,7 +410,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: null });
+    ).toEqual({ contacted: false, sent: false, queued: null, finished: null });
   });
 
   it("is null when email-gateway has no result for the email", () => {
@@ -443,6 +498,46 @@ describe("pickRetryCandidate", () => {
     // A later pull neither sees nor asks about them.
     checkDeliveryStatus.mockClear();
     expect(await pickRetryCandidate({ ...base, nowMs: NOW + 60_000 })).toBeNull();
+    expect(checkDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("closes a person the sender is finished with, never claims them, and never re-queries them", async () => {
+    markSentUpdates.length = 0;
+    rows = [
+      row({
+        id: "aaaaaaaa-0000-4000-8000-000000000001",
+        served_at: new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        retry_count: 104,
+      }),
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000002" }),
+    ];
+    checkDeliveryStatus.mockResolvedValue({
+      results: [
+        {
+          email: "aaaaaaaa-0000-4000-8000-000000000001@example.com",
+          broadcast: { campaign: scoped({ contacted: true, queued: false, finished: true }) },
+        },
+        notHeld("aaaaaaaa-0000-4000-8000-000000000002@example.com"),
+      ],
+    });
+
+    const picked = await pickRetryCandidate(base);
+
+    // The slot goes to somebody who can actually be emailed.
+    expect(picked?.id).toBe("aaaaaaaa-0000-4000-8000-000000000002");
+    expect(rows[0].retry_count).toBe(104);
+    expect(rows[0].retry_claimed_at).toBeNull();
+    // Closed with its own marker — NOT sent_at, because nothing was sent.
+    const closed = markSentUpdates.filter((u) => "senderClosedAt" in (u.set as object));
+    expect(closed).toHaveLength(1);
+    expect(closed[0].set).toMatchObject({ senderClosedAt: new Date(NOW) });
+    expect(markSentUpdates.some((u) => "sentAt" in (u.set as object))).toBe(false);
+
+    // What the database persists from that write: a later pull neither sees nor asks.
+    rows[0].sender_closed_at = new Date(NOW).toISOString();
+    rows[1].sent_at = new Date(NOW).toISOString();
+    checkDeliveryStatus.mockClear();
+    expect(await pickRetryCandidate({ ...base, nowMs: NOW + 2 * 60 * 60 * 1000 })).toBeNull();
     expect(checkDeliveryStatus).not.toHaveBeenCalled();
   });
 

@@ -16,7 +16,12 @@ import { randomUUID } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { leads, leadsCampaigns } from "../../src/db/schema.js";
-import { claimCandidate, markSentCandidates } from "../../src/lib/retry-pool.js";
+import {
+  claimCandidate,
+  loadRetryCandidates,
+  markSenderClosedCandidates,
+  markSentCandidates,
+} from "../../src/lib/retry-pool.js";
 
 /**
  * `tests/setup.ts` fills the DSN only when one is absent, so CI's throwaway Postgres wins
@@ -96,5 +101,24 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
 
     expect(first).toBe(true);
     expect(second).toBe(false);
+  });
+
+  it("closes a candidate the sender is finished with: out of the pool, never claimable, not sent", async () => {
+    const id = await seedServedRow();
+
+    await markSenderClosedCandidates([id], Date.now());
+
+    const [after] = await db
+      .select({ senderClosedAt: leadsCampaigns.senderClosedAt, sentAt: leadsCampaigns.sentAt })
+      .from(leadsCampaigns)
+      .where(eq(leadsCampaigns.id, id));
+    expect(after.senderClosedAt).not.toBeNull();
+    expect(after.sentAt).toBeNull();
+
+    const candidates = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now() });
+    expect(candidates.map((c) => c.id)).not.toContain(id);
+
+    const claimed = await claimCandidate({ id, nowMs: Date.now(), runId: randomUUID(), parentRunId: null });
+    expect(claimed).toBe(false);
   });
 });
