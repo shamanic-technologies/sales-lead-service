@@ -1,4 +1,4 @@
--- 0039: what the customer's OWN CRM evidences about a lead we emailed counts on our funnel steps.
+-- 0040: what the customer's OWN CRM evidences about a lead we emailed counts on our funnel steps.
 --
 -- A customer runs their own CRM and we mirror it (crm-service). For a CRM contact PAIRED with one of
 -- our leads (crm-pairing.ts: paired only — never unconfirmed, never rejected), crm-service serves

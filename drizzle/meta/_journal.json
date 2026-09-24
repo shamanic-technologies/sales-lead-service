@@ -279,7 +279,14 @@
       "idx": 39,
       "version": "7",
       "when": 1783209600000,
-      "tag": "0039_crm_evidenced_steps",
+      "tag": "0039_leads_campaigns_sender_closed",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1783296000000,
+      "tag": "0040_crm_evidenced_steps",
       "breakpoints": true
     }
   ]
