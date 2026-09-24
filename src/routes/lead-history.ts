@@ -184,7 +184,8 @@ async function fetchOwnStatements(
   }>;
 
   const trackerRows = (await sql`
-    SELECT id, event, received_at, value_cents, match_confidence, attribution_status
+    SELECT id, event, source, received_at, value_cents, match_confidence, attribution_status,
+           caused_by_outreach
     FROM conversion_events
     WHERE org_id = ${orgId}
       AND brand_id = ${brandId}
@@ -194,14 +195,17 @@ async function fetchOwnStatements(
   `) as unknown as Array<{
     id: string;
     event: string;
+    source: string | null;
     received_at: Date | string | null;
     value_cents: number | null;
     match_confidence: string | null;
     attribution_status: string | null;
+    caused_by_outreach: boolean | null;
   }>;
 
   const neverRows = (await sql`
-    SELECT id, step, campaign_id, created_at, cost_cents, stated_by_user_id, note
+    SELECT id, step, source, campaign_id, created_at, occurred_at, cost_cents, stated_by_user_id,
+           note, crm_evidence->>'crmStep' AS crm_step
     FROM lead_step_disqualifications
     WHERE org_id = ${orgId}
       AND brand_id = ${brandId}
@@ -211,8 +215,11 @@ async function fetchOwnStatements(
   `) as unknown as Array<{
     id: string;
     step: string;
+    source: string | null;
     campaign_id: string | null;
     created_at: Date | string | null;
+    occurred_at: Date | string | null;
+    crm_step: string | null;
     cost_cents: number | null;
     stated_by_user_id: string | null;
     note: string | null;
@@ -229,7 +236,9 @@ async function fetchOwnStatements(
       statedByUserId: row.stated_by_user_id,
       note: row.note,
     })),
-    nevers: neverRows.map((row) => ({
+    // A "never" a PERSON stated is their statement; one the customer's CRM evidences is not, so it
+    // is served beside the other observed outcomes below.
+    nevers: neverRows.filter((row) => row.source !== "crm").map((row) => ({
       id: row.id,
       step: row.step,
       campaignId: row.campaign_id,
@@ -238,14 +247,34 @@ async function fetchOwnStatements(
       statedByUserId: row.stated_by_user_id,
       note: row.note,
     })),
-    tracker: trackerRows.map((row) => ({
-      id: row.id,
-      event: row.event,
-      at: toIsoTimestamp(row.received_at),
-      valueCents: row.value_cents,
-      matchConfidence: row.match_confidence,
-      attributionStatus: row.attribution_status,
-    })),
+    tracker: [
+      ...trackerRows.map((row) => ({
+        id: row.id,
+        event: row.event,
+        at: toIsoTimestamp(row.received_at),
+        valueCents: row.value_cents,
+        matchConfidence: row.match_confidence,
+        attributionStatus: row.attribution_status,
+        observedBy: (row.source === "crm" ? "crm" : "tracker") as "crm" | "tracker",
+        causedByOutreach: row.caused_by_outreach,
+      })),
+      // One per PERSON, not per campaign row: the CRM "never" is written on every row of theirs.
+      ...Array.from(
+        new Map(
+          neverRows
+            .filter((row) => row.source === "crm")
+            .map((row) => [`${row.step}:${row.crm_step}`, row] as const),
+        ).values(),
+      ).map((row) => ({
+        id: row.id,
+        event: row.crm_step ?? row.step,
+        at: toIsoTimestamp(row.occurred_at),
+        valueCents: null,
+        matchConfidence: null,
+        attributionStatus: null,
+        observedBy: "crm" as const,
+      })),
+    ],
   };
 }
 

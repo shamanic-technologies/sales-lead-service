@@ -19,6 +19,7 @@
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { canonicalizeOpportunityState, type CrmOpportunityState } from "./crm-pairing.js";
+import type { CrmFunnelEvent } from "./crm-evidence.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -347,4 +348,65 @@ export async function fetchCrmOpportunitiesByContact(
   for (const raw of body.ungrouped ?? []) push(raw);
 
   return byContact;
+}
+
+// ---------------------------------------------------------------------------
+// Funnel events
+// ---------------------------------------------------------------------------
+
+/**
+ * One contact's dated funnel events, as crm-service serves them. crm-service owns what a
+ * GoHighLevel appointment, stage or status MEANS; nothing here re-derives it.
+ */
+export interface CrmContactFunnelEvents {
+  contactId: string;
+  primaryEmail: string | null;
+  fullName: string | null;
+  events: CrmFunnelEvent[];
+}
+
+/** crm-service caps a funnel-events page at 1000 contacts. */
+const CRM_FUNNEL_EVENTS_PAGE_SIZE = 1_000;
+
+/**
+ * Every contact of the brand carrying at least one funnel event, walked a page at a time. The
+ * population is the contacts WITH events (a few hundred on the first mirrored account), not the
+ * whole CRM.
+ */
+export async function fetchCrmFunnelEvents(
+  brandId: string,
+  ctx: CrmIdentityContext,
+): Promise<CrmContactFunnelEvents[]> {
+  const out: CrmContactFunnelEvents[] = [];
+  let offset = 0;
+  for (;;) {
+    const body = await getJson<{
+      contacts?: Array<{
+        contactId?: string;
+        primaryEmail?: string | null;
+        fullName?: string | null;
+        events?: CrmFunnelEvent[];
+      }>;
+      nextOffset?: number | null;
+    }>(
+      `/orgs/gohighlevel/funnel-events?brandId=${encodeURIComponent(brandId)}` +
+        `&limit=${CRM_FUNNEL_EVENTS_PAGE_SIZE}&offset=${offset}`,
+      ctx,
+    );
+    if (!Array.isArray(body.contacts)) {
+      throw new CrmServiceError("crm-service funnel-events answered with no contacts array");
+    }
+    for (const c of body.contacts) {
+      if (!c.contactId) continue;
+      out.push({
+        contactId: c.contactId,
+        primaryEmail: c.primaryEmail ?? null,
+        fullName: c.fullName ?? null,
+        events: Array.isArray(c.events) ? c.events : [],
+      });
+    }
+    const next = body.nextOffset;
+    if (typeof next !== "number" || next <= offset) return out;
+    offset = next;
+  }
 }

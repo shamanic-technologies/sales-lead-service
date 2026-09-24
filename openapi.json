@@ -1729,9 +1729,10 @@
             "type": "string",
             "enum": [
               "tracker",
-              "manual"
+              "manual",
+              "crm"
             ],
-            "description": "manual — a human stated the deal; tracker — the website tag reported it."
+            "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs."
           }
         },
         "required": [
@@ -2779,13 +2780,57 @@
                   "website_visit",
                   "purchase"
                 ]
+              },
+              "crm": {
+                "type": "object",
+                "properties": {
+                  "signup": {
+                    "type": "integer",
+                    "example": 12
+                  },
+                  "meeting_booked": {
+                    "type": "integer",
+                    "example": 3
+                  },
+                  "meeting_attended": {
+                    "type": "integer",
+                    "example": 2
+                  },
+                  "form_submission": {
+                    "type": "integer",
+                    "example": 7
+                  },
+                  "sale": {
+                    "type": "integer",
+                    "example": 2
+                  },
+                  "website_visit": {
+                    "type": "integer",
+                    "description": "Website visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is NOT counted here, so this number can be ADDED to the measured click count without counting anybody twice. Nothing about what the delivery layer measures changes.",
+                    "example": 1
+                  },
+                  "purchase": {
+                    "type": "integer",
+                    "example": 2
+                  }
+                },
+                "required": [
+                  "signup",
+                  "meeting_booked",
+                  "meeting_attended",
+                  "form_submission",
+                  "sale",
+                  "website_visit",
+                  "purchase"
+                ]
               }
             },
             "required": [
               "tracker",
-              "manual"
+              "manual",
+              "crm"
             ],
-            "description": "The SAME rows, split by who said so: tracker — reported by the client's website; manual — stated by a human about a lead named by id. For every key, tracker + manual === counts. This is how a hand-stated outcome stays distinguishable from a tracker-reported one after the fact without changing what either counts toward."
+            "description": "The SAME rows, split by who said so: tracker — reported by the client's website; manual — stated by a human about a lead named by id; crm — evidenced by the customer's own CRM for a lead paired with a contact of theirs. For every key, tracker + manual + crm === counts. This is how a hand-stated outcome stays distinguishable from a tracker-reported one after the fact without changing what either counts toward."
           },
           "byCause": {
             "type": "object",
@@ -3164,9 +3209,10 @@
             "type": "string",
             "enum": [
               "tracker",
-              "manual"
+              "manual",
+              "crm"
             ],
-            "description": "manual — a human stated it; tracker — the website tag reported it."
+            "description": "manual — a human stated it; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs (causedByOutreach then follows the date rule unless a person overrode it)."
           }
         },
         "required": [
@@ -3541,9 +3587,10 @@
             "enum": [
               "tracker",
               "manual",
+              "crm",
               null
             ],
-            "description": "Who said so. Null on a pending step (nobody has said anything) and on an implied one (nobody stated it)."
+            "description": "Who said so. manual — a person; tracker — the website tag or the delivery layer; crm — the customer's own CRM, for a lead paired with a contact of theirs (not a person's statement, so not withdrawable here). Null on a pending step (nobody has said anything) and on an implied one (nobody stated it)."
           },
           "valueCents": {
             "type": "integer",
@@ -4625,6 +4672,19 @@
             "type": "string",
             "nullable": true
           },
+          "observedBy": {
+            "type": "string",
+            "enum": [
+              "tracker",
+              "crm"
+            ],
+            "description": "On a `conversion`: what observed it — the brand's website tag, or the customer's own CRM for a lead paired with a contact of theirs (then `event` is crm-service's own step word, e.g. sale, meeting_not_held, deal_lost). Neither is a person's statement."
+          },
+          "causedByOutreach": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "On a CRM-observed outcome: whose win it was, as it stands (rule or a person's override)."
+          },
           "statedBy": {
             "type": "string",
             "nullable": true
@@ -4961,7 +5021,54 @@
             "additionalProperties": {
               "nullable": true
             },
-            "description": "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired."
+            "description": "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here."
+          },
+          "ourClosedDeal": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "occurredAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "When the deal closed, ISO-8601 — the date the person stating it gave, not the date they typed it. Null only when genuinely undated; never fabricated.",
+                "example": "2026-08-19T14:30:00.000Z"
+              },
+              "valueCents": {
+                "type": "integer",
+                "nullable": true,
+                "description": "What the deal was worth, in cents. A sale stated from now on always carries one (the write refuses a sale with no value); null means nobody said, NOT zero.",
+                "example": 490000
+              },
+              "costCents": {
+                "type": "integer",
+                "nullable": true,
+                "description": "What the CUSTOMER states closing it cost THEM, in cents. 0 is a stated zero; null means nobody was ever asked. Never platform spend and never billed.",
+                "example": 12000
+              },
+              "causedByOutreach": {
+                "type": "boolean",
+                "nullable": true,
+                "description": "WHOSE win it was. true — the customer states OUR outreach caused this deal. false — they state something else of theirs did (a referral, a conference, their existing pipeline, another agency): the deal is REAL, it stays among the brand's own closes and in every count, it is simply not one to compute the return on our outreach from. null — NOBODY WAS ASKED, which is what every deal stated before this existed reads as, and what a tracker-reported one always reads as (a page-load tag cannot know why somebody bought). Null is never read as either answer.",
+                "example": true
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "tracker",
+                  "manual",
+                  "crm"
+                ],
+                "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs."
+              }
+            },
+            "required": [
+              "occurredAt",
+              "valueCents",
+              "costCents",
+              "causedByOutreach",
+              "source"
+            ],
+            "description": "The deal on our lead, exactly as the leads list serves it (`closedDeal`): stated by a person, reported by the tracker, or evidenced by their own CRM (source crm, causedByOutreach per the date rule unless a person overrode it via /orgs/leads/{id}/crm-attribution). Null when none; absent when nothing paired."
           },
           "theirStatus": {
             "$ref": "#/components/schemas/CrmTheirStatus"
@@ -5144,6 +5251,215 @@
           "crmContactId",
           "leadId",
           "ruling"
+        ]
+      },
+      "CrmAttributionResponse": {
+        "type": "object",
+        "properties": {
+          "leadCampaignId": {
+            "type": "string"
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CrmAttributionStep"
+            }
+          }
+        },
+        "required": [
+          "leadCampaignId",
+          "leadId",
+          "brandId",
+          "steps"
+        ]
+      },
+      "CrmAttributionStep": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": [
+              "meeting_booked",
+              "meeting_attended",
+              "sale"
+            ]
+          },
+          "evidence": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "crmContactId": {
+                "type": "string",
+                "nullable": true
+              },
+              "crmStep": {
+                "type": "string",
+                "nullable": true,
+                "description": "crm-service's own step name, verbatim."
+              },
+              "occurredAt": {
+                "type": "string",
+                "nullable": true
+              },
+              "dateBasis": {
+                "type": "string",
+                "nullable": true
+              },
+              "source": {
+                "type": "string",
+                "nullable": true,
+                "description": "appointment | stage_entry | won_status, as crm-service names it."
+              },
+              "sourceId": {
+                "type": "string",
+                "nullable": true
+              },
+              "valueCents": {
+                "type": "integer",
+                "nullable": true,
+                "description": "On a sale: the won opportunity's value in their CRM, in cents. Null when their CRM holds none."
+              }
+            },
+            "required": [
+              "crmContactId",
+              "crmStep",
+              "occurredAt",
+              "dateBasis",
+              "source",
+              "sourceId",
+              "valueCents"
+            ],
+            "description": "What their CRM evidences for this step, or null when nothing of theirs stands on it (no evidence, the pairing is not confirmed, or a person stated the step themselves, which outranks it)."
+          },
+          "rule": {
+            "$ref": "#/components/schemas/CrmCauseRule"
+          },
+          "statement": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "causedByOutreach": {
+                "type": "boolean"
+              },
+              "note": {
+                "type": "string",
+                "nullable": true
+              },
+              "statedByUserId": {
+                "type": "string",
+                "nullable": true
+              },
+              "statedAt": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "causedByOutreach",
+              "note",
+              "statedByUserId",
+              "statedAt"
+            ],
+            "description": "A person's live override, or null."
+          },
+          "causedByOutreach": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "The answer that stands: the person's override when there is one, else the rule's."
+          },
+          "basis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "rule",
+              "person",
+              null
+            ],
+            "description": "Where `causedByOutreach` comes from. Null when their CRM evidences nothing on this step."
+          }
+        },
+        "required": [
+          "step",
+          "evidence",
+          "rule",
+          "statement",
+          "causedByOutreach",
+          "basis"
+        ]
+      },
+      "CrmCauseRule": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "causedByOutreach": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "after_first_delivery",
+              "before_first_delivery",
+              "event_undated",
+              "never_delivered"
+            ]
+          },
+          "firstDeliveredAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Our first delivered email to this person at brand scope — the rule's other input."
+          }
+        },
+        "required": [
+          "causedByOutreach",
+          "reason",
+          "firstDeliveredAt"
+        ],
+        "description": "The default rule: their CRM event dated AFTER our first delivered email to this lead is our outreach's win (true); at or before it, not ours (false); an undated event, or a lead we never delivered to, is undecided (null) — never attributed to us."
+      },
+      "CrmEvidenceSyncResult": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "contactsWithEvents": {
+            "type": "integer"
+          },
+          "pairedContacts": {
+            "type": "integer"
+          },
+          "leads": {
+            "type": "integer"
+          },
+          "outcomes": {
+            "type": "integer"
+          },
+          "nevers": {
+            "type": "integer"
+          },
+          "withdrawnOutcomes": {
+            "type": "integer"
+          },
+          "withdrawnNevers": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "brandId",
+          "contactsWithEvents",
+          "pairedContacts",
+          "leads",
+          "outcomes",
+          "nevers",
+          "withdrawnOutcomes",
+          "withdrawnNevers"
         ]
       }
     },
@@ -7031,7 +7347,7 @@
     "/internal/brands/{brandId}/conversion-counts": {
       "get": {
         "summary": "Real conversion counts per event type for a brand (internal, service-auth)",
-        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported and hand-stated (tracker + manual === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (the customer states ours caused it), other (they state something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (nobody was asked; every outcome predating the field and every tracker-reported one). outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
+        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (the customer states ours caused it), other (they state something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (nobody was asked; every outcome predating the field and every tracker-reported one). outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
         "parameters": [
           {
             "in": "header",
@@ -8628,6 +8944,454 @@
           },
           "500": {
             "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/crm-attribution": {
+      "get": {
+        "summary": "Whose win each step the customer's own CRM evidences for this lead was",
+        "description": "For a lead PAIRED with a contact in the customer's own CRM (paired only — never unconfirmed or rejected), the steps their CRM evidences (meeting booked, meeting attended, sale) count on our funnel exactly like any other evidence (source crm). Per step this answers the evidence, the default rule's answer to whose win it was, a person's override if any, and which of the two stands.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID of the person making the statement. Stored verbatim as statedByUserId so a statement can be traced back to whoever made it."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand scope. Same meaning as ?brandId=: which of the row's brands the statement is about. A brand the row is not part of answers 404, exactly as an absent row does."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+              "example": "40000000-0000-0000-0000-000000000001"
+            },
+            "required": true,
+            "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id})."
+            },
+            "required": false,
+            "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id}).",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Always all three steps",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrmAttributionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "id is not a uuid"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such lead row for this org (or for the requested brand scope)"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/crm-attribution/{step}": {
+      "put": {
+        "summary": "A person states whose win a CRM-evidenced step was, overriding the date rule",
+        "description": "Outranks the rule and moves every read that carries causedByOutreach (the lead's closed deal, /internal/brands/{brandId}/converted-leads, the byCause split). About the PERSON and the step within the brand. Retractable (DELETE), never deleted.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID of the person making the statement. Stored verbatim as statedByUserId so a statement can be traced back to whoever made it."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand scope. Same meaning as ?brandId=: which of the row's brands the statement is about. A brand the row is not part of answers 404, exactly as an absent row does."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+              "example": "40000000-0000-0000-0000-000000000001"
+            },
+            "required": true,
+            "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "meeting_booked",
+                "meeting_attended",
+                "sale"
+              ]
+            },
+            "required": true,
+            "name": "step",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id})."
+            },
+            "required": false,
+            "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id}).",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "causedByOutreach": {
+                    "type": "boolean"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "causedByOutreach"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The step as it now reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CrmAttributionStep"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "leadCampaignId": {
+                          "type": "string"
+                        },
+                        "leadId": {
+                          "type": "string"
+                        },
+                        "brandId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "leadCampaignId",
+                        "leadId",
+                        "brandId"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "id is not a uuid, step is not one of the three, or causedByOutreach is missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such lead row for this org (or for the requested brand scope)"
+          },
+          "409": {
+            "description": "Their CRM evidences nothing on this step for this lead (code no_crm_evidence)"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Withdraw a person's whose-win override; the rule's answer stands again",
+        "description": "Idempotent: withdrawing what is already withdrawn answers 200 with alreadyWithdrawn=true.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID of the person making the statement. Stored verbatim as statedByUserId so a statement can be traced back to whoever made it."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand scope. Same meaning as ?brandId=: which of the row's brands the statement is about. A brand the row is not part of answers 404, exactly as an absent row does."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+              "example": "40000000-0000-0000-0000-000000000001"
+            },
+            "required": true,
+            "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "meeting_booked",
+                "meeting_attended",
+                "sale"
+              ]
+            },
+            "required": true,
+            "name": "step",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id})."
+            },
+            "required": false,
+            "description": "The brand scope the row was listed under (same as GET /orgs/leads/{id}).",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The step as it now reads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/CrmAttributionStep"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "leadCampaignId": {
+                          "type": "string"
+                        },
+                        "leadId": {
+                          "type": "string"
+                        },
+                        "brandId": {
+                          "type": "string"
+                        },
+                        "withdrawn": {
+                          "type": "boolean"
+                        },
+                        "alreadyWithdrawn": {
+                          "type": "boolean"
+                        }
+                      },
+                      "required": [
+                        "leadCampaignId",
+                        "leadId",
+                        "brandId",
+                        "withdrawn",
+                        "alreadyWithdrawn"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "id is not a uuid, or step is not one of the three"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such lead row for this org (or for the requested brand scope)"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/leads/crm-evidence/sync": {
+      "post": {
+        "summary": "Reflect what the brand's own CRM evidences onto its paired leads, now",
+        "description": "The same pass an in-process worker runs every 10 minutes for every brand whose CRM has been paired. Buys no judgment. A sibling that cannot answer is a 502 and nothing already reflected is set aside.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID of the person making the statement. Stored verbatim as statedByUserId so a statement can be traced back to whoever made it."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand scope. Same meaning as ?brandId=: which of the row's brands the statement is about. A brand the row is not part of answers 404, exactly as an absent row does."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the pass found and wrote",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CrmEvidenceSyncResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "brandId missing or not a uuid"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "crm-service or email-gateway could not answer"
           }
         }
       }

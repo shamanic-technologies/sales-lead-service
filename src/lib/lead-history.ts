@@ -220,6 +220,14 @@ export interface HistoryConversionEvent extends HistoryEventBase {
   valueCents: number | null;
   matchConfidence: string | null;
   attributionStatus: string | null;
+  /**
+   * WHAT observed it: `tracker` — the brand's website tag; `crm` — the customer's own CRM, for a
+   * lead paired with a contact of theirs (then `event` is crm-service's own step word, verbatim,
+   * e.g. `sale`, `meeting_not_held`, `deal_lost`, and `causedByOutreach` is the answer that stands
+   * for an outcome). Neither is a person's statement.
+   */
+  observedBy: "tracker" | "crm";
+  causedByOutreach?: boolean | null;
 }
 
 export interface HistoryFollowupEvent extends HistoryEventBase {
@@ -291,6 +299,9 @@ export interface HistoryTrackerConversion {
   valueCents: number | null;
   matchConfidence: string | null;
   attributionStatus: string | null;
+  /** Absent reads as `tracker`, which is what every row was before a CRM could evidence one. */
+  observedBy?: "tracker" | "crm";
+  causedByOutreach?: boolean | null;
 }
 
 export interface AssembleHistoryInput {
@@ -800,6 +811,8 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
       valueCents: conversion.valueCents,
       matchConfidence: conversion.matchConfidence,
       attributionStatus: conversion.attributionStatus,
+      observedBy: conversion.observedBy ?? "tracker",
+      ...(conversion.observedBy === "crm" ? { causedByOutreach: conversion.causedByOutreach ?? null } : {}),
     });
   }
 

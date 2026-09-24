@@ -1226,8 +1226,10 @@ const ClosedDealSchema = z
         "Null is never read as either answer.",
       example: true,
     }),
-    source: z.enum(["tracker", "manual"]).openapi({
-      description: "manual — a human stated the deal; tracker — the website tag reported it.",
+    source: z.enum(["tracker", "manual", "crm"]).openapi({
+      description:
+        "manual — a human stated the deal; tracker — the website tag reported it; crm — the " +
+        "customer's own CRM evidences it for a lead paired with a contact of theirs.",
     }),
   })
   .openapi("LeadClosedDeal", {
@@ -3082,12 +3084,13 @@ const ConversionCountsResponseSchema = z
         "NOT an outcome and is counted by nothing here.",
     }),
     bySource: z
-      .object({ tracker: StepCountsSchema, manual: StepCountsSchema })
+      .object({ tracker: StepCountsSchema, manual: StepCountsSchema, crm: StepCountsSchema })
       .openapi({
         description:
           "The SAME rows, split by who said so: tracker — reported by the client's website; " +
-          "manual — stated by a human about a lead named by id. For every key, " +
-          "tracker + manual === counts. This is how a hand-stated outcome stays distinguishable " +
+          "manual — stated by a human about a lead named by id; crm — evidenced by the customer's " +
+          "own CRM for a lead paired with a contact of theirs. For every key, " +
+          "tracker + manual + crm === counts. This is how a hand-stated outcome stays distinguishable " +
           "from a tracker-reported one after the fact without changing what either counts toward.",
       }),
     byCause: z
@@ -3132,7 +3135,7 @@ registry.registerPath({
     "by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so " +
     "this number can be added to the measured click count without counting anybody twice (email-gateway " +
     "unreachable → 502, never a guessed count). `bySource` splits the same " +
-    "rows into tracker-reported and hand-stated (tracker + manual === counts, per key), and `byCause` " +
+    "rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` " +
     "splits them by WHOSE win each was: outreach (the customer states ours caused it), other (they " +
     "state something else of theirs did — a real outcome, counted here like any other, simply not one " +
     "to compute OUR return on) and unstated (nobody was asked; every outcome predating the field and " +
@@ -3373,8 +3376,11 @@ const ConvertedLeadOutcomeSchema = z
         "which answers whether we managed to identify who somebody was.",
       example: true,
     }),
-    source: z.enum(["tracker", "manual"]).openapi({
-      description: "manual — a human stated it; tracker — the website tag reported it.",
+    source: z.enum(["tracker", "manual", "crm"]).openapi({
+      description:
+        "manual — a human stated it; tracker — the website tag reported it; crm — the customer's " +
+        "own CRM evidences it for a lead paired with a contact of theirs (causedByOutreach then " +
+        "follows the date rule unless a person overrode it).",
     }),
   })
   .openapi("ConvertedLeadOutcome");
@@ -3722,9 +3728,12 @@ const StepStateSchema = z
     stepIndex: z.number().int().nullable().openapi({
       description: "Where the step sits on the funnel, or null when the funnel does not contain it.",
     }),
-    source: z.enum(["tracker", "manual"]).nullable().openapi({
+    source: z.enum(["tracker", "manual", "crm"]).nullable().openapi({
       description:
-        "Who said so. Null on a pending step (nobody has said anything) and on an implied one (nobody stated it).",
+        "Who said so. manual — a person; tracker — the website tag or the delivery layer; crm — the " +
+        "customer's own CRM, for a lead paired with a contact of theirs (not a person's statement, " +
+        "so not withdrawable here). Null on a pending step (nobody has said anything) and on an " +
+        "implied one (nobody stated it).",
     }),
     valueCents: z.number().int().nullable(),
     causedByOutreach: z.boolean().nullable().openapi({
@@ -4546,6 +4555,15 @@ const HistoryEventSchema = z
     costCents: z.number().nullable().optional(),
     matchConfidence: z.string().nullable().optional(),
     attributionStatus: z.string().nullable().optional(),
+    observedBy: z.enum(["tracker", "crm"]).optional().openapi({
+      description:
+        "On a `conversion`: what observed it — the brand's website tag, or the customer's own CRM for a lead " +
+        "paired with a contact of theirs (then `event` is crm-service's own step word, e.g. sale, " +
+        "meeting_not_held, deal_lost). Neither is a person's statement.",
+    }),
+    causedByOutreach: z.boolean().nullable().optional().openapi({
+      description: "On a CRM-observed outcome: whose win it was, as it stands (rule or a person's override).",
+    }),
     statedBy: z.string().nullable().optional(),
     note: z.string().nullable().optional(),
     state: z.enum(["scheduled", "stopped"]).optional(),
@@ -4826,8 +4844,16 @@ const CrmPairingRowSchema = z
       .nullable()
       .openapi({
         description:
-          "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired.",
+          "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. " +
+          "A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here.",
       }),
+    ourClosedDeal: ClosedDealSchema.nullable().optional().openapi({
+      description:
+        "The deal on our lead, exactly as the leads list serves it (`closedDeal`): stated by a person, " +
+        "reported by the tracker, or evidenced by their own CRM (source crm, causedByOutreach per the " +
+        "date rule unless a person overrode it via /orgs/leads/{id}/crm-attribution). Null when none; " +
+        "absent when nothing paired.",
+    }),
     theirStatus: CrmTheirStatusSchema,
   })
   .openapi("CrmPairingRow");
@@ -5063,6 +5089,212 @@ registry.registerPath({
     400: { description: "A missing or malformed brandId, crmContactId or leadId" },
     401: { description: "Unauthorized" },
     409: { description: "Nobody has ruled on this pairing (code nothing_stated)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+// ---------------------------------------------------------------------------
+// What the customer's own CRM evidences, and whose win it was
+// ---------------------------------------------------------------------------
+
+const CRM_EVIDENCED_STEP_ENUM = ["meeting_booked", "meeting_attended", "sale"] as const;
+
+const CrmCauseRuleSchema = z
+  .object({
+    causedByOutreach: z.boolean().nullable(),
+    reason: z.enum(["after_first_delivery", "before_first_delivery", "event_undated", "never_delivered"]),
+    firstDeliveredAt: z.string().nullable().openapi({
+      description: "Our first delivered email to this person at brand scope — the rule's other input.",
+    }),
+  })
+  .openapi("CrmCauseRule", {
+    description:
+      "The default rule: their CRM event dated AFTER our first delivered email to this lead is our " +
+      "outreach's win (true); at or before it, not ours (false); an undated event, or a lead we never " +
+      "delivered to, is undecided (null) — never attributed to us.",
+  });
+
+const CrmAttributionStepSchema = z
+  .object({
+    step: z.enum(CRM_EVIDENCED_STEP_ENUM),
+    evidence: z
+      .object({
+        crmContactId: z.string().nullable(),
+        crmStep: z.string().nullable().openapi({ description: "crm-service's own step name, verbatim." }),
+        occurredAt: z.string().nullable(),
+        dateBasis: z.string().nullable(),
+        source: z.string().nullable().openapi({ description: "appointment | stage_entry | won_status, as crm-service names it." }),
+        sourceId: z.string().nullable(),
+        valueCents: z.number().int().nullable().openapi({
+          description: "On a sale: the won opportunity's value in their CRM, in cents. Null when their CRM holds none.",
+        }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "What their CRM evidences for this step, or null when nothing of theirs stands on it (no evidence, " +
+          "the pairing is not confirmed, or a person stated the step themselves, which outranks it).",
+      }),
+    rule: CrmCauseRuleSchema.nullable(),
+    statement: z
+      .object({
+        causedByOutreach: z.boolean(),
+        note: z.string().nullable(),
+        statedByUserId: z.string().nullable(),
+        statedAt: z.string().nullable(),
+      })
+      .nullable()
+      .openapi({ description: "A person's live override, or null." }),
+    causedByOutreach: z.boolean().nullable().openapi({
+      description: "The answer that stands: the person's override when there is one, else the rule's.",
+    }),
+    basis: z.enum(["rule", "person"]).nullable().openapi({
+      description: "Where `causedByOutreach` comes from. Null when their CRM evidences nothing on this step.",
+    }),
+  })
+  .openapi("CrmAttributionStep");
+
+const CrmAttributionResponseSchema = z
+  .object({
+    leadCampaignId: z.string(),
+    leadId: z.string(),
+    brandId: z.string(),
+    steps: z.array(CrmAttributionStepSchema),
+  })
+  .openapi("CrmAttributionResponse");
+
+const CrmAttributionStepParams = LeadRowIdPathParam.extend({
+  step: z.enum(CRM_EVIDENCED_STEP_ENUM).openapi({ param: { name: "step", in: "path" } }),
+});
+
+const CrmAttributionBrandQuery = z.object({
+  brandId: z.string().uuid().optional().openapi({
+    description: "The brand scope the row was listed under (same as GET /orgs/leads/{id}).",
+  }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/crm-attribution",
+  summary: "Whose win each step the customer's own CRM evidences for this lead was",
+  description:
+    "For a lead PAIRED with a contact in the customer's own CRM (paired only — never unconfirmed or " +
+    "rejected), the steps their CRM evidences (meeting booked, meeting attended, sale) count on our " +
+    "funnel exactly like any other evidence (source crm). Per step this answers the evidence, the default " +
+    "rule's answer to whose win it was, a person's override if any, and which of the two stands.",
+  request: { params: LeadRowIdPathParam, query: CrmAttributionBrandQuery },
+  parameters: StepStatementOrgHeaders,
+  responses: {
+    200: { description: "Always all three steps", content: { "application/json": { schema: CrmAttributionResponseSchema } } },
+    400: { description: "id is not a uuid" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such lead row for this org (or for the requested brand scope)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/leads/{id}/crm-attribution/{step}",
+  summary: "A person states whose win a CRM-evidenced step was, overriding the date rule",
+  description:
+    "Outranks the rule and moves every read that carries causedByOutreach (the lead's closed deal, " +
+    "/internal/brands/{brandId}/converted-leads, the byCause split). About the PERSON and the step within " +
+    "the brand. Retractable (DELETE), never deleted.",
+  request: {
+    params: CrmAttributionStepParams,
+    query: CrmAttributionBrandQuery,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ causedByOutreach: z.boolean(), note: z.string().optional() }),
+        },
+      },
+    },
+  },
+  parameters: StepStatementOrgHeaders,
+  responses: {
+    200: {
+      description: "The step as it now reads",
+      content: {
+        "application/json": {
+          schema: CrmAttributionStepSchema.extend({
+            leadCampaignId: z.string(),
+            leadId: z.string(),
+            brandId: z.string(),
+          }),
+        },
+      },
+    },
+    400: { description: "id is not a uuid, step is not one of the three, or causedByOutreach is missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such lead row for this org (or for the requested brand scope)" },
+    409: { description: "Their CRM evidences nothing on this step for this lead (code no_crm_evidence)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/leads/{id}/crm-attribution/{step}",
+  summary: "Withdraw a person's whose-win override; the rule's answer stands again",
+  description: "Idempotent: withdrawing what is already withdrawn answers 200 with alreadyWithdrawn=true.",
+  request: { params: CrmAttributionStepParams, query: CrmAttributionBrandQuery },
+  parameters: StepStatementOrgHeaders,
+  responses: {
+    200: {
+      description: "The step as it now reads",
+      content: {
+        "application/json": {
+          schema: CrmAttributionStepSchema.extend({
+            leadCampaignId: z.string(),
+            leadId: z.string(),
+            brandId: z.string(),
+            withdrawn: z.boolean(),
+            alreadyWithdrawn: z.boolean(),
+          }),
+        },
+      },
+    },
+    400: { description: "id is not a uuid, or step is not one of the three" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such lead row for this org (or for the requested brand scope)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/leads/crm-evidence/sync",
+  summary: "Reflect what the brand's own CRM evidences onto its paired leads, now",
+  description:
+    "The same pass an in-process worker runs every 10 minutes for every brand whose CRM has been paired. " +
+    "Buys no judgment. A sibling that cannot answer is a 502 and nothing already reflected is set aside.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  parameters: StepStatementOrgHeaders,
+  responses: {
+    200: {
+      description: "What the pass found and wrote",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              contactsWithEvents: z.number().int(),
+              pairedContacts: z.number().int(),
+              leads: z.number().int(),
+              outcomes: z.number().int(),
+              nevers: z.number().int(),
+              withdrawnOutcomes: z.number().int(),
+              withdrawnNevers: z.number().int(),
+            })
+            .openapi("CrmEvidenceSyncResult"),
+        },
+      },
+    },
+    400: { description: "brandId missing or not a uuid" },
+    401: { description: "Unauthorized" },
+    502: { description: "crm-service or email-gateway could not answer" },
     500: { description: "Internal server error" },
   },
 });
