@@ -169,12 +169,23 @@ describe("streamBasicLeadChunks — bounded reads", () => {
     expect(executed[0]).toEqual({ limit: 4, offset: 50, cursorId: null });
   });
 
-  it("spends offset on the FIRST page only — later pages continue by keyset", async () => {
-    // chunkSize below the limit forces a second page inside one call.
-    await collect({ limit: 6, cursor: null, offset: 10 }, 3);
-    expect(executed[0]).toEqual({ limit: 3, offset: 10, cursorId: null });
-    expect(executed[1].offset).toBeNull();
-    expect(executed[1].cursorId).toBe(mockRows[12].id);
+  it("reads a bounded page in ONE statement, however many chunks it streams in", async () => {
+    // chunkSize below the limit: the page arrives in two chunks, but it is one execution carrying
+    // the whole bound. A statement per chunk re-ran the brand's whole-population dedup per chunk —
+    // ten times for a 5,000-row page in production.
+    const ids = await collect({ limit: 6, cursor: null, offset: 10 }, 3);
+    expect(ids).toEqual(mockRows.slice(10, 16).map((r) => r.id));
+    expect(executed).toEqual([{ limit: 6, offset: 10, cursorId: null }]);
+  });
+
+  it("resumes from a keyset cursor in ONE statement", async () => {
+    const last = mockRows[20];
+    const ids = await collect(
+      { limit: 5, cursor: { createdAt: last.created_at_cursor as string, id: last.id as string }, offset: null },
+      2,
+    );
+    expect(ids).toEqual(mockRows.slice(21, 26).map((r) => r.id));
+    expect(executed).toEqual([{ limit: 5, offset: null, cursorId: last.id }]);
   });
 });
 

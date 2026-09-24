@@ -243,6 +243,13 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
   };
 }
 
+// THE PAGE IS CHOSEN BEFORE ANYTHING IS JOINED ONTO IT. The scope filter, the keyset position and
+// the LIMIT/OFFSET all live in the inner subquery, so the per-lead lookups below (the person, the
+// current employer, the primary email) run once per row that is RETURNED, not once per row in the
+// brand. With them on the outer query instead, Postgres joined all three onto the brand's whole
+// deduped population and only then sorted and cut it: measured in production on a 49,792-row brand,
+// every 500-row chunk cost ~1.2 s, of which ~1.05 s was lookups for rows the LIMIT then threw away.
+// Same rows, same order, same columns — only where the cut happens moved.
 function basicLeadQuery(
   f: BasicLeadFilters,
   cursor: BasicLeadCursor | null,
@@ -267,7 +274,22 @@ function basicLeadQuery(
       org.founded_year, org.short_description,
       org.org_city, org.org_state, org.org_country,
       em.value AS email_value, em.status AS email_status
-    FROM ${leadCampaignBaseRelation(f)}
+    FROM (
+      SELECT lc.*
+      FROM ${leadCampaignBaseRelation(f)}
+      WHERE lc.org_id = ${f.orgId}
+        ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
+        ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
+        ${leadStatusScope(f) ? sql`AND lc.status = ANY(${leadStatusScope(f)!})` : sql``}
+        ${f.queryOrgId ? sql`AND lc.org_id = ${f.queryOrgId}` : sql``}
+        ${f.userId ? sql`AND lc.user_id = ${f.userId}` : sql``}
+        ${f.workflowSlug ? sql`AND lc.workflow_slug = ${f.workflowSlug}` : sql``}
+        ${leadRowIdScope(f) ? sql`AND lc.id = ANY(${leadRowIdScope(f)!}::uuid[])` : sql``}
+        ${cursor ? sql`AND (lc.created_at, lc.id) > (${leadCursorTimestampParam(cursor)}, ${cursor.id})` : sql``}
+      ORDER BY lc.created_at ASC, lc.id ASC
+      ${limit == null ? sql`` : sql`LIMIT ${limit}`}
+      ${offset == null || offset === 0 ? sql`` : sql`OFFSET ${offset}`}
+    ) lc
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
       SELECT lo.title AS current_title,
@@ -290,18 +312,7 @@ function basicLeadQuery(
       ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
       LIMIT 1
     ) em ON true
-    WHERE lc.org_id = ${f.orgId}
-      ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
-      ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
-      ${leadStatusScope(f) ? sql`AND lc.status = ANY(${leadStatusScope(f)!})` : sql``}
-      ${f.queryOrgId ? sql`AND lc.org_id = ${f.queryOrgId}` : sql``}
-      ${f.userId ? sql`AND lc.user_id = ${f.userId}` : sql``}
-      ${f.workflowSlug ? sql`AND lc.workflow_slug = ${f.workflowSlug}` : sql``}
-      ${leadRowIdScope(f) ? sql`AND lc.id = ANY(${leadRowIdScope(f)!}::uuid[])` : sql``}
-      ${cursor ? sql`AND (lc.created_at, lc.id) > (${leadCursorTimestampParam(cursor)}, ${cursor.id})` : sql``}
     ORDER BY lc.created_at ASC, lc.id ASC
-    ${limit == null ? sql`` : sql`LIMIT ${limit}`}
-    ${offset == null || offset === 0 ? sql`` : sql`OFFSET ${offset}`}
   `;
 }
 
@@ -330,14 +341,14 @@ export async function fetchBasicLeadRows(f: BasicLeadFilters): Promise<BasicLead
 /**
  * Stream the scoped population in chunks of at most `chunkSize`.
  *
- * An UNBOUNDED read (no limit, no start position — every caller before bounds existed, and the
- * staff console today) keeps the server-side `.cursor()` path byte for byte: one query, streamed,
- * no re-execution per chunk.
+ * ONE statement per read, streamed through a server-side `.cursor()`, whether or not the read is
+ * bounded. A bounded read carries its `limit` / keyset `cursor` / `offset` INTO that statement, so
+ * it never fetches more rows than the caller asked for — the delivery overlay and the JSON
+ * serialization stay per-returned-row, which is what makes a `limit=50` read cheap.
  *
- * A BOUNDED read walks by keyset over `(created_at, id)`, never fetching more rows than the caller
- * asked for. That is what makes a bounded read cheap: the delivery overlay, the audience
- * resolution and the JSON serialization are all per-returned-row, so a `limit=50` read does 50
- * rows' worth of them instead of the brand's whole population.
+ * It used to issue a SEPARATE statement per chunk of a bounded page, and each one re-ran the brand's
+ * whole-population dedup (see leadCampaignBaseRelation) just to cut the next 500 rows off it: a
+ * 5,000-row page of a 49,792-row brand paid that dedup ten times. One statement pays it once.
  */
 export async function* streamBasicLeadChunks(
   f: BasicLeadFilters,
@@ -345,31 +356,8 @@ export async function* streamBasicLeadChunks(
   page: LeadListPage = UNBOUNDED_LEAD_PAGE,
 ): AsyncGenerator<BasicLeadRow[]> {
   const size = Math.max(1, chunkSize);
-  if (page.limit === null && page.cursor === null && page.offset === null) {
-    for await (const rows of basicLeadQuery(f, null, null).cursor(size)) {
-      if (rows.length === 0) continue;
-      yield rows.map(mapRow);
-    }
-    return;
-  }
-
-  let cursor: BasicLeadCursor | null = page.cursor;
-  // OFFSET only positions the FIRST page; the walk continues by keyset from there.
-  let offset: number | null = page.offset;
-  let remaining = page.limit;
-
-  while (remaining === null || remaining > 0) {
-    const take = remaining === null ? size : Math.min(size, remaining);
-    const rows = await basicLeadQuery(f, cursor, take, offset);
-    offset = null;
-    if (rows.length === 0) return;
-
-    const mapped = rows.map(mapRow);
-    yield mapped;
-    if (remaining !== null) remaining -= mapped.length;
-
-    if (rows.length < take) return;
-    const last = mapped[mapped.length - 1];
-    cursor = { createdAt: last.cursorCreatedAt, id: last.id };
+  for await (const rows of basicLeadQuery(f, page.cursor, page.limit, page.offset).cursor(size)) {
+    if (rows.length === 0) continue;
+    yield rows.map(mapRow);
   }
 }
