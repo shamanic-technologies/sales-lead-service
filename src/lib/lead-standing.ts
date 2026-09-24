@@ -421,6 +421,93 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
 }
 
 /**
+ * WHERE ON THE FUNNEL a `sales_interest` lead stands — the finer reading of that one state.
+ *
+ * `sales_interest` means "reached some step of the funnel this campaign sells, short of its last":
+ * a lead who replied positively and a lead who booked a meeting both stand there, and for every
+ * consumer that only asks WHETHER somebody is in play that is exactly right, so it is unchanged.
+ * A board that draws one column per funnel step needs the finer answer, and it has to be a
+ * PARTITION of `sales_interest` (one step per lead, columns that do not overlap, sizes that add
+ * up), which the nested engagement buckets cannot be — somebody who attended also booked.
+ *
+ * So the stage is the DEEPEST step known to have been reached, read off the same standing: the
+ * deepest statable funnel step when one reads as reached (stated, implied by a later step, tracker-
+ * reported or CRM-evidenced — the standing already resolved which), otherwise the funnel's ENTRY
+ * step, which is what put the lead at `sales_interest` in the first place (a positive reply on a
+ * conversation-led funnel, a click on a visit-led one). Nothing is re-derived: this is a projection
+ * of `deepestStep` / `entryStep`, which the standing already carries on every row.
+ *
+ * The vocabulary is the funnel's own step names: `conversation_reply` / `website_visit` for an
+ * entry (brand-service's funnel vocabulary, as `entryStep` already is), and the outcome names for
+ * every later step (`meeting_booked`, `meeting_attended`, `signup`, `form_submission`). The last
+ * step (`sale`) is never a stage — a lead who reached it is a `customer`.
+ *
+ * Null for every state other than `sales_interest`.
+ */
+export function salesInterestStage(standing: LeadStanding): string | null {
+  if (standing.state !== "sales_interest") return null;
+  const stage = standing.deepestStep ?? standing.entryStep;
+  if (stage === null) {
+    // Unreachable by construction: `sales_interest` is only ever reached through a funnel step or
+    // the funnel's measured entry. A stage nobody can name must not be counted under a guessed one.
+    throw new Error("a sales_interest standing names neither a funnel step nor an entry step");
+  }
+  return stage;
+}
+
+/**
+ * Every stage a `sales_interest` lead can stand at, in the order a funnel is walked. The ENTRY
+ * steps an ads-led funnel starts at are absent: nothing here observes an ad click, so no lead can
+ * ever stand there and a zero would be a claim, not a count.
+ */
+export const SALES_INTEREST_STAGES = [
+  "conversation_reply",
+  "website_visit",
+  "signup",
+  "form_submission",
+  "meeting_booked",
+  "meeting_attended",
+] as const;
+export type SalesInterestStage = (typeof SALES_INTEREST_STAGES)[number];
+
+/**
+ * The stages ONE funnel's `sales_interest` leads can stand at, in funnel order: its measured entry,
+ * then every statable step short of the last. A visit-led funnel's entry and first statable step
+ * are the same step (`website_visit`), so it appears once.
+ */
+export function salesInterestStagesOf(
+  entry: FunnelEntry,
+  steps: readonly LeadStepOutcomeName[],
+): SalesInterestStage[] {
+  const out: string[] = [];
+  if (entry.measure !== null) out.push(entry.step);
+  for (const step of steps.slice(0, -1)) if (!out.includes(step)) out.push(step);
+  return out.filter((s): s is SalesInterestStage =>
+    (SALES_INTEREST_STAGES as readonly string[]).includes(s),
+  );
+}
+
+/**
+ * Resolve the `stage` query param: a comma-separated list of `SALES_INTEREST_STAGES`, read as ONE
+ * set exactly as `standing` is. Absent -> null. Anything unknown, or an empty set, is a 400.
+ */
+export function parseSalesInterestStageFilter(raw: unknown): readonly SalesInterestStage[] | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string") throw new Error("stage must be a single comma-separated string");
+  const parts = raw.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    throw new Error(`stage must name at least one of: ${SALES_INTEREST_STAGES.join(", ")}`);
+  }
+  const unknown = parts.filter((p) => !(SALES_INTEREST_STAGES as readonly string[]).includes(p));
+  if (unknown.length > 0) {
+    throw new Error(
+      `Unknown stage value(s): ${unknown.join(", ")}. Valid: ${SALES_INTEREST_STAGES.join(", ")}`,
+    );
+  }
+  return Array.from(new Set(parts)) as SalesInterestStage[];
+}
+
+/**
  * Resolve the `standing` query param into the standings a read answers for.
  *
  * Absent → null (no standing filter). Otherwise a COMMA-SEPARATED list of standing states, read as

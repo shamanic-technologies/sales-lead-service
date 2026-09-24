@@ -123,6 +123,51 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect(standings.counts.not_contacted).toBe(1); // Ada was served and nothing reached her
   });
 
+  it("splits sales_interest by funnel stage — a partition, stored per row, pageable per stage", async () => {
+    // John clicked on a visit-led funnel: sales_interest at its entry. Ada books a meeting.
+    const [booked] = await db
+      .insert(conversionEvents)
+      .values({
+        brandId,
+        orgId,
+        event: "meeting_booked",
+        matchedLeadId: people[3].leadId,
+        leadCampaignId: people[3].rowId,
+        matchConfidence: "exact",
+        attributionStatus: "attributed",
+        source: "manual",
+        costCents: 0,
+      })
+      .returning({ id: conversionEvents.id });
+    try {
+      const m = await model.ensureReadModel(scope);
+      const { counts, stages } = await model.readModelStandingAndStageCounts(m, null);
+      expect(counts.sales_interest).toBe(2);
+      expect(Object.fromEntries(stages)).toEqual({ website_visit: 1, meeting_booked: 1 });
+      expect([...stages.values()].reduce((a, b) => a + b, 0)).toBe(counts.sales_interest);
+      // The plain count answers exactly as before.
+      expect((await model.readModelStandingCounts(m, null)).counts).toEqual(counts);
+
+      const page = await model.readModelPage(m, {
+        tokens: null,
+        bucket: null,
+        standings: null,
+        stages: ["meeting_booked"],
+        sort: "activity",
+        page: { limit: 10, cursor: null, offset: null },
+      });
+      expect(page.total).toBe(1);
+      const ids: string[] = [];
+      for await (const chunk of page.ids(10)) ids.push(...chunk);
+      expect(ids).toEqual([people[3].rowId]);
+    } finally {
+      await db
+        .update(conversionEvents)
+        .set({ withdrawnAt: new Date() })
+        .where(eq(conversionEvents.id, booked.id));
+    }
+  });
+
   it("asks the delivery layer NOTHING when there is nothing new to apply", async () => {
     await model.ensureReadModel(scope);
     gatewayCalls = [];
