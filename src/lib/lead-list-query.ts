@@ -51,6 +51,13 @@ export interface LeadListScope {
    * the one counted. Row ORDER is restored by the caller from the index, not by this filter.
    */
   rowIds?: readonly string[];
+  /**
+   * Restrict the read to these PEOPLE (`leads_campaigns.lead_id`). Unlike `rowIds` this is safe
+   * INSIDE the dedup subquery: the dedup is per person (`DISTINCT ON (lead_id)`), so narrowing to a
+   * set of people never changes which membership row wins for any of them. It is what lets the read
+   * model (lead-read-model.ts) recompute a handful of people without re-deduping a whole brand.
+   */
+  leadIds?: readonly string[];
 }
 
 /**
@@ -309,6 +316,7 @@ export function leadCampaignBaseRelation(f: LeadListScope) {
       ${f.queryOrgId ? sql`AND lc0.org_id = ${f.queryOrgId}` : sql``}
       ${f.userId ? sql`AND lc0.user_id = ${f.userId}` : sql``}
       ${f.workflowSlug ? sql`AND lc0.workflow_slug = ${f.workflowSlug}` : sql``}
+      ${f.leadIds ? sql`AND lc0.lead_id = ANY(${[...f.leadIds]}::uuid[])` : sql``}
     ORDER BY lc0.lead_id,
       CASE lc0.status
         WHEN 'served' THEN 3

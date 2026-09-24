@@ -34,24 +34,22 @@ import { watchClient, isClientGone } from "../lib/client-abort.js";
 import { ResponseWriter } from "../lib/stream-writer.js";
 import { leadExportHeader, leadExportLine } from "../lib/lead-export.js";
 import { parseLeadBucket, zeroBucketCounts, type LeadBucket } from "../lib/lead-buckets.js";
-import { countLeadListRows, streamLeadIndex } from "../lib/lead-index.js";
-import { addBucketCounts, enrichLeadIndex, type EngagementContext } from "../lib/lead-engagement.js";
+import { countLeadListRows } from "../lib/lead-index.js";
+import { standingDelivery } from "../lib/lead-standing-index.js";
+import { parseLeadSort, type LeadSortOrder } from "../lib/lead-page-plan.js";
 import {
-  addStandingCounts,
-  attachLeadStandings,
-  standingDelivery,
-} from "../lib/lead-standing-index.js";
-import {
-  leadRowInRead,
-  parseLeadSort,
-  standingFilterSet,
-  type LeadSortOrder,
-} from "../lib/lead-page-plan.js";
-import {
-  openLeadPlanStore,
+  ensureReadModel,
+  noteEvidenceChanged,
+  readModelBucketCounts,
+  readModelDelivery,
+  readModelPage,
+  readModelScopeFor,
+  readModelStandingCounts,
+  ReadModelUnavailableError,
   type LeadPlanPage,
-  type LeadPlanStore,
-} from "../lib/lead-plan-store.js";
+  type ReadModel,
+} from "../lib/lead-read-model.js";
+import { LeadEvidenceChangedRequestSchema } from "../schemas.js";
 import { resolveAudiencesForBrand, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
 import { createOfferCardResolver, type OfferCard } from "../lib/offer-card-client.js";
 import {
@@ -91,18 +89,6 @@ export { flattenBrandStatus, flattenCampaignStatus, flattenFamilyStatus };
 // bounded by LEADS_STREAM_CHUNK_SIZE regardless of the brand's lead count.
 // The wire shape is byte-identical to the old res.json({ leads }) — `{"leads":[...]}`.
 const LEADS_STREAM_CHUNK_SIZE = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
-
-/**
- * How many people one pass of the index walk holds at once.
- *
- * This is the number that bounds a filtered read's peak memory: the walk indexes this many rows,
- * fetches their evidence, judges them and writes the survivors' positions to the database-side
- * plan, and then the chunk is garbage. It is deliberately a CONSTANT and not a function of the
- * population — that is the whole fix (see lead-plan-store.ts for what the population-sized version
- * cost). Bigger means fewer round trips and more heap; 1,000 keeps each gateway fan-out at ten
- * requests and each plan INSERT at one statement.
- */
-const LEAD_INDEX_CHUNK_SIZE = Math.max(1, Number(process.env.LEAD_INDEX_CHUNK_SIZE) || 1000);
 
 // postgres.js returns timestamptz as Date OR string depending on the path; the cursor carries
 // whichever came back and normalizes at encode time (see LeadListCursor).
@@ -504,29 +490,6 @@ class LeadReadRefused extends Error {
   }
 }
 
-/**
- * The context the population-wide evidence pass runs under: the SAME identity headers, the SAME
- * delivery scope and the SAME flatten the per-row overlay uses, so a bucket count and the row it
- * counted can never disagree about what happened to that person.
- */
-function engagementContext(
-  req: AuthenticatedRequest,
-  scope: LeadListScope,
-  brandId: string | undefined,
-  statusCampaignId: string | undefined,
-  flatten: (result: StatusResult) => FlattenedStatus,
-  deliveryQueried: boolean,
-): EngagementContext {
-  return {
-    serviceContext: getServiceContext(req),
-    statusCampaignId,
-    flatten,
-    deliveryQueried,
-    orgId: scope.orgId,
-    brandId,
-  };
-}
-
 /** What a caller asks the response to be. Absent means JSON, exactly as today. */
 type LeadListFormat = "json" | "csv";
 
@@ -778,9 +741,6 @@ const compactCompression = compression({ filter: (req) => req.query.view === "co
 
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
-  // The database-side plan of a filtered read, when there is one. Closed in the `finally` below,
-  // however the read ends — it holds a reserved connection and two temp tables.
-  let planStore: LeadPlanStore | null = null;
   // Every byte of a streamed response goes through this: it batches the per-row writes and waits
   // when the socket is full, so what this process holds is one batch rather than the difference
   // between database speed and network speed (see stream-writer.ts).
@@ -927,66 +887,35 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
 
     // A read that SEARCHES, buckets or re-orders cannot express its page as a keyset over
     // leads_campaigns alone: the order and the filter depend on evidence held per person (a reply
-    // that dates a lead, a click that puts them in a bucket). So the population is indexed first —
-    // one narrow row each — the page is chosen from that index, and only the page's own ids are
-    // hydrated. A read naming none of the three never builds an index and is byte-identical to
-    // what it has always been.
+    // that dates a lead, a click that puts them in a bucket). So the page is chosen from the scope's
+    // READ MODEL — one narrow row per person, kept between requests and kept fresh (see
+    // lead-read-model.ts) — and only the page's own ids are hydrated. A read naming none of the
+    // three never touches a model and is byte-identical to what it has always been.
     const indexed =
       searchTokens !== null || bucket !== null || standings !== null || sort !== "created";
-    // The gateway fan-out is only paid for when something actually asks about evidence. A read
-    // that only searches needs neither the delivery overlay nor the outcome ledger to choose its
-    // rows, and paying for a population-wide fan-out to answer a search would be the same waste in
-    // a different place.
-    // A standing is read FROM the delivery overlay (a click is the measured half of a website
-    // visit), so asking for one column of the board is asking about evidence too.
-    const needsEvidence = bucket !== null || standings !== null || sort === "activity";
     let plan: LeadPlanPage | null = null;
+    // The scope's read model, when this read is answered from one: its count, its order and its
+    // filter are all read off the model's rows (see lead-read-model.ts), and the page it picks is
+    // then overlaid from the SAME delivery evidence the model was built from — so the row a tab
+    // shows and the count that labels the tab come from one answer.
+    let model: ReadModel | null = null;
     if (indexed) {
-      // The plan lives in the database for the whole read (see lead-plan-store.ts); closing it is
-      // the `finally` at the bottom of this handler, so a stream that dies mid-write still hands
-      // the connection back and takes its temp tables with it.
-      const store = await openLeadPlanStore();
-      planStore = store;
-      const standingSet = standingFilterSet(standings);
-      const ctx = engagementContext(
-        req,
-        scope,
-        brandIdStr,
-        statusCampaignIdStr,
-        flatten,
-        hasScopeForStatus,
-      );
-      // ONE chunk of the population at a time: indexed, given its evidence, filtered, and reduced
-      // to the (id, position) pairs the order needs. Nothing about the chunk outlives the loop —
-      // which is the whole point, because holding it all is what killed the process.
-      for await (const indexChunk of streamLeadIndex(scope, searchTokens, LEAD_INDEX_CHUNK_SIZE)) {
-        client.stopIfGone(0);
-        const enriched = await enrichLeadIndex(indexChunk, ctx, needsEvidence);
-        // FAIL LOUD, unlike the per-row standing on the walk: there a standing nobody could resolve
-        // is one field of a row, here it decides WHICH rows come back at all, so a resolver that
-        // throws must not quietly answer a differently-filtered list with a 200.
-        if (standings !== null) {
-          try {
-            await attachLeadStandings(enriched, standingResolver);
-          } catch (error) {
-            console.error(
-              "[lead-service] a standing-filtered read is refused: where these leads stand could " +
-                `not be resolved, and a wrongly-filtered list is worse than none: ${(error as Error).message}`,
-            );
-            throw new LeadReadRefused(502, "lead standing unavailable");
-          }
+      try {
+        model = await ensureReadModel(readModelScopeFor(scope, brandIdStr, hasScopeForStatus));
+      } catch (error) {
+        if (error instanceof ReadModelUnavailableError) {
+          console.error(
+            "[lead-service] a filtered/ordered read is refused: its read model could not be built " +
+              `or brought up to date, and a wrongly-filtered list is worse than none: ${error.message}`,
+          );
+          throw new LeadReadRefused(
+            502,
+            error.source === "standing" ? "lead standing unavailable" : "email-gateway unavailable",
+          );
         }
-        await store.add(
-          enriched
-            .filter((row) => leadRowInRead(row, bucket, standingSet))
-            .map((row) => ({
-              id: row.id,
-              activityAt: row.activityAt,
-              createdAtText: row.createdAtText,
-            })),
-        );
+        throw error;
       }
-      plan = await store.page(sort, page);
+      plan = await readModelPage(model, { tokens: searchTokens, bucket, standings, sort, page });
     }
 
     // How many rows match what the caller asked for — the number that labels the page, not the
@@ -1046,9 +975,17 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         const lastBasic = basicRows[basicRows.length - 1];
         if (lastBasic) lastPosition = { createdAt: lastBasic.cursorCreatedAt, id: lastBasic.id };
 
-        const statusMap = hasScopeForStatus
-          ? await buildStatusMapForBasicRows(basicRows, statusCampaignIdStr, context)
-          : new Map<string, StatusResult>();
+        const statusMap = !hasScopeForStatus
+          ? new Map<string, StatusResult>()
+          : model
+            ? await readModelDelivery(
+                model.scope,
+                basicRows
+                  .filter((r) => r.status === "served" && r.email?.value)
+                  .map((r) => ({ brandId: r.brandIds[0] ?? "unknown", email: r.email!.value })),
+                model.evidenceAt,
+              )
+            : await buildStatusMapForBasicRows(basicRows, statusCampaignIdStr, context);
 
         if (compact) {
           for (const r of basicRows) {
@@ -1229,7 +1166,19 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
 
       // Delivery-status overlay, scoped to this chunk's served rows only.
       const statusMap = new Map<string, StatusResult>();
-      if (hasScopeForStatus) {
+      if (hasScopeForStatus && model) {
+        const fromModel = await readModelDelivery(
+          model.scope,
+          chunkRows.flatMap((row) => {
+            const email = primaryEmail(fullLeadByLeadId.get(row.leadId))?.value;
+            return row.status === "served" && email
+              ? [{ brandId: row.brandIds[0] ?? "unknown", email }]
+              : [];
+          }),
+          model.evidenceAt,
+        );
+        for (const [email, result] of fromModel) statusMap.set(email, result);
+      } else if (hasScopeForStatus) {
         const groups = new Map<string, { brandId: string; items: DeliveryStatusItem[] }>();
         for (const row of chunkRows) {
           if (row.status !== "served") continue;
@@ -1341,7 +1290,6 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
     }
   } finally {
     client.dispose();
-    if (planStore) await planStore.close();
   }
 });
 
@@ -1392,39 +1340,27 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
-    const ctx = engagementContext(
-      req,
-      resolved.scope,
-      brandId,
-      resolved.statusCampaignIdStr,
-      resolved.flatten,
-      resolved.hasScopeForStatus,
-    );
-
-    // Counted a CHUNK at a time: a count is a number, and holding a population to reach one is
-    // what took this service down when the export did it (see lead-plan-store.ts). The counters
-    // are the only thing that survives a chunk, and they are O(1).
-    const counts = zeroBucketCounts();
-    let total = 0;
+    // Counted off the scope's read model — the same rows `GET /orgs/leads?bucket=` pages through
+    // (see lead-read-model.ts). A count is a number and no longer costs the population it counts.
+    let model: ReadModel;
     try {
-      for await (const indexChunk of streamLeadIndex(
-        resolved.scope,
-        searchTokens,
-        LEAD_INDEX_CHUNK_SIZE,
-      )) {
-        const enriched = await enrichLeadIndex(indexChunk, ctx, true);
-        total += enriched.length;
-        addBucketCounts(counts, enriched);
-      }
-    } catch (error) {
-      console.error(
-        "[lead-service] bucket counts refused: the delivery evidence they are counted from could " +
-          `not be read: ${(error as Error).message}`,
+      model = await ensureReadModel(
+        readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
       );
-      return res.status(502).json({ error: "email-gateway unavailable" });
+    } catch (error) {
+      if (error instanceof ReadModelUnavailableError) {
+        console.error(
+          "[lead-service] bucket counts refused: the read model they are counted from could not " +
+            `be built or brought up to date: ${error.message}`,
+        );
+        return res.status(502).json({
+          error: error.source === "standing" ? "lead standing unavailable" : "email-gateway unavailable",
+        });
+      }
+      throw error;
     }
 
-    return res.json({ total, counts });
+    return res.json(await readModelBucketCounts(model, searchTokens));
   } catch (error) {
     console.error("[lead-service] Bucket counts error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -1475,59 +1411,53 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
-    const ctx = engagementContext(
-      req,
-      resolved.scope,
-      brandId,
-      resolved.statusCampaignIdStr,
-      resolved.flatten,
-      resolved.hasScopeForStatus,
-    );
-    // The same resolver the list builds, with the same identity and the same delivery scope: one
-    // campaign-service read for the whole request, reused by every chunk.
-    const standingResolver = createLeadStandingResolver({
-      orgId: req.orgId!,
-      userId: req.userId ?? null,
-      runId: req.runId ?? null,
-      brandId: brandId ?? null,
-      deliveryQueried: resolved.hasScopeForStatus,
-    });
-
-    // Counted a CHUNK at a time, exactly as the bucket counts are: a column's size is a number and
-    // must not cost the population it is the size of.
-    const counts = zeroStandingCounts();
-    let total = 0;
-    for await (const indexChunk of streamLeadIndex(
-      resolved.scope,
-      searchTokens,
-      LEAD_INDEX_CHUNK_SIZE,
-    )) {
-      let enriched;
-      try {
-        enriched = await enrichLeadIndex(indexChunk, ctx, true);
-      } catch (error) {
+    // Counted off the scope's read model — the same rows `GET /orgs/leads?standing=` pages
+    // through, each carrying the one standing the list's own resolver gave it.
+    let model: ReadModel;
+    try {
+      model = await ensureReadModel(
+        readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
+      );
+    } catch (error) {
+      if (error instanceof ReadModelUnavailableError) {
         console.error(
-          "[lead-service] standing counts refused: the delivery evidence they are read from could " +
-            `not be read: ${(error as Error).message}`,
+          "[lead-service] standing counts refused: the read model they are counted from could " +
+            `not be built or brought up to date: ${error.message}`,
         );
-        return res.status(502).json({ error: "email-gateway unavailable" });
+        return res.status(502).json({
+          error: error.source === "standing" ? "lead standing unavailable" : "email-gateway unavailable",
+        });
       }
-      try {
-        await attachLeadStandings(enriched, standingResolver);
-      } catch (error) {
-        console.error(
-          "[lead-service] standing counts refused: where these leads stand could not be resolved: " +
-            `${(error as Error).message}`,
-        );
-        return res.status(502).json({ error: "lead standing unavailable" });
-      }
-      total += enriched.length;
-      addStandingCounts(counts, enriched);
+      throw error;
     }
 
-    return res.json({ total, counts });
+    return res.json(await readModelStandingCounts(model, searchTokens));
   } catch (error) {
     console.error("[lead-service] Standing counts error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * POST /orgs/leads/evidence-changed — these addresses' delivery evidence just changed.
+ *
+ * The Leads page's counts and filtered pages read a model that keeps each address's delivery
+ * evidence for at most five minutes (lead-read-model.ts). That bound is fine for an open the
+ * provider observed; it is not fine for something a PERSON just did in the product — classifying a
+ * reply, recording an opt-out — which they expect to see on the next read. So the service that
+ * holds that evidence says so here, and the next read of any scope holding one of these addresses
+ * asks the delivery layer again before it answers. Cheap on purpose: it records and returns.
+ */
+router.post("/orgs/leads/evidence-changed", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+  const parsed = LeadEvidenceChangedRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues.map((i) => i.message).join("; ") });
+  }
+  try {
+    const accepted = await noteEvidenceChanged(req.orgId!, parsed.data.emails);
+    return res.status(202).json({ accepted });
+  } catch (error) {
+    console.error("[lead-service] evidence-changed could not be recorded:", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

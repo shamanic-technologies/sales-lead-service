@@ -24,11 +24,7 @@
 import type { FlattenedStatus } from "./delivery-flatten.js";
 import type { EnrichedLeadIndexRow } from "./lead-engagement.js";
 import type { LeadStandingResolver, StandingRow } from "./lead-standing-resolver.js";
-import {
-  zeroStandingCounts,
-  type LeadStandingDelivery,
-  type LeadStandingState,
-} from "./lead-standing.js";
+import type { LeadStandingDelivery } from "./lead-standing.js";
 
 /**
  * How many rows one resolver call covers. The resolver's two reads bind their lead ids as an
@@ -86,19 +82,4 @@ export async function attachLeadStandings(
     }
   }
   return rows;
-}
-
-/**
- * How many people stand in each state. Every key is present; a state nobody is in is 0, never
- * absent — a consumer draws a column per state and an absent key would be an absent column.
- *
- * Unlike the engagement buckets, standing IS a partition: a row has exactly one standing, so these
- * counts DO sum to the scoped population.
- */
-export function addStandingCounts(
-  counts: Record<LeadStandingState, number>,
-  rows: readonly EnrichedLeadIndexRow[],
-): Record<LeadStandingState, number> {
-  for (const row of rows) counts[row.standing ?? "unresolved"] += 1;
-  return counts;
 }

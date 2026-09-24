@@ -58,6 +58,7 @@ let indexRows: Array<{
   email: string | null;
   servedAt: string | null;
   createdAtText: string;
+  searchText: string;
 }> = [];
 
 vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
@@ -74,11 +75,12 @@ vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   countLeadListRows: () => Promise.resolve(indexRows.length),
 }));
 
-// The plan is a temp table on a reserved connection in production; `sql` is mocked here, so the
-// read gets the in-memory double. The SQL is covered in tests/integration/lead-plan-store-sql.test.ts.
-vi.mock("../../src/lib/lead-plan-store.js", async () => {
-  const { fakePlanStoreModule } = await import("../helpers/fake-lead-plan-store.js");
-  return fakePlanStoreModule();
+// The read model is rows in Postgres in production; `sql` is mocked here, so the route gets the
+// in-memory double, which derives its rows with the real code. The SQL and the freshness machinery
+// are covered in tests/integration/lead-read-model-sql.test.ts.
+vi.mock("../../src/lib/lead-read-model.js", async (importOriginal) => {
+  const { fakeReadModelModule } = await import("../helpers/fake-lead-read-model.js");
+  return fakeReadModelModule(await importOriginal());
 });
 
 let gatewayFails = false;
@@ -176,6 +178,7 @@ function person(i: number) {
     email: `p${i}@example.test`,
     servedAt: null,
     createdAtText: `2026-01-01 00:00:00.${String(i).padStart(6, "0")}+00`,
+    searchText: `p${i}@example.test`,
   };
 }
 

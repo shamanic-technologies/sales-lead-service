@@ -10,21 +10,20 @@
  *
  * So the index is that narrow read. It runs over exactly the same relation the list runs over —
  * same scope, same dedup, same lifecycle filter (`leadCampaignBaseRelation`) — so a count taken
- * from it and a page taken from the list describe the same population by construction. The search
- * predicate lives HERE and only here: the list paths never search, they hydrate ids the index
- * already chose.
+ * from it and a page taken from the list describe the same population by construction.
+ *
+ * It is not read per request any more: it is what the read model (lead-read-model.ts) is BUILT
+ * from, and the model is what a count, a search or a filtered page reads. The list paths never
+ * search; they hydrate ids the model already chose.
  */
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import {
   campaignScopeIds,
   leadCampaignBaseRelation,
-  leadCursorTimestampParam,
   leadStatusScope,
-  type LeadListCursor,
   type LeadListScope,
 } from "./lead-list-query.js";
-import { leadSearchPattern } from "./lead-search.js";
 import { canonicalizeStepOutcome, type LeadStepOutcomeName } from "./step-statements.js";
 
 /** One person in the scoped population, as narrow as the questions asked of it allow. */
@@ -40,6 +39,13 @@ export interface LeadIndexRow {
   servedAt: string | null;
   /** `created_at::text`, full precision — the position a default-ordered cursor is built from. */
   createdAtText: string;
+  /**
+   * The four things a person is searched by — name, job title, company, address — joined with a
+   * newline. A search token never contains whitespace (see lead-search.ts) and `_` is escaped, so a
+   * token can only match INSIDE one field, never across two: `search_text ILIKE %token%` means
+   * exactly "some field contains the token", the predicate this read has always applied per field.
+   */
+  searchText: string;
 }
 
 interface RawIndexRow {
@@ -51,45 +57,27 @@ interface RawIndexRow {
   email_value: string | null;
   served_at: Date | string | null;
   created_at_cursor: string;
-}
-
-/** Every token must match at least one of the four searchable fields. Empty tokens → no predicate. */
-function searchPredicate(tokens: readonly string[] | null) {
-  if (!tokens || tokens.length === 0) return sql``;
-  let predicate = sql``;
-  for (const token of tokens) {
-    const pattern = leadSearchPattern(token);
-    predicate = sql`${predicate} AND (
-      l.first_name ILIKE ${pattern}
-      OR l.last_name ILIKE ${pattern}
-      OR l.name ILIKE ${pattern}
-      OR org.current_title ILIKE ${pattern}
-      OR org.org_name ILIKE ${pattern}
-      OR em.value ILIKE ${pattern}
-    )`;
-  }
-  return predicate;
+  search_text: string | null;
 }
 
 /**
- * One chunk of the scoped (and optionally searched) population: one row per person under brand
- * scope and one row per membership under a single-campaign scope — the same collapse the list
- * applies.
+ * The scoped population as ONE statement: one row per person under brand scope and one row per
+ * membership under a single-campaign scope — the same collapse the list applies — ordered
+ * `(created_at, id)` ascending, which is the list's own total order.
  *
- * Ordered `(created_at, id)` ascending, which is the list's own total order, so an index-driven
- * default-ordered page and a plain keyset page return the same rows in the same order.
+ * One statement, streamed through a server-side cursor, rather than a statement per chunk: every
+ * chunk statement re-ran the brand's whole-population dedup just to cut the next thousand rows
+ * off it, which is what made the walk cost 4.8s on a 17,910-person brand. `scope.leadIds` narrows
+ * it to a handful of people for an incremental recompute (see lead-read-model.ts).
  */
-function leadIndexChunk(
-  scope: LeadListScope,
-  tokens: readonly string[] | null,
-  after: LeadListCursor | null,
-  chunkSize: number,
-) {
+function leadIndexStatement(scope: LeadListScope) {
   return sql<RawIndexRow[]>`
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.status, lc.served_at,
       lc.created_at::text AS created_at_cursor,
-      em.value AS email_value
+      em.value AS email_value,
+      concat_ws(E'\n', l.first_name, l.last_name, l.name, org.current_title, org.org_name, em.value)
+        AS search_text
     FROM ${leadCampaignBaseRelation(scope)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
@@ -116,10 +104,8 @@ function leadIndexChunk(
       ${scope.queryOrgId ? sql`AND lc.org_id = ${scope.queryOrgId}` : sql``}
       ${scope.userId ? sql`AND lc.user_id = ${scope.userId}` : sql``}
       ${scope.workflowSlug ? sql`AND lc.workflow_slug = ${scope.workflowSlug}` : sql``}
-      ${searchPredicate(tokens)}
-      ${after ? sql`AND (lc.created_at, lc.id) > (${leadCursorTimestampParam(after)}::timestamptz, ${after.id}::uuid)` : sql``}
+      ${scope.leadIds ? sql`AND lc.lead_id = ANY(${[...scope.leadIds]}::uuid[])` : sql``}
     ORDER BY lc.created_at ASC, lc.id ASC
-    LIMIT ${chunkSize}
   `;
 }
 
@@ -133,39 +119,26 @@ function mapIndexRow(r: RawIndexRow): LeadIndexRow {
     email: r.email_value,
     servedAt: toIsoTimestamp(r.served_at),
     createdAtText: r.created_at_cursor,
+    searchText: r.search_text ?? "",
   };
 }
 
 /**
- * The same population, one BOUNDED chunk at a time, walked by keyset over `(created_at, id)`.
+ * The same population, one BOUNDED chunk at a time.
  *
- * This is the only way a filtered read is allowed to see the population, and the reason is a
- * production outage: the array form held every matching row — with its delivery overlay, its
- * buckets and its outcome set — before a single byte was written, which is about 3.4 KB per person
- * and 160 MB of peak heap on one brand's 16,599-row export. The process died on V8's heap limit
- * with exit code 0, the restart policy brought it straight back, and every other org's Leads page
- * got `ECONNREFUSED` for the seconds it was gone. One customer pressing a button was a
- * platform-wide outage, and nothing anywhere went red.
- *
- * `id` is unique, so `(created_at, id)` is a TOTAL order and the walk visits every row exactly
- * once — no gaps, no repeats — and it holds no connection between chunks (each chunk is its own
- * statement), so a long read cannot pin one of the pool's twenty.
+ * This process never holds the population: a filtered read used to, at about 3.4 KB per person,
+ * and 160 MB of peak heap on one brand's export killed the process on V8's heap limit (exit code
+ * 0, restart policy, every other org's Leads page down for the seconds it was gone). The chunk is
+ * the only thing alive at a time; the cursor holds one connection for the walk.
  */
 export async function* streamLeadIndex(
   scope: LeadListScope,
-  tokens: readonly string[] | null,
   chunkSize: number,
 ): AsyncGenerator<LeadIndexRow[]> {
   const size = Math.max(1, chunkSize);
-  let after: LeadListCursor | null = null;
-  while (true) {
-    const rows = await leadIndexChunk(scope, tokens, after, size);
-    if (rows.length === 0) return;
-    const mapped = rows.map(mapIndexRow);
-    yield mapped;
-    if (rows.length < size) return;
-    const last = mapped[mapped.length - 1];
-    after = { createdAt: last.createdAtText, id: last.id };
+  for await (const rows of leadIndexStatement(scope).cursor(size)) {
+    if (rows.length === 0) continue;
+    yield rows.map(mapIndexRow);
   }
 }
 
