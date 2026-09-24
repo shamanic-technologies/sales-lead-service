@@ -14,6 +14,7 @@ import { resolveOfferCampaignIds, OfferCampaignsUnavailableError } from "../lib/
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
+import { prefetchOne } from "../lib/prefetch.js";
 import { fetchBasicLeadChunk, streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import {
   campaignScopeIds,
@@ -1034,7 +1035,10 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             fetchBasicLeadChunk(s, null, count),
           )
         : streamBasicLeadChunks(scope, LEADS_STREAM_CHUNK_SIZE, page);
-      for await (const basicRows of basicSource) {
+      // A compact walk does two independent waits per chunk — the next rows from the database and
+      // this chunk's delivery evidence from email-gateway — so it reads one chunk ahead and the two
+      // overlap. The other views keep their exact sequencing.
+      for await (const basicRows of compact ? prefetchOne(basicSource) : basicSource) {
         // Between chunks, before this chunk's gateway/audience/standing fan-out: throwing here
         // leaves the generator, which closes the cursor and hands the connection back.
         client.stopIfGone(rowCount);
