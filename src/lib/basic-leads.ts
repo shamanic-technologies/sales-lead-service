@@ -285,6 +285,7 @@ function basicLeadQuery(
         ${f.userId ? sql`AND lc.user_id = ${f.userId}` : sql``}
         ${f.workflowSlug ? sql`AND lc.workflow_slug = ${f.workflowSlug}` : sql``}
         ${leadRowIdScope(f) ? sql`AND lc.id = ANY(${leadRowIdScope(f)!}::uuid[])` : sql``}
+        ${f.leadIds ? sql`AND lc.lead_id = ANY(${[...f.leadIds]}::uuid[])` : sql``}
         ${cursor ? sql`AND (lc.created_at, lc.id) > (${leadCursorTimestampParam(cursor)}, ${cursor.id})` : sql``}
       ORDER BY lc.created_at ASC, lc.id ASC
       ${limit == null ? sql`` : sql`LIMIT ${limit}`}

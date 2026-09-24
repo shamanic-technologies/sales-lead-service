@@ -2422,6 +2422,104 @@ registry.registerPath({
   },
 });
 
+const LeadChangesResponseSchema = z
+  .object({
+    full: z.boolean().openapi({
+      description:
+        "true = `leads` is the WHOLE scope (no `since`, or a `since` this feed can no longer " +
+        "continue from): replace your copy with it. false = `leads` and `removed` are only what " +
+        "changed after `since`: apply them to your copy.",
+    }),
+    reason: z
+      .enum(["no_cursor", "feed_replaced", "empty_scope"])
+      .nullable()
+      .openapi({
+        description:
+          "Why the answer is the whole scope: `no_cursor` (no `since` was given), `feed_replaced` " +
+          "(the feed `since` named is gone — unread for a day, or the scope changed shape, e.g. a " +
+          "campaign identity gained a member), `empty_scope` (an offer no campaign sells yet). " +
+          "null on a delta.",
+      }),
+    cursor: z.string().nullable().openapi({
+      description:
+        "The position to pass back as `since` next time. Opaque. null only for `empty_scope`.",
+    }),
+    leads: z.array(z.record(z.string(), z.unknown())).openapi({
+      description:
+        "Rows to put into your copy, keyed by `id` — each exactly the element `GET /orgs/leads?view=compact` " +
+        "emits for that row (same fields, same values). Unordered.",
+    }),
+    removed: z.array(z.string()).openapi({
+      description: "Ids of rows that left the scope since `since`: drop them from your copy. Always empty when `full`.",
+    }),
+  })
+  .openapi("LeadChangesResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/changes",
+  summary: "What changed in a scope's compact lead rows since your last read",
+  description:
+    "For a consumer that keeps a copy of a brand's (or campaign identity's, or offer's) whole lead " +
+    "population — the `view=compact` rows — and must stop re-reading all of it on every refresh. " +
+    "Call it once without `since`: the answer is the whole scope (`full: true`) and a `cursor`. " +
+    "Then call it with `since=<cursor>`: the answer is only the rows that changed (`leads`, to put " +
+    "by `id`) and the rows that left the scope (`removed`, ids), plus the next `cursor`. Applying " +
+    "every answer in order leaves you holding exactly what `GET /orgs/leads?view=compact` returns " +
+    "for the same parameters. When `since` can no longer be continued from, the answer is the " +
+    "whole scope again with `full: true` and `reason: feed_replaced` — replace your copy; nothing " +
+    "is ever answered as a partial delta. " +
+    "Same scope vocabulary and meaning as the list: `brandId`, `campaignId` (the whole campaign " +
+    "identity), `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping " +
+    "parameters (`q`, `bucket`, `standing`, `sort`, `format`, `include`, `limit`, `offset`, " +
+    "`cursor`) are a 400: the feed is always the whole scope. Gzipped when the caller accepts it. " +
+    "FRESHNESS: a serve, a re-point, a status, a name, an email or an employer written here, and " +
+    "every delivery event the sender announces (a send, an open, a click, a reply, a bounce, an " +
+    "opt-out), shows on the next read; delivery evidence nobody announced is at most 5 minutes old, " +
+    "enforced — a feed whose last full reconcile is older is reconciled before it answers. " +
+    "email-gateway unreachable is a 502, never a partial answer.",
+  parameters: [
+    ...AuthHeaders,
+    {
+      in: "query" as const,
+      name: "since",
+      required: false,
+      description: "The `cursor` of your previous answer. Absent: the whole scope.",
+      schema: { type: "string" as const },
+    },
+    { in: "query" as const, name: "brandId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "campaignId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "funnelKey", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "workflowSlug", required: false, schema: { type: "string" as const } },
+    {
+      in: "query" as const,
+      name: "status",
+      required: false,
+      description: "Same vocabulary and default as the list (`buffered,claimed,served`).",
+      schema: { type: "string" as const },
+    },
+  ],
+  responses: {
+    200: {
+      description: "The whole scope, or what changed since `since`",
+      content: { "application/json": { schema: LeadChangesResponseSchema } },
+    },
+    400: {
+      description:
+        "A `since` this endpoint did not issue or issued for another scope, a page-shaping parameter, or an invalid scope parameter",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
+    502: {
+      description: "The delivery evidence could not be read — refused rather than answered partially",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
 export const LeadEvidenceChangedRequestSchema = z
   .object({
     emails: z
