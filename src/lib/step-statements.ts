@@ -84,9 +84,27 @@ export function canonicalizeStepOutcome(value: unknown): LeadStepOutcomeName | n
   return canonicalizeConversionEvent(value);
 }
 
-/** Where an outcome came from. Frozen on the row at write, never inferred on read. */
-export type StatementSource = "tracker" | "manual";
-export const STATEMENT_SOURCES: readonly StatementSource[] = ["tracker", "manual"];
+/**
+ * Where a step's evidence came from. Frozen on the row at write, never inferred on read.
+ *
+ *   manual  — a person stated it. The only source a person can withdraw.
+ *   tracker — the brand's website tag reported it (or the delivery layer measured the click).
+ *   crm     — the customer's OWN CRM evidences it, for a lead paired with that CRM contact
+ *             (crm-evidence.ts). Not a person's statement: it is corrected by rejecting the pairing,
+ *             or overridden by a person stating the step.
+ */
+export type StatementSource = "tracker" | "manual" | "crm";
+export const STATEMENT_SOURCES: readonly StatementSource[] = ["tracker", "manual", "crm"];
+
+/**
+ * A stored `source` read back. Anything that is not explicitly `manual` or `crm` came off the
+ * website tracker — which is what every row written before the column existed is.
+ */
+export function statementSourceOf(raw: unknown): StatementSource {
+  if (raw === "manual") return "manual";
+  if (raw === "crm") return "crm";
+  return "tracker";
+}
 
 /** What a human stated about a step: it happened, or it never will. */
 export type StatementKind = "outcome" | "never";

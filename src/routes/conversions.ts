@@ -17,6 +17,7 @@ import {
   WEBSITE_VISIT,
   canonicalizeStepOutcome,
   outcomeCauseOf,
+  statementSourceOf,
   type LeadStepOutcomeName,
   type OutcomeCause,
   type StatementSource,
@@ -240,6 +241,9 @@ router.get(
              array_agg(DISTINCT event) AS event_types
       FROM conversion_events
       WHERE brand_id = ${brandId}
+        -- The tracker's liveness: what the customer's own CRM evidences is not a signal the
+        -- website tag sent.
+        AND source <> 'crm'
     `)) as unknown as Array<{
       last_event_at: Date | string | null;
       event_types: string[] | null;
@@ -388,7 +392,8 @@ function respondMeasuredVisitFailure(error: unknown, res: Response): boolean {
  * `counts` totals BOTH sources and is what every existing consumer keeps reading unchanged.
  * `bySource.tracker` / `bySource.manual` split the same rows by who said so — a hand-stated
  * outcome is distinguishable from a tracker-reported one after the fact without changing what
- * either counts toward. For every key, tracker + manual === counts.
+ * either counts toward. `bySource.crm` is what the customer's OWN CRM evidences for leads paired
+ * with a contact of theirs. For every key, tracker + manual + crm === counts.
  *
  * `byCause.outreach` / `byCause.other` / `byCause.unstated` split the same rows by WHOSE WIN each
  * outcome was — a brand also sells through referrals, conferences, its own pipeline and other
@@ -442,6 +447,8 @@ router.get(
     const bySource: Record<StatementSource, Record<LeadStepOutcomeName, number>> = {
       tracker: zeroed(),
       manual: zeroed(),
+      // What the customer's OWN CRM evidences, for leads paired with a contact of theirs.
+      crm: zeroed(),
     };
     // WHOSE win each outcome was. `outreach` — the customer says ours caused it; `other` — they say
     // something else of theirs did (a referral, a conference, their own pipeline: a REAL outcome,
@@ -459,9 +466,9 @@ router.get(
       const canonical = canonicalizeStepOutcome(row.event);
       if (!canonical) continue;
       counts[canonical] += row.n;
-      // Anything not explicitly stated by a human came off the website tracker — which is what
-      // every row written before the column existed is.
-      bySource[row.source === "manual" ? "manual" : "tracker"][canonical] += row.n;
+      // Anything not explicitly stated by a human or evidenced by the customer's CRM came off the
+      // website tracker — which is what every row written before the column existed is.
+      bySource[statementSourceOf(row.source)][canonical] += row.n;
       byCause[outcomeCauseOf(row.caused_by_outreach)][canonical] += row.n;
     }
 
@@ -470,6 +477,7 @@ router.get(
       bySource: {
         tracker: withLegacyPurchaseAlias(bySource.tracker),
         manual: withLegacyPurchaseAlias(bySource.manual),
+        crm: withLegacyPurchaseAlias(bySource.crm),
       },
       byCause: {
         outreach: withLegacyPurchaseAlias(byCause.outreach),
@@ -775,7 +783,7 @@ router.get(
       // something else of theirs did, so its value belongs in the brand's own total and NOT in the
       // return computed on our outreach; null — nobody was ever asked, which is neither answer.
       causedByOutreach: typeof r.caused_by_outreach === "boolean" ? r.caused_by_outreach : null,
-      source: (r.source === "manual" ? "manual" : "tracker") as StatementSource,
+      source: statementSourceOf(r.source),
     }));
 
     res.json({ event, outcomes });

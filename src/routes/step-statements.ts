@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
+import { supersedeCrmOutcome } from "../lib/crm-evidence-store.js";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { toIsoTimestamp } from "../lib/basic-leads.js";
 import {
@@ -9,6 +10,7 @@ import {
   WEBSITE_VISIT,
   canonicalizeStepOutcome,
   manualOutcomeSignature,
+  statementSourceOf,
   type LeadStepOutcomeName,
   type StatementSource,
   type StepState,
@@ -412,6 +414,11 @@ router.post(
           ${costCents}, ${body.note ?? null}, ${statedBy}
         )
         ON CONFLICT (lead_id, campaign_id, step) DO UPDATE SET
+          -- A person stating "never" on a step their CRM also evidences as dead makes it THEIR
+          -- statement: a person outranks the CRM, and only a person's statement is withdrawable.
+          source = 'manual',
+          occurred_at = NULL,
+          crm_evidence = NULL,
           cost_cents = EXCLUDED.cost_cents,
           note = EXCLUDED.note,
           stated_by_user_id = EXCLUDED.stated_by_user_id,
@@ -511,6 +518,12 @@ router.post(
       RETURNING id, received_at
     `)) as unknown as Array<{ id: string; received_at: Date | string }>;
 
+    // A person stating a step outranks what their CRM evidences for it, and the two must not both
+    // count: the ledger counts ROWS, so a CRM-evidenced outcome on the same person and step would
+    // make one deal read as two. It is set aside (never deleted); the CRM sync stands it back up if
+    // this statement is later withdrawn.
+    await supersedeCrmOutcome(brandId, row.lead_id, step);
+
     res.status(201).json({
       statement: {
         id: inserted[0].id,
@@ -569,7 +582,9 @@ async function loadStepStates(
       AND attribution_status = 'attributed'
       AND withdrawn_at IS NULL
       AND (lead_campaign_id IS NULL OR lead_campaign_id = ${row.id})
-    ORDER BY received_at DESC NULLS LAST
+    -- What the customer's CRM evidences answers a step only when nobody and nothing else of ours
+    -- did: a person's statement and the tracker's report come first.
+    ORDER BY (source = 'crm') ASC, received_at DESC NULLS LAST
   `)) as unknown as Array<{
     event: string;
     source: string;
@@ -583,7 +598,9 @@ async function loadStepStates(
 
   // Retracted statements are excluded: they are kept for the record, not to be read as live.
   const neverRows = (await db.execute(sql`
-    SELECT step, cost_cents, note, stated_by_user_id, updated_at
+    SELECT step, source, cost_cents, note, stated_by_user_id,
+           -- A CRM "never" is dated by the CRM or not at all — never by when we synced it.
+           CASE WHEN source = 'crm' THEN occurred_at ELSE updated_at END AS updated_at
     FROM lead_step_disqualifications
     WHERE lead_id = ${row.lead_id}
       AND campaign_id = ${row.campaign_id}
@@ -591,6 +608,7 @@ async function loadStepStates(
       AND withdrawn_at IS NULL
   `)) as unknown as Array<{
     step: string;
+    source: string | null;
     cost_cents: number | null;
     note: string | null;
     stated_by_user_id: string | null;
@@ -603,7 +621,7 @@ async function loadStepStates(
     const step = canonicalizeStepOutcome(o.event);
     if (!step || outcomes.has(step)) continue;
     outcomes.set(step, {
-      source: o.source === "manual" ? "manual" : "tracker",
+      source: statementSourceOf(o.source),
       valueCents: o.value_cents,
       // Null is "nobody was ever asked" — a tracker event observes a page load and knows nothing
       // about the customer's spend, and a statement predating the mandatory cost carries none.
@@ -622,6 +640,7 @@ async function loadStepStates(
     const step = canonicalizeStepOutcome(n.step);
     if (!step) continue;
     nevers.set(step, {
+      source: n.source === "crm" ? "crm" : "manual",
       costCents: n.cost_cents,
       note: n.note,
       statedByUserId: n.stated_by_user_id,
@@ -825,6 +844,8 @@ router.delete(
       WHERE lead_id = ${row.lead_id}
         AND campaign_id = ${row.campaign_id}
         AND step = ${step}
+        -- Only a person's "never". One the customer's CRM evidences is not a statement.
+        AND source = 'manual'
         AND retracted_at IS NULL
         AND withdrawn_at IS NULL
       LIMIT 1
@@ -851,6 +872,7 @@ router.delete(
         WHERE lead_id = ${row.lead_id}
           AND campaign_id = ${row.campaign_id}
           AND step = ${step}
+          AND source = 'manual'
           AND withdrawn_at IS NOT NULL
         LIMIT 1
       `)) as unknown as Array<{ hit: number }>;
@@ -881,14 +903,19 @@ router.delete(
         return;
       }
 
-      // A step that reads as an outcome with nothing hand-stated behind it was reported by the
-      // tracker or measured by the delivery layer. Neither is anybody's statement.
-      const observed = current.state === "outcome" && current.origin === "stated";
+      // A step that reads as stated with nothing hand-stated behind it was reported by the
+      // tracker, measured by the delivery layer, or evidenced by the customer's own CRM. None of
+      // them is anybody's statement.
+      const observed = current.origin === "stated" && current.source !== "manual";
       res.status(409).json({
         error: observed
-          ? `${step} was reported by the website tracker or measured by the delivery layer for this ` +
-            "lead, not stated by a person — there is no statement to withdraw, and what another " +
-            "system observed is not edited here."
+          ? current.source === "crm"
+            ? `${step} is evidenced by your own CRM for this lead, not stated by a person — there ` +
+              "is no statement to withdraw. If this CRM contact is not this lead, reject the " +
+              "pairing; otherwise state the step yourself, which takes precedence."
+            : `${step} was reported by the website tracker or measured by the delivery layer for ` +
+              "this lead, not stated by a person — there is no statement to withdraw, and what " +
+              "another system observed is not edited here."
           : `Nobody has stated ${step} for this lead, so there is nothing to withdraw.` +
             (current.origin === "implied"
               ? ` It reads as "${current.state}" because ${current.impliedBy} was stated and this ` +
