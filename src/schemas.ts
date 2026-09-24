@@ -2109,8 +2109,16 @@ registry.registerPath({
         "Still drops the heavy stuff (employmentHistory, subdepartments, technologyNames, " +
         "secondaryIndustries, funding events) so basic stays ~10x smaller than full. " +
         "Absent or any other value => the full FullLead payload (default, " +
-        "backward-compatible). Use `basic` for list views.",
-      schema: { type: "string" as const, enum: ["basic", "full"] },
+        "backward-compatible). Use `basic` for list views. " +
+        "`compact` is for a consumer computing figures over a whole population: each row carries " +
+        "ONLY id, leadId, campaignId, workflowSlug, status, email, the delivery flags (contacted, sent, " +
+        "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification) and " +
+        "lead {firstName, lastName, photoUrl, currentTitle, seniority, organization {id, name, logoUrl, " +
+        "primaryDomain, websiteUrl, industry, estimatedNumEmployees, city, country}} — every value " +
+        "identical to the same field on `basic`. No audience, offer, standing or closedDeal is " +
+        "resolved, the response is gzip-encoded when the caller accepts it, and `include=campaigns` " +
+        "is a 400. Envelope, paging (`limit`/`cursor`/`nextCursor`/`total`) and filters are unchanged.",
+      schema: { type: "string" as const, enum: ["basic", "compact", "full"] },
     },
     {
       in: "query" as const,
