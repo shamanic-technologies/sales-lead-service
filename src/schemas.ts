@@ -4748,6 +4748,23 @@ const CrmPairingRowSchema = z
           "Their company, when the producer carries one. Absent means we hold no company signal for this person — never a mismatch.",
       }),
       unsubscribed: z.boolean(),
+      record: z
+        .object({
+          type: z.string().nullable().openapi({ description: "Their contact type, e.g. `lead`, `customer`.", example: "lead" }),
+          leadSource: z.string().nullable().openapi({ description: "Their lead source, verbatim.", example: "Meta Ads" }),
+          tags: z.array(z.string()).nullable().openapi({ description: "Their tags, verbatim. `[]` = they hold the list and it is empty." }),
+          createdAt: z.string().nullable().openapi({ description: "When the record was created IN THEIR CRM." }),
+          updatedAt: z.string().nullable().openapi({ description: "When the record was last updated in their CRM." }),
+          origin: z.object({
+            medium: z.string().nullable().openapi({ example: "form" }),
+            url: z.string().nullable(),
+            referrer: z.string().nullable(),
+          }),
+        })
+        .openapi({
+          description:
+            "Where the record came from in THEIR CRM, in their own words, carried verbatim from crm-service and never mapped onto any vocabulary of ours. Every field is null when their CRM holds none.",
+        }),
     }),
     pairing: z.object({
       state: z.enum(CRM_PAIRING_STATES).openapi({
@@ -4818,7 +4835,14 @@ registry.registerPath({
     "an error. A page whose pairings the deterministic signals could not decide pays for a typed " +
     "similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the " +
     "view twice returns the same pairings, and the judgment is never re-asked on read.\n\n" +
-    "Bounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.",
+    "Bounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.\n\n" +
+    "`state` narrows the rows to one or more pairing states. Their contact list is then WALKED from " +
+    "`offset` until `limit` matching rows are held, so the read stays bounded and paged, and " +
+    "`/orgs/leads/crm-pairing-counts` remains the authority for how many there are: paging a state " +
+    "to the end visits exactly the contacts its `byState` count reports. `offset`/`nextOffset` stay " +
+    "positions in THEIR contact list, so ruling on a row while paging skips nobody. A filtered read " +
+    "buys judgments only when `state` includes `unconfirmed` (the only state a judgment can move a " +
+    "row out of), and decides each row after any judgment it bought is frozen.",
   parameters: [
     ...CrmPairingHeaders,
     {
@@ -4841,6 +4865,16 @@ registry.registerPath({
       required: false,
       schema: { type: "integer" as const },
       description: "Where to resume. Use the `nextOffset` the previous page returned.",
+    },
+    {
+      in: "query" as const,
+      name: "state",
+      required: false,
+      schema: { type: "string" as const },
+      example: "paired,unconfirmed",
+      description:
+        "Comma-separated pairing states to keep (paired, unconfirmed, rejected, unpaired), read as one set. " +
+        "Absent = every contact, unchanged. An unknown state or an empty list is a 400, never a silently-ignored filter.",
     },
   ],
   responses: {
@@ -4871,7 +4905,7 @@ registry.registerPath({
         },
       },
     },
-    400: { description: "brandId is absent or not a uuid, or limit/offset is unparseable" },
+    400: { description: "brandId is absent or not a uuid, limit/offset is unparseable, or state names an unknown state" },
     401: { description: "Unauthorized" },
     502: { description: "Their CRM could not be read (crm-service unavailable). Never a guessed empty CRM." },
     500: { description: "Internal server error" },

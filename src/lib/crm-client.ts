@@ -106,14 +106,27 @@ export async function fetchCrmConnection(
 // ---------------------------------------------------------------------------
 
 /**
- * One contact as crm-service serves it.
+ * Where a contact's record came from, in THEIR CRM, in THEIR words.
  *
- * `companyName` is OPTIONAL and read defensively on purpose: crm-service does not project a
- * contact's company to silver today (the vendor's `companyName` sits verbatim in its bronze
- * payload), and a sibling change is widening that. An absent company is "we hold no company
- * signal for this person", never a mismatch — so this reads correctly both before and after that
- * lands, and nothing here blocks on it.
+ * crm-service serves this per contact under `record` (GoHighLevel's contact type, lead source,
+ * tags, created/updated dates and the attribution origin it captured). Every value is the
+ * customer's own free text, carried verbatim and never mapped onto any vocabulary of ours; a
+ * field their CRM does not hold reads `null`, never a default.
  */
+export interface CrmContactRecord {
+  type: string | null;
+  leadSource: string | null;
+  tags: string[] | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  origin: {
+    medium: string | null;
+    url: string | null;
+    referrer: string | null;
+  };
+}
+
+/** One contact as this service reads it, normalized out of crm-service's served shape. */
 export interface CrmContact {
   id: string;
   brandId: string;
@@ -125,9 +138,81 @@ export interface CrmContact {
   lastName: string | null;
   unsubscribed: boolean;
   companyName?: string | null;
-  /** A company URL/domain, if the producer ever carries one. Feeds the matcher's domain tier. */
+  /** The company's website, when their CRM holds one. Feeds the matcher's domain tier. */
   companyUrl?: string | null;
+  /** Provenance. Always present on a contact read through `fetchCrmContactsPage`. */
+  record?: CrmContactRecord;
   lastRebuiltAt?: string | null;
+}
+
+/**
+ * crm-service's served contact. It groups company and provenance into nested objects
+ * (`company: { name, website }`, `record: {...}`); an older build served `companyName` flat.
+ * BOTH spellings are read, because reading only the flat one is what silently blanked every
+ * contact's company once the nested shape shipped.
+ */
+interface RawCrmContact {
+  id: string;
+  brandId: string;
+  externalId?: string | null;
+  primaryEmail?: string | null;
+  phoneE164?: string | null;
+  fullName?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  unsubscribed?: boolean;
+  lastRebuiltAt?: string | null;
+  companyName?: string | null;
+  company?: { name?: string | null; website?: string | null } | null;
+  record?: {
+    type?: unknown;
+    leadSource?: unknown;
+    tags?: unknown;
+    createdAt?: unknown;
+    updatedAt?: unknown;
+    origin?: { medium?: unknown; url?: unknown; referrer?: unknown } | null;
+  } | null;
+}
+
+function textOrNull(v: unknown): string | null {
+  return typeof v === "string" && v.trim().length > 0 ? v : null;
+}
+
+/** Tags are a list of their words. Anything that is not a list of strings is "not held", not coerced. */
+function tagsOrNull(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.every((t) => typeof t === "string") ? (v as string[]) : null;
+}
+
+export function normalizeCrmContact(raw: RawCrmContact): CrmContact {
+  const record = raw.record ?? null;
+  const origin = record?.origin ?? null;
+  return {
+    id: raw.id,
+    brandId: raw.brandId,
+    externalId: raw.externalId ?? null,
+    primaryEmail: raw.primaryEmail ?? null,
+    phoneE164: raw.phoneE164 ?? null,
+    fullName: raw.fullName ?? null,
+    firstName: raw.firstName ?? null,
+    lastName: raw.lastName ?? null,
+    unsubscribed: raw.unsubscribed === true,
+    lastRebuiltAt: raw.lastRebuiltAt ?? null,
+    companyName: textOrNull(raw.company?.name) ?? textOrNull(raw.companyName),
+    companyUrl: textOrNull(raw.company?.website),
+    record: {
+      type: textOrNull(record?.type),
+      leadSource: textOrNull(record?.leadSource),
+      tags: tagsOrNull(record?.tags),
+      createdAt: textOrNull(record?.createdAt),
+      updatedAt: textOrNull(record?.updatedAt),
+      origin: {
+        medium: textOrNull(origin?.medium),
+        url: textOrNull(origin?.url),
+        referrer: textOrNull(origin?.referrer),
+      },
+    },
+  };
 }
 
 export async function fetchCrmContactsPage(
@@ -136,22 +221,24 @@ export async function fetchCrmContactsPage(
   offset: number,
   ctx: CrmIdentityContext,
 ): Promise<CrmContact[]> {
-  const body = await getJson<{ contacts?: CrmContact[] }>(
+  const body = await getJson<{ contacts?: RawCrmContact[] }>(
     `/orgs/gohighlevel/contacts?brandId=${encodeURIComponent(brandId)}&limit=${limit}&offset=${offset}`,
     ctx,
   );
-  return Array.isArray(body.contacts) ? body.contacts : [];
+  return Array.isArray(body.contacts) ? body.contacts.map(normalizeCrmContact) : [];
 }
 
 /**
  * Their whole contact population, a page at a time. The caller folds each page into counters and
  * drops it — nothing accumulates a list, so a summary costs the same on a CRM of any size.
+ * `startOffset` resumes the walk at a position in their list (a filtered read's cursor).
  */
 export async function* streamCrmContacts(
   brandId: string,
   ctx: CrmIdentityContext,
+  startOffset = 0,
 ): AsyncGenerator<CrmContact[]> {
-  let offset = 0;
+  let offset = startOffset;
   for (;;) {
     const page = await fetchCrmContactsPage(brandId, CRM_CONTACT_PAGE_SIZE, offset, ctx);
     if (page.length === 0) return;
