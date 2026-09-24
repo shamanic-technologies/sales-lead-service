@@ -14,8 +14,7 @@ import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { DEFAULT_STATUS, flattenBrandStatus, type FlattenedStatus } from "./delivery-flatten.js";
 import { standingDelivery } from "./lead-standing-index.js";
-import type { LeadStanding } from "./lead-standing.js";
-import type { LeadStandingResolver } from "./lead-standing-resolver.js";
+import type { LeadStandingResolver, ResolvedLeadFacts } from "./lead-standing-resolver.js";
 import type { ServiceContext } from "../middleware/auth.js";
 
 /** The lead behind one pairing, as the surface shows it and as the judgment reads it. */
@@ -143,8 +142,8 @@ export async function resolveStandingsForLeads(
   leads: PairedLeadFacts[],
   resolver: LeadStandingResolver,
   ctx: ServiceContext,
-): Promise<Map<string, LeadStanding>> {
-  const out = new Map<string, LeadStanding>();
+): Promise<Map<string, ResolvedLeadFacts>> {
+  const out = new Map<string, ResolvedLeadFacts>();
   if (leads.length === 0) return out;
 
   const emails = Array.from(
@@ -181,7 +180,7 @@ export async function resolveStandingsForLeads(
 
   for (const lead of leads) {
     const resolved = facts.get(lead.leadCampaignId);
-    if (resolved) out.set(lead.leadId, resolved.standing);
+    if (resolved) out.set(lead.leadId, resolved);
   }
   return out;
 }

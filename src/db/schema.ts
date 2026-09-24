@@ -373,7 +373,10 @@ export const conversionEvents = pgTable(
     candidateCount: integer("candidate_count").notNull().default(0),
     // WHEN the outcome happened. The tracker stamps the moment it received the event; a human
     // stating a past fact supplies the date, so the by-day series places it on the right day.
-    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    // NULLABLE since 0040: an outcome the customer's CRM evidences with no date is UNDATED, and every
+    // read answers it in its `undated` bucket rather than on a fabricated day. Every other writer
+    // still gets the default.
+    receivedAt: timestamp("received_at", { withTimezone: true }).defaultNow(),
     // "tracker" (reported by the client's website) | "manual" (stated by a human about a lead we
     // already know by id). Frozen at write; what makes the two distinguishable after the fact
     // WITHOUT changing what either counts toward — every count reads both.
@@ -396,6 +399,13 @@ export const conversionEvents = pgTable(
      */
     withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
     withdrawnByUserId: text("withdrawn_by_user_id"),
+    /**
+     * On a `source = 'crm'` row only: what the customer's CRM evidence IS (the CRM contact, its
+     * source and id, which date `received_at` is) and the whose-win RULE's own answer with its
+     * input. `caused_by_outreach` holds the EFFECTIVE answer (a person's override, else the rule);
+     * this keeps the rule's so a withdrawn override restores it exactly. See crm-evidence.ts.
+     */
+    crmEvidence: jsonb("crm_evidence"),
   },
   (table) => [
     uniqueIndex("idx_ce_brand_dedupe_signature")
@@ -457,12 +467,52 @@ export const leadStepDisqualifications = pgTable(
      */
     withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
     withdrawnByUserId: text("withdrawn_by_user_id"),
+    /**
+     * `manual` — a person stated it. `crm` — the customer's own CRM evidences it (a meeting their
+     * CRM says was not held, a deal it says was lost) for a lead PAIRED with that CRM contact.
+     * Only a `manual` row is a person's statement, so only a `manual` row can be withdrawn here.
+     */
+    source: text("source").notNull().default("manual"),
+    /** On a `crm` row: when their CRM says it happened. NULL when it gave no date. */
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    /** On a `crm` row: what the evidence is. See crm-evidence.ts. */
+    crmEvidence: jsonb("crm_evidence"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("idx_lsd_lead_campaign_step").on(table.leadId, table.campaignId, table.step),
     index("idx_lsd_brand_step").on(table.brandId, table.step),
+    index("idx_lsd_brand_source").on(table.brandId, table.source),
+  ],
+);
+
+/**
+ * A PERSON saying whose win a step the customer's CRM evidences was — overriding the date rule
+ * (crm-evidence.ts). Keyed on the PERSON and the step within a brand, because the CRM evidence is
+ * about the person, not about one campaign row. Retractable, never deleted: withdrawing marks the
+ * row and the rule's answer stands again; restating clears the mark through the same upsert.
+ */
+export const leadStepCauseStatements = pgTable(
+  "lead_step_cause_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    step: text("step").notNull(),
+    causedByOutreach: boolean("caused_by_outreach").notNull(),
+    note: text("note"),
+    statedByUserId: text("stated_by_user_id"),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+    withdrawnByUserId: text("withdrawn_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_lscs_brand_lead_step").on(table.brandId, table.leadId, table.step),
   ],
 );
 

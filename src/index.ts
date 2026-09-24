@@ -19,6 +19,8 @@ import stepStatementsRoutes from "./routes/step-statements.js";
 import followupsRoutes from "./routes/followups.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
+import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
+import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { withConnectRetry } from "./lib/db-retry.js";
 import { requireBootReady } from "./middleware/readiness.js";
@@ -51,6 +53,8 @@ app.use(bufferRoutes);
 // Registered BEFORE the leads router: its literal `/orgs/leads/crm-pairing*` paths must win
 // over `/orgs/leads/:id`, which matches any single segment.
 app.use(crmPairingsRoutes);
+// Literal `/orgs/leads/crm-evidence/*` paths — registered before `/orgs/leads/:id`.
+app.use(crmEvidenceRoutes);
 app.use(leadsRoutes);
 app.use(statsRoutes);
 app.use(transferBrandRoutes);
@@ -106,6 +110,10 @@ async function boot(): Promise<void> {
   // service at 503 over something no request depends on.
   markBootReady();
   console.log("[lead-service] ready — serving traffic");
+
+  // What each paired customer's CRM evidences, reflected onto their leads. Armed only once the
+  // schema it writes is there.
+  startCrmEvidenceWorker();
 
   try {
     await registerProviders();

@@ -37,6 +37,7 @@ import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
 import {
   canonicalizeStepOutcome,
+  statementSourceOf,
   LEAD_STEP_OUTCOMES,
   WEBSITE_VISIT,
   type LeadStepOutcomeName,
@@ -76,6 +77,7 @@ interface NeverRow {
   lead_id: string;
   campaign_id: string;
   step: string;
+  source: string | null;
   cost_cents: number | null;
   note: string | null;
   stated_by_user_id: string | null;
@@ -162,12 +164,16 @@ export function createLeadStandingResolver(
                 AND matched_lead_id = ANY(${sql.param(leadIds)}::uuid[])
                 AND attribution_status = 'attributed'
                 AND withdrawn_at IS NULL
-              ORDER BY received_at DESC NULLS LAST
+              -- What the customer's CRM evidences answers a step only when nobody and nothing
+              -- else of ours did: a person's statement and the tracker's report come first.
+              ORDER BY (source = 'crm') ASC, received_at DESC NULLS LAST
             `)) as unknown as OutcomeRow[]);
 
       // Retracted and withdrawn statements are excluded: kept for the record, not read as live.
       const neverRows = (await db.execute(sql`
-        SELECT lead_id, campaign_id, step, cost_cents, note, stated_by_user_id, updated_at
+        SELECT lead_id, campaign_id, step, source, cost_cents, note, stated_by_user_id,
+               -- A CRM "never" is dated by the CRM or not at all — never by when we synced it.
+               CASE WHEN source = 'crm' THEN occurred_at ELSE updated_at END AS updated_at
         FROM lead_step_disqualifications
         WHERE lead_id = ANY(${sql.param(leadIds)}::uuid[])
           AND campaign_id = ANY(${sql.param(campaignIds)}::text[])
@@ -212,7 +218,7 @@ export function createLeadStandingResolver(
           const step = canonicalizeStepOutcome(o.event);
           if (!step || outcomes.has(step)) continue;
           outcomes.set(step, {
-            source: o.source === "manual" ? "manual" : "tracker",
+            source: statementSourceOf(o.source),
             valueCents: o.value_cents,
             costCents: o.cost_cents,
             causedByOutreach: o.caused_by_outreach,
@@ -242,6 +248,7 @@ export function createLeadStandingResolver(
           const step = canonicalizeStepOutcome(n.step);
           if (!step) continue;
           nevers.set(step, {
+            source: n.source === "crm" ? "crm" : "manual",
             costCents: n.cost_cents,
             note: n.note,
             statedByUserId: n.stated_by_user_id,

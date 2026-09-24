@@ -45,6 +45,12 @@ export interface StatedOutcome {
 }
 
 export interface StatedNever {
+  /**
+   * `manual` — a person stated it; `crm` — the customer's own CRM evidences it (a meeting not
+   * held, a deal lost) for a lead paired with that CRM contact. Absent reads as `manual`, which is
+   * what every "never" was before a CRM could evidence one.
+   */
+  source?: StatementSource;
   /** What the CUSTOMER stated this dead leg cost them. Null = never asked; 0 = a stated zero. */
   costCents: number | null;
   note: string | null;
@@ -189,7 +195,7 @@ export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[
         statedState,
         inFunnel,
         stepIndex,
-        source: "manual" as StatementSource,
+        source: never.source ?? ("manual" as StatementSource),
         valueCents: null,
         costCents: never.costCents,
         // Nothing happened, so nothing caused it.
