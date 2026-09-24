@@ -2246,6 +2246,26 @@ registry.registerPath({
     },
     {
       in: "query" as const,
+      name: "stage",
+      required: false,
+      description:
+        "Restrict the read to `sales_interest` leads standing at one or SEVERAL funnel stages, " +
+        "comma-separated, read as ONE set: `conversation_reply`, `website_visit`, `signup`, " +
+        "`form_submission`, `meeting_booked`, `meeting_attended`. A stage is WHERE ON THE FUNNEL a " +
+        "`sales_interest` lead stands: the deepest funnel step known to have been reached (stated, " +
+        "implied by a later step, tracker-reported or CRM-evidenced), else the funnel's entry step " +
+        "that put them there (a positive reply on a conversation-led funnel, a click on a visit-led " +
+        "one). It is a PARTITION of `sales_interest` — one stage per lead, so somebody who attended " +
+        "is under `meeting_attended` and NOT also under `meeting_booked` — which is what lets a " +
+        "board draw one column per funnel step whose sizes add up (the engagement `bucket`s are " +
+        "nested and cannot). Only `sales_interest` rows carry a stage, so naming one narrows to " +
+        "them. `total` is then the column's size, and GET /orgs/leads/standing-counts?breakdown=" +
+        "stage answers every stage's size. Row-level, the same answer is `standing.deepestStep ?? " +
+        "standing.entryStep` on a `sales_interest` row. An unknown value is a 400.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "query" as const,
       name: "sort",
       required: false,
       description:
@@ -2471,7 +2491,7 @@ registry.registerPath({
     "is ever answered as a partial delta. " +
     "Same scope vocabulary and meaning as the list: `brandId`, `campaignId` (the whole campaign " +
     "identity), `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping " +
-    "parameters (`q`, `bucket`, `standing`, `sort`, `format`, `include`, `limit`, `offset`, " +
+    "parameters (`q`, `bucket`, `standing`, `stage`, `sort`, `format`, `include`, `limit`, `offset`, " +
     "`cursor`) are a 400: the feed is always the whole scope. Gzipped when the caller accepts it. " +
     "FRESHNESS: a serve, a re-point, a status, a name, an email or an employer written here, and " +
     "every delivery event the sender announces (a send, an open, a click, a reply, a bounce, an " +
@@ -2600,6 +2620,27 @@ const LeadStandingCountsResponseSchema = z
           "of those columns can state its own size and be paged on its own via " +
           "`GET /orgs/leads?standing=opted_out` / `?standing=disqualified`.",
       }),
+    salesInterestStages: z
+      .array(
+        z.object({
+          stage: z.string().openapi({ example: "meeting_booked" }),
+          count: z.number().int(),
+        }),
+      )
+      .optional()
+      .openapi({
+        description:
+          "Present ONLY when `breakdown=stage` is asked for. The `sales_interest` leads split by " +
+          "WHERE ON THE FUNNEL they stand — the deepest funnel step known to have been reached, " +
+          "else the funnel's entry step (`conversation_reply` for a positive reply on a " +
+          "conversation-led funnel, `website_visit` for a click on a visit-led one). A PARTITION " +
+          "of `counts.sales_interest`: one stage per lead, and the counts SUM to it exactly. When " +
+          "`funnelKey` is named, every stage of that funnel is present in funnel order (0 when " +
+          "nobody stands there) — for `sales_meetings_from_conversation`: `conversation_reply`, " +
+          "`meeting_booked`, `meeting_attended`; a scope spanning several funnels also lists every " +
+          "other stage observed. The funnel's last step is never a stage (a lead who reached it is " +
+          "a `customer`). Page one stage with `GET /orgs/leads?stage=<stage>`.",
+      }),
   })
   .openapi("LeadStandingCountsResponse", {
     description: "Response shape for GET /orgs/leads/standing-counts. Counts only — never any rows.",
@@ -2665,6 +2706,16 @@ registry.registerPath({
         "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
         "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
       schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
+    },
+    {
+      in: "query" as const,
+      name: "breakdown",
+      required: false,
+      description:
+        "`stage` adds `salesInterestStages`: the `sales_interest` count split by where on the " +
+        "funnel each lead stands (a partition — sums to `counts.sales_interest`). Absent => the " +
+        "response is exactly what it always was. Any other value is a 400.",
+      schema: { type: "string" as const, enum: ["stage"] },
     },
     { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },

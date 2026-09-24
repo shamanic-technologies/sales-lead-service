@@ -215,6 +215,8 @@ interface DerivedRow {
   activityAt: string;
   buckets: LeadBucket[];
   standing: LeadStandingState;
+  /** Where on the funnel a `sales_interest` row stands; null for every other standing. */
+  stage: string | null;
   searchText: string;
 }
 
@@ -297,6 +299,7 @@ async function deriveRows(
     activityAt: row.activityAt,
     buckets: LEAD_BUCKETS.filter((b) => row.buckets.has(b)),
     standing: row.standing ?? "unresolved",
+    stage: row.stage ?? null,
     searchText: row.searchText,
   }));
 }
@@ -318,9 +321,9 @@ async function writeRows(
   if (rows.length === 0) return;
   await db`
     INSERT INTO lead_read_model_rows
-      (model_id, id, lead_id, email, created_at_text, activity_at, buckets, standing, search_text)
+      (model_id, id, lead_id, email, created_at_text, activity_at, buckets, standing, stage, search_text)
     SELECT ${modelId}::uuid, u.id, u.lead_id, u.email, u.created_at_text, u.activity_at,
-           string_to_array(u.buckets, ','), u.standing, u.search_text
+           string_to_array(u.buckets, ','), u.standing, u.stage, u.search_text
     FROM unnest(
       ${rows.map((r) => r.id)}::uuid[],
       ${rows.map((r) => r.leadId)}::uuid[],
@@ -329,8 +332,9 @@ async function writeRows(
       ${rows.map((r) => r.activityAt)}::timestamptz[],
       ${rows.map((r) => r.buckets.join(","))}::text[],
       ${rows.map((r) => r.standing)}::text[],
+      ${rows.map((r) => r.stage)}::text[],
       ${rows.map((r) => r.searchText)}::text[]
-    ) AS u(id, lead_id, email, created_at_text, activity_at, buckets, standing, search_text)
+    ) AS u(id, lead_id, email, created_at_text, activity_at, buckets, standing, stage, search_text)
     ON CONFLICT (model_id, id) DO UPDATE SET
       lead_id = EXCLUDED.lead_id,
       email = EXCLUDED.email,
@@ -338,6 +342,7 @@ async function writeRows(
       activity_at = EXCLUDED.activity_at,
       buckets = EXCLUDED.buckets,
       standing = EXCLUDED.standing,
+      stage = EXCLUDED.stage,
       search_text = EXCLUDED.search_text
   `;
 }
@@ -628,6 +633,7 @@ function modelFilter(
   tokens: readonly string[] | null,
   bucket: LeadBucket | null,
   standings: readonly LeadStandingState[] | null,
+  stages: readonly string[] | null = null,
 ) {
   let predicate = sql`model_id = ${model.id}`;
   for (const token of tokens ?? []) {
@@ -635,6 +641,7 @@ function modelFilter(
   }
   if (bucket) predicate = sql`${predicate} AND ${bucket} = ANY(buckets)`;
   if (standings) predicate = sql`${predicate} AND standing = ANY(${[...standings]}::text[])`;
+  if (stages) predicate = sql`${predicate} AND stage = ANY(${[...stages]}::text[])`;
   return predicate;
 }
 
@@ -665,13 +672,31 @@ export async function readModelStandingCounts(
   model: ReadModel,
   tokens: readonly string[] | null,
 ): Promise<{ total: number; counts: Record<LeadStandingState, number> }> {
-  const rows = await sql<Array<{ standing: string; n: number }>>`
-    SELECT standing, count(*)::int AS n
+  const { total, counts } = await readModelStandingAndStageCounts(model, tokens);
+  return { total, counts };
+}
+
+/**
+ * Every standing's size AND, within `sales_interest`, every funnel stage's size — one GROUP BY, so
+ * the stage counts are a partition of `counts.sales_interest` taken from the same rows at the same
+ * instant (they sum to it exactly).
+ */
+export async function readModelStandingAndStageCounts(
+  model: ReadModel,
+  tokens: readonly string[] | null,
+): Promise<{
+  total: number;
+  counts: Record<LeadStandingState, number>;
+  stages: Map<string, number>;
+}> {
+  const rows = await sql<Array<{ standing: string; stage: string | null; n: number }>>`
+    SELECT standing, stage, count(*)::int AS n
     FROM lead_read_model_rows
     WHERE ${modelFilter(model, tokens, null, null)}
-    GROUP BY standing
+    GROUP BY standing, stage
   `;
   const counts = zeroStandingCounts();
+  const stages = new Map<string, number>();
   let total = 0;
   for (const row of rows) {
     const state = (LEAD_STANDING_STATES as readonly string[]).includes(row.standing)
@@ -679,8 +704,15 @@ export async function readModelStandingCounts(
       : "unresolved";
     counts[state] += row.n;
     total += row.n;
+    if (state === "sales_interest") {
+      if (row.stage === null) {
+        // A model written before the stage existed. Never counted under a guessed stage.
+        throw new ReadModelUnavailableError("standing", "a sales_interest row carries no stage");
+      }
+      stages.set(row.stage, (stages.get(row.stage) ?? 0) + row.n);
+    }
   }
-  return { total, counts };
+  return { total, counts, stages };
 }
 
 /** The page a caller asked for: how many rows match, where to resume, and the ids themselves. */
@@ -734,12 +766,14 @@ export async function readModelPage(
     tokens: readonly string[] | null;
     bucket: LeadBucket | null;
     standings: readonly LeadStandingState[] | null;
+    /** Narrow to `sales_interest` rows standing at one of these funnel stages. */
+    stages?: readonly string[] | null;
     sort: LeadSortOrder;
     page: LeadListPage;
   },
 ): Promise<LeadPlanPage> {
   const { tokens, bucket, standings, sort, page } = query;
-  const filter = modelFilter(model, tokens, bucket, standings);
+  const filter = modelFilter(model, tokens, bucket, standings, query.stages ?? null);
   const start = page.offset !== null && page.offset > 0 ? page.offset : 0;
 
   if (page.limit !== null) {

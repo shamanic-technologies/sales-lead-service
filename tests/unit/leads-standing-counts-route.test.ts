@@ -95,6 +95,8 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 
 /** The state each row's standing resolves to, by `leads_campaigns.id`. */
 let standingByRow: Record<string, string> = {};
+/** The deepest funnel step a row reached, by id — absent means only the funnel's entry. */
+let deepestByRow: Record<string, string> = {};
 let standingChunks: number[] = [];
 let standingFails = false;
 vi.mock("../../src/lib/lead-standing-resolver.js", async (importOriginal) => ({
@@ -109,7 +111,14 @@ vi.mock("../../src/lib/lead-standing-resolver.js", async (importOriginal) => ({
             .filter((r) => standingByRow[r.id])
             .map((r) => [
               r.id,
-              { standing: { state: standingByRow[r.id] }, closedDeal: null },
+              {
+                standing: {
+                  state: standingByRow[r.id],
+                  entryStep: "conversation_reply",
+                  deepestStep: deepestByRow[r.id] ?? null,
+                },
+                closedDeal: null,
+              },
             ]),
         ),
       );
@@ -202,6 +211,7 @@ beforeEach(() => {
     [indexRows[4].id]: "disqualified",
     [indexRows[5].id]: "opted_out",
   };
+  deepestByRow = {};
   hydrated = [];
   standingChunks = [];
   gatewayFails = false;
@@ -480,5 +490,110 @@ describe("GET /orgs/leads?standing=a,b (a column holding several standings)", ()
     standingFails = true;
     const res = await get(`?brandId=${BRAND}&view=basic&standing=sales_interest,customer`);
     expect(res.status).toBe(502);
+  });
+});
+
+/**
+ * The board of ONE sales funnel draws a column per funnel step a lead can stand at, and those
+ * columns must be a PARTITION of `sales_interest`: one place per lead, sizes that add up. The
+ * nested engagement buckets cannot draw it (somebody who attended also booked), so the stage is
+ * the deepest step reached, else the funnel's entry.
+ */
+describe("funnel stages within sales_interest", () => {
+  const FUNNEL = "sales_meetings_from_conversation";
+  beforeEach(() => {
+    indexRows = Array.from({ length: 9 }, (_, i) => person(i));
+    standingByRow = {
+      [indexRows[0].id]: "contacted",
+      [indexRows[1].id]: "sales_interest", // positive reply only
+      [indexRows[2].id]: "sales_interest", // positive reply only
+      [indexRows[3].id]: "sales_interest", // booked
+      [indexRows[4].id]: "sales_interest", // booked
+      [indexRows[5].id]: "sales_interest", // booked
+      [indexRows[6].id]: "sales_interest", // attended (and therefore booked)
+      [indexRows[7].id]: "customer",
+      [indexRows[8].id]: "opted_out",
+    };
+    deepestByRow = {
+      [indexRows[3].id]: "meeting_booked",
+      [indexRows[4].id]: "meeting_booked",
+      [indexRows[5].id]: "meeting_booked",
+      [indexRows[6].id]: "meeting_attended",
+      [indexRows[7].id]: "sale",
+    };
+  });
+
+  it("answers today's response byte for byte when no breakdown is asked for", async () => {
+    const res = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}`);
+    expect(res.status).toBe(200);
+    expect(Object.keys(res.body).sort()).toEqual(["counts", "total"]);
+  });
+
+  it("splits sales_interest by funnel stage, in funnel order, summing to it exactly", async () => {
+    const res = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}&breakdown=stage`);
+    expect(res.status).toBe(200);
+    expect(res.body.counts.sales_interest).toBe(6);
+    expect(res.body.salesInterestStages).toEqual([
+      { stage: "conversation_reply", count: 2 },
+      { stage: "meeting_booked", count: 3 },
+      { stage: "meeting_attended", count: 1 },
+    ]);
+    const summed = (res.body.salesInterestStages as Array<{ count: number }>).reduce(
+      (a, b) => a + b.count,
+      0,
+    );
+    expect(summed).toBe(res.body.counts.sales_interest);
+    // The other columns are untouched.
+    const plain = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}`);
+    expect(res.body.counts).toEqual(plain.body.counts);
+    expect(res.body.total).toBe(plain.body.total);
+  });
+
+  it("lists every stage of the named funnel even when nobody stands there", async () => {
+    deepestByRow = {};
+    const res = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}&breakdown=stage`);
+    expect(res.body.salesInterestStages).toEqual([
+      { stage: "conversation_reply", count: 6 },
+      { stage: "meeting_booked", count: 0 },
+      { stage: "meeting_attended", count: 0 },
+    ]);
+  });
+
+  it("400s an unknown breakdown", async () => {
+    expect((await counts(`?brandId=${BRAND}&breakdown=funnel`)).status).toBe(400);
+  });
+
+  it("pages one stage with a total that matches its count, never overlapping a neighbour", async () => {
+    const counted = await counts(`?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}&breakdown=stage`);
+    const byStage = Object.fromEntries(
+      (counted.body.salesInterestStages as Array<{ stage: string; count: number }>).map((s) => [
+        s.stage,
+        s.count,
+      ]),
+    );
+    const seen = new Set<string>();
+    for (const stage of ["conversation_reply", "meeting_booked", "meeting_attended"]) {
+      const res = await get(
+        `?brandId=${BRAND}&offerId=o1&funnelKey=${FUNNEL}&view=basic&stage=${stage}&sort=activity&limit=2`,
+      );
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(byStage[stage]);
+      for (const lead of res.body.leads) {
+        expect(seen.has(lead.id)).toBe(false);
+        seen.add(lead.id);
+      }
+    }
+    const booked = await get(`?brandId=${BRAND}&view=basic&stage=meeting_booked`);
+    expect(booked.body.leads.map((l: { id: string }) => l.id)).toEqual([
+      indexRows[3].id,
+      indexRows[4].id,
+      indexRows[5].id,
+    ]);
+  });
+
+  it("400s a stage it does not know", async () => {
+    const res = await get(`?brandId=${BRAND}&stage=sale`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("Unknown stage");
   });
 });

@@ -35,6 +35,7 @@ interface FakeRow {
   activityAt: string;
   buckets: Set<LeadBucket>;
   standing: LeadStandingState;
+  stage: string | null;
   searchText: string;
 }
 
@@ -121,6 +122,7 @@ export function fakeReadModelModule(real: Real): Real {
           activityAt: row.activityAt,
           buckets: row.buckets,
           standing: row.standing ?? "unresolved",
+          stage: row.stage ?? null,
           searchText: row.searchText ?? "",
         });
       }
@@ -142,13 +144,15 @@ export function fakeReadModelModule(real: Real): Real {
     tokens: readonly string[] | null,
     bucket: LeadBucket | null,
     standings: readonly LeadStandingState[] | null,
+    stages: readonly string[] | null = null,
   ): FakeRow[] {
     fakeModelSearches.push(tokens);
     return (fakeModels.get(model.id) ?? []).filter(
       (row) =>
         (tokens ?? []).every((t) => row.searchText.toLowerCase().includes(t.toLowerCase())) &&
         (bucket === null || row.buckets.has(bucket)) &&
-        (standings === null || standings.includes(row.standing)),
+        (standings === null || standings.includes(row.standing)) &&
+        (stages === null || (row.stage !== null && stages.includes(row.stage))),
     );
   }
 
@@ -172,8 +176,21 @@ export function fakeReadModelModule(real: Real): Real {
       }
       return { total: rows.length, counts };
     },
+    readModelStandingAndStageCounts: async (model, tokens) => {
+      const rows = filtered(model, tokens, null, null);
+      const counts = zeroStandingCounts();
+      const stages = new Map<string, number>();
+      for (const row of rows) {
+        const state = LEAD_STANDING_STATES.includes(row.standing) ? row.standing : "unresolved";
+        counts[state] += 1;
+        if (state === "sales_interest" && row.stage) {
+          stages.set(row.stage, (stages.get(row.stage) ?? 0) + 1);
+        }
+      }
+      return { total: rows.length, counts, stages };
+    },
     readModelPage: async (model, query) => {
-      const rows = filtered(model, query.tokens, query.bucket, query.standings);
+      const rows = filtered(model, query.tokens, query.bucket, query.standings, query.stages ?? null);
       return pageOf(rows, query.sort, query.page);
     },
   };

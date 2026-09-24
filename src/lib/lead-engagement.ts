@@ -34,6 +34,11 @@ export interface EnrichedLeadIndexRow extends LeadIndexRow {
    * searches must not pay for it.
    */
   standing?: LeadStandingState;
+  /**
+   * Where on the funnel a `sales_interest` lead stands (`salesInterestStage`), attached with the
+   * standing and null for every other state.
+   */
+  stage?: string | null;
 }
 
 /** The identity context email-gateway is called with — the same one the list calls it with. */

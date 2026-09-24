@@ -11,7 +11,13 @@ import {
 } from "../lib/email-gateway-client.js";
 import { resolveCampaignFamily } from "../lib/campaign-identity-client.js";
 import { resolveOfferCampaignIds, OfferCampaignsUnavailableError } from "../lib/offer-campaigns-client.js";
-import { canonicalizeFunnelKey, FUNNEL_KEYS, type FunnelKey } from "../lib/funnel-steps.js";
+import {
+  canonicalizeFunnelKey,
+  FUNNEL_ENTRY,
+  FUNNEL_KEYS,
+  FUNNEL_STEPS,
+  type FunnelKey,
+} from "../lib/funnel-steps.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
@@ -46,6 +52,7 @@ import {
   readModelDelivery,
   readModelPage,
   readModelScopeFor,
+  readModelStandingAndStageCounts,
   readModelStandingCounts,
   ReadModelUnavailableError,
   type LeadPlanPage,
@@ -76,8 +83,12 @@ import {
 } from "../lib/lead-standing-resolver.js";
 import {
   parseLeadStandingFilter,
+  parseSalesInterestStageFilter,
+  SALES_INTEREST_STAGES,
+  salesInterestStagesOf,
   zeroStandingCounts,
   type LeadStandingState,
+  type SalesInterestStage,
 } from "../lib/lead-standing.js";
 
 const router = Router();
@@ -786,6 +797,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
     let searchTokens: string[] | null;
     let bucket: LeadBucket | null;
     let standings: readonly LeadStandingState[] | null;
+    let stages: readonly SalesInterestStage[] | null;
     let sort: LeadSortOrder;
     let format: LeadListFormat;
     try {
@@ -793,6 +805,10 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       searchTokens = parseLeadSearch(req.query.q);
       bucket = parseLeadBucket(req.query.bucket);
       standings = parseLeadStandingFilter(req.query.standing);
+      // Where on the funnel a `sales_interest` lead stands — a partition of that one standing, so
+      // a board can draw a column per funnel step. Only `sales_interest` rows carry a stage, so
+      // naming one narrows to them. Absent = no stage filter, byte-identical to before.
+      stages = parseSalesInterestStageFilter(req.query.stage);
       sort = parseLeadSort(req.query.sort);
       format = parseLeadFormat(req.query.format);
       // How much of that population to return, and where to start. Absent `limit` means the whole
@@ -822,6 +838,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         searchTokens !== null ||
         bucket !== null ||
         standings !== null ||
+        stages !== null ||
         sort !== "created" ||
         page.limit !== null ||
         page.offset !== null ||
@@ -877,7 +894,11 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
     // lead-read-model.ts) — and only the page's own ids are hydrated. A read naming none of the
     // three never touches a model and is byte-identical to what it has always been.
     const indexed =
-      searchTokens !== null || bucket !== null || standings !== null || sort !== "created";
+      searchTokens !== null ||
+      bucket !== null ||
+      standings !== null ||
+      stages !== null ||
+      sort !== "created";
     let plan: LeadPlanPage | null = null;
     // The scope's read model, when this read is answered from one: its count, its order and its
     // filter are all read off the model's rows (see lead-read-model.ts), and the page it picks is
@@ -900,7 +921,14 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         }
         throw error;
       }
-      plan = await readModelPage(model, { tokens: searchTokens, bucket, standings, sort, page });
+      plan = await readModelPage(model, {
+        tokens: searchTokens,
+        bucket,
+        standings,
+        stages,
+        sort,
+        page,
+      });
     }
 
     // How many rows match what the caller asked for — the number that labels the page, not the
@@ -1353,6 +1381,31 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
 });
 
 /**
+ * `breakdown` on GET /orgs/leads/standing-counts: absent -> false (the response is exactly what it
+ * always was); `stage` -> true (adds `salesInterestStages`). Anything else is a 400.
+ */
+function parseStandingBreakdown(raw: unknown): boolean {
+  if (raw === undefined) return false;
+  if (raw === "stage") return true;
+  throw new Error("breakdown must be `stage`");
+}
+
+/**
+ * The `sales_interest` partition by funnel stage, ordered: the named funnel's stages first, in
+ * funnel order and always present, then any other stage observed (a scope spanning several funnels),
+ * in the canonical stage order. Sums to `counts.sales_interest` by construction.
+ */
+function stageBreakdown(
+  funnelStages: readonly SalesInterestStage[],
+  observed: ReadonlyMap<string, number>,
+): Array<{ stage: string; count: number }> {
+  const order: string[] = [...funnelStages];
+  for (const stage of SALES_INTEREST_STAGES) if (observed.has(stage) && !order.includes(stage)) order.push(stage);
+  for (const stage of observed.keys()) if (!order.includes(stage)) order.push(stage);
+  return order.map((stage) => ({ stage, count: observed.get(stage) ?? 0 }));
+}
+
+/**
  * GET /orgs/leads/standing-counts — how many leads stand in each state, and no rows.
  *
  * A triage board draws one column per STANDING (still in play, sales interest, disqualified,
@@ -1379,12 +1432,20 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
   try {
     let statuses: readonly string[];
     let searchTokens: string[] | null;
+    let withStages: boolean;
     try {
       statuses = parseLeadStatusFilter(req.query.status);
       searchTokens = parseLeadSearch(req.query.q);
+      withStages = parseStandingBreakdown(req.query.breakdown);
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
+    // The stages a named funnel's sales_interest leads can stand at, in funnel order — each is
+    // always present (0 when nobody stands there) so a board draws every column of that funnel.
+    const funnelKeyForStages = canonicalizeFunnelKey(req.query.funnelKey);
+    const funnelStages: readonly SalesInterestStage[] = funnelKeyForStages
+      ? salesInterestStagesOf(FUNNEL_ENTRY[funnelKeyForStages], FUNNEL_STEPS[funnelKeyForStages])
+      : [];
 
     const resolved = await resolveLeadReadScope(req, statuses);
     if (resolved.kind === "error") {
@@ -1392,7 +1453,11 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
     }
     // An offer no campaign sells: a real, empty population, stated as such rather than widened.
     if (resolved.kind === "empty") {
-      return res.json({ total: 0, counts: zeroStandingCounts() });
+      return res.json({
+        total: 0,
+        counts: zeroStandingCounts(),
+        ...(withStages ? { salesInterestStages: stageBreakdown(funnelStages, new Map()) } : {}),
+      });
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;
@@ -1416,7 +1481,9 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       throw error;
     }
 
-    return res.json(await readModelStandingCounts(model, searchTokens));
+    if (!withStages) return res.json(await readModelStandingCounts(model, searchTokens));
+    const { total, counts, stages } = await readModelStandingAndStageCounts(model, searchTokens);
+    return res.json({ total, counts, salesInterestStages: stageBreakdown(funnelStages, stages) });
   } catch (error) {
     console.error("[lead-service] Standing counts error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -1429,7 +1496,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
  * that believes it filtered a copy it did not filter would compute on the wrong population.
  */
 const CHANGE_FEED_REFUSED_PARAMS = [
-  "q", "bucket", "standing", "sort", "format", "include", "limit", "offset", "cursor",
+  "q", "bucket", "standing", "stage", "sort", "format", "include", "limit", "offset", "cursor",
 ] as const;
 
 /**
