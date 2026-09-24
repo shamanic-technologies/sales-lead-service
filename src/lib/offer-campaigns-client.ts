@@ -33,6 +33,7 @@
  */
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { canonicalizeFunnelKey, type FunnelKey } from "./funnel-steps.js";
 
 export interface OfferCampaignContext {
   orgId: string;
@@ -46,6 +47,12 @@ export interface OfferCampaignRow {
   id: string;
   /** The offer the campaign sells. NULL is a real state — a campaign that names none. */
   offerId?: string | null;
+  /**
+   * The sales funnel the campaign states (campaign-service `campaigns.funnel_key`), in either the
+   * current or the retired spelling. NULL is a real state too: a campaign that sells through no
+   * sales funnel at all — PR, hiring, press kit — or a legacy row that never stated one.
+   */
+  funnelKey?: string | null;
 }
 
 /**
@@ -60,7 +67,17 @@ export class OfferCampaignsUnavailableError extends Error {
 }
 
 /**
- * Every campaign id in the org that names `offerId`, ascending.
+ * Every campaign id in the org that names `offerId`, ascending — narrowed, when `funnelKey` is
+ * named, to the campaigns that sell the offer THROUGH that sales funnel.
+ *
+ * A funnel narrowing reads the funnel each campaign STATES and nothing else, compared in canonical
+ * form so either spelling of a key selects the same campaigns. It is never inferred: not from the
+ * offer's declared funnels in brand-service, not from a sibling campaign, not from a goal. So a
+ * campaign stating no funnel belongs to NO funnel page — which is what keeps a PR or hiring campaign
+ * run under the same offer off a sales funnel's list, and what makes each funnel's population a
+ * subset of the offer's. Measured 2026-09-24: of the offer-carrying campaigns stating no funnel,
+ * all but five are non-sales channels; those five are legacy cold-email rows (8 people on the two
+ * offers declaring a single funnel), and they stay unattributed rather than guessed.
  *
  * Membership is strict equality on the offer the campaign itself states — never inferred from a
  * sibling campaign, a funnel, or a brand. A campaign that states no offer belongs to no offer.
@@ -71,6 +88,7 @@ export class OfferCampaignsUnavailableError extends Error {
 export async function resolveOfferCampaignIds(
   offerId: string,
   ctx: OfferCampaignContext,
+  funnelKey: FunnelKey | null = null,
 ): Promise<string[]> {
   const headers: Record<string, string> = {
     "X-API-Key": CAMPAIGN_SERVICE_API_KEY,
@@ -124,7 +142,9 @@ export async function resolveOfferCampaignIds(
 
   const ids = new Set<string>();
   for (const row of data.campaigns) {
-    if (row?.id && row.offerId === offerId) ids.add(row.id);
+    if (!row?.id || row.offerId !== offerId) continue;
+    if (funnelKey && canonicalizeFunnelKey(row.funnelKey) !== funnelKey) continue;
+    ids.add(row.id);
   }
   return Array.from(ids).sort();
 }

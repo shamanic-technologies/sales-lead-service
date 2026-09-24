@@ -11,6 +11,7 @@ import {
 } from "../lib/email-gateway-client.js";
 import { resolveCampaignFamily } from "../lib/campaign-identity-client.js";
 import { resolveOfferCampaignIds, OfferCampaignsUnavailableError } from "../lib/offer-campaigns-client.js";
+import { canonicalizeFunnelKey, FUNNEL_KEYS, type FunnelKey } from "../lib/funnel-steps.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
@@ -570,7 +571,7 @@ async function resolveLeadReadScope(
   req: AuthenticatedRequest,
   statuses: readonly string[],
 ): Promise<LeadScopeResolution> {
-  const { brandId, campaignId, offerId, orgId: queryOrgId, userId, workflowSlug } = req.query;
+  const { brandId, campaignId, offerId, funnelKey, orgId: queryOrgId, userId, workflowSlug } = req.query;
   const brandIdStr = typeof brandId === "string" ? brandId : undefined;
   const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
   const offerIdStr = typeof offerId === "string" ? offerId : undefined;
@@ -582,6 +583,29 @@ async function resolveLeadReadScope(
     // narrowings where one already implies the other — either the campaign is in the offer (the
     // offer adds nothing) or it is not (the pair matches nothing, and whichever the caller meant
     // is unknowable). Refused rather than silently resolved one way.
+  // One sales funnel of an offer: the offer's campaigns that STATE that funnel. Either spelling of
+  // a key is accepted and read in canonical form. An unknown key, or a funnel named without the
+  // offer it narrows, is refused — never silently ignored, which would answer a funnel page with
+  // the whole offer's leads under the funnel's name.
+  let funnelKeyCanonical: FunnelKey | null = null;
+  if (funnelKey !== undefined) {
+    funnelKeyCanonical = canonicalizeFunnelKey(funnelKey);
+    if (!funnelKeyCanonical) {
+      return {
+        kind: "error",
+        status: 400,
+        error: `funnelKey must be one of ${FUNNEL_KEYS.join(", ")} (or a retired spelling of one), got ${JSON.stringify(funnelKey)}`,
+      };
+    }
+    if (!offerIdStr) {
+      return {
+        kind: "error",
+        status: 400,
+        error: "funnelKey narrows an offer to one of its sales funnels — name the offerId it narrows",
+      };
+    }
+  }
+
   if (offerIdStr && campaignIdStr) {
     return {
       kind: "error",
@@ -599,12 +623,16 @@ async function resolveLeadReadScope(
     let offerCampaignIds: string[] | null = null;
     if (offerIdStr) {
       try {
-        offerCampaignIds = await resolveOfferCampaignIds(offerIdStr, {
-          orgId: req.orgId!,
-          userId: req.userId ?? null,
-          runId: req.runId ?? null,
-          brandId: brandIdStr ?? null,
-        });
+        offerCampaignIds = await resolveOfferCampaignIds(
+          offerIdStr,
+          {
+            orgId: req.orgId!,
+            userId: req.userId ?? null,
+            runId: req.runId ?? null,
+            brandId: brandIdStr ?? null,
+          },
+          funnelKeyCanonical,
+        );
       } catch (error) {
         console.error(
           `[lead-service] offer scope unresolved for offerId=${offerIdStr} orgId=${req.orgId} — ` +
@@ -620,8 +648,9 @@ async function resolveLeadReadScope(
         };
       }
 
-      // No campaign sells this offer yet, so no lead has been served under it. That is a real,
-      // correct answer — and the one place a missing filter would otherwise become the brand.
+      // No campaign sells this offer (through this funnel, when one is named) yet, so no lead has
+      // been served under it. That is a real, correct answer — and the one place a missing filter
+      // would otherwise become the brand.
       if (offerCampaignIds.length === 0) return { kind: "empty" };
     }
 
@@ -648,6 +677,7 @@ async function resolveLeadReadScope(
       brandId: brandIdStr,
       campaignId: campaignIdStr,
       offerId: offerIdStr,
+      funnelKey: funnelKeyCanonical ?? undefined,
       campaignIds: offerCampaignIds ?? campaignFamily ?? undefined,
       queryOrgId: queryOrgIdStr,
       userId: userIdStr,
