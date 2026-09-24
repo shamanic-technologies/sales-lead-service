@@ -5359,3 +5359,77 @@ registry.registerPath({
     500: { description: "Internal server error" },
   },
 });
+
+const WonLeadSchema = z
+  .object({
+    leadId: z.string().uuid().openapi({ description: "The won lead." }),
+    emails: z.array(z.string()).openapi({
+      description:
+        "Every email address registered to this lead, lowercased and trimmed. Empty when the lead holds no email address (still listed, so the set never silently shrinks).",
+    }),
+    wonAt: z.string().nullable().openapi({
+      description:
+        "When the earliest live sale for this lead happened, ISO-8601. Null only when genuinely undated (e.g. a CRM deal with no date) — never fabricated.",
+    }),
+    sources: z.array(z.enum(["manual", "tracker", "crm"])).openapi({
+      description:
+        "Who observed the sale: `manual` (a person stated it), `tracker` (the brand's website tag reported it), `crm` (the customer's own CRM evidences it).",
+    }),
+  })
+  .openapi("WonLead");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/won-leads",
+  summary: "The people this brand has won (paying clients), keyed by email",
+  description:
+    "Every lead the (org, brand) has WON — exactly what makes a lead's standing `customer`: a live, attributed `sale` on the outcome ledger, " +
+    "whether a person stated it, the brand's tracker reported it, or the customer's own CRM evidences it. Scope is the whole brand (every campaign, every offer) within the calling org. " +
+    "A withdrawn sale statement, or a CRM sale a person's statement superseded, stops counting immediately. " +
+    "Without `email`: the whole set (`emails` is the distinct union of every won lead's addresses). With `email`: the same read narrowed to leads owning that exact address " +
+    "(case-insensitive) — `emails` is `[email]` when that address is a won person for the brand, `[]` otherwise, so the one-address check cannot disagree with the set. " +
+    "Built for the people gateway to keep a paying client out of cold outreach. Any failure is a 500 — never an empty set.",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      email: z.string().optional().openapi({ description: "One exact address to check (case-insensitive)." }),
+    }),
+  },
+  parameters: [
+    {
+      in: "header" as const,
+      name: "x-api-key",
+      required: true,
+      schema: { type: "string" as const },
+      description: "API key for authenticating requests",
+    },
+    {
+      in: "header" as const,
+      name: "x-org-id",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Internal organization UUID — the org whose brand is asked about",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The brand's won people",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              emails: z.array(z.string()).openapi({
+                description: "Distinct lowercased addresses of every won lead (or `[email]` / `[]` when `email` was asked).",
+              }),
+              wonLeads: z.array(WonLeadSchema),
+            })
+            .openapi("WonLeadsResponse"),
+        },
+      },
+    },
+    400: { description: "Missing x-org-id, or an empty `email`" },
+    401: { description: "Unauthorized" },
+    500: { description: "The won set could not be read — never answered as an empty set" },
+  },
+});
