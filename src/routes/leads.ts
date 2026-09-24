@@ -13,6 +13,7 @@ import { resolveCampaignFamily } from "../lib/campaign-identity-client.js";
 import { resolveOfferCampaignIds, OfferCampaignsUnavailableError } from "../lib/offer-campaigns-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
+import compression from "compression";
 import { fetchBasicLeadChunk, streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import {
   campaignScopeIds,
@@ -710,7 +711,71 @@ async function resolveLeadReadScope(
   return { kind: "scope", scope, statusCampaignIdStr, hasScopeForStatus, flatten };
 }
 
-router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+/**
+ * One row of `?view=compact`: WHO the lead is, WHICH campaign and workflow served them, and what the
+ * delivery layer measured — exactly what a consumer computing figures over a brand's whole
+ * population reads, and nothing it does not.
+ *
+ * It exists because features-service computes a brand's revenue, funnel counts and per-lead outcomes
+ * by walking the brand's entire population, and `view=basic` answered that walk with ~2.2 KB a row
+ * (audience card, offer card, standing, closed deal, run ids, timestamps, headline, LinkedIn URL…)
+ * of which the engine read a quarter — 110 MB for the largest brand. Every value here is read off
+ * the SAME row and the SAME flattened overlay `view=basic` emits, so a field present in both can
+ * never disagree. The audience, offer and standing resolvers are not run at all for this view.
+ */
+function toCompactLead(r: BasicLeadRow, delivery: FlattenedStatus) {
+  const org = r.lead?.organization ?? null;
+  return {
+    id: r.id,
+    leadId: r.leadId,
+    campaignId: r.campaignId,
+    workflowSlug: r.workflowSlug ?? null,
+    status: r.status,
+    email: r.email?.value ?? "",
+    lead: r.lead
+      ? {
+          firstName: r.lead.firstName,
+          lastName: r.lead.lastName,
+          photoUrl: r.lead.photoUrl,
+          currentTitle: r.lead.currentTitle,
+          seniority: r.lead.seniority,
+          organization: org
+            ? {
+                id: org.id,
+                name: org.name,
+                logoUrl: org.logoUrl,
+                primaryDomain: org.primaryDomain,
+                websiteUrl: org.websiteUrl,
+                industry: org.industry,
+                estimatedNumEmployees: org.estimatedNumEmployees,
+                city: org.city,
+                country: org.country,
+              }
+            : null,
+        }
+      : null,
+    contacted: delivery.contacted,
+    sent: delivery.sent,
+    delivered: delivery.delivered,
+    opened: delivery.opened,
+    clicked: delivery.clicked,
+    bounced: delivery.bounced,
+    unsubscribed: delivery.unsubscribed,
+    replied: delivery.replied,
+    replyClassification: delivery.replyClassification,
+  };
+}
+
+/**
+ * `view=compact` is gzipped when the caller accepts it (Node's `fetch` asks for it and decodes it
+ * transparently). Scoped to that view ONLY: every other response of this route keeps its exact
+ * encoding, so no existing consumer — including any proxy that copies headers onto a body it has
+ * already decoded — sees a byte change. The JSON is highly repetitive (the same keys on every row),
+ * so this is the larger half of what makes a whole-brand walk light on the wire.
+ */
+const compactCompression = compression({ filter: (req) => req.query.view === "compact" });
+
+router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
   // The database-side plan of a filtered read, when there is one. Closed in the `finally` below,
   // however the read ends — it holds a reserved connection and two temp tables.
@@ -752,6 +817,15 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         }
         includeCampaigns = parts.includes("campaigns");
       }
+    }
+
+    // `?view=compact` — the per-lead delivery evidence plus the identity a figure row renders, and
+    // nothing else (see toCompactLead). It skips the audience, offer and standing resolution the
+    // other views pay per chunk, so it cannot also carry a nested campaign breakdown: asking for
+    // both is a 400, never a silently dropped include. An export (`format=csv`) keeps its own shape.
+    const compact = req.query.view === "compact" && req.query.format !== "csv";
+    if (compact && includeCampaigns) {
+      return res.status(400).json({ error: "include=campaigns is not available on view=compact" });
     }
 
     // Which lifecycle statuses this read answers for. Absent means the actionable population
@@ -931,7 +1005,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     // FullLead, the existing default. No Zod default: a missing param is full.
     // An export is always taken from the slim projection: a CSV cell cannot hold an employment
     // history, and an export that reads the full graph for a whole brand is the read being fixed.
-    const slim = req.query.view === "basic" || format === "csv";
+    const slim = req.query.view === "basic" || compact || format === "csv";
 
     // Basic view: ONE flat query (current-employer org + primary email via LATERAL),
     // streamed in cursor chunks. This keeps the list shape compatible with api-service
@@ -971,6 +1045,19 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         const statusMap = hasScopeForStatus
           ? await buildStatusMapForBasicRows(basicRows, statusCampaignIdStr, context)
           : new Map<string, StatusResult>();
+
+        if (compact) {
+          for (const r of basicRows) {
+            const statusResult = statusMap.get(r.email?.value ?? "");
+            const delivery =
+              hasScopeForStatus && r.status === "served"
+                ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+                : DEFAULT_STATUS;
+            await writer.write((wroteFirstBasic ? "," : "") + JSON.stringify(toCompactLead(r, delivery)));
+            wroteFirstBasic = true;
+          }
+          continue;
+        }
 
         const audienceMap = await buildAudienceMapForRows(
           basicRows.map((r) => ({
