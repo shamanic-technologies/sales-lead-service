@@ -487,6 +487,176 @@ describe("GET /orgs/leads/crm-pairings", () => {
   });
 });
 
+function frozen(id: string, over: Record<string, unknown> = {}) {
+  return {
+    crmContactId: id,
+    matchedLeadId: LEAD,
+    matchMethod: "email",
+    matchConfidence: "deterministic",
+    candidateCount: 1,
+    matchedAt: null,
+    ...over,
+  };
+}
+
+/**
+ * Six of their contacts, in their list order:
+ *   crm-a paired (email)   crm-b unpaired   crm-c unconfirmed (last name)
+ *   crm-d paired (email)   crm-e unpaired   crm-f unconfirmed (last name)
+ */
+function sixContactFixture() {
+  const ids = ["crm-a", "crm-b", "crm-c", "crm-d", "crm-e", "crm-f"];
+  const matches = new Map<string, ReturnType<typeof frozen>>([
+    ["crm-a", frozen("crm-a")],
+    ["crm-b", frozen("crm-b", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
+    ["crm-c", frozen("crm-c", { matchMethod: "last_name", matchConfidence: "probabilistic", candidateCount: 9 })],
+    ["crm-d", frozen("crm-d")],
+    ["crm-e", frozen("crm-e", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
+    ["crm-f", frozen("crm-f", { matchMethod: "last_name", matchConfidence: "probabilistic", candidateCount: 9 })],
+  ]);
+  fetchCrmConnection.mockResolvedValue(CONNECTION);
+  // The walk honours its start position, exactly like crm-service's offset.
+  streamCrmContacts.mockImplementation(async function* (_b: string, _c: unknown, start = 0) {
+    yield ids.slice(start).map((id) => contact({ id }));
+  });
+  loadFrozenMatches.mockImplementation(async (_b: string, wanted: string[]) =>
+    new Map(wanted.filter((id) => matches.has(id)).map((id) => [id, matches.get(id)!])),
+  );
+  fetchPairedLeadFacts.mockResolvedValue(leadFacts());
+  return ids;
+}
+
+describe("GET /orgs/leads/crm-pairings?state=", () => {
+  const url = `/orgs/leads/crm-pairings?brandId=${BRAND}`;
+
+  it("400s on a state it does not know, or an empty set, rather than ignoring the filter", async () => {
+    fetchCrmConnection.mockResolvedValue(CONNECTION);
+    expect((await request(app).get(`${url}&state=merged`).set(auth)).status).toBe(400);
+    expect((await request(app).get(`${url}&state=paired,maybe`).set(auth)).status).toBe(400);
+    expect((await request(app).get(`${url}&state=`).set(auth)).status).toBe(400);
+    expect((await request(app).get(`${url}&state=,`).set(auth)).status).toBe(400);
+    expect(streamCrmContacts).not.toHaveBeenCalled();
+  });
+
+  it("serves only the paired rows, never buys a judgment for rows it will not serve, and says there is no more", async () => {
+    sixContactFixture();
+    const res = await request(app).get(`${url}&state=paired`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a", "crm-d"]);
+    expect(res.body.pairings.every((p: { pairing: { state: string } }) => p.pairing.state === "paired")).toBe(true);
+    expect(res.body.nextOffset).toBeNull();
+    expect(judgeSamePerson).not.toHaveBeenCalled();
+    expect(fetchCrmContactsPage).not.toHaveBeenCalled();
+  });
+
+  // The acceptance criterion: paging the filter visits exactly the set the counts report.
+  it("pages the filtered set by position in their list, and the pages add up to the counts", async () => {
+    sixContactFixture();
+    const seen: string[] = [];
+    let offset: number | null = 0;
+    let pages = 0;
+    while (offset !== null) {
+      const page = await request(app).get(`${url}&state=paired,unpaired&limit=1&offset=${offset}`).set(auth);
+      expect(page.status).toBe(200);
+      seen.push(...page.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id));
+      offset = page.body.nextOffset;
+      pages += 1;
+      expect(pages).toBeLessThan(10);
+    }
+    expect(seen).toEqual(["crm-a", "crm-b", "crm-d", "crm-e"]);
+
+    const counts = await request(app).get(`/orgs/leads/crm-pairing-counts?brandId=${BRAND}`).set(auth);
+    expect(counts.body.counts.byState.paired + counts.body.counts.byState.unpaired).toBe(seen.length);
+  });
+
+  it("nextOffset is the position of the next matching contact, so a row ruled on meanwhile skips nobody", async () => {
+    sixContactFixture();
+    const first = await request(app).get(`${url}&state=paired&limit=1`).set(auth);
+    expect(first.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a"]);
+    // crm-d sits at position 3 in their list.
+    expect(first.body.nextOffset).toBe(3);
+    const second = await request(app).get(`${url}&state=paired&limit=1&offset=3`).set(auth);
+    expect(second.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-d"]);
+    expect(second.body.nextOffset).toBeNull();
+  });
+
+  it("an unconfirmed read judges what it walks and serves a row by the state it ends in", async () => {
+    sixContactFixture();
+    // crm-c is judged the same person; crm-f stays hesitant.
+    judgeSamePerson
+      .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
+      .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
+    const res = await request(app).get(`${url}&state=unconfirmed`).set(auth);
+    expect(res.status).toBe(200);
+    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
+    expect(saveJudgment).toHaveBeenCalledTimes(2);
+    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-f"]);
+    expect(res.body.pairings[0].pairing.state).toBe("unconfirmed");
+    expect(res.body.pairings[0].pairing.judgment.status).toBe("undecided");
+  });
+
+  it("502s rather than serving a partial filtered page when their CRM cannot be read", async () => {
+    const { CrmServiceError } = await import("../../src/lib/crm-client.js");
+    fetchCrmConnection.mockResolvedValue(CONNECTION);
+    streamCrmContacts.mockImplementation(async function* () {
+      throw new CrmServiceError("crm-service 503");
+    });
+    const res = await request(app).get(`${url}&state=paired`).set(auth);
+    expect(res.status).toBe(502);
+  });
+});
+
+describe("GET /orgs/leads/crm-pairings — where their record came from", () => {
+  const url = `/orgs/leads/crm-pairings?brandId=${BRAND}`;
+
+  it("carries each contact's provenance in their own words, and nulls when their CRM holds none", async () => {
+    fetchCrmConnection.mockResolvedValue(CONNECTION);
+    const { normalizeCrmContact } = await import("../../src/lib/crm-client.js");
+    fetchCrmContactsPage.mockResolvedValue([
+      normalizeCrmContact({
+        ...contact({ id: "crm-1" }),
+        company: { name: "Acme Chiro", website: "https://acmechiro.com" },
+        record: {
+          type: "lead",
+          leadSource: "Meta Ads",
+          tags: ["funnel form submitted", "appt scheduled"],
+          createdAt: "2026-09-19T21:07:55.341Z",
+          updatedAt: "2026-09-20T08:00:00.000Z",
+          origin: { medium: "form", url: null, referrer: null },
+        },
+      } as never),
+      normalizeCrmContact(contact({ id: "crm-2" }) as never),
+    ]);
+    loadFrozenMatches.mockResolvedValue(
+      new Map([
+        ["crm-1", frozen("crm-1", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
+        ["crm-2", frozen("crm-2", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
+      ]),
+    );
+
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    const [withRecord, without] = res.body.pairings;
+    expect(withRecord.crmContact.company).toBe("Acme Chiro");
+    expect(withRecord.crmContact.record).toEqual({
+      type: "lead",
+      leadSource: "Meta Ads",
+      tags: ["funnel form submitted", "appt scheduled"],
+      createdAt: "2026-09-19T21:07:55.341Z",
+      updatedAt: "2026-09-20T08:00:00.000Z",
+      origin: { medium: "form", url: null, referrer: null },
+    });
+    expect(without.crmContact.record).toEqual({
+      type: null,
+      leadSource: null,
+      tags: null,
+      createdAt: null,
+      updatedAt: null,
+      origin: { medium: null, url: null, referrer: null },
+    });
+  });
+});
+
 describe("GET /orgs/leads/crm-pairing-counts", () => {
   const url = `/orgs/leads/crm-pairing-counts?brandId=${BRAND}`;
 
