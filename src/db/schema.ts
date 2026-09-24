@@ -202,6 +202,11 @@ export const leadsCampaigns = pgTable(
     sentAt: timestamp("sent_at", { withTimezone: true }),
     retryClaimedAt: timestamp("retry_claimed_at", { withTimezone: true }),
     retryCount: integer("retry_count").notNull().default(0),
+    // sender_closed_at — terminal WITHOUT a send. The sender stated it is finished with this
+    //                    person in this campaign and will answer any further hand-off as a
+    //                    duplicate that sends nothing; the row leaves the pool for good. Kept
+    //                    apart from sent_at, which means an email went out.
+    senderClosedAt: timestamp("sender_closed_at", { withTimezone: true }),
     // --- Follow-up queue (src/lib/followup-queue.ts) ---
     // What we owe this person NEXT, and when. Once somebody shows a sales interest we owe them an
     // answer now and, if they go quiet, further answers at growing intervals, indefinitely, until
