@@ -2,8 +2,8 @@
  * The population-level reads: bucket counts with no rows, a bucket filter, a search, and an order
  * that follows what happened to each person rather than when we first saw them.
  *
- * What is under test is the WIRING — that the route indexes the population, chooses the page from
- * that index, and then hydrates ONLY those ids, in that order. The evidence itself is mocked
+ * What is under test is the WIRING — that the route reads the scope's model, chooses the page from
+ * it, and then hydrates ONLY those ids, in that order. The evidence itself is mocked
  * (email-gateway, the outcome ledger); what must not be mocked away is that the ids the plan chose
  * are the ids the hydration query is given, because a read that quietly hydrates something else is
  * a page that disagrees with its own count.
@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
+import { fakeModelSearches } from "../helpers/fake-lead-read-model.js";
 
 interface SqlNode { __sql: true; strings: readonly string[]; values: unknown[] }
 function isNode(v: unknown): v is SqlNode {
@@ -57,16 +58,15 @@ let indexRows: Array<{
   email: string | null;
   servedAt: string | null;
   createdAtText: string;
+  searchText: string;
 }> = [];
-let searchSeen: unknown;
 let outcomes = new Map<string, { steps: Set<string>; latestAt: string | null }>();
 
 vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/lead-index.js")>()),
   // The population is walked in CHUNKS and never held; two here, so the route's own loop is what
   // assembles the read rather than one convenient array.
-  streamLeadIndex: async function* (_scope: unknown, tokens: unknown) {
-    searchSeen = tokens;
+  streamLeadIndex: async function* () {
     const half = Math.ceil(indexRows.length / 2);
     if (indexRows.length === 0) return;
     yield indexRows.slice(0, half);
@@ -76,12 +76,12 @@ vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   countLeadListRows: () => Promise.resolve(indexRows.length),
 }));
 
-// The plan is a temp table on a reserved connection in production; `sql` is a `vi.fn()` here, so
-// the read gets the in-memory double instead. The SQL itself is covered in
-// tests/integration/lead-plan-store-sql.test.ts.
-vi.mock("../../src/lib/lead-plan-store.js", async () => {
-  const { fakePlanStoreModule } = await import("../helpers/fake-lead-plan-store.js");
-  return fakePlanStoreModule();
+// The read model is rows in Postgres in production; `sql` is mocked here, so the route gets the
+// in-memory double, which derives its rows with the real code. The SQL and the freshness machinery
+// are covered in tests/integration/lead-read-model-sql.test.ts.
+vi.mock("../../src/lib/lead-read-model.js", async (importOriginal) => {
+  const { fakeReadModelModule } = await import("../helpers/fake-lead-read-model.js");
+  return fakeReadModelModule(await importOriginal());
 });
 
 let statusByEmail: Record<string, Record<string, unknown>> = {};
@@ -158,6 +158,7 @@ function person(i: number, email: string | null = `p${i}@example.test`) {
     email,
     servedAt: null,
     createdAtText: `2026-01-01 00:00:00.${String(i).padStart(6, "0")}+00`,
+    searchText: `Person\n${i}\nTitle\nCompany${i}\n${email ?? ""}`,
   };
 }
 
@@ -183,7 +184,7 @@ beforeEach(() => {
   };
   outcomes = new Map([[indexRows[3].leadId, { steps: new Set(["sale"]), latestAt: "2026-03-01T00:00:00.000Z" }]]);
   hydrated = [];
-  searchSeen = undefined;
+  fakeModelSearches.length = 0;
   gatewayFails = false;
 });
 
@@ -277,11 +278,12 @@ describe("GET /orgs/leads — one bucket at a time", () => {
     ]);
   });
 
-  it("carries the search to the index rather than filtering a page", async () => {
-    const res = await get(`?brandId=${BRAND}&q=jane%20acme&limit=2`);
+  it("searches the whole scope's model rather than filtering a page", async () => {
+    const res = await get(`?brandId=${BRAND}&q=person%20company4&limit=2`);
     expect(res.status).toBe(200);
-    expect(searchSeen).toEqual(["jane", "acme"]);
-    expect(res.body.total).toBe(6);
+    expect(fakeModelSearches).toEqual([["person", "company4"]]);
+    expect(res.body.total).toBe(1);
+    expect(hydrated).toEqual([[indexRows[4].id]]);
   });
 });
 
@@ -292,7 +294,7 @@ describe("GET /orgs/leads — unchanged when nothing new is named", () => {
     expect(res.body.leads).toHaveLength(6);
     expect(res.body.nextCursor).toBeNull();
     expect(res.body.total).toBeUndefined();
-    expect(searchSeen).toBeUndefined();
+    expect(fakeModelSearches).toEqual([]);
   });
 });
 

@@ -1,25 +1,16 @@
 /**
- * The engagement view of a whole scoped population: which buckets each person is in, and when
- * something last happened to them.
+ * The engagement view of a scoped population: which buckets each person is in, and when something
+ * last happened to them.
  *
- * This is the pass that lets the Leads page state its tab counts, open one tab, and order by
- * recency without ever holding the population. It reads the same two sources a list row reads —
- * the delivery overlay from email-gateway and this service's own outcome ledger — over the index
- * rather than over the full projection, so it costs the network calls the list already made and
- * none of the hydration, the audience resolution or the serialization.
- *
- * Fail loud in both directions: email-gateway unreachable rejects (the caller answers 502) rather
- * than reporting a bucket count of zero, which is a wrong number nothing would ever go red about.
+ * It reads the same two sources a list row reads — the delivery overlay and this service's own
+ * outcome ledger — over the index rather than over the full projection. The read model
+ * (lead-read-model.ts) runs it when it builds or recomputes rows, so what a tab counts and what the
+ * list overlays onto a row are derived by one piece of code.
  */
 import { toIsoTimestamp } from "./basic-leads.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { DEFAULT_STATUS, type FlattenedStatus } from "./delivery-flatten.js";
-import {
-  bucketsForRow,
-  leadActivityAt,
-  zeroBucketCounts,
-  type LeadBucket,
-} from "./lead-buckets.js";
+import { bucketsForRow, leadActivityAt, type LeadBucket } from "./lead-buckets.js";
 import { fetchOutcomesByLead, type LeadIndexRow } from "./lead-index.js";
 import type { LeadStandingState } from "./lead-standing.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
@@ -61,87 +52,21 @@ export interface EngagementContext {
   brandId: string | undefined;
 }
 
-/** How many emails one gateway request carries, and how many such requests run at once. */
-const EMAILS_PER_REQUEST = 100;
-const REQUEST_CONCURRENCY = 6;
-
-/** Run `task` over `items` at most `limit` at a time. Rejects on the first failure, like Promise.all. */
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  task: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (true) {
-      const index = next++;
-      if (index >= items.length) return;
-      results[index] = await task(items[index]);
-    }
-  });
-  await Promise.all(workers);
-  return results;
-}
-
-/**
- * The delivery answer for every served row that has an email, keyed by email.
- *
- * Grouped by the row's primary brand exactly as the list groups it, then split into bounded
- * batches: a large brand is tens of thousands of addresses and firing one request per hundred all
- * at once would be a burst nobody asked for.
- */
-async function fetchDeliveryByEmail(
-  rows: readonly LeadIndexRow[],
-  ctx: EngagementContext,
-): Promise<Map<string, StatusResult>> {
-  const byEmail = new Map<string, StatusResult>();
-  if (!ctx.deliveryQueried) return byEmail;
-
-  const groups = new Map<string, Set<string>>();
-  for (const row of rows) {
-    if (row.status !== "served") continue;
-    if (!row.email) continue;
-    const brandId = row.brandIds[0] ?? "unknown";
-    if (!groups.has(brandId)) groups.set(brandId, new Set());
-    groups.get(brandId)!.add(row.email);
-  }
-
-  const requests: Array<{ brandId: string; emails: string[] }> = [];
-  for (const [brandId, emails] of groups) {
-    const list = [...emails];
-    for (let i = 0; i < list.length; i += EMAILS_PER_REQUEST) {
-      requests.push({ brandId, emails: list.slice(i, i + EMAILS_PER_REQUEST) });
-    }
-  }
-
-  const responses = await mapWithConcurrency(requests, REQUEST_CONCURRENCY, (request) =>
-    checkDeliveryStatus(
-      request.brandId,
-      ctx.statusCampaignId,
-      request.emails.map((email) => ({ email })),
-      ctx.serviceContext,
-    ),
-  );
-
-  for (const response of responses) {
-    for (const result of response.results) byEmail.set(result.email, result);
-  }
-  return byEmail;
-}
-
 /**
  * Every index row, with its buckets and its activity timestamp.
  *
- * `withEvidence: false` skips both lookups entirely — a read that only SEARCHES needs neither, and
- * paying for a population-wide gateway fan-out to answer a search would be the same waste in a
- * different place. Rows then carry no buckets and are dated by their served/created timestamp,
- * which is all the default order asks of them.
+ * `deliveryByEmail` is the raw email-gateway answer per address, supplied by the caller (the read
+ * model reads it through the evidence cache, lead-delivery-evidence.ts) — this function decides
+ * nothing about where evidence comes from or how old it may be, only what it MEANS for a row.
+ *
+ * `withEvidence: false` skips both sources — rows then carry no buckets and are dated by their
+ * served/created timestamp.
  */
 export async function enrichLeadIndex(
   rows: readonly LeadIndexRow[],
   ctx: EngagementContext,
   withEvidence: boolean,
+  deliveryByEmail: ReadonlyMap<string, StatusResult> = new Map(),
 ): Promise<EnrichedLeadIndexRow[]> {
   if (!withEvidence) {
     return rows.map((row) => ({
@@ -152,14 +77,11 @@ export async function enrichLeadIndex(
     }));
   }
 
-  const [deliveryByEmail, outcomesByLead] = await Promise.all([
-    fetchDeliveryByEmail(rows, ctx),
-    fetchOutcomesByLead(
-      ctx.orgId,
-      ctx.brandId,
-      rows.map((r) => r.leadId),
-    ),
-  ]);
+  const outcomesByLead = await fetchOutcomesByLead(
+    ctx.orgId,
+    ctx.brandId,
+    rows.map((r) => r.leadId),
+  );
 
   const noOutcomes = { steps: new Set<LeadStepOutcomeName>(), latestAt: null as string | null };
 
@@ -190,22 +112,4 @@ export async function enrichLeadIndex(
  */
 function isoCreatedAt(createdAtText: string): string {
   return toIsoTimestamp(createdAtText)!;
-}
-
-/**
- * Add one chunk's rows to a running bucket tally.
- *
- * Incremental rather than whole-population on purpose: the counters are the ONLY thing that
- * survives a chunk, so a count over a brand of any size costs the same O(1) of this process's heap
- * (see lead-plan-store.ts for what the array form cost). Every bucket key is present in the tally
- * from the start; a bucket nobody is in stays 0, never absent.
- */
-export function addBucketCounts(
-  counts: Record<LeadBucket, number>,
-  rows: readonly EnrichedLeadIndexRow[],
-): Record<LeadBucket, number> {
-  for (const row of rows) {
-    for (const bucket of row.buckets) counts[bucket] += 1;
-  }
-  return counts;
 }
