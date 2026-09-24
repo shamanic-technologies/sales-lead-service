@@ -22,6 +22,7 @@ import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
+import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { withConnectRetry } from "./lib/db-retry.js";
@@ -119,6 +120,8 @@ async function boot(): Promise<void> {
   startCrmEvidenceWorker();
   // Keeps the Leads page's read models inside their freshness bound (see lead-read-model.ts).
   startReadModelWorker();
+  // Keeps every lead change feed a consumer follows current (see lead-change-feed.ts).
+  startChangeFeedWorker();
 
   try {
     await registerProviders();
