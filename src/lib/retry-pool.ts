@@ -80,7 +80,14 @@ export type RetryVerdict =
    */
   | "unknown"
   /** An email went out. This person is done — mark locally, never query again. */
-  | "terminal";
+  | "terminal"
+  /**
+   * The sender says it is finished with this person in this campaign WITHOUT sending, and
+   * will answer any further hand-off as a duplicate that sends nothing. Re-serving them can
+   * never produce an email — it only burns the slot that would buy somebody new. Out of the
+   * pool for good, never queried again. Not `terminal`: nothing was sent.
+   */
+  | "sender_closed";
 
 /** The two flags email-gateway already serves per scope, for one candidate. */
 export interface CandidateStatusFlags {
@@ -94,6 +101,13 @@ export interface CandidateStatusFlags {
    * field) — never read as `false`.
    */
   queued: boolean | null;
+  /**
+   * The sender's own statement that it is FINISHED with this person in this campaign: it
+   * holds their claim, has nothing left to send, and a further send would send nothing.
+   * `null` = the sender stated nothing — never read as `false`, and never inferred from
+   * age or from how many times the person was handed out.
+   */
+  finished: boolean | null;
 }
 
 export interface RetryCandidate {
@@ -111,20 +125,26 @@ export interface RetryCandidate {
 /**
  * Decide what to do with one candidate.
  *
- *   | sent | queued | contacted | age since served_at | verdict          |
- *   |------|--------|-----------|---------------------|------------------|
- *   | true | —      | —         | any                 | terminal         |
- *   | false| true   | —         | any                 | in_vendor_queue  |
- *   | false| null   | —         | any                 | unknown          |
- *   | false| false  | false     | any                 | retry            |
- *   | false| false  | true      | < TTL               | in_vendor_queue  |
- *   | false| false  | true      | >= TTL              | retry            |
+ *   | sent | queued | finished | contacted | age since served_at | verdict          |
+ *   |------|--------|----------|-----------|---------------------|------------------|
+ *   | true | —      | —        | —         | any                 | terminal         |
+ *   | false| true   | —        | —         | any                 | in_vendor_queue  |
+ *   | false| false  | true     | —         | any                 | sender_closed    |
+ *   | false| null   | —        | —         | any                 | unknown          |
+ *   | false| false  | not true | false     | any                 | retry            |
+ *   | false| false  | not true | true      | < TTL               | in_vendor_queue  |
+ *   | false| false  | not true | true      | >= TTL              | retry            |
  *
  * `sent` is checked first: it is terminal regardless of anything else. Then the sender's
  * own `queued` statement: while it holds the person, age means nothing — a backlogged
  * queue is still a queue. A sender that stated nothing (or no status at all for the
  * email) is `unknown` and is NOT retried: without its word we cannot tell a stranded
- * person from a queued one, and only one of those mistakes sends a second email. Only
+ * person from a queued one, and only one of those mistakes sends a second email. A sender
+ * that says it is FINISHED with the person in this campaign closes them for good: its claim
+ * on (campaign, email) makes every later hand-off a duplicate that sends nothing, so no
+ * amount of re-serving can reach them (campaign 3922c8e1: one person handed out 104
+ * times, zero emails). A queued statement outranks it — a person still in the queue will
+ * be sent, whatever else is on file. Only
  * where the sender says it holds nothing does the old table apply — never handed over ⟹
  * retry; handed over and older than the TTL ⟹ lost, retry. An unknown age (a served row
  * with no timestamp at all) counts as still queued rather than lost.
@@ -137,6 +157,7 @@ export function decideRetry(
   if (!flags) return "unknown";
   if (flags.sent) return "terminal";
   if (flags.queued === true) return "in_vendor_queue";
+  if (flags.finished === true) return "sender_closed";
   if (flags.queued === null) return "unknown";
   if (!flags.contacted) return "retry";
 
@@ -170,6 +191,7 @@ export function campaignScopeFlags(
   let contacted = false;
   let sent = false;
   let queued: boolean | null = null;
+  let finished: boolean | null = null;
 
   for (const provider of [result.broadcast, result.transactional]) {
     if (!provider) continue;
@@ -181,10 +203,13 @@ export function campaignScopeFlags(
       if (provider === result.broadcast && typeof scope.queued === "boolean") {
         queued = queued === true || scope.queued;
       }
+      if (provider === result.broadcast && typeof scope.finished === "boolean") {
+        finished = finished === true || scope.finished;
+      }
     }
   }
 
-  return { contacted, sent, queued };
+  return { contacted, sent, queued, finished };
 }
 
 function toMillis(value: Date | string | null): number | null {
@@ -240,6 +265,7 @@ export async function loadRetryCandidates(params: {
       AND lc.campaign_id = ${params.campaignId}
       AND lc.status = 'served'
       AND lc.sent_at IS NULL
+      AND lc.sender_closed_at IS NULL
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
@@ -279,6 +305,21 @@ export async function markSentCandidates(ids: string[], nowMs: number): Promise<
 }
 
 /**
+ * Take a candidate out of the pool because the sender is finished with them here.
+ *
+ * Nothing was sent, so this is NOT `sent_at` — the lead history reads that column as an
+ * email that went out. Like `sent_at`, it is written once and the row is never re-queried.
+ */
+export async function markSenderClosedCandidates(ids: string[], nowMs: number): Promise<void> {
+  if (ids.length === 0) return;
+  const now = new Date(nowMs);
+  await db
+    .update(leadsCampaigns)
+    .set({ senderClosedAt: now, updatedAt: now })
+    .where(and(inArray(leadsCampaigns.id, ids), isNull(leadsCampaigns.senderClosedAt)));
+}
+
+/**
  * Claim one candidate for this run, atomically.
  *
  * Two runs pulling at the same time both read `contacted = false` for the same person;
@@ -308,6 +349,7 @@ export async function claimCandidate(params: {
      WHERE id = ${params.id}
        AND status = 'served'
        AND sent_at IS NULL
+       AND sender_closed_at IS NULL
        AND (retry_claimed_at IS NULL OR retry_claimed_at < ${leaseCutoff})
     RETURNING id
   `)) as unknown as Array<{ id: string }>;
@@ -394,6 +436,7 @@ export async function pickRetryCandidate(params: {
   for (const result of statuses) byEmail.set(result.email.toLowerCase(), result);
 
   const terminalIds: string[] = [];
+  const closedIds: string[] = [];
   const retryable: RetryCandidate[] = [];
   let queuedCount = 0;
   let unknownCount = 0;
@@ -402,6 +445,7 @@ export async function pickRetryCandidate(params: {
     const flags = campaignScopeFlags(byEmail.get(candidate.email.toLowerCase()), params.campaignId);
     const verdict = decideRetry(flags, candidate.servedAt, nowMs);
     if (verdict === "terminal") terminalIds.push(candidate.id);
+    else if (verdict === "sender_closed") closedIds.push(candidate.id);
     else if (verdict === "retry") retryable.push(candidate);
     else if (verdict === "in_vendor_queue") queuedCount += 1;
     else unknownCount += 1;
@@ -418,6 +462,13 @@ export async function pickRetryCandidate(params: {
   // Sent people leave the pool whether or not we return anyone this run — that is what
   // keeps the next pull's batch small.
   await markSentCandidates(terminalIds, nowMs);
+  // Same for people the sender is finished with here: re-serving them can never send.
+  await markSenderClosedCandidates(closedIds, nowMs);
+  if (closedIds.length > 0) {
+    console.log(
+      `[lead-service] retry-pool closed ${closedIds.length} candidate(s) the sender is finished with campaign=${params.campaignId}`,
+    );
+  }
 
   for (const candidate of retryable) {
     const claimed = await claimCandidate({
@@ -428,7 +479,7 @@ export async function pickRetryCandidate(params: {
     });
     if (claimed) {
       console.log(
-        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} queued=${queuedCount} unknown=${unknownCount}`,
+        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} closed=${closedIds.length} queued=${queuedCount} unknown=${unknownCount}`,
       );
       return candidate;
     }
