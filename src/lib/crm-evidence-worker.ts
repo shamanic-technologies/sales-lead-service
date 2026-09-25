@@ -28,6 +28,16 @@ export function syncBrandOnce(orgId: string, brandId: string): Promise<CrmEviden
   return run;
 }
 
+/**
+ * Sync one brand AFTER anything already running for it — for a change the running pass may have
+ * read around (a person's ruling), where joining it would answer with the state before the change.
+ */
+export async function resyncBrand(orgId: string, brandId: string): Promise<CrmEvidenceSyncResult> {
+  const running = inFlight.get(`${orgId}:${brandId}`);
+  if (running) await running.catch(() => undefined);
+  return await syncBrandOnce(orgId, brandId);
+}
+
 let sweeping = false;
 
 export async function sweepCrmEvidence(): Promise<void> {
@@ -39,7 +49,9 @@ export async function sweepCrmEvidence(): Promise<void> {
       try {
         const r = await syncBrandOnce(orgId, brandId);
         console.log(
-          `[crm-evidence] brand=${brandId} contactsWithEvents=${r.contactsWithEvents} ` +
+          `[crm-evidence] brand=${brandId} walked=${r.judging.contacts} judged=${r.judging.judged} ` +
+            `judgmentFailed=${r.judging.judgmentFailed} deferred=${r.judging.deferred} ` +
+            `withoutLead=${r.judging.withoutLead} contactsWithEvents=${r.contactsWithEvents} ` +
             `paired=${r.pairedContacts} leads=${r.leads} outcomes=${r.outcomes} nevers=${r.nevers} ` +
             `setAside=${r.withdrawnOutcomes}/${r.withdrawnNevers}`,
         );

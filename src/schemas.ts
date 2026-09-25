@@ -5080,10 +5080,14 @@ const CrmPairingRowSchema = z
     pairing: z.object({
       state: z.enum(CRM_PAIRING_STATES).openapi({
         description:
-          "paired = we say these are one human. unconfirmed = a candidate exists and nothing strong enough has ruled. rejected = a human denied it or a judgment landed below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count.",
+          "paired = we say these are one human (confidently, or to confirm — see toConfirm). unconfirmed = a candidate exists and no judgment could be had yet (the evidence sync judges every candidate and retries a failed one on its next pass). rejected = a human denied it or a judgment landed at or below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count.",
       }),
       decidedBy: z.enum(CRM_PAIRING_DECIDERS).nullable().openapi({
         description: "Null on unconfirmed and unpaired: nobody has decided. Precedence is human > judgment > signal.",
+      }),
+      toConfirm: z.boolean().openapi({
+        description:
+          "True only on a PAIRED row a hesitant judgment decided (same-person probability strictly between rejectAt and pairAt). Doubt leans to the customer: it counts as paired — its CRM evidence flows onto the lead and it counts in their ROI — and a person should confirm or deny it. False on every other row.",
       }),
       lead: z
         .object({
@@ -5160,8 +5164,10 @@ registry.registerPath({
     "`/orgs/leads/crm-pairing-counts` remains the authority for how many there are: paging a state " +
     "to the end visits exactly the contacts its `byState` count reports. `offset`/`nextOffset` stay " +
     "positions in THEIR contact list, so ruling on a row while paging skips nobody. A filtered read " +
-    "buys judgments only when `state` includes `unconfirmed` (the only state a judgment can move a " +
-    "row out of), and decides each row after any judgment it bought is frozen.",
+    "buys judgments unless `state` is only `unpaired` (the one state no judgment can move a row into " +
+    "or out of), and decides each row after any judgment it bought is frozen.\n\n" +
+    "`toConfirm=true` lists the pairings that rest on a hesitant judgment — the 'To confirm' set a " +
+    "person reviews; `byState.paired` includes them and `pairedToConfirm` counts them.",
   parameters: [
     ...CrmPairingHeaders,
     {
@@ -5194,6 +5200,14 @@ registry.registerPath({
       description:
         "Comma-separated pairing states to keep (paired, unconfirmed, rejected, unpaired), read as one set. " +
         "Absent = every contact, unchanged. An unknown state or an empty list is a 400, never a silently-ignored filter.",
+    },
+    {
+      in: "query" as const,
+      name: "toConfirm",
+      required: false,
+      schema: { type: "string" as const, enum: ["true", "false"] },
+      description:
+        "Narrow to paired rows that are (true) or are not (false) waiting for a person to confirm them. Alone it implies state=paired; beside `state` it narrows that set. Anything but true/false is a 400.",
     },
   ],
   responses: {
@@ -5263,6 +5277,10 @@ registry.registerPath({
               crmContacts: z.number(),
               crmContactsWithEmail: z.number(),
               byState: z.record(z.enum(CRM_PAIRING_STATES), z.number()),
+              pairedToConfirm: z.number().openapi({
+                description:
+                  "Of byState.paired, how many rest on a hesitant judgment and wait for a person to confirm them. A subset of paired, never a fifth state.",
+              }),
               byMatchMethod: z.record(z.enum(CRM_MATCH_METHOD_KEYS), z.number()),
               opportunities: z.number(),
               opportunitiesByState: z.record(z.enum(CRM_OPPORTUNITY_STATE_KEYS), z.number()),

@@ -16,6 +16,7 @@
  * from, and the model is what a count, a search or a filtered page reads. The list paths never
  * search; they hydrate ids the model already chose.
  */
+import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import {
@@ -168,6 +169,12 @@ export async function countLeadListRows(scope: LeadListScope): Promise<number> {
 export interface LeadOutcomes {
   steps: Set<LeadStepOutcomeName>;
   latestAt: string | null;
+  /**
+   * A positive reply the LEDGER holds for this lead — today only what their own CRM evidences (a
+   * form their prospect submitted after our first email). Not a step outcome, so it is carried
+   * beside `steps`, and the bucket reads it beside the delivery layer's own positive reply.
+   */
+  positiveReply?: boolean;
 }
 
 /**
@@ -206,10 +213,15 @@ export async function fetchOutcomesByLead(
 
   for (const row of rows) {
     const canonical = canonicalizeStepOutcome(row.event);
-    if (!canonical) continue;
+    const positiveReply = row.event === CRM_POSITIVE_REPLY_STEP;
+    if (!canonical && !positiveReply) continue;
     const latest = toIsoTimestamp(row.latest);
-    const existing = byLead.get(row.lead_id) ?? { steps: new Set<LeadStepOutcomeName>(), latestAt: null };
-    existing.steps.add(canonical);
+    const existing: LeadOutcomes = byLead.get(row.lead_id) ?? {
+      steps: new Set<LeadStepOutcomeName>(),
+      latestAt: null,
+    };
+    if (canonical) existing.steps.add(canonical);
+    if (positiveReply) existing.positiveReply = true;
     if (latest && (existing.latestAt === null || latest > existing.latestAt)) {
       existing.latestAt = latest;
     }

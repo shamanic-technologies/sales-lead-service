@@ -4,9 +4,14 @@
  * Reads, in order: crm-service's dated funnel events (the contacts carrying any), the frozen pairing
  * for each of those contacts (matching any not matched yet, with the SAME matcher the pairings view
  * uses), the frozen judgments and the human rulings — and decides each pairing with the SAME policy
- * (`resolveCrmPairing`). Only `paired` counts. No judgment is BOUGHT here: a pairing a judgment would
- * be needed for stays unconfirmed until somebody opens the pairings view, which is where that spend
- * is decided and declared.
+ * (`resolveCrmPairing`). Only `paired` counts — confident or `toConfirm` alike (doubt leans to us).
+ *
+ * Before any of that, the pass JUDGES EVERY CANDIDATE (`judgeEveryCandidate`): it walks their whole
+ * contact list, matches whatever was never matched, and buys the same-person judgment for every
+ * pairing that still waits on one — so no candidate stays undecided because nobody opened the
+ * pairings page. There is no org request behind a pass, so the judgment goes through chat-service's
+ * platform twin, which declares the spend. A judgment the vendor could not produce is not a verdict:
+ * the pairing stays unconfirmed and is asked again on the next pass.
  *
  * Then, per paired lead: the earliest evidence per step, the whose-win rule against our first
  * delivered email (email-gateway, brand scope), a person's override if any, and the write into the
@@ -26,7 +31,13 @@ import {
 import { loadFrozenMatches, loadJudgments, loadRulings, rulingKey, type FrozenMatch } from "./crm-pairing-store.js";
 import { resolveCrmPairing } from "./crm-pairing.js";
 import { matchesForContacts } from "./crm-matching.js";
+import { awaitsJudgment, judgeCandidates } from "./crm-judging.js";
+import { fetchPairedLeadFacts } from "./crm-pairing-view.js";
+import { judgeSamePersonAsPlatform } from "./judgment-client.js";
 import {
+  CRM_POSITIVE_REPLY_STEP,
+  formSubmissionsFrom,
+  positiveReplyEvidence,
   crmCauseRule,
   crmOutcomeSignature,
   effectiveCrmCause,
@@ -47,8 +58,74 @@ import {
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
 
+/**
+ * How many judgments one pass may buy. A judgment is bought once per pairing and then frozen, so
+ * this bounds a brand's FIRST pass (and a CRM import of thousands of look-alikes), not steady
+ * state; whatever it defers is judged on the next pass, one interval later.
+ */
+export const MAX_JUDGMENTS_PER_PASS = 500;
+
+export interface CrmJudgingResult {
+  /** Contacts walked. */
+  contacts: number;
+  /** Judgments bought this pass. */
+  judged: number;
+  /** Judgments the vendor could not produce — asked again next pass, never a verdict. */
+  judgmentFailed: number;
+  /** Candidates left for the next pass because this pass's budget ran out. */
+  deferred: number;
+  /** Candidates whose lead holds no row in this brand, so there is nothing to compare against. */
+  withoutLead: number;
+}
+
+/**
+ * Walk their whole contact list and judge every pairing that still waits on a judgment.
+ * Bounded memory (a page at a time) and bounded spend (`MAX_JUDGMENTS_PER_PASS`).
+ */
+export async function judgeEveryCandidate(
+  orgId: string,
+  brandId: string,
+  ctx: CrmIdentityContext,
+): Promise<CrmJudgingResult> {
+  const out: CrmJudgingResult = { contacts: 0, judged: 0, judgmentFailed: 0, deferred: 0, withoutLead: 0 };
+  const budget = { remaining: MAX_JUDGMENTS_PER_PASS };
+  for await (const page of streamCrmContacts(brandId, ctx)) {
+    out.contacts += page.length;
+    const matches = await matchesForContacts(orgId, brandId, page);
+    const ids = page.map((c) => c.id);
+    const [judgments, rulings] = await Promise.all([
+      loadJudgments(brandId, ids),
+      loadRulings(brandId, ids),
+    ]);
+    const waiting = page.filter((c) => awaitsJudgment(c, matches, judgments, rulings));
+    if (waiting.length === 0) continue;
+    const leadFacts = await fetchPairedLeadFacts(
+      brandId,
+      Array.from(new Set(waiting.map((c) => matches.get(c.id)!.matchedLeadId!))),
+    );
+    const r = await judgeCandidates({
+      orgId,
+      brandId,
+      contacts: waiting,
+      matches,
+      judgments,
+      rulings,
+      leadFacts,
+      budget,
+      judge: judgeSamePersonAsPlatform,
+      logPrefix: "[crm-evidence]",
+    });
+    out.judged += r.judged;
+    out.judgmentFailed += r.failures.size;
+    out.deferred += r.deferred;
+    out.withoutLead += r.withoutLead;
+  }
+  return out;
+}
+
 export interface CrmEvidenceSyncResult {
   brandId: string;
+  judging: CrmJudgingResult;
   contactsWithEvents: number;
   pairedContacts: number;
   leads: number;
@@ -64,6 +141,9 @@ interface LeadEvidence {
   match: FrozenMatch;
   crmEmail: string | null;
 }
+
+/** Every form submission of every contact paired with a lead, kept whole (see positiveReplyEvidence). */
+type LeadForms = Array<Omit<LeadEvidence, "evidence"> & { submissions: CrmStepEvidence[] }>;
 
 async function primaryEmails(leadIds: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
@@ -93,6 +173,8 @@ function saleValueCents(
 export async function syncCrmEvidence(orgId: string, brandId: string): Promise<CrmEvidenceSyncResult> {
   const ctx: CrmIdentityContext = { orgId, brandId };
 
+  const judging = await judgeEveryCandidate(orgId, brandId, ctx);
+
   const contacts = (await fetchCrmFunnelEvents(brandId, ctx)).filter((c) => c.events.length > 0);
   const contactIds = contacts.map((c) => c.contactId);
 
@@ -116,6 +198,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
   // Per paired lead, the earliest evidence per (kind, step) across every contact paired with them.
   const byLead = new Map<string, Map<string, LeadEvidence>>();
+  const formsByLead = new Map<string, LeadForms>();
   let pairedContacts = 0;
   for (const contact of contacts) {
     const match = matches.get(contact.contactId);
@@ -139,7 +222,15 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
     const leadId = match.matchedLeadId;
     const steps = byLead.get(leadId) ?? new Map<string, LeadEvidence>();
+    const submissions = formSubmissionsFrom(contact.events);
+    if (submissions.length > 0) {
+      const forms = formsByLead.get(leadId) ?? [];
+      forms.push({ crmContactId: contact.contactId, match, crmEmail: contact.primaryEmail, submissions });
+      formsByLead.set(leadId, forms);
+    }
     for (const evidence of evidenceFromEvents(contact.events)) {
+      // Which form stands as a positive reply depends on our first delivery — chosen below.
+      if (evidence.step === CRM_POSITIVE_REPLY_STEP) continue;
       const key = `${evidence.kind}:${evidence.step}`;
       const current = steps.get(key);
       const next: LeadEvidence = {
@@ -193,6 +284,20 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     const steps = byLead.get(leadId)!;
     const outcomeSteps = new Set<string>();
 
+    // A form their prospect submitted is a positive reply FOR US only when it answered our
+    // outreach: the earliest submission dated after our first delivered email. One filled before
+    // we wrote, an undated one, or one to a person we never delivered to is not written — and one
+    // written on an earlier pass is set aside with the rest of the stale evidence below.
+    const firstDeliveredAt = firstDelivered.get(leadId) ?? null;
+    let reply: LeadEvidence | null = null;
+    for (const form of formsByLead.get(leadId) ?? []) {
+      const chosen = positiveReplyEvidence(form.submissions, firstDeliveredAt);
+      if (chosen && (!reply || mergeEvidence(reply.evidence, chosen) === chosen)) {
+        reply = { evidence: chosen, crmContactId: form.crmContactId, match: form.match, crmEmail: form.crmEmail };
+      }
+    }
+    if (reply) steps.set(`outcome:${CRM_POSITIVE_REPLY_STEP}`, reply);
+
     for (const item of steps.values()) {
       if (item.evidence.kind !== "outcome") continue;
       const step = item.evidence.step;
@@ -203,6 +308,8 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
       const rule = crmCauseRule(item.evidence.occurredAt, firstDelivered.get(leadId) ?? null);
       const cause = effectiveCrmCause(rule, causeStatements.get(`${leadId}:${step}`) ?? null);
+      // A person who said this reply was NOT ours outranks the date: it is not written.
+      if (step === CRM_POSITIVE_REPLY_STEP && cause.causedByOutreach !== true) continue;
       const evidence: StoredCrmEvidence = {
         crmContactId: item.crmContactId,
         crmStep: item.evidence.crmStep,
@@ -266,6 +373,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
   return {
     brandId,
+    judging,
     contactsWithEvents: contacts.length,
     pairedContacts,
     leads: leadIds.length,

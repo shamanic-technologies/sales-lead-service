@@ -538,20 +538,31 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
     expect(streamCrmContacts).not.toHaveBeenCalled();
   });
 
-  it("serves only the paired rows, never buys a judgment for rows it will not serve, and says there is no more", async () => {
+  it("serves only the paired rows, judging candidates first (a judgment can pair them), and says there is no more", async () => {
     sixContactFixture();
+    // Both name-only candidates are judged different people, so they reject and stay out.
+    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const res = await request(app).get(`${url}&state=paired`).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a", "crm-d"]);
     expect(res.body.pairings.every((p: { pairing: { state: string } }) => p.pairing.state === "paired")).toBe(true);
     expect(res.body.nextOffset).toBeNull();
-    expect(judgeSamePerson).not.toHaveBeenCalled();
+    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
     expect(fetchCrmContactsPage).not.toHaveBeenCalled();
+  });
+
+  it("an unpaired-only read never buys a judgment: no judgment can move a row into or out of it", async () => {
+    sixContactFixture();
+    const res = await request(app).get(`${url}&state=unpaired`).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-b", "crm-e"]);
+    expect(judgeSamePerson).not.toHaveBeenCalled();
   });
 
   // The acceptance criterion: paging the filter visits exactly the set the counts report.
   it("pages the filtered set by position in their list, and the pages add up to the counts", async () => {
     sixContactFixture();
+    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const seen: string[] = [];
     let offset: number | null = 0;
     let pages = 0;
@@ -571,6 +582,7 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
 
   it("nextOffset is the position of the next matching contact, so a row ruled on meanwhile skips nobody", async () => {
     sixContactFixture();
+    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const first = await request(app).get(`${url}&state=paired&limit=1`).set(auth);
     expect(first.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a"]);
     // crm-d sits at position 3 in their list.
@@ -580,19 +592,36 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
     expect(second.body.nextOffset).toBeNull();
   });
 
-  it("an unconfirmed read judges what it walks and serves a row by the state it ends in", async () => {
+  it("a to-confirm read judges what it walks and serves only the hesitant pairings", async () => {
     sixContactFixture();
-    // crm-c is judged the same person; crm-f stays hesitant.
+    // crm-c is judged the same person confidently; crm-f hesitantly — so it pairs, to confirm.
+    judgeSamePerson
+      .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
+      .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
+    const res = await request(app).get(`${url}&toConfirm=true`).set(auth);
+    expect(res.status).toBe(200);
+    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
+    expect(saveJudgment).toHaveBeenCalledTimes(2);
+    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-f"]);
+    expect(res.body.pairings[0].pairing.state).toBe("paired");
+    expect(res.body.pairings[0].pairing.toConfirm).toBe(true);
+    expect(res.body.pairings[0].pairing.judgment.status).toBe("undecided");
+  });
+
+  it("an unconfirmed read after every candidate is judged serves nothing — doubt lean to us", async () => {
+    sixContactFixture();
     judgeSamePerson
       .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
       .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
     const res = await request(app).get(`${url}&state=unconfirmed`).set(auth);
     expect(res.status).toBe(200);
-    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
-    expect(saveJudgment).toHaveBeenCalledTimes(2);
-    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-f"]);
-    expect(res.body.pairings[0].pairing.state).toBe("unconfirmed");
-    expect(res.body.pairings[0].pairing.judgment.status).toBe("undecided");
+    expect(res.body.pairings).toEqual([]);
+  });
+
+  it("toConfirm must be true or false", async () => {
+    fetchCrmConnection.mockResolvedValue(CONNECTION);
+    const res = await request(app).get(`${url}&toConfirm=yes`).set(auth);
+    expect(res.status).toBe(400);
   });
 
   it("502s rather than serving a partial filtered page when their CRM cannot be read", async () => {

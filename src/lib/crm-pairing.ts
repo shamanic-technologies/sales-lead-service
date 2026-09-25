@@ -26,9 +26,16 @@
  *      through chat-service (which owns the model resolution, the credential and the cost
  *      declaration). It is recorded with the model release that produced it and NEVER re-asked on
  *      read, so the same pairing resolves the same way twice and the customer's table does not
- *      change under them between page loads. A judgment the vendor could not produce leaves the
- *      pairing exactly where the signal left it — `unconfirmed` — and says so; it is never read
- *      as a merge and never as a rejection.
+ *      change under them between page loads. The evidence sync buys it for EVERY candidate, so no
+ *      candidate stays undecided because nobody opened a page. A judgment the vendor could not
+ *      produce leaves the pairing exactly where the signal left it — `unconfirmed` — says so, and
+ *      is asked again on the next pass; it is never read as a merge and never as a rejection.
+ *
+ *      DOUBT LEANS TO US, AND STAYS VISIBLE (owner's rule). A confident yes pairs, a confident no
+ *      rejects, and everything in between PAIRS too — the lead counts for the customer's ROI and
+ *      the CRM's evidence flows onto it — but carries `toConfirm: true`, so a person can see which
+ *      pairings rest on a hesitant model and confirm or deny them. A denial removes everything the
+ *      pairing contributed on the next evidence pass.
  *
  *   4. A HUMAN OUTRANKS ALL OF IT. Somebody looking at the two rows can accept or deny the
  *      pairing, and their statement beats both the signal and the judgment. It is retractable and
@@ -92,13 +99,9 @@ export const CRM_JUDGMENT_UNAVAILABLE_REASONS = [
 export type CrmJudgmentUnavailableReason = (typeof CRM_JUDGMENT_UNAVAILABLE_REASONS)[number];
 
 /**
- * A yes-probability at or above this pairs; at or below the floor it rejects; between them the
- * model was hesitating and the pairing stays where the signal left it.
- *
- * Deliberately asymmetric and deliberately wide apart: the two mistakes are not equal. Merging two
- * different humans puts one customer's deal on another person's record, which is unrecoverable
- * without somebody noticing; leaving a real pair unconfirmed costs one click on a debug surface
- * built for exactly that click.
+ * A yes-probability at or above this pairs CONFIDENTLY; at or below the floor it rejects; between
+ * them the model was hesitating, and the pairing is PAIRED BUT `toConfirm` — it counts for the
+ * customer (owner: "when in doubt, lean toward us") and is listed for a person to confirm or deny.
  */
 export const CRM_JUDGMENT_PAIR_AT = 0.85;
 export const CRM_JUDGMENT_REJECT_AT = 0.15;
@@ -175,6 +178,12 @@ export interface CrmPairingInput {
 export interface CrmPairingVerdict {
   state: CrmPairingState;
   decidedBy: CrmPairingDecider | null;
+  /**
+   * `true` only on a pairing a HESITANT judgment decided (probability strictly between the floor
+   * and the bar): it counts as paired, and a person should confirm it. `false` on every other
+   * verdict — a confident judgment, a deterministic signal, a human ruling, or no pairing at all.
+   */
+  toConfirm: boolean;
   judgmentStatus: CrmJudgmentStatus;
   judgmentUnavailableReason: CrmJudgmentUnavailableReason | null;
 }
@@ -232,6 +241,7 @@ export function resolveCrmPairing(input: CrmPairingInput): CrmPairingVerdict {
     return {
       state: "unpaired",
       decidedBy: null,
+      toConfirm: false,
       judgmentStatus: "not_needed",
       judgmentUnavailableReason: null,
     };
@@ -251,6 +261,7 @@ export function resolveCrmPairing(input: CrmPairingInput): CrmPairingVerdict {
     return {
       state: ruling.ruling === "accepted" ? "paired" : "rejected",
       decidedBy: "human",
+      toConfirm: false,
       judgmentStatus,
       judgmentUnavailableReason: judgmentUnavailableReason ?? null,
     };
@@ -258,18 +269,29 @@ export function resolveCrmPairing(input: CrmPairingInput): CrmPairingVerdict {
 
   if (judgment) {
     const verdict = judgmentStatusOf(judgment.samePersonProbability);
-    if (verdict === "pair") {
-      return { state: "paired", decidedBy: "judgment", judgmentStatus, judgmentUnavailableReason: null };
-    }
     if (verdict === "reject") {
-      return { state: "rejected", decidedBy: "judgment", judgmentStatus, judgmentUnavailableReason: null };
+      return {
+        state: "rejected",
+        decidedBy: "judgment",
+        toConfirm: false,
+        judgmentStatus,
+        judgmentUnavailableReason: null,
+      };
     }
-    // Hesitant: decides nothing, falls back to what the signal was worth.
+    // A confident yes pairs; a hesitant one pairs too — doubt leans to us — and says so.
+    return {
+      state: "paired",
+      decidedBy: "judgment",
+      toConfirm: verdict === "undecided",
+      judgmentStatus,
+      judgmentUnavailableReason: null,
+    };
   }
 
   return {
     state: fromSignal,
     decidedBy: fromSignal === "paired" ? "signal" : null,
+    toConfirm: false,
     judgmentStatus,
     judgmentUnavailableReason: judgmentUnavailableReason ?? null,
   };
@@ -300,6 +322,12 @@ export interface CrmPairingCounts {
   /** Of those, how many carry an email at all — the only identifier that pairs deterministically here. */
   crmContactsWithEmail: number;
   byState: Record<CrmPairingState, number>;
+  /**
+   * Of `byState.paired`, how many rest on a hesitant judgment and wait for a person to confirm
+   * them. A subset of `paired`, never a fifth state: they count for the customer exactly like a
+   * confident pairing does.
+   */
+  pairedToConfirm: number;
   byMatchMethod: Record<CrmMatchMethodKey, number>;
   opportunities: number;
   opportunitiesByState: Record<CrmOpportunityStateKey, number>;
@@ -316,6 +344,7 @@ export function zeroCrmPairingCounts(): CrmPairingCounts {
     crmContacts: 0,
     crmContactsWithEmail: 0,
     byState: { paired: 0, unconfirmed: 0, rejected: 0, unpaired: 0 },
+    pairedToConfirm: 0,
     byMatchMethod: {
       email: 0,
       phone: 0,
@@ -340,6 +369,7 @@ export function addCrmPairingCounts(
   entry: {
     hasEmail: boolean;
     state: CrmPairingState;
+    toConfirm: boolean;
     matchMethod: MatchMethod;
     opportunityStates: Array<CrmOpportunityState | null>;
     opportunityStageNames: Array<string | null>;
@@ -348,6 +378,7 @@ export function addCrmPairingCounts(
   counts.crmContacts += 1;
   if (entry.hasEmail) counts.crmContactsWithEmail += 1;
   counts.byState[entry.state] += 1;
+  if (entry.state === "paired" && entry.toConfirm) counts.pairedToConfirm += 1;
   counts.byMatchMethod[matchMethodKey(entry.matchMethod)] += 1;
   for (const state of entry.opportunityStates) {
     counts.opportunities += 1;
