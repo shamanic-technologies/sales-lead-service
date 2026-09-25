@@ -29,6 +29,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
+import { followupActionInsert } from "./followup-actions.js";
 
 /**
  * How long a claim holds a due row before another worker may take it.
@@ -252,19 +253,28 @@ export async function claimFollowup(params: {
   id: string;
   nowMs: number;
   runId: string | null;
+  /** The campaign the claiming worker was dispatched for (x-campaign-id). Recorded, never guessed. */
+  actingCampaignId?: string | null;
 }): Promise<boolean> {
   const now = new Date(params.nowMs).toISOString();
   const leaseCutoff = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
 
+  // The ledger row is written by the SAME statement that wins the claim, so a claim can never
+  // exist without the record of who took it, and a lost race writes nothing.
   const rows = (await db.execute(sql`
-    UPDATE leads_campaigns
-       SET followup_claimed_at = ${now},
-           updated_at = ${now}
-     WHERE id = ${params.id}
-       AND followup_due_at IS NOT NULL
-       AND followup_due_at <= ${now}
-       AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
-    RETURNING id
+    WITH claimed AS (
+      UPDATE leads_campaigns
+         SET followup_claimed_at = ${now},
+             updated_at = ${now}
+       WHERE id = ${params.id}
+         AND followup_due_at IS NOT NULL
+         AND followup_due_at <= ${now}
+         AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
+      RETURNING id, org_id, brand_ids, lead_id, campaign_id
+    ), logged AS (
+      ${followupActionInsert("claimed", params.actingCampaignId ?? null, params.runId, now)}
+    )
+    SELECT id FROM claimed
   `)) as unknown as Array<{ id: string }>;
 
   return rows.length > 0;
@@ -359,6 +369,8 @@ export async function pickFollowupCandidate(params: {
   orgId: string;
   campaignId: string;
   runId: string | null;
+  /** The campaign the claiming worker was dispatched for (x-campaign-id), recorded on the ledger. */
+  actingCampaignId?: string | null;
   context: FollowupClaimContext;
   nowMs?: number;
 }): Promise<FollowupClaim> {
@@ -412,7 +424,12 @@ export async function pickFollowupCandidate(params: {
   await stopFollowups(optedOutIds, "opted_out", nowMs);
 
   for (const candidate of answerable) {
-    const claimed = await claimFollowup({ id: candidate.id, nowMs, runId: params.runId });
+    const claimed = await claimFollowup({
+      id: candidate.id,
+      nowMs,
+      runId: params.runId,
+      actingCampaignId: params.actingCampaignId ?? null,
+    });
     if (claimed) {
       console.log(
         `[lead-service] followup claimed campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} followupCount=${candidate.followupCount} due=${candidates.length} optedOut=${optedOutIds.length}`,
@@ -518,20 +535,34 @@ export async function writeFollowupStatement(params: {
   dueAtIso: string | null;
   reason: string | null;
   nowMs: number;
+  /** Recorded on the ledger for an 'acted' statement: the campaign the worker was dispatched for. */
+  actingCampaignId?: string | null;
+  runId?: string | null;
 }): Promise<FollowupState | null> {
   const now = new Date(params.nowMs).toISOString();
   const acted = params.kind === "acted";
 
+  // An 'acted' statement is also a ledger row, written by the same statement: the count on the
+  // lifecycle row says HOW MANY answers were sent, the ledger says WHICH campaign's worker sent each.
   const rows = (await db.execute(sql`
-    UPDATE leads_campaigns
-       SET followup_due_at = ${params.dueAtIso},
-           followup_claimed_at = NULL,
-           followup_count = COALESCE(followup_count, 0) + ${acted ? 1 : 0},
-           followup_last_action_at = ${acted ? now : sql`followup_last_action_at`},
-           followup_stopped_reason = ${params.reason},
-           updated_at = ${now}
-     WHERE id = ${params.id} AND org_id = ${params.orgId}
-    RETURNING ${STATE_COLUMNS}
+    WITH updated AS (
+      UPDATE leads_campaigns
+         SET followup_due_at = ${params.dueAtIso},
+             followup_claimed_at = NULL,
+             followup_count = COALESCE(followup_count, 0) + ${acted ? 1 : 0},
+             followup_last_action_at = ${acted ? now : sql`followup_last_action_at`},
+             followup_stopped_reason = ${params.reason},
+             updated_at = ${now}
+       WHERE id = ${params.id} AND org_id = ${params.orgId}
+      RETURNING ${STATE_COLUMNS}, org_id, brand_ids
+    )${
+      acted
+        ? sql`, logged AS (
+      ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`)}
+    )`
+        : sql``
+    }
+    SELECT ${STATE_COLUMNS} FROM updated
   `)) as unknown as RawStateRow[];
 
   return rows[0] ? toState(rows[0]) : null;

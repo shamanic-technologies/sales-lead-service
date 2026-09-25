@@ -256,6 +256,45 @@ export const leadsCampaigns = pgTable(
   ],
 );
 
+// --- Follow-up actions ledger (src/lib/followup-actions.ts, migration 0045) ---
+// WHO acted on a follow-up row. The queue's own columns on leads_campaigns say what is owed and
+// when; they never said which campaign's worker claimed or answered the person, and a campaign
+// performing an internal leg (ai-meeting-booking) claims rows HELD by another campaign (its
+// predecessor), so it owns no lifecycle row of its own. Append-only, written in the same statement
+// as the claim / the 'acted' write. No foreign key: the paid-pool requeue deletes lifecycle rows,
+// and a record of what happened must survive that.
+//
+// held_by_campaign_id — the campaign of the lifecycle row (the one that holds the person).
+// acting_campaign_id  — the campaign the worker was dispatched for (x-campaign-id). NULL when the
+//                       caller named none: never guessed from the held campaign.
+// action              — 'claimed' (handed to a worker) | 'acted' (the worker answered them).
+// source / source_ref — 'live', or 'windmill_backfill' with the windmill job id it was read from.
+export const followupActions = pgTable(
+  "followup_actions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandIds: text("brand_ids").array().notNull(),
+    leadCampaignId: uuid("lead_campaign_id").notNull(),
+    leadId: uuid("lead_id").notNull(),
+    heldByCampaignId: text("held_by_campaign_id").notNull(),
+    actingCampaignId: text("acting_campaign_id"),
+    runId: text("run_id"),
+    action: text("action").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    source: text("source").notNull().default("live"),
+    sourceRef: text("source_ref"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("idx_fa_acting_campaign").on(table.actingCampaignId, table.action),
+    index("idx_fa_brand_ids").using("gin", table.brandIds),
+    uniqueIndex("idx_fa_source_ref")
+      .on(table.sourceRef)
+      .where(sql`source_ref IS NOT NULL`),
+  ],
+);
+
 // --- Apollo strategies per campaign (multi-strategy cursor) ---
 export const campaignsApolloStrategies = pgTable(
   "campaigns_apollo_strategies",

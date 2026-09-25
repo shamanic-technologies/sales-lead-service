@@ -316,6 +316,13 @@
       "when": 1783641600000,
       "tag": "0044_outcome_cause_rule",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1783728000000,
+      "tag": "0045_followup_actions",
+      "breakpoints": true
     }
   ]
 }
