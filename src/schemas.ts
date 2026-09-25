@@ -2130,7 +2130,10 @@ registry.registerPath({
         "backward-compatible). Use `basic` for list views. " +
         "`compact` is for a consumer computing figures over a whole population: each row carries " +
         "ONLY id, leadId, campaignId, workflowSlug, status, email, the delivery flags (contacted, sent, " +
-        "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification) and " +
+        "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification), " +
+        "crmPositiveReplyAt (ISO date of a positive reply the customer's own CRM evidences — their form " +
+        "submitted after our first delivered email; null when none; count a person once when either it " +
+        "or replyClassification says positive) and " +
         "lead {firstName, lastName, photoUrl, currentTitle, seniority, organization {id, name, logoUrl, " +
         "primaryDomain, websiteUrl, industry, estimatedNumEmployees, city, country}} — every value " +
         "identical to the same field on `basic`. No audience, offer, standing or closedDeal is " +

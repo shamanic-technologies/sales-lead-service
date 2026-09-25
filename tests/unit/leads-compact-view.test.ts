@@ -43,6 +43,12 @@ vi.mock("../../src/lib/offer-card-client.js", async (importOriginal) => ({
   createOfferCardResolver: () => ({ resolve: (...args: unknown[]) => offerResolveMock(...args) }),
 }));
 
+const crmRepliesMock = vi.fn();
+vi.mock("../../src/lib/crm-positive-reply-dates.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/crm-positive-reply-dates.js")>()),
+  fetchCrmPositiveReplyDates: (...args: unknown[]) => crmRepliesMock(...args),
+}));
+
 vi.mock("../../src/lib/trace-event.js", () => ({ traceEvent: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../../src/config.js", () => ({ LEAD_SERVICE_API_KEY: "test-api-key" }));
 
@@ -156,6 +162,8 @@ beforeEach(() => {
       { email: "p2@x.com", broadcast: { brand: scoped({ bounced: true, delivered: false }) } },
     ],
   });
+  crmRepliesMock.mockReset();
+  crmRepliesMock.mockResolvedValue(new Map([[`${BRAND}:lead-0`, "2026-09-21T13:45:00.000Z"]]));
   resolveAudiencesMock.mockClear();
   standingResolveMock.mockClear();
   offerResolveMock.mockClear();
@@ -171,7 +179,7 @@ function get(query: string) {
 const COMPACT_KEYS = [
   "id", "leadId", "campaignId", "workflowSlug", "status", "email", "lead",
   "contacted", "sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "replied",
-  "replyClassification",
+  "replyClassification", "crmPositiveReplyAt",
 ].sort();
 
 describe("GET /orgs/leads?view=compact", () => {
@@ -200,7 +208,7 @@ describe("GET /orgs/leads?view=compact", () => {
     basic.body.leads.forEach((b: Record<string, any>, i: number) => {
       const c = compact.body.leads[i];
       for (const key of COMPACT_KEYS) {
-        if (key === "lead") continue;
+        if (key === "lead" || key === "crmPositiveReplyAt") continue;
         expect(c[key], `${key} on row ${i}`).toEqual(b[key]);
       }
       for (const key of Object.keys(c.lead)) {
@@ -222,6 +230,18 @@ describe("GET /orgs/leads?view=compact", () => {
     expect(compact.body.leads[2].bounced).toBe(true);
     // A row that was never served carries no evidence, exactly as on basic.
     expect(compact.body.leads[3].contacted).toBe(false);
+  });
+
+  it("carries the positive reply the customer's CRM evidences, per person, dated by the CRM", async () => {
+    const res = await get(`?brandId=${BRAND}&view=compact`);
+    expect(res.status).toBe(200);
+    // lead-0 CLICKED and never replied by email — only its CRM form says it replied positively.
+    expect(res.body.leads[0].replyClassification).toBeNull();
+    expect(res.body.leads[0].crmPositiveReplyAt).toBe("2026-09-21T13:45:00.000Z");
+    // lead-1 replied positively by email and nothing in the CRM: the two stay apart.
+    expect(res.body.leads[1].replyClassification).toBe("positive");
+    expect(res.body.leads[1].crmPositiveReplyAt).toBeNull();
+    expect(crmRepliesMock).toHaveBeenCalledTimes(1);
   });
 
   it("never resolves an audience, an offer or a standing", async () => {
