@@ -910,6 +910,7 @@ describe("GET /internal/brands/:brandId/converted-leads", () => {
         cost_cents: 0,
         // The customer states OUR outreach caused this deal.
         caused_by_outreach: true,
+        stated_caused_by_outreach: true,
         source: "manual",
         // A raw `sql` row hands a timestamptz back as a STRING on some paths — the fixture
         // must be one, or a handler that calls .toISOString() on it ships green and throws in prod.
@@ -921,6 +922,8 @@ describe("GET /internal/brands/:brandId/converted-leads", () => {
         campaign_id: null,
         value_cents: null,
         source: "tracker",
+        // Not evaluated by the whose-win rule yet.
+        cause_rule: null,
         received_at: "2026-08-18 09:00:00+00",
         email: "bob@globex.com",
       },
@@ -938,6 +941,8 @@ describe("GET /internal/brands/:brandId/converted-leads", () => {
         valueCents: 490000,
         costCents: 0,
         causedByOutreach: true,
+        causeBasis: "person",
+        causeReason: null,
         source: "manual",
       },
       {
@@ -949,6 +954,8 @@ describe("GET /internal/brands/:brandId/converted-leads", () => {
         // and no more about WHY they bought: nobody was asked, which is neither answer.
         costCents: null,
         causedByOutreach: null,
+        causeBasis: null,
+        causeReason: null,
         valueCents: null,
         source: "tracker",
       },
