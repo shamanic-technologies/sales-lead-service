@@ -4984,7 +4984,7 @@
                   "rejected",
                   "unpaired"
                 ],
-                "description": "paired = we say these are one human. unconfirmed = a candidate exists and nothing strong enough has ruled. rejected = a human denied it or a judgment landed below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count."
+                "description": "paired = we say these are one human (confidently, or to confirm — see toConfirm). unconfirmed = a candidate exists and no judgment could be had yet (the evidence sync judges every candidate and retries a failed one on its next pass). rejected = a human denied it or a judgment landed at or below the floor. unpaired = the waterfall found nobody. A PARTITION — the counts sum to the contact count."
               },
               "decidedBy": {
                 "type": "string",
@@ -4996,6 +4996,10 @@
                   null
                 ],
                 "description": "Null on unconfirmed and unpaired: nobody has decided. Precedence is human > judgment > signal."
+              },
+              "toConfirm": {
+                "type": "boolean",
+                "description": "True only on a PAIRED row a hesitant judgment decided (same-person probability strictly between rejectAt and pairAt). Doubt leans to the customer: it counts as paired — its CRM evidence flows onto the lead and it counts in their ROI — and a person should confirm or deny it. False on every other row."
               },
               "lead": {
                 "type": "object",
@@ -5135,6 +5139,7 @@
             "required": [
               "state",
               "decidedBy",
+              "toConfirm",
               "lead",
               "evidence",
               "judgment",
@@ -9005,7 +9010,7 @@
     "/orgs/leads/crm-pairings": {
       "get": {
         "summary": "Put the customer's CRM and our leads side by side, one row per CRM contact",
-        "description": "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\nA brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not an error. A page whose pairings the deterministic signals could not decide pays for a typed similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the view twice returns the same pairings, and the judgment is never re-asked on read.\n\nBounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.\n\n`state` narrows the rows to one or more pairing states. Their contact list is then WALKED from `offset` until `limit` matching rows are held, so the read stays bounded and paged, and `/orgs/leads/crm-pairing-counts` remains the authority for how many there are: paging a state to the end visits exactly the contacts its `byState` count reports. `offset`/`nextOffset` stay positions in THEIR contact list, so ruling on a row while paging skips nobody. A filtered read buys judgments only when `state` includes `unconfirmed` (the only state a judgment can move a row out of), and decides each row after any judgment it bought is frozen.",
+        "description": "For a brand whose CRM we mirror: which of their people are leads we emailed, how confident the pairing is, where each side says that person stands, and whether a human has ruled on it.\n\nA brand with no mirrored CRM answers `crmConnected: false` with an empty list — an answer, not an error. A page whose pairings the deterministic signals could not decide pays for a typed similarity judgment (through chat-service, org-billed there), which is then FROZEN: reading the view twice returns the same pairings, and the judgment is never re-asked on read.\n\nBounded by `limit`/`offset` over THEIR contacts. It never holds a brand's lead population.\n\n`state` narrows the rows to one or more pairing states. Their contact list is then WALKED from `offset` until `limit` matching rows are held, so the read stays bounded and paged, and `/orgs/leads/crm-pairing-counts` remains the authority for how many there are: paging a state to the end visits exactly the contacts its `byState` count reports. `offset`/`nextOffset` stay positions in THEIR contact list, so ruling on a row while paging skips nobody. A filtered read buys judgments unless `state` is only `unpaired` (the one state no judgment can move a row into or out of), and decides each row after any judgment it bought is frozen.\n\n`toConfirm=true` lists the pairings that rest on a hesitant judgment — the 'To confirm' set a person reviews; `byState.paired` includes them and `pairedToConfirm` counts them.",
         "parameters": [
           {
             "in": "header",
@@ -9079,6 +9084,19 @@
             },
             "example": "paired,unconfirmed",
             "description": "Comma-separated pairing states to keep (paired, unconfirmed, rejected, unpaired), read as one set. Absent = every contact, unchanged. An unknown state or an empty list is a 400, never a silently-ignored filter."
+          },
+          {
+            "in": "query",
+            "name": "toConfirm",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "description": "Narrow to paired rows that are (true) or are not (false) waiting for a person to confirm them. Alone it implies state=paired; beside `state` it narrows that set. Anything but true/false is a 400."
           }
         ],
         "responses": {
@@ -9272,6 +9290,10 @@
                             }
                           }
                         },
+                        "pairedToConfirm": {
+                          "type": "number",
+                          "description": "Of byState.paired, how many rest on a hesitant judgment and wait for a person to confirm them. A subset of paired, never a fifth state."
+                        },
                         "byMatchMethod": {
                           "type": "object",
                           "properties": {
@@ -9326,6 +9348,7 @@
                         "crmContacts",
                         "crmContactsWithEmail",
                         "byState",
+                        "pairedToConfirm",
                         "byMatchMethod",
                         "opportunities",
                         "opportunitiesByState",

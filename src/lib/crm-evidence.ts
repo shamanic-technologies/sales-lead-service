@@ -30,10 +30,12 @@
  *   sale             -> outcome sale
  *   meeting_not_held -> NEVER meeting_attended  (a meeting that did not take place)
  *   deal_lost        -> NEVER sale              (a deal their CRM closed lost)
+ *   form_submitted   -> outcome positive_reply  (owner: "a form submitted in their CRM = a positive
+ *                                                reply for us" — written only when the whose-win
+ *                                                rule says it answered our outreach)
  * A never is represented exactly as a person's "never" is (lead_step_disqualifications), so the
  * funnel's rules apply to it unchanged — and an outcome on the same step still beats it.
  */
-import type { LeadStepOutcomeName } from "./step-statements.js";
 
 /** crm-service's funnel event, as its `/orgs/gohighlevel/funnel-events` serves it. */
 export interface CrmFunnelEvent {
@@ -47,8 +49,26 @@ export interface CrmFunnelEvent {
 
 export type CrmEvidenceKind = "outcome" | "never";
 
+/**
+ * A POSITIVE REPLY is not a funnel step a person states (it is a delivery fact the reply
+ * classifier measures), so it is not in the step-outcome vocabulary. The CRM evidences it all the
+ * same — a form their prospect submitted — and it is written onto the SAME ledger under this event
+ * name, which the Leads buckets and the standing read beside the delivery layer's own positive
+ * reply (lead-buckets.ts, lead-standing-resolver.ts). No outcome COUNT reads it: those answer for
+ * the step vocabulary only.
+ */
+export const CRM_POSITIVE_REPLY_STEP = "positive_reply" as const;
+
+/** crm-service's funnel event for a form their prospect submitted — its own token, verbatim. */
+export const CRM_FORM_SUBMITTED_EVENT = "form_submitted" as const;
+
 /** The steps a CRM can evidence, in OUR vocabulary. */
-export const CRM_EVIDENCED_STEPS = ["meeting_booked", "meeting_attended", "sale"] as const;
+export const CRM_EVIDENCED_STEPS = [
+  "meeting_booked",
+  "meeting_attended",
+  "sale",
+  CRM_POSITIVE_REPLY_STEP,
+] as const;
 export type CrmEvidencedStep = (typeof CRM_EVIDENCED_STEPS)[number];
 
 const CRM_STEP_MAP: Record<string, { kind: CrmEvidenceKind; step: CrmEvidencedStep }> = {
@@ -57,12 +77,13 @@ const CRM_STEP_MAP: Record<string, { kind: CrmEvidenceKind; step: CrmEvidencedSt
   sale: { kind: "outcome", step: "sale" },
   meeting_not_held: { kind: "never", step: "meeting_attended" },
   deal_lost: { kind: "never", step: "sale" },
+  [CRM_FORM_SUBMITTED_EVENT]: { kind: "outcome", step: CRM_POSITIVE_REPLY_STEP },
 };
 
 /** One step's evidence, chosen out of a contact's events. */
 export interface CrmStepEvidence {
   kind: CrmEvidenceKind;
-  step: CrmEvidencedStep & LeadStepOutcomeName;
+  step: CrmEvidencedStep;
   /** crm-service's own step name, verbatim (e.g. `meeting_not_held` behind a never). */
   crmStep: string;
   occurredAt: string | null;
@@ -119,6 +140,37 @@ export function evidenceFromEvents(events: readonly CrmFunnelEvent[]): CrmStepEv
  */
 export function mergeEvidence(a: CrmStepEvidence, b: CrmStepEvidence): CrmStepEvidence {
   return earlier(b, a) ? b : a;
+}
+
+/**
+ * Every form submission among these events, as positive-reply evidence — ALL of them, not the
+ * earliest: a prospect who filled the form before we wrote to them and again after did answer us
+ * the second time, so which one stands depends on our first delivery (`positiveReplyEvidence`).
+ */
+export function formSubmissionsFrom(events: readonly CrmFunnelEvent[]): CrmStepEvidence[] {
+  return events
+    .filter((e) => e.step === CRM_FORM_SUBMITTED_EVENT)
+    .flatMap((e) => evidenceFromEvents([e]));
+}
+
+/**
+ * The form submission that stands as a positive reply: the EARLIEST one dated strictly after our
+ * first delivered email. `null` when none is — a form filled before we wrote, an undated one, or a
+ * person we never delivered to is not a reply to anything we sent.
+ */
+export function positiveReplyEvidence(
+  submissions: readonly CrmStepEvidence[],
+  firstDeliveredAt: string | null,
+): CrmStepEvidence | null {
+  const delivered = instant(firstDeliveredAt);
+  if (delivered === null) return null;
+  let best: CrmStepEvidence | null = null;
+  for (const s of submissions) {
+    const t = instant(s.occurredAt);
+    if (t === null || t <= delivered) continue;
+    if (!best || t < instant(best.occurredAt)!) best = s;
+  }
+  return best;
 }
 
 /** Why the rule answered what it answered. Served beside the answer, never collapsed into it. */

@@ -38,7 +38,6 @@ import {
 import {
   addCrmPairingCounts,
   resolveCrmPairing,
-  needsJudgment,
   zeroCrmPairingCounts,
   CRM_JUDGMENT_PAIR_AT,
   CRM_JUDGMENT_REJECT_AT,
@@ -56,7 +55,6 @@ import {
   loadJudgments,
   loadRulings,
   rulingKey,
-  saveJudgment,
   upsertRuling,
   withdrawRuling,
   type FrozenMatch,
@@ -70,7 +68,9 @@ import {
   type CrmContact,
   type CrmOpportunity,
 } from "../lib/crm-client.js";
-import { JudgmentUnavailableError, judgeSamePerson } from "../lib/judgment-client.js";
+import { judgeSamePerson } from "../lib/judgment-client.js";
+import { judgeCandidates } from "../lib/crm-judging.js";
+import { resyncBrand } from "../lib/crm-evidence-worker.js";
 import {
   fetchPairedLeadFacts,
   resolveStandingsForLeads,
@@ -78,7 +78,7 @@ import {
 } from "../lib/crm-pairing-view.js";
 import { createLeadStandingResolver } from "../lib/lead-standing-resolver.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
-import { mapWithConcurrency, matchesForContacts } from "../lib/crm-matching.js";
+import { matchesForContacts } from "../lib/crm-matching.js";
 
 const router = Router();
 
@@ -95,8 +95,6 @@ const MAX_PAGE_SIZE = 200;
  */
 const MAX_JUDGMENTS_PER_READ = 100;
 
-/** Judgments in flight at once. Bounded so one read cannot stampede chat-service. */
-const JUDGMENT_CONCURRENCY = 6;
 
 
 // ---------------------------------------------------------------------------
@@ -172,6 +170,14 @@ function parseStateFilter(raw: unknown): Set<CrmPairingState> | undefined | null
   return out;
 }
 
+/** `?toConfirm=true|false`. `undefined` when absent, `null` (a 400) when anything else. */
+function parseToConfirm(raw: unknown): boolean | undefined | null {
+  if (raw === undefined) return undefined;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  return null;
+}
+
 interface ReadContext {
   orgId: string;
   brandId: string;
@@ -221,70 +227,20 @@ async function resolveContacts(
   // Judge only what the deterministic signals could not decide, that nobody has ruled on and
   // that carries no frozen judgment already. Bounded, and every failure degrades to a stated
   // reason rather than to a merge or a rejection.
-  const judgmentFailures = new Map<string, CrmJudgmentUnavailableReason>();
+  let judgmentFailures = new Map<string, CrmJudgmentUnavailableReason>();
   if (opts.judge && opts.budget.remaining > 0) {
-    const toJudge = contacts
-      .filter((contact) => {
-        const match = matches.get(contact.id);
-        if (!match?.matchedLeadId) return false;
-        if (!needsJudgment(match)) return false;
-        if (judgments.has(contact.id)) return false;
-        if (rulings.has(rulingKey(contact.id, match.matchedLeadId))) return false;
-        return leadFacts.has(match.matchedLeadId);
-      })
-      .slice(0, opts.budget.remaining);
-    opts.budget.remaining -= toJudge.length;
-
-    await mapWithConcurrency(toJudge, JUDGMENT_CONCURRENCY, async (contact) => {
-      const match = matches.get(contact.id)!;
-      const lead = leadFacts.get(match.matchedLeadId!)!;
-      try {
-        const judgment = await judgeSamePerson(
-          {
-            crmContact: {
-              fullName: contact.fullName,
-              firstName: contact.firstName,
-              lastName: contact.lastName,
-              email: contact.primaryEmail,
-              phone: contact.phoneE164,
-              company: contact.companyName ?? null,
-            },
-            ourLead: {
-              fullName: lead.fullName,
-              firstName: lead.firstName,
-              lastName: lead.lastName,
-              email: lead.email,
-              jobTitle: lead.jobTitle,
-              company: lead.company,
-              companyDomain: lead.companyDomain,
-              location: lead.location,
-            },
-          },
-          identity,
-        );
-        await saveJudgment({
-          orgId,
-          brandId,
-          crmContactId: contact.id,
-          leadId: lead.leadId,
-          samePersonProbability: judgment.probability,
-          model: judgment.model,
-        });
-        judgments.set(contact.id, {
-          leadId: lead.leadId,
-          samePersonProbability: judgment.probability,
-          model: judgment.model,
-          judgedAt: new Date().toISOString(),
-        });
-      } catch (error) {
-        if (!(error instanceof JudgmentUnavailableError)) throw error;
-        console.warn(
-          `[crm-pairings] no judgment for contact="${contact.id}" lead="${lead.leadId}", so the ` +
-            `pairing stays unconfirmed: ${error.message}`,
-        );
-        judgmentFailures.set(contact.id, error.reason);
-      }
-    });
+    ({ failures: judgmentFailures } = await judgeCandidates({
+      orgId,
+      brandId,
+      contacts,
+      matches,
+      judgments,
+      rulings,
+      leadFacts,
+      budget: opts.budget,
+      judge: (sides) => judgeSamePerson(sides, identity),
+      logPrefix: "[crm-pairings]",
+    }));
   }
 
   return contacts.map((contact) => {
@@ -377,6 +333,7 @@ async function serializePairings(
     pairing: {
       state: verdict.state,
       decidedBy: verdict.decidedBy,
+      toConfirm: verdict.toConfirm,
       lead: lead
         ? {
             leadId: lead.leadId,
@@ -422,9 +379,9 @@ async function serializePairings(
  * denying a row moves it OUT of the set they were paging — an ordinal would then skip whoever
  * slid into its place, and the rows a person is working through are exactly the ones they rule on.
  *
- * Judgments are bought only when the filter includes `unconfirmed`: that is the only state a
- * judgment can move a row out of, so a read that does not ask for it must not spend on rows it
- * will never serve. Rows are decided AFTER any judgment this read bought is frozen, which is what
+ * Judgments are bought unless the filter is only `unpaired`: a judgment moves a row out of
+ * `unconfirmed` into `paired` (confident or to confirm) or `rejected`, so any other set can gain
+ * or lose rows by it; `unpaired` never can, so a read of it must not spend. Rows are decided AFTER any judgment this read bought is frozen, which is what
  * keeps a filtered page and `/crm-pairing-counts` answering for the same set.
  */
 async function walkFiltered(
@@ -432,12 +389,13 @@ async function walkFiltered(
   res: import("express").Response,
   ctx: ReadContext,
   states: Set<CrmPairingState>,
+  toConfirm: boolean | undefined,
   limit: number,
   offset: number,
 ): Promise<{ rows: ResolvedContact[]; nextOffset: number | null }> {
   const client = watchClient(req, res);
   const budget = { remaining: MAX_JUDGMENTS_PER_READ };
-  const judge = states.has("unconfirmed");
+  const judge = [...states].some((s) => s !== "unpaired");
   const rows: ResolvedContact[] = [];
   let position = offset;
   try {
@@ -447,7 +405,10 @@ async function walkFiltered(
         const chunk = page.slice(i, i + FILTER_WALK_CHUNK);
         const resolved = await resolveContacts(ctx, chunk, { judge, budget });
         for (const row of resolved) {
-          if (states.has(row.verdict.state)) {
+          if (
+            states.has(row.verdict.state) &&
+            (toConfirm === undefined || row.verdict.toConfirm === toConfirm)
+          ) {
             if (rows.length === limit) return { rows, nextOffset: position };
             rows.push(row);
           }
@@ -478,12 +439,19 @@ router.get(
     if (offset === null) {
       return res.status(400).json({ error: "offset must be an integer of 0 or more" });
     }
-    const states = parseStateFilter(req.query.state);
+    let states = parseStateFilter(req.query.state);
     if (states === null) {
       return res.status(400).json({
         error: `state must be a comma-separated list of ${CRM_PAIRING_STATES.join(", ")}`,
       });
     }
+    const toConfirm = parseToConfirm(req.query.toConfirm);
+    if (toConfirm === null) {
+      return res.status(400).json({ error: "toConfirm must be true or false" });
+    }
+    // `toConfirm` is a property of a PAIRED row. Naming it alone means "the paired rows that
+    // are / are not to confirm"; naming it beside a state set narrows that set.
+    if (toConfirm !== undefined && !states) states = new Set<CrmPairingState>(["paired"]);
 
     const orgId = req.orgId!;
     const identity = {
@@ -514,7 +482,7 @@ router.get(
 
       if (states) {
         [{ rows, nextOffset }, opportunitiesByContact] = await Promise.all([
-          walkFiltered(req, res, ctx, states, limit, offset),
+          walkFiltered(req, res, ctx, states, toConfirm, limit, offset),
           fetchCrmOpportunitiesByContact(brandId, identity),
         ]);
       } else {
@@ -645,6 +613,7 @@ router.get(
           addCrmPairingCounts(counts, {
             hasEmail: !!contact.primaryEmail,
             state: verdict.state,
+            toConfirm: verdict.toConfirm,
             matchMethod: signal.matchMethod,
             opportunityStates: opportunities.map((o) => o.state),
             opportunityStageNames: opportunities.map((o) => o.stageName),
@@ -680,6 +649,21 @@ router.get(
 // ---------------------------------------------------------------------------
 
 const RULING_KINDS: readonly CrmPairingRulingKind[] = ["accepted", "rejected"];
+
+/**
+ * A ruling changes what the pairing CONTRIBUTES — a denial must take its CRM evidence off the lead,
+ * an acceptance must put it on — so the brand's evidence pass runs now rather than at the next
+ * interval. In the background: the ruling is recorded whatever the pass does, and a pass that
+ * fails is logged loudly and retried by the interval, which is the bound either way.
+ */
+function resyncEvidence(orgId: string, brandId: string): void {
+  resyncBrand(orgId, brandId).catch((error) =>
+    console.error(
+      `[crm-pairings] evidence pass after a ruling failed for brand=${brandId}; the interval ` +
+        `will retry it: ${(error as Error).message}`,
+    ),
+  );
+}
 
 /**
  * A human accepts or denies a pairing. Outranks the signal and the judgment alike, survives a
@@ -728,6 +712,7 @@ router.post(
         note,
         statedByUserId: req.userId ?? null,
       });
+      resyncEvidence(req.orgId!, brandId);
       return res.status(201).json({
         ruling: {
           brandId,
@@ -783,6 +768,7 @@ router.delete(
         leadId,
         withdrawnByUserId: req.userId ?? null,
       });
+      if (result.existed && !result.alreadyWithdrawn) resyncEvidence(req.orgId!, brandId);
       if (!result.existed) {
         return res.status(409).json({
           code: "nothing_stated",
