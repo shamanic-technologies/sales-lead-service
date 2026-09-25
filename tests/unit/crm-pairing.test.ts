@@ -138,16 +138,56 @@ describe("resolveCrmPairing — precedence is human > judgment > signal", () => 
     expect(v.decidedBy).toBe("judgment");
   });
 
-  it("a hesitant judgment decides nothing and leaves the signal's answer standing", () => {
+  // Owner: "when in doubt, lean toward us" — and a person must be able to see it was doubt.
+  it("a hesitant judgment PAIRS, and carries toConfirm so a person can review it", () => {
     const v = resolveCrmPairing({
       signal: nameOnly,
       judgment: { samePersonProbability: 0.5, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" },
       judgmentUnavailableReason: null,
       ruling: null,
     });
-    expect(v.state).toBe("unconfirmed");
-    expect(v.decidedBy).toBeNull();
+    expect(v.state).toBe("paired");
+    expect(v.decidedBy).toBe("judgment");
+    expect(v.toConfirm).toBe(true);
     expect(v.judgmentStatus).toBe("undecided");
+  });
+
+  it("the band is strict: at the bar is confident, at the floor rejects, between is to confirm", () => {
+    const at = (p: number) =>
+      resolveCrmPairing({
+        signal: nameOnly,
+        judgment: { samePersonProbability: p, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" },
+        judgmentUnavailableReason: null,
+        ruling: null,
+      });
+    expect([at(0.85).state, at(0.85).toConfirm]).toEqual(["paired", false]);
+    expect([at(0.84).state, at(0.84).toConfirm]).toEqual(["paired", true]);
+    expect([at(0.16).state, at(0.16).toConfirm]).toEqual(["paired", true]);
+    expect([at(0.15).state, at(0.15).toConfirm]).toEqual(["rejected", false]);
+  });
+
+  it("a human ruling on a to-confirm pairing settles it either way, and is never to confirm", () => {
+    const hesitant = { samePersonProbability: 0.5, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" };
+    const ruling = (r: "accepted" | "rejected") => ({
+      ruling: r,
+      note: null,
+      statedByUserId: "u",
+      statedAt: "2026-09-23T00:00:00Z",
+    });
+    const denied = resolveCrmPairing({
+      signal: nameOnly,
+      judgment: hesitant,
+      judgmentUnavailableReason: null,
+      ruling: ruling("rejected"),
+    });
+    expect([denied.state, denied.decidedBy, denied.toConfirm]).toEqual(["rejected", "human", false]);
+    const accepted = resolveCrmPairing({
+      signal: nameOnly,
+      judgment: hesitant,
+      judgmentUnavailableReason: null,
+      ruling: ruling("accepted"),
+    });
+    expect([accepted.state, accepted.decidedBy, accepted.toConfirm]).toEqual(["paired", "human", false]);
   });
 
   // The acceptance criterion the vendor's health must never be able to break.

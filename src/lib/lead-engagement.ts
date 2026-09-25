@@ -11,7 +11,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { DEFAULT_STATUS, type FlattenedStatus } from "./delivery-flatten.js";
 import { bucketsForRow, leadActivityAt, type LeadBucket } from "./lead-buckets.js";
-import { fetchOutcomesByLead, type LeadIndexRow } from "./lead-index.js";
+import { fetchOutcomesByLead, type LeadIndexRow, type LeadOutcomes } from "./lead-index.js";
 import type { LeadStandingState } from "./lead-standing.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
 
@@ -88,7 +88,7 @@ export async function enrichLeadIndex(
     rows.map((r) => r.leadId),
   );
 
-  const noOutcomes = { steps: new Set<LeadStepOutcomeName>(), latestAt: null as string | null };
+  const noOutcomes: LeadOutcomes = { steps: new Set<LeadStepOutcomeName>(), latestAt: null };
 
   return rows.map((row) => {
     const result = row.email ? deliveryByEmail.get(row.email) : undefined;
@@ -103,7 +103,7 @@ export async function enrichLeadIndex(
     const outcomes = outcomesByLead.get(row.leadId) ?? noOutcomes;
     return {
       ...row,
-      buckets: bucketsForRow(delivery, outcomes.steps),
+      buckets: bucketsForRow(delivery, outcomes.steps, outcomes.positiveReply === true),
       delivery,
       activityAt: leadActivityAt(delivery, outcomes.latestAt, row.servedAt, isoCreatedAt(row.createdAtText)),
     };

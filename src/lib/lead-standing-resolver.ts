@@ -35,6 +35,7 @@ import { FUNNEL_ENTRY, FUNNEL_STEPS, type FunnelKey } from "./funnel-steps.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-funnel-state.js";
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
+import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import {
   canonicalizeStepOutcome,
   statementSourceOf,
@@ -256,6 +257,19 @@ export function createLeadStandingResolver(
           });
         }
 
+        // A positive reply the ledger holds (their CRM's form, dated after our first email) is the
+        // same fact as a positive reply the delivery layer classified, so the standing reads it the
+        // same way: it is what puts a lead on a conversation-led funnel. Nothing else of the
+        // delivery evidence moves — an opt-out still outranks it.
+        const ledgerPositiveReply = (outcomesByLead.get(row.leadId) ?? []).some(
+          (o) =>
+            o.event === CRM_POSITIVE_REPLY_STEP &&
+            (o.lead_campaign_id === null || o.lead_campaign_id === row.id),
+        );
+        const delivery: LeadStandingDelivery = ledgerPositiveReply
+          ? { ...row.delivery, replied: true, replyClassification: "positive" }
+          : row.delivery;
+
         const steps = resolveStepStates({
           allSteps: LEAD_STEP_OUTCOMES,
           funnelSteps: funnel?.steps ?? [],
@@ -267,7 +281,7 @@ export function createLeadStandingResolver(
           standing: resolveLeadStanding({
             lifecycleStatus: row.status,
             deliveryQueried,
-            delivery: row.delivery,
+            delivery,
             funnel,
             funnelUnresolvedReason: unresolvedReason,
             steps,

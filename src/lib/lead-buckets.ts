@@ -85,13 +85,15 @@ export function outcomeBucketsOf(outcomes: ReadonlySet<LeadStepOutcomeName>): Le
 export function bucketsForRow(
   delivery: FlattenedStatus | null,
   outcomes: ReadonlySet<LeadStepOutcomeName>,
+  /** A positive reply the outcome ledger holds (their CRM's form submission). Unioned per person. */
+  ledgerPositiveReply = false,
 ): Set<LeadBucket> {
   const buckets = new Set<LeadBucket>();
   if (delivery?.contacted) buckets.add("contacted");
   // The automatic half of a website visit is a CLICK on the email we sent; the hand-stated half is
   // a `website_visit` outcome. One person known both ways is one person in this bucket.
   if (delivery?.clicked || outcomes.has("website_visit")) buckets.add("website_visit");
-  if (delivery?.replied && delivery.replyClassification === "positive") {
+  if ((delivery?.replied && delivery.replyClassification === "positive") || ledgerPositiveReply) {
     buckets.add("positive_reply");
   }
   for (const b of outcomeBucketsOf(outcomes)) buckets.add(b);

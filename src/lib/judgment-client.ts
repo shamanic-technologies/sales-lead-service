@@ -115,6 +115,30 @@ export async function judgeSamePerson(
   if (ctx.userId) headers["x-user-id"] = ctx.userId;
   if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
 
+  return await askJudgment(`${CHAT_SERVICE_URL}/orgs/judgments`, headers, sides);
+}
+
+/**
+ * The same question, asked with NO org request behind it — the evidence sync's in-process worker,
+ * which judges every candidate so none stays undecided because nobody opened a page.
+ *
+ * It has no user and no run to hang an org-billed judgment on, so it goes through chat-service's
+ * platform twin, which declares the spend on a platform run (chat-service owns that declaration,
+ * exactly as it owns the org-billed one). Same question, same parse, same typed failures.
+ */
+export async function judgeSamePersonAsPlatform(sides: SamePersonSides): Promise<SamePersonJudgment> {
+  return await askJudgment(
+    `${CHAT_SERVICE_URL}/internal/platform-judgments`,
+    { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY },
+    sides,
+  );
+}
+
+async function askJudgment(
+  url: string,
+  headers: Record<string, string>,
+  sides: SamePersonSides,
+): Promise<SamePersonJudgment> {
   const body = JSON.stringify({
     state: sides,
     questions: {
@@ -128,7 +152,7 @@ export async function judgeSamePerson(
 
   let response: Response;
   try {
-    response = await fetchWithRetry(`${CHAT_SERVICE_URL}/orgs/judgments`, {
+    response = await fetchWithRetry(url, {
       method: "POST",
       headers,
       body,
