@@ -490,11 +490,13 @@ router.post(
     const inserted = (await db.execute(sql`
       INSERT INTO conversion_events (
         brand_id, org_id, event, dedupe_signature, value_cents, cost_cents, caused_by_outreach,
-        matched_lead_id, match_method, match_confidence, attribution_status, candidate_count,
-        received_at, source, campaign_id, lead_campaign_id, stated_by_user_id, note
+        stated_caused_by_outreach, matched_lead_id, match_method, match_confidence,
+        attribution_status, candidate_count, received_at, source, campaign_id, lead_campaign_id,
+        stated_by_user_id, note
       ) VALUES (
         ${brandId}, ${req.orgId!}, ${step}, ${manualOutcomeSignature(row.id, step)},
         ${body.valueCents ?? null}, ${costCents}, ${body.causedByOutreach ?? null},
+        ${body.causedByOutreach ?? null},
         ${row.lead_id}, 'manual', 'deterministic',
         'attributed', 1, ${occurredAtIso ?? nowIso}, 'manual', ${row.campaign_id}, ${row.id},
         ${statedBy}, ${body.note ?? null}
@@ -504,9 +506,18 @@ router.post(
         cost_cents = EXCLUDED.cost_cents,
         -- A restatement REPLACES the statement, exactly as it replaces the value and the note: it
         -- is the same person saying the thing again, and what they say now is what stands. So
-        -- restating without naming a cause returns the outcome to "nobody was asked" rather than
-        -- quietly keeping an answer the author did not repeat.
-        caused_by_outreach = EXCLUDED.caused_by_outreach,
+        -- restating without naming a cause returns the outcome to the owner's date RULE rather than
+        -- quietly keeping an answer the author did not repeat (outcome-cause.ts). The rule's
+        -- stored answer still stands when the date did not move; a moved date drops it, and the
+        -- worker answers again within one interval.
+        stated_caused_by_outreach = EXCLUDED.stated_caused_by_outreach,
+        caused_by_outreach = COALESCE(
+          EXCLUDED.stated_caused_by_outreach,
+          CASE WHEN conversion_events.received_at IS NOT DISTINCT FROM EXCLUDED.received_at
+               THEN (conversion_events.cause_rule->>'causedByOutreach')::boolean END
+        ),
+        cause_rule = CASE WHEN conversion_events.received_at IS NOT DISTINCT FROM EXCLUDED.received_at
+                          THEN conversion_events.cause_rule END,
         note = EXCLUDED.note,
         received_at = EXCLUDED.received_at,
         stated_by_user_id = EXCLUDED.stated_by_user_id,

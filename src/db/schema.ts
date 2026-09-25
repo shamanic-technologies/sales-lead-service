@@ -360,7 +360,21 @@ export const conversionEvents = pgTable(
     //
     // Deliberately NOT `attributionStatus` (attributed / needs_review / unmatched): that answers
     // "did we manage to identify who this was", this answers "did our outreach cause this deal".
+    //
+    // Since 0044 this is the EFFECTIVE answer on every row: a person's statement when there is one,
+    // else the owner's date rule (src/lib/outcome-cause.ts) — "after our first delivered email to
+    // that person -> ours, before -> not ours, undated / unmatched / never delivered -> null". NULL
+    // is still never defaulted to either answer; the rule only answers where its inputs exist.
     causedByOutreach: boolean("caused_by_outreach"),
+    // What a PERSON stated, kept apart from the effective answer above so a restatement without a
+    // cause returns the row to the rule rather than keeping an answer nobody repeated. NULL = no
+    // person answered. Never written on a CRM row, whose override lives in
+    // lead_step_cause_statements.
+    statedCausedByOutreach: boolean("stated_caused_by_outreach"),
+    // On a non-CRM row: the rule's own answer, the REASON it gave and the inputs it was computed
+    // from ({causedByOutreach, reason, firstDeliveredAt, leadId, occurredAt}). A CRM row keeps the
+    // same thing in crm_evidence.rule.
+    causeRule: jsonb("cause_rule"),
     matchedLeadId: uuid("matched_lead_id").references(() => leads.id, {
       onDelete: "set null",
     }),
