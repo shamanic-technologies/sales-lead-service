@@ -741,10 +741,20 @@ router.get(
         ce.value_cents,
         ce.cost_cents,
         ce.caused_by_outreach,
+        ce.stated_caused_by_outreach,
+        COALESCE(ce.cause_rule, ce.crm_evidence->'rule') AS cause_rule,
+        (cs.id IS NOT NULL) AS crm_override,
         ce.source,
         ce.received_at,
         lower(canonical.value) AS email
       FROM conversion_events ce
+      -- A person's whose-win override of a CRM-evidenced step lives beside it, keyed on the person.
+      LEFT JOIN lead_step_cause_statements cs
+        ON ce.source = 'crm'
+       AND cs.brand_id = ce.brand_id
+       AND cs.lead_id = ce.matched_lead_id
+       AND cs.step = ce.event
+       AND cs.withdrawn_at IS NULL
       LEFT JOIN LATERAL (
         SELECT cm.value
         FROM lead_contact_methods cm
@@ -765,6 +775,9 @@ router.get(
       value_cents: number | null;
       cost_cents: number | null;
       caused_by_outreach: boolean | null;
+      stated_caused_by_outreach: boolean | null;
+      cause_rule: { reason?: string } | string | null;
+      crm_override: boolean;
       source: string | null;
       received_at: Date | string | null;
       email: string | null;
@@ -783,11 +796,35 @@ router.get(
       // something else of theirs did, so its value belongs in the brand's own total and NOT in the
       // return computed on our outreach; null — nobody was ever asked, which is neither answer.
       causedByOutreach: typeof r.caused_by_outreach === "boolean" ? r.caused_by_outreach : null,
+      ...causeProvenance(r),
       source: statementSourceOf(r.source),
     }));
 
     res.json({ event, outcomes });
   }),
 );
+
+/**
+ * Where a row's `causedByOutreach` comes from: a PERSON (their statement on the outcome, or their
+ * override of a CRM-evidenced step) or the owner's date RULE, with the reason the rule gave
+ * (outcome-cause.ts). Both null when neither has answered yet.
+ */
+function causeProvenance(r: {
+  source: string | null;
+  stated_caused_by_outreach: boolean | null;
+  cause_rule: { reason?: string } | string | null;
+  crm_override: boolean;
+}): { causeBasis: "person" | "rule" | null; causeReason: string | null } {
+  const person =
+    (r.source === "crm" && r.crm_override === true) ||
+    (r.source !== "crm" && typeof r.stated_caused_by_outreach === "boolean");
+  if (person) return { causeBasis: "person", causeReason: null };
+  const rule =
+    typeof r.cause_rule === "string"
+      ? (JSON.parse(r.cause_rule) as { reason?: string })
+      : r.cause_rule;
+  if (rule && typeof rule.reason === "string") return { causeBasis: "rule", causeReason: rule.reason };
+  return { causeBasis: null, causeReason: null };
+}
 
 export default router;

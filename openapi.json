@@ -3070,7 +3070,7 @@
               "other",
               "unstated"
             ],
-            "description": "The SAME rows, split by WHOSE WIN each outcome was. A brand contacts people through us AND through everything else it already does — referrals, conferences, an existing pipeline, another agency — so some of the people we email go on to buy for reasons that have nothing to do with us. outreach — the customer states our outreach caused it. other — they state something else of theirs did; the outcome is REAL, it stays in `counts` and among the brand's own, it is simply not one to compute OUR return on. unstated — NOBODY WAS ASKED: every outcome stated before this field existed and every tracker-reported one (a page-load tag cannot know why somebody bought). `unstated` is never folded into either answer. For every key, outreach + other + unstated === counts. This is deliberately NOT the attributed / needs_review / unmatched vocabulary, which answers whether we managed to identify WHO somebody was."
+            "description": "The SAME rows, split by WHOSE WIN each outcome was. A brand contacts people through us AND through everything else it already does — referrals, conferences, an existing pipeline, another agency — so some of the people we email go on to buy for reasons that have nothing to do with us. outreach — our outreach caused it. other — something else of theirs did; the outcome is REAL, it stays in `counts` and among the brand's own, it is simply not one to compute OUR return on. Each answer is a person's when one was given, else the owner's date rule, whatever the source (after our first delivered email to that person -> outreach, before -> other). unstated — UNDECIDED: undated, not attributed to a lead we emailed, never delivered to, or not evaluated yet. `unstated` is never folded into either answer. For every key, outreach + other + unstated === counts. This is deliberately NOT the attributed / needs_review / unmatched vocabulary, which answers whether we managed to identify WHO somebody was."
           }
         },
         "required": [
@@ -3302,8 +3302,33 @@
           "causedByOutreach": {
             "type": "boolean",
             "nullable": true,
-            "description": "WHOSE win it was. true — the customer states OUR outreach caused this outcome. false — they state something else of theirs did (a referral, a conference, their existing pipeline, another agency): the outcome is REAL and is counted everywhere the others are, it is simply not one to compute the return on our outreach from, so a consumer leaves its value out of that figure and keeps it in the brand's own total. null — NOBODY WAS ASKED: every outcome stated before this field existed, and every tracker-reported one, because a page-load tag observes a page load and cannot know why somebody bought. Null is never read as either answer. Deliberately NOT the attributed / needs_review / unmatched vocabulary, which answers whether we managed to identify who somebody was.",
+            "description": "WHOSE win it was. true — our outreach caused this outcome; false — something else of the customer's did (a referral, a conference, their existing pipeline, another agency): the outcome is REAL and is counted everywhere the others are, it is simply not one to compute the return on our outreach from, so a consumer leaves its value out of that figure and keeps it in the brand's own total. A person's answer when one was given, else the owner's date rule (see causeBasis / causeReason) — whatever the source. null — UNDECIDED: undated, not attributed to a lead we emailed, never delivered to, or not evaluated yet. Null is never read as either answer. Deliberately NOT the attributed / needs_review / unmatched vocabulary, which answers whether we managed to identify who somebody was.",
             "example": true
+          },
+          "causeBasis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "person",
+              "rule",
+              null
+            ],
+            "description": "Where `causedByOutreach` comes from. person — somebody answered it (the \"Caused by us?\" of a stated outcome, or an override of a CRM-evidenced step); rule — nobody did, so the owner's default rule answered it: after our first delivered email to that person -> ours, before -> not ours, undated / not attributed to a lead / never delivered -> null. The rule applies to every source (tracker, manual, crm). null — the rule has not evaluated this row yet (a new outcome, within one worker interval).",
+            "example": "rule"
+          },
+          "causeReason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "after_first_delivery",
+              "before_first_delivery",
+              "event_undated",
+              "never_delivered",
+              "not_matched",
+              null
+            ],
+            "description": "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise.",
+            "example": "after_first_delivery"
           },
           "source": {
             "type": "string",
@@ -3323,6 +3348,8 @@
           "valueCents",
           "costCents",
           "causedByOutreach",
+          "causeBasis",
+          "causeReason",
           "source"
         ]
       },
@@ -7939,7 +7966,7 @@
     "/internal/brands/{brandId}/conversion-counts": {
       "get": {
         "summary": "Real conversion counts per event type for a brand (internal, service-auth)",
-        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (the customer states ours caused it), other (they state something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (nobody was asked; every outcome predating the field and every tracker-reported one). outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
+        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (ours caused it), other (something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (undecided). A person's answer outranks the owner's date rule, which answers every other outcome whatever its source: after our first delivered email to that person -> outreach, before -> other, undated / unmatched / never delivered -> unstated. outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
         "parameters": [
           {
             "in": "header",

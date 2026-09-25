@@ -23,6 +23,7 @@ import { registerProviders } from "./lib/register-providers.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
+import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { withConnectRetry } from "./lib/db-retry.js";
@@ -122,6 +123,9 @@ async function boot(): Promise<void> {
   startReadModelWorker();
   // Keeps every lead change feed a consumer follows current (see lead-change-feed.ts).
   startChangeFeedWorker();
+  // Answers WHOSE WIN every outcome nobody answered was, by the owner's date rule
+  // (see outcome-cause.ts).
+  startOutcomeCauseWorker();
 
   try {
     await registerProviders();
