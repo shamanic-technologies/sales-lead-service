@@ -3767,6 +3767,85 @@ registry.registerPath({
   },
 });
 
+// --- Follow-up actions: who a campaign's worker actually acted on ---
+
+const FollowupActedLeadSchema = z
+  .object({
+    actingCampaignId: z.string().openapi({
+      description: "The campaign whose worker acted — the one it was DISPATCHED for (x-campaign-id), never the campaign holding the person.",
+    }),
+    leadId: z.string(),
+    email: z.string().nullable().openapi({ description: "The lead's canonical email; null when none is registered." }),
+    leadCampaignIds: z.array(z.string()).openapi({ description: "The lifecycle rows the actions landed on." }),
+    heldByCampaignIds: z.array(z.string()).openapi({
+      description: "The campaigns HOLDING those rows (for ai-meeting-booking: the predecessor cold-email leg).",
+    }),
+    claimCount: z.number().int().openapi({ description: "Times the queue handed this person to this campaign's worker." }),
+    firstClaimedAt: z.string().nullable(),
+    lastClaimedAt: z.string().nullable(),
+    actedCount: z.number().int().openapi({
+      description: "Times this campaign's worker ANSWERED them (reply sent, follow-up recorded). 0 = claimed but not answered (escalated to a human, or a human had taken the thread over).",
+    }),
+    firstActedAt: z.string().nullable(),
+    lastActedAt: z.string().nullable(),
+  })
+  .openapi("FollowupActedLead");
+
+const FollowupActionsResponseSchema = z
+  .object({
+    brandId: z.string(),
+    leads: z.array(FollowupActedLeadSchema).openapi({
+      description: "One row per (acting campaign, person) — a person claimed ten times is one person.",
+    }),
+    campaigns: z
+      .array(
+        z.object({
+          campaignId: z.string(),
+          leadsClaimed: z.number().int().openapi({ description: "Distinct people handed to this campaign's worker." }),
+          leadsActed: z.number().int().openapi({ description: "Distinct people this campaign's worker answered." }),
+          claims: z.number().int(),
+          acts: z.number().int(),
+        }),
+      )
+      .openapi({ description: "Every campaign named in campaignIds, zeros included." }),
+  })
+  .openapi("FollowupActionsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/followup-actions",
+  summary: "Which people the named campaigns' workers claimed and answered through the follow-up queue (internal, service-auth)",
+  description:
+    "INTERNAL (service-auth: x-api-key, no org — the brand scopes it). Built for a campaign performing an " +
+    "INTERNAL funnel leg (ai-meeting-booking): it serves no lead of its own, it CLAIMS people held by its " +
+    "predecessor leg's campaign through claim-next and answers them, so its lifecycle rows are zero and the " +
+    "only record of who crossed its leg is this ledger. Each claim that hands somebody out and each `acted` " +
+    "follow-up statement is recorded in the same statement as the write, attributed to the campaign the worker " +
+    "was DISPATCHED for (x-campaign-id). A record of the act itself, never an inference from timing. " +
+    "Two facts are served apart: claimed (handed to the worker) and acted (the worker answered). " +
+    "History is complete: everything before this ledger shipped was read back from the orchestrator's own " +
+    "job results (the first claim that found anybody is 2026-09-21).",
+  request: { params: BrandIdPathParam },
+  parameters: [
+    ...FeatureMembershipApiKeyHeader,
+    {
+      in: "query" as const,
+      name: "campaignIds",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Comma-separated ACTING campaign ids (at most 100). Required.",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The people each named campaign's worker claimed and answered",
+      content: { "application/json": { schema: FollowupActionsResponseSchema } },
+    },
+    400: { description: "Missing/invalid brandId or campaignIds" },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Hand-stated step outcomes ---
 
 const StepStatementOrgHeaders = [
