@@ -3208,8 +3208,11 @@
             "enum": [
               "signup",
               "meeting_booked",
+              "meeting_attended",
               "form_submission",
-              "sale"
+              "sale",
+              "website_visit",
+              "positive_reply"
             ],
             "description": "The CANONICAL conversion event type the emails were filtered to. A legacy \"purchase\" query is normalized to and echoed as \"sale\".",
             "example": "form_submission"
@@ -3243,7 +3246,8 @@
               "meeting_attended",
               "form_submission",
               "sale",
-              "website_visit"
+              "website_visit",
+              "positive_reply"
             ],
             "description": "The CANONICAL step the outcomes were filtered to. A legacy \"purchase\" query is normalized to and echoed as \"sale\".",
             "example": "sale"
@@ -8077,10 +8081,11 @@
                 "form_submission",
                 "sale",
                 "website_visit",
-                "purchase"
+                "purchase",
+                "positive_reply"
               ]
             },
-            "description": "Conversion event type to filter to. Required. Canonical: signup | meeting_booked | form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\")."
+            "description": "Conversion event type to filter to. Required. Canonical: signup | meeting_booked | form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\"). `positive_reply` answers the positive replies the ledger holds (their CRM's form, after our first delivered email) — a consumer unions them per person with email-gateway's own."
           },
           {
             "schema": {
@@ -8139,10 +8144,11 @@
                 "form_submission",
                 "sale",
                 "website_visit",
-                "purchase"
+                "purchase",
+                "positive_reply"
               ]
             },
-            "description": "Step to filter to. Required. Canonical: signup | meeting_booked | meeting_attended | form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\")."
+            "description": "Step to filter to. Required. Canonical: signup | meeting_booked | meeting_attended | form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\"). `positive_reply` answers the positive replies the LEDGER holds — today, a form their prospect submitted in their own CRM on a lead paired with it, dated after our first delivered email (source `crm`, causedByOutreach true). It is NOT the delivery layer's own classified replies (email-gateway serves those): a consumer counting positive replies unions the two per person, by email, so a person known both ways counts once."
           },
           {
             "schema": {

@@ -1,3 +1,4 @@
+import { CRM_POSITIVE_REPLY_STEP } from "../lib/crm-evidence.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -576,6 +577,17 @@ router.get(
 );
 
 /**
+ * The event a per-row ledger read answers for: a step outcome (legacy "purchase" folded to
+ * "sale"), or `positive_reply`. The latter is not a step outcome (no count reads it), but the
+ * ledger holds it — a form their prospect submitted in their own CRM on a paired lead, after our
+ * first delivered email — and a consumer counting positive replies needs it per person to union it
+ * with the delivery layer's own classified replies. `null` for anything else (a 400).
+ */
+function ledgerEventOf(raw: unknown): string | null {
+  return raw === CRM_POSITIVE_REPLY_STEP ? CRM_POSITIVE_REPLY_STEP : canonicalizeStepOutcome(raw);
+}
+
+/**
  * GET /internal/brands/:brandId/converted-lead-emails?event=<type>
  *
  * INTERNAL (service-auth: x-api-key — same tier as conversion-counts, NO Clerk).
@@ -609,7 +621,8 @@ router.get(
 
     // Accept canonical "sale" AND legacy "purchase" (both resolve to the canonical "sale"
     // that stored rows carry); anything else (incl. "ping", garbage, missing) → 400.
-    const event = canonicalizeStepOutcome(req.query.event);
+    // Also `positive_reply` — see ledgerEventOf.
+    const event = ledgerEventOf(req.query.event);
     if (!event) {
       res.status(400).json({ error: "Invalid or missing event" });
       return;
@@ -708,8 +721,9 @@ router.get(
  *    vocabulary, which answers whether we managed to identify who somebody was.
  *  - `source` — `manual` (a human stated it) or `tracker` (the website tag reported it).
  *
- * `event` is REQUIRED, one of the five step outcomes (legacy "purchase" normalized to "sale");
- * missing/invalid → 400. Rows come back newest-first. Never 404 — a brand with no attributed
+ * `event` is REQUIRED, one of the five step outcomes (legacy "purchase" normalized to "sale"), or
+ * `positive_reply` — the ledger's positive replies (their CRM's form after our first email), which
+ * a consumer unions per person with the delivery layer's classified replies; missing/invalid → 400. Rows come back newest-first. Never 404 — a brand with no attributed
  * outcome of `event` returns an empty array (200).
  */
 router.get(
@@ -718,7 +732,7 @@ router.get(
   wrap(async (req: Request, res: Response) => {
     const brandId = req.params.brandId;
 
-    const event = canonicalizeStepOutcome(req.query.event);
+    const event = ledgerEventOf(req.query.event);
     if (!event) {
       res.status(400).json({ error: "Invalid or missing event" });
       return;
