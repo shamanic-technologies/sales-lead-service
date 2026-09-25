@@ -20,6 +20,7 @@ import {
   readFollowupState,
   writeFollowupStatement,
 } from "../lib/followup-queue.js";
+import { readFollowupActions } from "../lib/followup-actions.js";
 
 const router = Router();
 
@@ -85,6 +86,9 @@ router.post(
         orgId: req.orgId as string,
         campaignId,
         runId: req.runId ?? null,
+        // The campaign this worker was DISPATCHED for. For an internal leg it is not the campaign
+        // named in the path (that one holds the person), and it is what the ledger attributes to.
+        actingCampaignId: req.campaignId ?? null,
         context: {
           orgId: req.orgId,
           userId: req.userId,
@@ -326,6 +330,8 @@ router.post(
       dueAtIso,
       reason,
       nowMs,
+      actingCampaignId: req.campaignId ?? null,
+      runId: req.runId ?? null,
     });
 
     if (!state) {
@@ -334,6 +340,49 @@ router.post(
     }
 
     res.json({ followup: state });
+  }),
+);
+
+/** Campaign ids a caller may name in one read. A consumer asks per offer, which is a handful. */
+const MAX_ACTING_CAMPAIGN_IDS = 100;
+
+/**
+ * Which people the named campaigns' workers claimed and answered, for one brand.
+ *
+ * Built for a campaign that performs an INTERNAL leg (ai-meeting-booking): it serves no lead of its
+ * own, it claims people held by its predecessor leg's campaign, so the only record of who crossed
+ * its leg is the follow-up ledger (`src/lib/followup-actions.ts`). Service-auth, no org: the brand
+ * scopes it, exactly as the other `/internal/brands/:brandId/*` reads.
+ *
+ * `campaignIds` (comma-separated, required) names the ACTING campaigns — the ones the workers were
+ * dispatched for — never the campaign that holds the person. Every named campaign is answered in
+ * `campaigns`, zeros included. History: every claim that ever handed somebody out is here — read
+ * back from the orchestrator's job results for everything before the ledger shipped (the first such
+ * claim is 2026-09-21), and written live since.
+ */
+router.get(
+  "/internal/brands/:brandId/followup-actions",
+  apiKeyAuth,
+  wrap(async (req: Request, res: Response) => {
+    const brandId = req.params.brandId;
+    if (!UUID_RE.test(brandId)) {
+      res.status(400).json({ error: "brandId must be a uuid" });
+      return;
+    }
+
+    const raw = typeof req.query.campaignIds === "string" ? req.query.campaignIds : "";
+    const campaignIds = [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+    if (campaignIds.length === 0) {
+      res.status(400).json({ error: "campaignIds is required (comma-separated acting campaign ids)" });
+      return;
+    }
+    if (campaignIds.length > MAX_ACTING_CAMPAIGN_IDS) {
+      res.status(400).json({ error: `campaignIds accepts at most ${MAX_ACTING_CAMPAIGN_IDS} ids` });
+      return;
+    }
+
+    const result = await readFollowupActions({ brandId, campaignIds });
+    res.json({ brandId, ...result });
   }),
 );
 
