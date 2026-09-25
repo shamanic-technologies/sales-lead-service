@@ -13,7 +13,11 @@ import type { FlattenedStatus } from "./delivery-flatten.js";
  * the SAME row and the SAME flattened overlay `view=basic` emits, so a field present in both can
  * never disagree. The audience, offer and standing resolvers are not run at all for this view.
  */
-export function toCompactLead(r: BasicLeadRow, delivery: FlattenedStatus) {
+export function toCompactLead(
+  r: BasicLeadRow,
+  delivery: FlattenedStatus,
+  crmPositiveReplyAt: string | null,
+) {
   const org = r.lead?.organization ?? null;
   return {
     id: r.id,
@@ -53,6 +57,12 @@ export function toCompactLead(r: BasicLeadRow, delivery: FlattenedStatus) {
     unsubscribed: delivery.unsubscribed,
     replied: delivery.replied,
     replyClassification: delivery.replyClassification,
+    // A positive reply the customer's OWN CRM evidences (their form, submitted after our first
+    // delivered email — see crm-positive-reply-dates.ts), dated by the CRM. Null when there is none.
+    // It is the same fact as `replied && replyClassification === "positive"`, kept apart so the
+    // delivery evidence above stays exactly what the sender measured: a consumer counting positive
+    // replies counts a person once when either says so.
+    crmPositiveReplyAt,
   };
 }
 
