@@ -23,6 +23,7 @@ import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
 import { prefetchOne } from "../lib/prefetch.js";
 import { toCompactLead } from "../lib/compact-lead.js";
+import { crmPositiveReplyAtFor, fetchCrmPositiveReplyDates } from "../lib/crm-positive-reply-dates.js";
 import { fetchBasicLeadChunk, streamBasicLeadChunks, toIsoTimestamp, type BasicLeadRow } from "../lib/basic-leads.js";
 import {
   campaignScopeIds,
@@ -1001,13 +1002,14 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             : await buildStatusMapForBasicRows(basicRows, statusCampaignIdStr, context);
 
         if (compact) {
+          const crmReplies = await fetchCrmPositiveReplyDates(basicRows);
           for (const r of basicRows) {
             const statusResult = statusMap.get(r.email?.value ?? "");
             const delivery =
               hasScopeForStatus && r.status === "served"
                 ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
                 : DEFAULT_STATUS;
-            await writer.write((wroteFirstBasic ? "," : "") + JSON.stringify(toCompactLead(r, delivery)));
+            await writer.write((wroteFirstBasic ? "," : "") + JSON.stringify(toCompactLead(r, delivery, crmPositiveReplyAtFor(crmReplies, r))));
             wroteFirstBasic = true;
           }
           continue;

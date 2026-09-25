@@ -50,6 +50,7 @@ import { createHash } from "node:crypto";
 import { sql } from "../db/index.js";
 import { streamBasicLeadChunks, type BasicLeadRow } from "./basic-leads.js";
 import { toCompactLead } from "./compact-lead.js";
+import { crmPositiveReplyAtFor, fetchCrmPositiveReplyDates } from "./crm-positive-reply-dates.js";
 import type { StatusResult } from "./email-gateway-client.js";
 import type { EvidenceRequest } from "./lead-delivery-evidence.js";
 import {
@@ -203,12 +204,14 @@ export function freshFeedRows(
   scope: ReadModelScope,
   rows: readonly BasicLeadRow[],
   delivery: ReadonlyMap<string, StatusResult>,
+  crmReplies: ReadonlyMap<string, string>,
 ): FreshFeedRow[] {
   return rows.map((row) => {
     const payload = JSON.stringify(
       toCompactLead(
         row,
         modelDeliveryFor(scope, row.status, delivery.get(row.email?.value ?? "")),
+        crmPositiveReplyAtFor(crmReplies, row),
       ),
     );
     return {
@@ -234,7 +237,8 @@ async function readChunk(
     acceptFetchedSince,
     changedAt,
   );
-  return freshFeedRows(feed.scope, rows, delivery);
+  const crmReplies = await fetchCrmPositiveReplyDates(rows);
+  return freshFeedRows(feed.scope, rows, delivery, crmReplies);
 }
 
 /**

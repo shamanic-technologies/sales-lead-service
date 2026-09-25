@@ -2130,7 +2130,10 @@ registry.registerPath({
         "backward-compatible). Use `basic` for list views. " +
         "`compact` is for a consumer computing figures over a whole population: each row carries " +
         "ONLY id, leadId, campaignId, workflowSlug, status, email, the delivery flags (contacted, sent, " +
-        "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification) and " +
+        "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification), " +
+        "crmPositiveReplyAt (ISO date of a positive reply the customer's own CRM evidences — their form " +
+        "submitted after our first delivered email; null when none; count a person once when either it " +
+        "or replyClassification says positive) and " +
         "lead {firstName, lastName, photoUrl, currentTitle, seniority, organization {id, name, logoUrl, " +
         "primaryDomain, websiteUrl, industry, estimatedNumEmployees, city, country}} — every value " +
         "identical to the same field on `basic`. No audience, offer, standing or closedDeal is " +
@@ -3505,7 +3508,7 @@ registry.registerPath({
 const ConvertedLeadEmailsResponseSchema = z
   .object({
     event: z
-      .enum(["signup", "meeting_booked", "form_submission", "sale"])
+      .enum(["signup", "meeting_booked", "meeting_attended", "form_submission", "sale", "website_visit", "positive_reply"])
       .openapi({
         description:
           "The CANONICAL conversion event type the emails were filtered to. A legacy \"purchase\" " +
@@ -3562,11 +3565,14 @@ registry.registerPath({
           "sale",
           "website_visit",
           "purchase",
+          "positive_reply",
         ],
       },
       description:
         "Conversion event type to filter to. Required. Canonical: signup | meeting_booked | " +
-        "form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\").",
+        "form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\"). " +
+        "`positive_reply` answers the positive replies the ledger holds (their CRM's form, after our " +
+        "first delivered email) — a consumer unions them per person with email-gateway's own.",
     },
   ],
   responses: {
@@ -3680,6 +3686,7 @@ const ConvertedLeadsResponseSchema = z
         "form_submission",
         "sale",
         "website_visit",
+        "positive_reply",
       ])
       .openapi({
       description:
@@ -3737,11 +3744,17 @@ registry.registerPath({
           "sale",
           "website_visit",
           "purchase",
+          "positive_reply",
         ],
       },
       description:
         "Step to filter to. Required. Canonical: signup | meeting_booked | meeting_attended | " +
-        "form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\").",
+        "form_submission | sale. The legacy \"purchase\" spelling is accepted (normalized to \"sale\"). " +
+        "`positive_reply` answers the positive replies the LEDGER holds — today, a form their prospect " +
+        "submitted in their own CRM on a lead paired with it, dated after our first delivered email " +
+        "(source `crm`, causedByOutreach true). It is NOT the delivery layer's own classified replies " +
+        "(email-gateway serves those): a consumer counting positive replies unions the two per person, " +
+        "by email, so a person known both ways counts once.",
     },
   ],
   responses: {

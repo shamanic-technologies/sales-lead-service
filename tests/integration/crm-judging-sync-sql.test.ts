@@ -16,6 +16,8 @@
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import express from "express";
+import request from "supertest";
 
 const state = vi.hoisted(() => ({
   funnelContacts: [] as Array<{
@@ -100,6 +102,7 @@ const { bucketsForRow } = await import("../../src/lib/lead-buckets.js");
 const { createLeadStandingResolver } = await import("../../src/lib/lead-standing-resolver.js");
 const { DEFAULT_STATUS } = await import("../../src/lib/delivery-flatten.js");
 const { standingDelivery } = await import("../../src/lib/lead-standing-index.js");
+const conversionsRoutes = (await import("../../src/routes/conversions.js")).default;
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -266,6 +269,30 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     );
     expect(facts.get(ids.formafter.row)!.standing).toMatchObject({ state: "sales_interest", signal: "positive_reply" });
     expect(facts.get(ids.formbefore.row)!.standing.state).not.toBe("sales_interest");
+  });
+
+  it("serves the ledger's positive replies one row at a time on /converted-leads?event=positive_reply", async () => {
+    const app = express();
+    app.use(conversionsRoutes);
+    const res = await request(app)
+      .get(`/internal/brands/${brandId}/converted-leads?event=positive_reply`)
+      .set("x-api-key", "test-api-key");
+    expect([res.status, res.body]).toEqual([200, expect.objectContaining({ event: "positive_reply" })]);
+    const byLead = new Map(res.body.outcomes.map((o: { leadId: string }) => [o.leadId, o]));
+    expect(byLead.size).toBe(2);
+    expect(byLead.get(ids.formafter.leadId)).toMatchObject({
+      email: ids.formafter.email.toLowerCase(),
+      occurredAt: "2026-05-20T00:00:00.000Z",
+      source: "crm",
+      causedByOutreach: true,
+    });
+    expect(byLead.has(ids.formboth.leadId)).toBe(true);
+    expect(byLead.has(ids.formbefore.leadId)).toBe(false);
+    // Still a 400 for anything that is neither a step nor the ledger's positive reply.
+    const bad = await request(app)
+      .get(`/internal/brands/${brandId}/converted-leads?event=reply`)
+      .set("x-api-key", "test-api-key");
+    expect(bad.status).toBe(400);
   });
 
   it("a person denying a to-confirm pairing removes everything it contributed", async () => {
