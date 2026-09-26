@@ -2,9 +2,14 @@
  * The two reads the went-cold rule (`lead-cold.ts`) needs about the customer's CRM.
  *
  *   - Is the brand's CRM USABLE as evidence that a step did not happen? Read from crm-service, which
- *     owns the connection and what each pipeline stage means: connected and active, synced within
- *     CRM_SYNC_MAX_AGE_MS, its last sync not failing, and at least one stage resolved (and served as
- *     evidence) to the step whose absence the rule reads.
+ *     owns the connection and what each pipeline stage means: not paused, its last SUCCESSFUL sync
+ *     within CRM_SYNC_MAX_AGE_MS, and at least one stage resolved (and served as evidence) to the step
+ *     whose absence the rule reads. The question is whether the evidence we HOLD is fresh, not whether
+ *     the latest ATTEMPT succeeded: crm-service writes `lastSyncedAt` only when a pass succeeds (a
+ *     failed pass sets `status: "error"` + `lastError` and leaves it alone), so one timed-out pass
+ *     while the last good data is minutes old must not suspend the rule — that made a client's ROI
+ *     flip between two numbers on every transient hiccup. A CRM that stays broken (auth revoked,
+ *     disconnected upstream) stops succeeding, ages past the window and is suspended, loud.
  *   - Which of these leads have a CRM candidate whose pairing is still UNDECIDED? Decided by the SAME
  *     `resolveCrmPairing` over the same frozen match, judgment and human ruling every pairing read
  *     uses. Such a lead's CRM evidence does not flow to it yet, so its silence proves nothing.
@@ -24,8 +29,12 @@ import {
   type CrmColdEligibility,
 } from "./lead-cold.js";
 
-/** A CRM not synced for longer than this is not current enough to prove an absence. */
-export const CRM_SYNC_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+/**
+ * A CRM whose last SUCCESSFUL sync is older than this is not current enough to prove an absence.
+ * crm-service syncs every 15 minutes, so this tolerates ~24 consecutive failed passes; past it a
+ * step the CRM would have shown could be missing from what we hold.
+ */
+export const CRM_SYNC_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /** How long a READABLE answer is reused in-process. A connection's state moves on a sync's cadence. */
 const ELIGIBILITY_TTL_MS = 5 * 60 * 1000;
@@ -60,12 +69,27 @@ export async function loadCrmColdEligibility(
   try {
     const connection = await fetchCrmConnection(brandId, { orgId, brandId });
     if (!connection) value = CRM_COLD_INELIGIBLE("no_crm_connection");
-    else if (connection.status !== "active") value = CRM_COLD_INELIGIBLE("crm_not_active");
-    else if (!connection.synced || !connection.lastSyncedAt) value = CRM_COLD_INELIGIBLE("crm_not_synced");
-    else if (connection.lastError) value = CRM_COLD_INELIGIBLE("crm_sync_failing");
-    else if (now.getTime() - Date.parse(connection.lastSyncedAt) > CRM_SYNC_MAX_AGE_MS) {
-      value = CRM_COLD_INELIGIBLE("crm_sync_stale");
+    // `error` is a status crm-service writes on a FAILED ATTEMPT, not a state of the data; only a
+    // connection someone paused (or any status we do not know) is not a live CRM.
+    else if (connection.status !== "active" && connection.status !== "error") {
+      value = CRM_COLD_INELIGIBLE("crm_not_active");
+    } else if (!connection.synced || !connection.lastSyncedAt) value = CRM_COLD_INELIGIBLE("crm_not_synced");
+    else if (!(now.getTime() - Date.parse(connection.lastSyncedAt) <= CRM_SYNC_MAX_AGE_MS)) {
+      // Stale (or an unreadable date). Name WHY: still failing, or simply not synced lately.
+      value = CRM_COLD_INELIGIBLE(connection.lastError ? "crm_sync_failing" : "crm_sync_stale");
+      console.warn(
+        `[lead-cold] brand ${brandId}'s CRM last synced successfully at ${connection.lastSyncedAt}, ` +
+          `older than ${CRM_SYNC_MAX_AGE_MS / 3_600_000}h, so no lead of it goes cold` +
+          (connection.lastError ? `; its sync is failing: ${connection.lastError}` : ""),
+      );
     } else {
+      if (connection.lastError) {
+        console.warn(
+          `[lead-cold] brand ${brandId}'s last CRM sync attempt failed (${connection.lastError}); the ` +
+            `rule still applies on the data synced at ${connection.lastSyncedAt}, inside the ` +
+            `${CRM_SYNC_MAX_AGE_MS / 3_600_000}h window`,
+        );
+      }
       const meanings = await fetchCrmStageMeanings(brandId, { orgId, brandId });
       const served = new Set(meanings.filter((m) => m.servedAsEvidence).map((m) => m.meaning));
       value = {
