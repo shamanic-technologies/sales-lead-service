@@ -51,6 +51,10 @@ describe("the leg graph", () => {
     expect(stepsOnlyThrough("sale")).toEqual([]);
   });
 
+  it("knows exactly the statable step vocabulary, and nothing else", () => {
+    expect([...STEP_ORDER].sort()).toEqual([...LEAD_STEP_OUTCOMES].sort());
+  });
+
   it("orders steps shallowest first", () => {
     expect(STEP_ORDER[0]).toBe("website_visit");
     expect(STEP_ORDER[STEP_ORDER.length - 1]).toBe("sale");
