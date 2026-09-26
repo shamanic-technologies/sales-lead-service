@@ -32,21 +32,7 @@ vi.mock("../../src/config.js", () => ({
   CAMPAIGN_SERVICE_API_KEY: "campaign-key",
 }));
 
-const resolveCampaignFunnelSteps = vi.fn();
-const fetchOrgCampaignFunnelKeys = vi.fn();
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
-  return {
-    ...actual,
-    resolveCampaignFunnelSteps: (...args: unknown[]) => resolveCampaignFunnelSteps(...args),
-    fetchOrgCampaignFunnelKeys: (...args: unknown[]) => fetchOrgCampaignFunnelKeys(...args),
-  };
-});
 
-const REPLY_MEETING_FUNNEL = {
-  funnelKey: "sales_meetings_from_conversation",
-  funnelSteps: ["meeting_booked", "meeting_attended", "sale"],
-};
 
 const dialect = new PgDialect();
 function compile(call: unknown): { sql: string; params: unknown[] } {
@@ -92,8 +78,6 @@ describe("stating a closed deal AND who caused it, in one statement", () => {
   }, 30_000);
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
-    resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
-    fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
   });
 
   function ledgerWriteReady() {
@@ -194,7 +178,6 @@ describe("reading back who caused a deal, for one lead", () => {
   }, 30_000);
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
-    resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
   });
 
   function get() {
@@ -220,7 +203,7 @@ describe("reading back who caused a deal, for one lead", () => {
           received_at: "2026-08-19 14:30:00+00",
         },
         {
-          event: "meeting_booked",
+          event: "meeting_attended",
           source: "manual",
           value_cents: null,
           cost_cents: null,
@@ -239,11 +222,11 @@ describe("reading back who caused a deal, for one lead", () => {
       (res.body.steps as Array<Record<string, unknown>>).map((s) => [s.step, s]),
     );
     expect(byStep.sale.causedByOutreach).toBe(false);
-    expect(byStep.meeting_booked.causedByOutreach).toBeNull();
-    // An IMPLIED step is not a statement, so nobody stated its cause either.
-    expect(byStep.meeting_attended.state).toBe("outcome");
-    expect(byStep.meeting_attended.origin).toBe("implied");
     expect(byStep.meeting_attended.causedByOutreach).toBeNull();
+    // An IMPLIED step is not a statement, so nobody stated its cause either.
+    expect(byStep.meeting_booked.state).toBe("outcome");
+    expect(byStep.meeting_booked.origin).toBe("implied");
+    expect(byStep.meeting_booked.causedByOutreach).toBeNull();
   });
 });
 

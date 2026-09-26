@@ -35,7 +35,7 @@ export interface EnrichedLeadIndexRow extends LeadIndexRow {
    */
   standing?: LeadStandingState;
   /**
-   * Where on the funnel a `sales_interest` lead stands (`salesInterestStage`), attached with the
+   * Where a `sales_interest` lead stands (`salesInterestStage`), attached with the
    * standing and null for every other state.
    */
   stage?: string | null;

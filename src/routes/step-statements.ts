@@ -19,23 +19,12 @@ import {
   MeasuredVisitLookupError,
   fetchMeasuredVisitEmails,
 } from "../lib/measured-visits.js";
-import {
-  FunnelStepsError,
-  resolveCampaignFunnelSteps,
-  fetchOrgCampaignFunnelKeys,
-  type ResolvedFunnelSteps,
-} from "../lib/campaign-funnel-client.js";
-import {
-  stepAndEarlier,
-  stepAndLater,
-  FUNNEL_STEPS,
-  type FunnelKey,
-} from "../lib/funnel-steps.js";
+import { stepsOnlyThrough, stepsRequiredBefore } from "../lib/step-graph.js";
 import {
   resolveStepStates,
   type StatedNever,
   type StatedOutcome,
-} from "../lib/step-funnel-state.js";
+} from "../lib/step-states.js";
 import { readBrandColdLeads, readLeadRowCold } from "../lib/lead-cold-read.js";
 import { EvidenceUnavailableError } from "../lib/lead-delivery-evidence.js";
 import { COLD_AFTER_DAYS, type ColdStep } from "../lib/lead-cold.js";
@@ -145,60 +134,9 @@ function respondMeasuredVisitFailure(error: unknown, res: Response): boolean {
 }
 
 /**
- * WHICH funnel this lead is on. A funnel is a funnel, and "before" / "after" mean nothing without
- * knowing which one: a campaign selling meetings off replies runs reply -> booked -> attended ->
- * paid, one selling off the website runs visit -> signup -> paid. The campaign is on the row and
- * campaign-service states its funnel, so it is read from there and never inferred.
- *
- * NO SILENT FALLBACK, and the failures are kept apart because they are different facts:
- *   502 — campaign-service could not answer. Transient.
- *   409 — the campaign states no funnel this service has a funnel for (or campaign-service does not
- *         know the campaign). Nothing is broken; there is simply no order to read the steps in, and
- *         a made-up order would print a funnel nobody stated.
- * Returns null having already answered.
- */
-async function resolveFunnelOrRespond(
-  row: LeadRow,
-  req: AuthenticatedRequest,
-  res: Response,
-): Promise<ResolvedFunnelSteps | null> {
-  try {
-    return await resolveCampaignFunnelSteps(row.campaign_id, {
-      orgId: req.orgId!,
-      userId: req.userId ?? null,
-      runId: req.runId ?? null,
-      brandId: req.brandIds?.[0] ?? null,
-    });
-  } catch (error) {
-    if (!(error instanceof FunnelStepsError)) throw error;
-    console.error(error.message);
-    if (error.reason === "unavailable") {
-      res.status(502).json({
-        error:
-          "campaign-service could not say which sales funnel this lead's campaign sells through, " +
-          "so the order of its steps is unknown. No answer is returned rather than one built on a " +
-          "funnel nobody stated.",
-        code: "campaign_service_unavailable",
-      });
-      return null;
-    }
-    res.status(409).json({
-      error:
-        error.reason === "unknown"
-          ? "The campaign this lead belongs to is unknown to campaign-service, so its sales funnel " +
-            "— and therefore the order of its steps — cannot be resolved."
-          : "This lead's campaign states no sales funnel, so its steps have no order. Declare the " +
-            "campaign's funnel and the funnel resolves.",
-      code: error.reason === "unknown" ? "campaign_unknown" : "funnel_unstated",
-    });
-    return null;
-  }
-}
-
-/**
  * POST /orgs/leads/:id/step-statements
  *
- * A HUMAN states what happened to ONE lead at ONE step of its campaign's sales funnel — or that
+ * A HUMAN states what happened to ONE lead at ONE step — or that
  * it never will. Organisation-authenticated (the customer dashboard and the staff console are
  * both org-authenticated callers); the publishable website-tracker token is deliberately NOT a
  * door to this: it is write-only, brand-scoped, and meant for a third party's page.
@@ -280,10 +218,10 @@ router.post(
 
     // WHAT THIS LEG COST THE CUSTOMER, and stating it is mandatory.
     //
-    // The platform automates the first link of a sales funnel; the customer performs the rest —
+    // The platform automates the first leg; the customer performs the rest —
     // they run the meeting, they close the deal — so they are the only one who knows what that
-    // leg cost. Without it a funnel's cost of acquisition counts only the link we billed for, and
-    // every return displayed for that funnel is too good.
+    // leg cost. Without it a cost of acquisition counts only the leg we billed for, and
+    // every return displayed on it is too good.
     //
     // ABSENT IS A REFUSAL, NEVER A ZERO. Defaulting it would silently answer a question nobody
     // was asked, and the answer would be indistinguishable from a real "it cost me nothing" — so
@@ -299,7 +237,7 @@ router.post(
         error:
           "costCents is required — state what this step cost you, in cents. Zero is a legitimate " +
           "answer and is recorded as a stated zero; leaving it out is not, because an absent cost " +
-          "would be indistinguishable from a stated zero and would make this funnel's cost of " +
+          "would be indistinguishable from a stated zero and would make the cost of " +
           "acquisition read better than it is. This is your money, never charged to you.",
         code: "cost_required",
       });
@@ -339,23 +277,19 @@ router.post(
       return;
     }
 
-    // A statement is only coherent against the funnel it is made on, so the funnel is resolved
-    // BEFORE anything is written: a "never" constrains every LATER step, an outcome constrains
-    // every EARLIER one, and neither rule can be enforced without knowing the order.
-    const resolved = await resolveFunnelOrRespond(row, req, res);
-    if (!resolved) return;
-    const funnel = resolved.funnelSteps;
-
+    // A statement is only coherent against the leg graph (step-graph.ts): a "never" constrains
+    // every step that can only be reached THROUGH it, an outcome every step that EVERY path to it
+    // goes through.
     const nowIso = new Date().toISOString();
     const statedBy = req.userId ?? null;
 
     if (body.kind === "never") {
-      // Everything this "never" would also make never: the step itself and every step AFTER it on
-      // the funnel. An outcome standing on ANY of them contradicts the statement — a lead that paid
-      // cannot never have booked — so the refusal that already guarded the step itself guards the
-      // whole forward slice, which is what stops the two directions disagreeing when statements
-      // arrive in the other order.
-      const blockedBy = stepAndLater(funnel, step);
+      // Everything this "never" would also make never: the step itself and every step that can only
+      // be reached through it. An outcome standing on ANY of them contradicts the statement — a lead
+      // that attended cannot never have booked — so the refusal that already guarded the step
+      // itself guards the whole forward slice, which is what stops the two directions disagreeing
+      // when statements arrive in the other order.
+      const blockedBy = [step, ...stepsOnlyThrough(step)];
 
       // A visit the delivery layer already measured HAPPENED, whatever a person types about it.
       // Same refusal as an outcome already on the ledger, for the same reason.
@@ -373,8 +307,8 @@ router.post(
               step === WEBSITE_VISIT
                 ? "website_visit was already measured for this lead (a click on the email we sent) " +
                   "— it cannot be stated as never"
-                : `website_visit was already measured for this lead and comes after ${step} on this ` +
-                  `campaign's funnel, so ${step} cannot be stated as never`,
+                : `website_visit was already measured for this lead and can only be reached through ` +
+                  `${step}, so ${step} cannot be stated as never`,
             code: "step_already_happened",
           });
           return;
@@ -401,8 +335,8 @@ router.post(
           error:
             happened === step
               ? `${step} already happened for this lead — it cannot be stated as never`
-              : `${happened} already happened for this lead and comes after ${step} on this ` +
-                `campaign's funnel, so ${step} cannot be stated as never`,
+              : `${happened} already happened for this lead and can only be reached through ` +
+                `${step}, so ${step} cannot be stated as never`,
           code: "step_already_happened",
         });
         return;
@@ -459,20 +393,18 @@ router.post(
           statedByUserId: statedBy,
           statedAt: toIsoTimestamp(inserted[0].updated_at),
         },
-        funnelKey: resolved.funnelKey,
-        funnelSteps: resolved.funnelSteps,
       });
       return;
     }
 
-    // An outcome supersedes a "never" for the same step — the person did the thing after all — and,
-    // along the funnel, for every step BEFORE it too: a lead that paid necessarily got through the
-    // steps that lead to paying, so a "never" standing on any of them is contradicted by the fact.
+    // An outcome supersedes a "never" for the same step — the person did the thing after all — and
+    // for every step EVERY path to it goes through: a lead that attended necessarily booked, so a
+    // "never" standing on any of them is contradicted by the fact.
     //
     // The row is MARKED retracted, never deleted: what somebody actually stated is the thing that
     // makes this auditable, and it must survive being superseded. Every read filters it out, so
     // nothing counts it and nothing shows it as live.
-    const supersedes = stepAndEarlier(funnel, step);
+    const supersedes = [...stepsRequiredBefore(step), step];
     const retracted = (await db.execute(sql`
       UPDATE lead_step_disqualifications
       SET retracted_at = now(),
@@ -556,10 +488,8 @@ router.post(
         statedByUserId: statedBy,
         statedAt: toIsoTimestamp(inserted[0].received_at),
       },
-      funnelKey: resolved.funnelKey,
-      funnelSteps: resolved.funnelSteps,
       // Kept as a boolean for the callers that already read it; the steps say WHICH statements the
-      // outcome superseded, including the earlier ones the funnel reached.
+      // outcome superseded, including the earlier ones every path to it goes through.
       retractedNever: retracted.length > 0,
       retractedNeverSteps: retracted.map((r) => r.step),
     });
@@ -567,8 +497,8 @@ router.post(
 );
 
 /**
- * What every step of this lead's funnel reads as, right now: the live statements (an outcome on
- * the ledger, a "never" on its own table) plus what the delivery layer measured, with the funnel's
+ * What every step of this lead reads as, right now: the live statements (an outcome on the
+ * ledger, a "never" on its own table) plus what the delivery layer measured, with the leg graph's
  * two rules applied on READ.
  *
  * Shared by the read and the withdrawal, deliberately: a withdrawal answers with the step states
@@ -583,7 +513,6 @@ async function loadStepStates(
   row: LeadRow,
   brandId: string,
   orgId: string,
-  funnelSteps: readonly LeadStepOutcomeName[],
 ) {
   // Outcomes credited to this person for this brand. A hand-stated one is keyed to the row it
   // was stated on; a tracker-reported one knows only the brand, so it is matched on the lead.
@@ -690,7 +619,6 @@ async function loadStepStates(
 
   return resolveStepStates({
     allSteps: LEAD_STEP_OUTCOMES,
-    funnelSteps,
     outcomes,
     nevers,
   });
@@ -699,27 +627,27 @@ async function loadStepStates(
 /**
  * GET /orgs/leads/:id/step-statements
  *
- * What is known about EVERY step of this lead's funnel, so a panel can state each one by hand and
- * read back what it stated — with the funnel's two rules already applied, because a funnel is a
- * funnel and no two surfaces may show a lead as dead at one step and alive at a later one.
+ * What is known about EVERY step of this lead, so a panel can state each one by hand and read back
+ * what it stated — with the leg graph's two rules already applied (step-graph.ts), because no two
+ * surfaces may show a lead as dead at one step and alive at a step only reachable through it.
  *
  * One entry per step of the outcome vocabulary, always all of them:
  *
  *   outcome — it happened. Either because somebody stated it (or the tracker reported it), or
- *             because a LATER step of this campaign's funnel did: a lead that paid necessarily got
- *             through the steps that lead to paying.
- *   never   — it will not happen. Either stated, or implied by an EARLIER step of the funnel being
- *             never: once a step is false, everything after it is false. Nothing counts either.
+ *             because a step only reachable THROUGH it did: a lead that attended a meeting booked
+ *             one.
+ *   never   — it will not happen. Either stated, or implied by a never on a step every path to it
+ *             goes through: a lead that will never book will never attend. Nothing counts either.
  *   pending — nobody spoke and neither rule reaches it. The honest "still on its way".
  *
- * `origin` is what tells a reader a step somebody STATED from one the funnel IMPLIES, and an implied
+ * `origin` is what tells a reader a step somebody STATED from one the graph IMPLIES, and an implied
  * step carries no author, no note and no date because nobody made that statement. `statedState`
- * keeps what a person really said readable even where the funnel concluded otherwise, so a real
+ * keeps what a person really said readable even where the graph concluded otherwise, so a real
  * statement is never lost. Because implication is computed on READ from the live statements,
  * retracting or superseding one moves everything it implied with it, automatically.
  *
- * `steps` is this campaign's funnel, in order — per FUNNEL, never a universal step order. Steps
- * outside it (`inFunnel: false`) read from statements alone: no funnel rule reaches them.
+ * The order is the LEGS' and nothing else: no campaign-service read is needed to answer, and a lead
+ * on a campaign stating no leg reads exactly like any other.
  */
 router.get(
   "/orgs/leads/:id/step-statements",
@@ -743,12 +671,9 @@ router.get(
       return;
     }
 
-    const resolved = await resolveFunnelOrRespond(row, req, res);
-    if (!resolved) return;
-
     let steps;
     try {
-      steps = await loadStepStates(row, brandId, req.orgId!, resolved.funnelSteps);
+      steps = await loadStepStates(row, brandId, req.orgId!);
     } catch (error) {
       if (respondMeasuredVisitFailure(error, res)) return;
       throw error;
@@ -785,8 +710,6 @@ router.get(
       leadId: row.lead_id,
       campaignId: row.campaign_id,
       brandId,
-      funnelKey: resolved.funnelKey,
-      funnelSteps: resolved.funnelSteps,
       steps,
       wentCold: cold.wentCold,
       coldRule: {
@@ -809,14 +732,14 @@ router.get(
  * count. It is the ABSENCE of one: the row is marked withdrawn, every read already filters it out
  * alongside a retracted one, so the brand's outcome counts drop it, the cost the customer stated
  * for that leg stops counting as their spend, and the step reads exactly as it did before anybody
- * spoke. Because the funnel's rules are computed on READ, everything the withdrawn statement
+ * spoke. Because the leg graph's rules are computed on READ, everything the withdrawn statement
  * implied falls away with it — a step that only read as reached, or as dead, because of it falls
  * back to whatever the remaining statements imply. The response carries the re-derived steps, so a
  * caller never has to guess what its withdrawal did.
  *
  * NOTHING IS DELETED. What somebody actually stated, and the fact that they later withdrew it,
  * both stay readable — the same posture retraction already takes. The two are different facts and
- * stay apart: a RETRACTION is the funnel resolving a contradiction (an outcome proved the "never"
+ * stay apart: a RETRACTION is the graph resolving a contradiction (an outcome proved the "never"
  * wrong), a WITHDRAWAL is the author saying it should never have been stated. Withdrawing an
  * outcome therefore also un-retracts the "never"s that outcome retracted — those statements were
  * only superseded because of a statement that is now gone — while leaving any that were withdrawn
@@ -827,7 +750,7 @@ router.get(
  *                         delivery layer MEASURED it. Nobody stated it; there is nothing to take
  *                         back, and this service does not edit what another system observed.
  *   409 nothing_stated  — nobody stated this step at all. It may still READ as reached or as dead
- *                         because the funnel implies it from a statement on ANOTHER step: withdraw
+ *                         because the graph implies it from a statement on ANOTHER step: withdraw
  *                         that one. `state` / `origin` in the body say which case it is.
  * Both are distinguishable from a 500 by carrying a `code`.
  *
@@ -861,11 +784,6 @@ router.delete(
       res.status(404).json({ error: "Lead not found" });
       return;
     }
-
-    // The funnel is resolved before anything is written, exactly as it is on the write: the answer
-    // states what every step reads as AFTER the withdrawal, and that needs the order.
-    const resolved = await resolveFunnelOrRespond(row, req, res);
-    if (!resolved) return;
 
     const withdrawnBy = req.userId ?? null;
 
@@ -925,7 +843,7 @@ router.delete(
 
       let steps;
       try {
-        steps = await loadStepStates(row, brandId, req.orgId!, resolved.funnelSteps);
+        steps = await loadStepStates(row, brandId, req.orgId!);
       } catch (error) {
         if (respondMeasuredVisitFailure(error, res)) return;
         throw error;
@@ -942,8 +860,6 @@ router.delete(
           withdrawn: false,
           alreadyWithdrawn: true,
           restoredNeverSteps: [],
-          funnelKey: resolved.funnelKey,
-          funnelSteps: resolved.funnelSteps,
           steps,
         });
         return;
@@ -965,7 +881,7 @@ router.delete(
           : `Nobody has stated ${step} for this lead, so there is nothing to withdraw.` +
             (current.origin === "implied"
               ? ` It reads as "${current.state}" because ${current.impliedBy} was stated and this ` +
-                "campaign's funnel implies it — withdraw that statement instead."
+                "leg graph implies it — withdraw that statement instead."
               : ""),
         code: observed ? "not_a_statement" : "nothing_stated",
         state: current.state,
@@ -1018,7 +934,7 @@ router.delete(
     // statements that remain — never patched up locally from what was just written.
     let steps;
     try {
-      steps = await loadStepStates(row, brandId, req.orgId!, resolved.funnelSteps);
+      steps = await loadStepStates(row, brandId, req.orgId!);
     } catch (error) {
       if (respondMeasuredVisitFailure(error, res)) return;
       throw error;
@@ -1035,8 +951,6 @@ router.delete(
       alreadyWithdrawn: false,
       withdrawnByUserId: withdrawnBy,
       restoredNeverSteps,
-      funnelKey: resolved.funnelKey,
-      funnelSteps: resolved.funnelSteps,
       steps,
     });
   }),
@@ -1056,18 +970,17 @@ router.delete(
  * byte-identical to what this read has always answered (retracted statements excluded, since a
  * superseded "never" was never a live one).
  *
- * `?implied=true` additionally applies the funnel: a lead that will never book has, by the same
- * statement, never attended and never paid. That needs each lead's campaign funnel, so it is opt-in
- * — a consumer that does not ask pays for no campaign-service read and sees exactly what it saw
- * before. It answers three more fields, kept apart so a reader can always tell what somebody stated
- * from what the funnel concluded:
+ * `?implied=true` additionally applies the leg graph: a lead that will never book has, by the
+ * same statement, never attended. It is opt-in — a consumer that does not ask sees exactly what it
+ * saw before. It answers three more fields, kept apart so a reader can always tell what somebody
+ * stated from what the graph concluded:
  *
- *   impliedCounts / impliedByStep   — steps NOBODY stated, which a stated "never" earlier on the
- *                                     funnel makes never.
+ *   impliedCounts / impliedByStep   — steps NOBODY stated, which a stated "never" on a step every
+ *                                     path to them goes through makes never.
  *   effectiveCounts / effectiveByStep — stated and implied together: the answer to "is this lead
  *                                     dead at this step?".
  *
- * A never contradicted by an outcome further down the funnel is dropped from the implied and
+ * A never contradicted by an outcome only reachable through it is dropped from the implied and
  * effective sets (the lead demonstrably got there), never from the stated ones.
  *
  * The identity returned is the lead's canonical (primary) email — the join key features-service
@@ -1187,7 +1100,7 @@ router.get(
       return;
     }
 
-    // --- the funnel view, opt-in ---
+    // --- the leg-graph view, opt-in ---
 
     const statementRows = (await db.execute(sql`
       SELECT d.lead_id, d.campaign_id, d.org_id, d.step, lower(canonical.value) AS email
@@ -1230,48 +1143,8 @@ router.get(
       return;
     }
 
-    // WHICH funnel each of those leads is on. Read from campaign-service, per org, never inferred.
-    const funnelByCampaign = new Map<string, FunnelKey | null>();
-    try {
-      for (const orgId of new Set(statementRows.map((r) => r.org_id))) {
-        for (const [campaignId, funnelKey] of await fetchOrgCampaignFunnelKeys({ orgId })) {
-          funnelByCampaign.set(campaignId, funnelKey);
-        }
-      }
-    } catch (error) {
-      if (!(error instanceof FunnelStepsError)) throw error;
-      console.error(error.message);
-      res.status(502).json({
-        error:
-          "campaign-service could not say which sales funnels these leads' campaigns sell through, " +
-          "so no funnel can be applied. No answer is returned rather than one built on a funnel " +
-          "nobody stated.",
-        code: "campaign_service_unavailable",
-      });
-      return;
-    }
-
-    const unstated = Array.from(
-      new Set(
-        statementRows
-          .map((r) => r.campaign_id)
-          .filter((campaignId) => !funnelByCampaign.get(campaignId)),
-      ),
-    );
-    if (unstated.length > 0) {
-      res.status(409).json({
-        error:
-          "Some of these leads belong to campaigns that state no sales funnel, so their steps have " +
-          "no order and no funnel can be applied. Declare those campaigns' funnels and the funnel " +
-          "resolves.",
-        code: "funnel_unstated",
-        campaignIds: unstated,
-      });
-      return;
-    }
-
-    // Outcomes contradict a "never" further up the funnel, so they are read before anything is
-    // concluded: a lead that demonstrably paid is not dead at the steps that lead to paying.
+    // Outcomes contradict a "never" on a step every path to them goes through, so they are read
+    // before anything is concluded: a lead that demonstrably attended is not dead at booking.
     const leadIds = Array.from(new Set(statementRows.map((r) => r.lead_id)));
     const outcomeRows = (await db.execute(sql`
       SELECT matched_lead_id, event
@@ -1301,7 +1174,7 @@ router.get(
       }
     }
 
-    // One resolution per (lead, campaign): that pair is the funnel a statement was made on.
+    // One resolution per (lead, campaign): that pair is the row a statement was made on.
     interface Group {
       leadId: string;
       campaignId: string;
@@ -1337,11 +1210,8 @@ router.get(
     ) as Record<LeadStepOutcomeName, Set<string>>;
 
     for (const group of groups.values()) {
-      const funnelKey = funnelByCampaign.get(group.campaignId) as FunnelKey;
-      const funnelSteps = FUNNEL_STEPS[funnelKey];
       const states = resolveStepStates({
         allSteps: LEAD_STEP_OUTCOMES,
-        funnelSteps: funnelSteps,
         outcomes: outcomesByLead.get(group.leadId) ?? new Map(),
         nevers: group.nevers,
       });
@@ -1371,12 +1241,12 @@ router.get(
  * GET /internal/brands/:brandId/step-costs[?step=<step>]
  *
  * INTERNAL (service-auth: x-api-key — the same tier as the conversion-count reads, NO Clerk).
- * What the CUSTOMER told us each funnel step cost THEM, one row per statement.
+ * What the CUSTOMER told us each step cost THEM, one row per statement.
  *
- * The platform automates the first link of a sales funnel and bills for it; the customer performs
- * the rest — they run the meeting, they close the deal. Until this existed, a funnel's cost of
- * acquisition could only count the link the platform paid for, so every return computed for that
- * funnel was too good. This is the read that closes the gap: whoever computes money adds these legs
+ * The platform automates the first leg and bills for it; the customer performs
+ * the rest — they run the meeting, they close the deal. Until this existed, a cost of
+ * acquisition could only count the leg the platform paid for, so every return computed on it
+ * was too good. This is the read that closes the gap: whoever computes money adds these legs
  * to the platform spend it already knows about.
  *
  * THIS IS NOT PLATFORM SPEND. Nothing here was ever charged to the organisation, no runs-service

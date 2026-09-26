@@ -1,7 +1,7 @@
 /**
  * Which people a campaign's worker actually acted on through the follow-up queue.
  *
- * A funnel is several legs and campaign-service mints one campaign per leg. A leg performed by the
+ * Campaign-service mints one campaign per (offer, leg, channel). A leg performed by the
  * platform itself (ai-meeting-booking answers a prospect who already replied positively and books
  * the meeting) serves no lead of its own: its runs CLAIM people held by the PREDECESSOR leg's
  * campaign through `claim-next`, answer them, and record `acted` on that predecessor row. So the

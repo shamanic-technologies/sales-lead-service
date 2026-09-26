@@ -1,14 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { FUNNEL_ENTRY, FUNNEL_KEYS, FUNNEL_STEPS } from "../../src/lib/funnel-steps.js";
+import { entryOfLeg, legOf, STEP_ORDER } from "../../src/lib/step-graph.js";
 import {
   parseSalesInterestStageFilter,
   resolveLeadStanding,
   salesInterestStage,
-  salesInterestStagesOf,
   SALES_INTEREST_STAGES,
   type LeadStandingInput,
 } from "../../src/lib/lead-standing.js";
-import type { StepReadState } from "../../src/lib/step-funnel-state.js";
+import type { StepReadState } from "../../src/lib/step-states.js";
 
 const delivery = {
   contacted: true,
@@ -24,15 +23,13 @@ const delivery = {
 };
 
 function input(outcomes: string[]): LeadStandingInput {
-  const key = "sales_meetings_from_conversation";
-  const steps = FUNNEL_STEPS[key];
   return {
     lifecycleStatus: "served",
     deliveryQueried: true,
     delivery,
-    funnel: { key, steps, entry: FUNNEL_ENTRY[key] },
-    funnelUnresolvedReason: null,
-    steps: steps.map(
+    entry: entryOfLeg(legOf("start_to_conversation")!),
+    entryUnresolvedReason: null,
+    steps: STEP_ORDER.map(
       (step) =>
         ({
           step,
@@ -45,7 +42,7 @@ function input(outcomes: string[]): LeadStandingInput {
 }
 
 describe("salesInterestStage", () => {
-  it("is the funnel's entry when only the positive reply was reached", () => {
+  it("is the campaign's entry when only the positive reply was reached", () => {
     const standing = resolveLeadStanding(input([]));
     expect(standing.state).toBe("sales_interest");
     expect(salesInterestStage(standing)).toBe("conversation_reply");
@@ -65,38 +62,13 @@ describe("salesInterestStage", () => {
   });
 });
 
-describe("salesInterestStagesOf", () => {
-  it("walks the conversation funnel entry-first, short of its last step", () => {
-    const k = "sales_meetings_from_conversation";
-    expect(salesInterestStagesOf(FUNNEL_ENTRY[k], FUNNEL_STEPS[k])).toEqual([
-      "conversation_reply",
-      "meeting_booked",
-      "meeting_attended",
-    ]);
-  });
-
-  it("names a visit-led funnel's entry once", () => {
-    const k = "form_magnet";
-    expect(salesInterestStagesOf(FUNNEL_ENTRY[k], FUNNEL_STEPS[k])).toEqual([
-      "website_visit",
-      "form_submission",
-    ]);
-  });
-
-  it("leaves out an ad click nothing here can observe", () => {
-    const k = "sales_meetings_from_ads";
-    expect(salesInterestStagesOf(FUNNEL_ENTRY[k], FUNNEL_STEPS[k])).toEqual([
-      "meeting_booked",
-      "meeting_attended",
-    ]);
-  });
-
-  it("only ever names stages the filter accepts", () => {
-    for (const k of FUNNEL_KEYS) {
-      for (const stage of salesInterestStagesOf(FUNNEL_ENTRY[k], FUNNEL_STEPS[k])) {
-        expect(SALES_INTEREST_STAGES).toContain(stage);
-      }
-    }
+describe("SALES_INTEREST_STAGES", () => {
+  it("lists the entries and every statable step short of the sale, shallowest first", () => {
+    expect(SALES_INTEREST_STAGES[0]).toBe("conversation_reply");
+    expect(SALES_INTEREST_STAGES).not.toContain("sale");
+    expect(SALES_INTEREST_STAGES.indexOf("meeting_booked")).toBeLessThan(
+      SALES_INTEREST_STAGES.indexOf("meeting_attended"),
+    );
   });
 });
 

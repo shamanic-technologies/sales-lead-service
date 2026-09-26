@@ -11,13 +11,6 @@ import {
 } from "../lib/email-gateway-client.js";
 import { resolveCampaignFamily } from "../lib/campaign-identity-client.js";
 import { resolveOfferCampaignIds, OfferCampaignsUnavailableError } from "../lib/offer-campaigns-client.js";
-import {
-  canonicalizeFunnelKey,
-  FUNNEL_ENTRY,
-  FUNNEL_KEYS,
-  FUNNEL_STEPS,
-  type FunnelKey,
-} from "../lib/funnel-steps.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { buildFullLeadsBatch, type FullLead } from "../lib/lead-shape.js";
 import compression from "compression";
@@ -86,7 +79,6 @@ import {
   parseLeadStandingFilter,
   parseSalesInterestStageFilter,
   SALES_INTEREST_STAGES,
-  salesInterestStagesOf,
   zeroStandingCounts,
   type LeadStandingState,
   type SalesInterestStage,
@@ -526,7 +518,7 @@ function parseLeadFormat(raw: unknown): LeadListFormat {
 
 /**
  * The standing of every row in one chunk. A resolver failure is NOT allowed to take the walk down:
- * the standing of a lead whose funnel or statements could not be read is stated as unresolved, and
+ * the standing of a lead whose leg or statements could not be read is stated as unresolved, and
  * the raw delivery facts beside it are unaffected. Anything else would fail a 57k-row list read
  * over one derived field.
  */
@@ -558,7 +550,7 @@ function unresolvedFacts(): ResolvedLeadFacts {
       signal: "none",
       origin: null,
       reason: "statements_unreadable",
-      funnelKey: null,
+      legKey: null,
       entryStep: null,
       entryMeasure: null,
       reachedEntryStep: null,
@@ -594,7 +586,7 @@ async function resolveLeadReadScope(
   req: AuthenticatedRequest,
   statuses: readonly string[],
 ): Promise<LeadScopeResolution> {
-  const { brandId, campaignId, offerId, funnelKey, orgId: queryOrgId, userId, workflowSlug } = req.query;
+  const { brandId, campaignId, offerId, orgId: queryOrgId, userId, workflowSlug } = req.query;
   const brandIdStr = typeof brandId === "string" ? brandId : undefined;
   const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
   const offerIdStr = typeof offerId === "string" ? offerId : undefined;
@@ -606,29 +598,6 @@ async function resolveLeadReadScope(
     // narrowings where one already implies the other — either the campaign is in the offer (the
     // offer adds nothing) or it is not (the pair matches nothing, and whichever the caller meant
     // is unknowable). Refused rather than silently resolved one way.
-  // One sales funnel of an offer: the offer's campaigns that STATE that funnel. Either spelling of
-  // a key is accepted and read in canonical form. An unknown key, or a funnel named without the
-  // offer it narrows, is refused — never silently ignored, which would answer a funnel page with
-  // the whole offer's leads under the funnel's name.
-  let funnelKeyCanonical: FunnelKey | null = null;
-  if (funnelKey !== undefined) {
-    funnelKeyCanonical = canonicalizeFunnelKey(funnelKey);
-    if (!funnelKeyCanonical) {
-      return {
-        kind: "error",
-        status: 400,
-        error: `funnelKey must be one of ${FUNNEL_KEYS.join(", ")} (or a retired spelling of one), got ${JSON.stringify(funnelKey)}`,
-      };
-    }
-    if (!offerIdStr) {
-      return {
-        kind: "error",
-        status: 400,
-        error: "funnelKey narrows an offer to one of its sales funnels — name the offerId it narrows",
-      };
-    }
-  }
-
   if (offerIdStr && campaignIdStr) {
     return {
       kind: "error",
@@ -654,7 +623,6 @@ async function resolveLeadReadScope(
             runId: req.runId ?? null,
             brandId: brandIdStr ?? null,
           },
-          funnelKeyCanonical,
         );
       } catch (error) {
         console.error(
@@ -671,13 +639,13 @@ async function resolveLeadReadScope(
         };
       }
 
-      // No campaign sells this offer (through this funnel, when one is named) yet, so no lead has
+      // No campaign sells this offer yet, so no lead has
       // been served under it. That is a real, correct answer — and the one place a missing filter
       // would otherwise become the brand.
       if (offerCampaignIds.length === 0) return { kind: "empty" };
     }
 
-    // A campaign as the customer knows it is an IDENTITY (org, brand, sales funnel, acquisition
+    // A campaign as the customer knows it is an IDENTITY (org, brand, offer, leg, acquisition
     // channel), not one stored campaign row: campaign-service used to mint a new row on every
     // workflow switch, so one campaign lives in storage as many. A campaign-scoped read totals the
     // whole identity — the same population features-service already totals for the same scope, so
@@ -700,7 +668,6 @@ async function resolveLeadReadScope(
       brandId: brandIdStr,
       campaignId: campaignIdStr,
       offerId: offerIdStr,
-      funnelKey: funnelKeyCanonical ?? undefined,
       campaignIds: offerCampaignIds ?? campaignFamily ?? undefined,
       queryOrgId: queryOrgIdStr,
       userId: userIdStr,
@@ -807,8 +774,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       searchTokens = parseLeadSearch(req.query.q);
       bucket = parseLeadBucket(req.query.bucket);
       standings = parseLeadStandingFilter(req.query.standing);
-      // Where on the funnel a `sales_interest` lead stands — a partition of that one standing, so
-      // a board can draw a column per funnel step. Only `sales_interest` rows carry a stage, so
+      // Where a `sales_interest` lead stands — a partition of that one standing, so
+      // a board can draw a column per step. Only `sales_interest` rows carry a stage, so
       // naming one narrows to them. Absent = no stage filter, byte-identical to before.
       stages = parseSalesInterestStageFilter(req.query.stage);
       sort = parseLeadSort(req.query.sort);
@@ -864,7 +831,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       runId: req.runId ?? null,
       brandId: brandIdStr ?? null,
     });
-    // Likewise ONE standing resolver for the whole response: the org's campaign -> funnel map is
+    // Likewise ONE standing resolver for the whole response: the org's campaign -> leg map is
     // read once and reused by every chunk, so naming the standing on fifty thousand rows costs the
     // same single campaign-service call as naming it on one.
     const standingResolver = createLeadStandingResolver({
@@ -1324,8 +1291,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
  * counts fall out of the same evidence the list overlays onto each row.
  *
  * Every bucket key is always present; a bucket nobody is in is 0, never absent. A consumer shows
- * whichever of them its brand's funnel actually prices — this read does not decide that, because
- * a brand can run several funnels at once and the honest answer is all of them.
+ * whichever of them it cares about — this read does not decide that, because
+ * a brand works several legs at once and the honest answer is all of them.
  *
  * `total` is the whole scoped population, buckets and all, including the people who carry no
  * evidence at all and can therefore be in no bucket (about 5,000 of one brand's 12,945). Bucket
@@ -1394,16 +1361,12 @@ function parseStandingBreakdown(raw: unknown): boolean {
 }
 
 /**
- * The `sales_interest` partition by funnel stage, ordered: the named funnel's stages first, in
- * funnel order and always present, then any other stage observed (a scope spanning several funnels),
- * in the canonical stage order. Sums to `counts.sales_interest` by construction.
+ * The `sales_interest` partition by stage: every stage observed, in the canonical stage order
+ * (shallowest first on the leg graph). Sums to `counts.sales_interest` by construction.
  */
-function stageBreakdown(
-  funnelStages: readonly SalesInterestStage[],
-  observed: ReadonlyMap<string, number>,
-): Array<{ stage: string; count: number }> {
-  const order: string[] = [...funnelStages];
-  for (const stage of SALES_INTEREST_STAGES) if (observed.has(stage) && !order.includes(stage)) order.push(stage);
+function stageBreakdown(observed: ReadonlyMap<string, number>): Array<{ stage: string; count: number }> {
+  const order: string[] = [];
+  for (const stage of SALES_INTEREST_STAGES) if (observed.has(stage)) order.push(stage);
   for (const stage of observed.keys()) if (!order.includes(stage)) order.push(stage);
   return order.map((stage) => ({ stage, count: observed.get(stage) ?? 0 }));
 }
@@ -1443,12 +1406,6 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
     } catch (error) {
       return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
-    // The stages a named funnel's sales_interest leads can stand at, in funnel order — each is
-    // always present (0 when nobody stands there) so a board draws every column of that funnel.
-    const funnelKeyForStages = canonicalizeFunnelKey(req.query.funnelKey);
-    const funnelStages: readonly SalesInterestStage[] = funnelKeyForStages
-      ? salesInterestStagesOf(FUNNEL_ENTRY[funnelKeyForStages], FUNNEL_STEPS[funnelKeyForStages])
-      : [];
 
     const resolved = await resolveLeadReadScope(req, statuses);
     if (resolved.kind === "error") {
@@ -1459,7 +1416,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       return res.json({
         total: 0,
         counts: zeroStandingCounts(),
-        ...(withStages ? { salesInterestStages: stageBreakdown(funnelStages, new Map()) } : {}),
+        ...(withStages ? { salesInterestStages: stageBreakdown(new Map()) } : {}),
       });
     }
 
@@ -1486,7 +1443,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
 
     if (!withStages) return res.json(await readModelStandingCounts(model, searchTokens));
     const { total, counts, stages } = await readModelStandingAndStageCounts(model, searchTokens);
-    return res.json({ total, counts, salesInterestStages: stageBreakdown(funnelStages, stages) });
+    return res.json({ total, counts, salesInterestStages: stageBreakdown(stages) });
   } catch (error) {
     console.error("[lead-service] Standing counts error:", error);
     return res.status(500).json({ error: "Internal server error" });
@@ -1507,7 +1464,7 @@ const CHANGE_FEED_REFUSED_PARAMS = [
  * holds, so a consumer keeping a copy of a brand's population stops re-reading all of it.
  *
  * Same scope vocabulary as the list (`brandId`, `campaignId` resolved to the whole identity,
- * `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`) and the same row: every
+ * `offerId`, `status`, `orgId`, `userId`, `workflowSlug`) and the same row: every
  * element of `leads` is exactly what `?view=compact` emits for that row. Without `since` the answer
  * is the whole scope (`full: true`); with it, every row that changed after it (`leads`) and every
  * row that left the scope (`removed`, ids). Either way `cursor` is the position to hand back next

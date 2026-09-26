@@ -100,7 +100,7 @@ vi.mock("../../src/lib/lead-standing-resolver.js", () => ({
                 signal: "none",
                 origin: null,
                 reason: opts.deliveryQueried ? null : "delivery_not_queried",
-                funnelKey: null,
+                legKey: null,
                 entryStep: null,
                 entryMeasure: null,
                 reachedEntryStep: null,

@@ -28,7 +28,7 @@ const state = vi.hoisted(() => ({
   }>,
   contacts: [] as Array<Record<string, unknown>>,
   delivered: new Map<string, string | null>(),
-  funnelByCampaign: new Map<string, string>(),
+  legByCampaign: new Map<string, string>(),
   /** Probability per CRM last name; `fail` throws the vendor-failure error. */
   answers: new Map<string, number | "fail">(),
   judged: [] as string[],
@@ -82,11 +82,11 @@ vi.mock("../../src/lib/email-gateway-client.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
+vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/lib/campaign-leg-client.js")>();
   return {
     ...actual,
-    fetchOrgCampaignFunnelKeys: vi.fn(async () => new Map(state.funnelByCampaign)),
+    fetchOrgCampaignLegs: vi.fn(async () => new Map(state.legByCampaign)),
   };
 });
 
@@ -181,7 +181,7 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
       await seedLead(key);
       await pairByLastName(key);
     }
-    state.funnelByCampaign.set(campaign, "sales_meetings_from_conversation");
+    state.legByCampaign.set(campaign, "start_to_conversation");
     state.contacts = KEYS.map((key) => ({
       id: `c-${key}`,
       brandId,

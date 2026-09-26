@@ -13,7 +13,7 @@
  *
  * What is kept, and how fresh it is — the three bounds this module states AND enforces:
  *
- *  1. A PERSON's statement (a funnel step, close won and its withdrawal, a "never", a CRM-evidenced
+ *  1. A PERSON's statement (a step, close won and its withdrawal, a "never", a CRM-evidenced
  *     step) shows on the VERY NEXT read. Every statement store carries a trigger that writes the
  *     lead it touched into `lead_read_changes` in the writer's own transaction, and every read
  *     applies what is new (`catchUp`) before it answers. "New" is exact under concurrent commits:
@@ -23,7 +23,7 @@
  *  2. DELIVERY evidence another service pushes as changed (`POST /orgs/leads/evidence-changed` —
  *     an opt-out, a reply somebody classified, a click the provider observed) is asked again and
  *     shows on the next read, the same way.
- *  3. Everything else — delivery evidence nobody pushed, new serves, a campaign's funnel, a name —
+ *  3. Everything else — delivery evidence nobody pushed, new serves, a campaign's leg, a name —
  *     is at most `READ_MODEL_MAX_EVIDENCE_AGE_MS` old, ENFORCED: a model older than that is rebuilt
  *     before it is read, never served. The worker (lead-read-model-worker.ts) rebuilds every model
  *     somebody reads once it is `READ_MODEL_REFRESH_AFTER_MS` old, so a read normally never waits.
@@ -215,7 +215,7 @@ interface DerivedRow {
   activityAt: string;
   buckets: LeadBucket[];
   standing: LeadStandingState;
-  /** Where on the funnel a `sales_interest` row stands; null for every other standing. */
+  /** Where a `sales_interest` row stands; null for every other standing. */
   stage: string | null;
   searchText: string;
 }
@@ -677,7 +677,7 @@ export async function readModelStandingCounts(
 }
 
 /**
- * Every standing's size AND, within `sales_interest`, every funnel stage's size — one GROUP BY, so
+ * Every standing's size AND, within `sales_interest`, every stage's size — one GROUP BY, so
  * the stage counts are a partition of `counts.sales_interest` taken from the same rows at the same
  * instant (they sum to it exactly).
  */
@@ -766,7 +766,7 @@ export async function readModelPage(
     tokens: readonly string[] | null;
     bucket: LeadBucket | null;
     standings: readonly LeadStandingState[] | null;
-    /** Narrow to `sales_interest` rows standing at one of these funnel stages. */
+    /** Narrow to `sales_interest` rows standing at one of these stages. */
     stages?: readonly string[] | null;
     sort: LeadSortOrder;
     page: LeadListPage;

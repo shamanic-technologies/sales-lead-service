@@ -63,7 +63,7 @@ export type LeadStepOutcomeName =
   | typeof WEBSITE_VISIT;
 
 /**
- * Every outcome a step of a sales funnel can carry — the four the tracker reports plus the two
+ * Every outcome a step can carry — the four the tracker reports plus the two
  * only a human can state. This is the vocabulary the COUNT contracts answer for; `CONVERSION_EVENTS`
  * stays the (narrower) set the public tracker ingest accepts.
  */

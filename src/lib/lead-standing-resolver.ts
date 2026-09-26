@@ -4,10 +4,11 @@
  *
  * Two facts have to be gathered before `resolveLeadStanding` (which is pure) can answer:
  *
- *   - WHICH funnel each row's campaign sells. campaign-service owns `funnelKey` and it is never
- *     inferred, so it is read from there — ONCE per request, org-wide (`fetchOrgCampaignFunnelKeys`
- *     is a single call that returns every campaign of the org), not once per row and not once per
- *     chunk. A brand with 57k rows across a dozen campaigns therefore costs exactly one call.
+ *   - WHICH leg each row's campaign works. campaign-service owns `legKey` and it is never
+ *     inferred, so it is read from there — ONCE per request, org-wide (`fetchOrgCampaignLegs` is a
+ *     single call that returns every campaign of the org), not once per row and not once per chunk.
+ *     A brand with 57k rows across a dozen campaigns therefore costs exactly one call. The leg says
+ *     where the campaign's leads step onto the leg graph (step-graph.ts).
  *   - WHAT somebody stated about each row's steps. Two indexed reads per chunk, batched over the
  *     chunk's lead ids: the outcome ledger (`conversion_events`) and the disqualification table,
  *     filtered exactly as the panel filters them so the two surfaces cannot disagree.
@@ -27,13 +28,13 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
-  fetchOrgCampaignFunnelKeys,
-  FunnelStepsError,
-  type CampaignFunnelContext,
-} from "./campaign-funnel-client.js";
-import { FUNNEL_ENTRY, FUNNEL_STEPS, type FunnelKey } from "./funnel-steps.js";
+  fetchOrgCampaignLegs,
+  CampaignLegsUnavailableError,
+  type CampaignLegContext,
+} from "./campaign-leg-client.js";
+import { entryOfLeg, legOf, type LegEntry } from "./step-graph.js";
 import { toIsoTimestamp } from "./basic-leads.js";
-import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-funnel-state.js";
+import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-states.js";
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { deriveWentCold, earlierInstant, type CrmColdEligibility } from "./lead-cold.js";
@@ -99,7 +100,7 @@ interface NeverRow {
  */
 export interface ResolvedLeadFacts {
   standing: LeadStanding;
-  /** The deal on this lead's funnel, or null when nobody has stated one. See closed-deal.ts. */
+  /** The deal on this lead, or null when nobody has stated one. See closed-deal.ts. */
   closedDeal: ClosedDeal | null;
 }
 
@@ -107,7 +108,7 @@ export interface LeadStandingResolver {
   resolve(rows: StandingRow[]): Promise<Map<string, ResolvedLeadFacts>>;
 }
 
-export interface LeadStandingResolverOptions extends CampaignFunnelContext {
+export interface LeadStandingResolverOptions extends CampaignLegContext {
   /**
    * Whether the delivery layer was asked at all. False on an unscoped read, where every row's
    * overlay is the all-false default and "nothing happened" is not something the read knows.
@@ -116,22 +117,22 @@ export interface LeadStandingResolverOptions extends CampaignFunnelContext {
 }
 
 /**
- * The org's campaign -> funnel map, read once and reused for every chunk. A failure is remembered
- * as a REASON rather than retried per chunk: campaign-service being down is a property of the
- * request, and retrying it 114 times on a 57k-row walk would turn one bad answer into a stampede.
+ * The org's campaign -> leg map, read once and reused for every chunk. A failure is remembered as a
+ * REASON rather than retried per chunk: campaign-service being down is a property of the request,
+ * and retrying it 114 times on a 57k-row walk would turn one bad answer into a stampede.
  */
-async function loadFunnelKeys(
-  ctx: CampaignFunnelContext,
-): Promise<{ keys: Map<string, FunnelKey | null> | null; reason: LeadStandingUnresolvedReason | null }> {
+async function loadCampaignLegs(
+  ctx: CampaignLegContext,
+): Promise<{ legs: Map<string, string | null> | null; reason: LeadStandingUnresolvedReason | null }> {
   try {
-    return { keys: await fetchOrgCampaignFunnelKeys(ctx), reason: null };
+    return { legs: await fetchOrgCampaignLegs(ctx), reason: null };
   } catch (error) {
-    if (!(error instanceof FunnelStepsError)) throw error;
+    if (!(error instanceof CampaignLegsUnavailableError)) throw error;
     console.error(
-      `[lead-standing] campaign-service could not say which funnels this org's campaigns sell, so ` +
+      `[lead-standing] campaign-service could not say which legs this org's campaigns work, so ` +
         `every lead's standing is unresolved rather than guessed: ${error.message}`,
     );
-    return { keys: null, reason: "campaign_service_unavailable" };
+    return { legs: null, reason: "campaign_service_unavailable" };
   }
 }
 
@@ -139,8 +140,8 @@ export function createLeadStandingResolver(
   options: LeadStandingResolverOptions,
 ): LeadStandingResolver {
   const { deliveryQueried, ...ctx } = options;
-  let funnels: Promise<{
-    keys: Map<string, FunnelKey | null> | null;
+  let campaignLegs: Promise<{
+    legs: Map<string, string | null> | null;
     reason: LeadStandingUnresolvedReason | null;
   }> | null = null;
   // Whether each brand's CRM can prove an absence, asked once per brand per resolver.
@@ -156,8 +157,8 @@ export function createLeadStandingResolver(
       const out = new Map<string, ResolvedLeadFacts>();
       if (rows.length === 0) return out;
 
-      if (!funnels) funnels = loadFunnelKeys(ctx);
-      const { keys, reason: funnelFailure } = await funnels;
+      if (!campaignLegs) campaignLegs = loadCampaignLegs(ctx);
+      const { legs, reason: legsFailure } = await campaignLegs;
 
       const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
       const campaignIds = Array.from(new Set(rows.map((r) => r.campaignId)));
@@ -224,19 +225,13 @@ export function createLeadStandingResolver(
       }
 
       for (const row of rows) {
-        const funnelKey = keys ? (keys.get(row.campaignId) ?? undefined) : undefined;
-        const resolvedKey = funnelKey ?? null;
-        const funnel = resolvedKey
-          ? {
-              key: resolvedKey,
-              steps: FUNNEL_STEPS[resolvedKey],
-              entry: FUNNEL_ENTRY[resolvedKey],
-            }
-          : null;
-        const unresolvedReason: LeadStandingUnresolvedReason | null = funnel
+        // A campaign stating no leg (or one this service does not know) is exactly that — never
+        // resolved through anything the campaign used to be keyed on.
+        const leg = legs ? legOf(legs.get(row.campaignId)) : null;
+        const entry: LegEntry | null = leg ? entryOfLeg(leg) : null;
+        const unresolvedReason: LeadStandingUnresolvedReason | null = entry
           ? null
-          : (funnelFailure ??
-            (keys && !keys.has(row.campaignId) ? "campaign_unknown" : "funnel_unstated"));
+          : (legsFailure ?? (legs && !legs.has(row.campaignId) ? "campaign_unknown" : "leg_unstated"));
 
         // Rows arrive newest first, so the first one seen for a step is the one that answers. A
         // hand-stated outcome is only this row's when it names this row; a tracker one names none.
@@ -286,7 +281,7 @@ export function createLeadStandingResolver(
 
         // A positive reply the ledger holds (their CRM's form, dated after our first email) is the
         // same fact as a positive reply the delivery layer classified, so the standing reads it the
-        // same way: it is what puts a lead on a conversation-led funnel. Nothing else of the
+        // same way: it is what reaches a conversation entry. Nothing else of the
         // delivery evidence moves — an opt-out still outranks it.
         const ledgerPositiveReplies = (outcomesByLead.get(row.leadId) ?? []).filter(
           (o) =>
@@ -300,7 +295,6 @@ export function createLeadStandingResolver(
 
         const steps = resolveStepStates({
           allSteps: LEAD_STEP_OUTCOMES,
-          funnelSteps: funnel?.steps ?? [],
           outcomes,
           nevers,
         });
@@ -317,10 +311,9 @@ export function createLeadStandingResolver(
           positiveReplyAt = earlierInstant(positiveReplyAt, toIsoTimestamp(o.received_at));
         }
         const wentCold =
-          eligibility && funnel
+          eligibility && entry
             ? deriveWentCold({
                 eligibility,
-                funnelSteps: funnel.steps,
                 steps,
                 positiveReplyAt,
                 pairingUnconfirmed: unconfirmedByBrand.get(primaryBrand!)?.has(row.leadId) ?? false,
@@ -334,8 +327,8 @@ export function createLeadStandingResolver(
             lifecycleStatus: row.status,
             deliveryQueried,
             delivery,
-            funnel,
-            funnelUnresolvedReason: unresolvedReason,
+            entry,
+            entryUnresolvedReason: unresolvedReason,
             steps,
           }),
           // Off the SAME step states, in the same pass — never a second read of the same ledger.

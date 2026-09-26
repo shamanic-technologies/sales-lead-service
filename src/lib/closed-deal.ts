@@ -2,7 +2,7 @@
  * THE DEAL, on a lead's row: it closed, what it was worth, what it cost the customer — and WHOSE
  * win it was.
  *
- * Every sales funnel this service knows ends at `sale`, so "did this person buy" is one step's
+ * Every path of the leg graph ends at `sale`, so "did this person buy" is one step's
  * state and nothing more. What was missing is the last field: a brand contacts people through us
  * AND through everything else it already does — referrals, conferences, an existing pipeline,
  * another agency — so some of the people we email go on to buy for reasons that have nothing to do
@@ -16,13 +16,13 @@
  * write and no backfill.
  *
  * Only a STATED sale answers here. An implied one carries no author, no value and no date because
- * nobody made that statement — and no funnel step comes after `sale`, so an implied sale cannot
+ * nobody made that statement — and no step comes after `sale` on the leg graph, so an implied sale cannot
  * arise in the first place.
  */
-import type { StepReadState } from "./step-funnel-state.js";
+import type { StepReadState } from "./step-states.js";
 import type { StatementSource } from "./step-statements.js";
 
-/** The `sale` step: every funnel this service knows about ends there. */
+/** The `sale` step: every path of the leg graph ends there. */
 export const SALE_STEP = "sale" as const;
 
 export interface ClosedDeal {
@@ -45,7 +45,7 @@ export interface ClosedDeal {
 }
 
 /**
- * The closed deal on this lead's funnel, or null when nobody has stated one.
+ * The closed deal on this lead, or null when nobody has stated one.
  *
  * Reads the SAME `steps` the panel reads, so the row and the panel cannot disagree about whether a
  * person bought or about who caused it.
