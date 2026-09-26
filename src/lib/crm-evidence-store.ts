@@ -197,7 +197,7 @@ export async function upsertCrmNever(w: CrmNeverWrite): Promise<string | null> {
       lead_campaign_id = EXCLUDED.lead_campaign_id,
       brand_id = EXCLUDED.brand_id,
       -- A CRM "never" set aside because its evidence stopped holding stands again. One an outcome
-      -- RETRACTED stays retracted: that is the funnel resolving a contradiction, not the sync's call.
+      -- RETRACTED stays retracted: that is the leg graph resolving a contradiction, not the sync's call.
       withdrawn_at = NULL,
       withdrawn_by_user_id = NULL,
       updated_at = now()

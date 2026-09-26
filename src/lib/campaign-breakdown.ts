@@ -346,7 +346,7 @@ const UNRESOLVED_STANDING: LeadStanding = {
   signal: "none",
   origin: null,
   reason: "statements_unreadable",
-  funnelKey: null,
+  legKey: null,
   entryStep: null,
   entryMeasure: null,
   reachedEntryStep: null,

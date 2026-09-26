@@ -2,12 +2,16 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveStepStates } from "../../src/lib/step-funnel-state.js";
-import { FUNNEL_STEPS } from "../../src/lib/funnel-steps.js";
-import { LEAD_STEP_OUTCOMES } from "../../src/lib/step-statements.js";
 
 /**
- * A sales funnel is a SALES FUNNEL, on the wire and inside, and nowhere is it a "chain".
+ * This service neither reads a sales funnel nor serves one (wave C3, distribute.you#4413), and it
+ * never called one a "chain" either.
+ *
+ * The fleet retired the sales funnel: org > brand > offer > outcome > leg, and a campaign is
+ * (offer x leg x channel). The order between steps is the leg graph (src/lib/step-graph.ts). The
+ * second half of this file is the older guard below, kept because the same reasoning applies.
+ *
+ * A sales funnel was never a "chain" either.
  *
  * The word was this fleet's second name for the same thing. features-service, api-service and all
  * three dashboard apps dropped it first; this service was the last producer still SERVING it,
@@ -29,7 +33,10 @@ const ALLOWED_PHRASES = ["call chain", "cause chain", "send chain", "promise cha
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 
 /** This file names what it forbids, so it is the one file exempt from its own scan. */
-const SELF = "tests/unit/funnel-vocabulary.test.ts";
+const SELF = "tests/unit/step-vocabulary.test.ts";
+
+/** The retired sales-funnel surface, spelled so this file does not match itself. */
+const RETIRED_FUNNEL = new RegExp(["funnel", "Key|funnel_", "key|sales-", "funnels|sales", "Funnel"].join(""), "i");
 
 function stripAllowed(text: string): string {
   let out = text.toLowerCase();
@@ -93,14 +100,31 @@ describe("the published contract never calls a sales funnel a chain", () => {
     expect(offenders).toEqual([]);
   });
 
-  it("serves the funnel's steps as funnelSteps, and a step's membership as inFunnel", () => {
-    const listed = spec.components.schemas.LeadStepStatementsResponse.properties;
-    expect(Object.keys(listed)).toContain("funnelSteps");
-    expect(Object.keys(listed)).toContain("funnelKey");
+});
 
-    const step = spec.components.schemas.LeadStepState.properties;
-    expect(Object.keys(step)).toContain("inFunnel");
-    expect(Object.keys(step)).toContain("stepIndex");
+describe("no sales funnel is read or served", () => {
+  const spec = JSON.parse(readFileSync(join(REPO, "openapi.json"), "utf8"));
+
+  it("publishes no funnel property and no funnel parameter", () => {
+    const offenders: string[] = [];
+    walkSpec(spec, "$", (path, key, value) => {
+      if (path.endsWith(".properties") && /funnel/i.test(key)) offenders.push(`${path}.${key}`);
+      if (key === "name" && typeof value === "string" && /funnel/i.test(value)) offenders.push(`${path}.name=${value}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it("serves the campaign's leg on a lead's standing instead", () => {
+    const standing = spec.components.schemas.LeadStanding?.properties ?? {};
+    expect(Object.keys(standing)).toContain("legKey");
+  });
+
+  it("names the retired surface in no source file", () => {
+    const offenders: string[] = [];
+    for (const file of walk(join(REPO, "src"))) {
+      if (RETIRED_FUNNEL.test(readFileSync(file, "utf8"))) offenders.push(file.slice(REPO.length));
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -115,24 +139,5 @@ describe("no source file calls a sales funnel a chain either", () => {
       }
     }
     expect(offenders).toEqual([]);
-  });
-});
-
-describe("the rename moved no data", () => {
-  it("reads a step's position and membership off the campaign's own funnel", () => {
-    const funnelSteps = FUNNEL_STEPS.sales_meetings_from_conversation;
-    const states = resolveStepStates({
-      allSteps: LEAD_STEP_OUTCOMES,
-      funnelSteps,
-      outcomes: new Map(),
-      nevers: new Map(),
-    });
-    const byStep = Object.fromEntries(states.map((s) => [s.step, s]));
-
-    expect(byStep.meeting_booked).toMatchObject({ inFunnel: true, stepIndex: 0 });
-    expect(byStep.meeting_attended).toMatchObject({ inFunnel: true, stepIndex: 1 });
-    expect(byStep.sale).toMatchObject({ inFunnel: true, stepIndex: 2 });
-    // Off this campaign's funnel: constrained by nothing, and it says so.
-    expect(byStep.signup).toMatchObject({ inFunnel: false, stepIndex: null });
   });
 });

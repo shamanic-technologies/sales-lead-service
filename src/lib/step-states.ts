@@ -1,31 +1,31 @@
 /**
- * What every step of one lead's funnel reads as, once the funnel's two rules are applied.
+ * What every step of one lead reads as, once the leg graph's two rules are applied (step-graph.ts).
  *
  * PURE: it takes the statements a person actually made (plus whatever the delivery layer measured)
  * and answers what each step reads as. Nothing here writes, and nothing here invents a statement —
  * an implied step carries no author, no note and no date, because nobody made it. `origin` is what
  * keeps the two apart for a reader, and `statedState` is what a person really said about that step
- * even when the funnel overrides it, so a real statement is never lost to satisfy the funnel.
+ * even when the graph overrides it, so a real statement is never lost to satisfy the graph.
  *
  * Precedence per step, in this order and for this reason:
  *
  *   1. its own stated OUTCOME               — the person said it happened.
- *   2. an outcome LATER on the funnel        — it necessarily got through this step to reach that
- *                                             one. A fact beats a prediction, which is exactly the
- *                                             same-step rule ("an outcome retracts a never")
- *                                             expressed along the funnel.
+ *   2. an outcome on a step that can only be reached THROUGH this one — it necessarily got through
+ *                                             this step to reach that one. A fact beats a
+ *                                             prediction, which is exactly the same-step rule ("an
+ *                                             outcome retracts a never") expressed along the legs.
  *   3. its own stated NEVER                 — the person said it will not happen.
- *   4. a never EARLIER on the funnel         — once a step is false, everything after it is false.
+ *   4. a never on a step every path to this one goes through — that path is closed, and there is
+ *                                             no other.
  *   5. pending                              — nobody spoke, neither rule reaches it.
  *
- * A never that sits at or before the deepest outcome is contradicted by that outcome, so it does
- * not propagate forward (rule 2 beats it at its own step, and it cannot make later steps never
- * while a later step demonstrably happened). It is still reported as `statedState: "never"` on its
- * own step.
+ * A never on a step that reads as reached (rule 2) is contradicted, so it does not propagate. It is
+ * still reported as `statedState: "never"` on its own step.
  */
+import { STEP_ORDER, stepsRequiredBefore } from "./step-graph.js";
 import type { LeadStepOutcomeName, StatementSource, StepState } from "./step-statements.js";
 
-/** Whether a step's state is something a person stated, or something the funnel implies. */
+/** Whether a step's state is something a person stated, or something the leg graph implies. */
 export type StepOrigin = "stated" | "implied";
 
 export interface StatedOutcome {
@@ -65,11 +65,8 @@ export interface StepReadState {
   origin: StepOrigin | null;
   /** The STATED step that implies this one, or null when nothing implies it. */
   impliedBy: LeadStepOutcomeName | null;
-  /** What a person actually stated about THIS step, whatever the funnel concluded. */
+  /** What a person actually stated about THIS step, whatever the graph concluded. */
   statedState: "outcome" | "never" | null;
-  /** Whether this step is part of the lead's funnel at all. */
-  inFunnel: boolean;
-  stepIndex: number | null;
   source: StatementSource | null;
   valueCents: number | null;
   /**
@@ -94,25 +91,40 @@ export interface StepReadState {
 export interface ResolveStepStatesInput {
   /** Every step this service can answer for, in the order the response lists them. */
   allSteps: readonly LeadStepOutcomeName[];
-  /** The lead's funnel, in order. */
-  funnelSteps: readonly LeadStepOutcomeName[];
   outcomes: ReadonlyMap<LeadStepOutcomeName, StatedOutcome>;
   nevers: ReadonlyMap<LeadStepOutcomeName, StatedNever>;
 }
 
-function pending(
-  step: LeadStepOutcomeName,
-  inFunnel: boolean,
-  stepIndex: number | null,
-): StepReadState {
+function pending(step: LeadStepOutcomeName): StepReadState {
   return {
     step,
     state: "pending",
     origin: null,
     impliedBy: null,
     statedState: null,
-    inFunnel,
-    stepIndex,
+    source: null,
+    valueCents: null,
+    costCents: null,
+    causedByOutreach: null,
+    note: null,
+    statedByUserId: null,
+    at: null,
+  };
+}
+
+function implied(
+  step: LeadStepOutcomeName,
+  state: StepState,
+  impliedBy: LeadStepOutcomeName,
+  statedState: "outcome" | "never" | null,
+): StepReadState {
+  // Nobody stated it, so it carries no author, no note, no cost and no date.
+  return {
+    step,
+    state,
+    origin: "implied",
+    impliedBy,
+    statedState,
     source: null,
     valueCents: null,
     costCents: null,
@@ -124,24 +136,32 @@ function pending(
 }
 
 export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[] {
-  const { allSteps, funnelSteps, outcomes, nevers } = input;
+  const { allSteps, outcomes, nevers } = input;
+  // Deepest first, so a step reached through several outcomes names the deepest one.
+  const deepestFirst = [...STEP_ORDER].reverse();
 
-  // The deepest step on the funnel a stated outcome reaches. Everything up to it is reached.
-  let deepestOutcome = -1;
-  for (let i = 0; i < funnelSteps.length; i++) {
-    if (outcomes.has(funnelSteps[i])) deepestOutcome = i;
+  // Rule 2: reached because a step that can only be reached through it demonstrably happened.
+  const reachedBy = new Map<LeadStepOutcomeName, LeadStepOutcomeName>();
+  for (const outcomeStep of deepestFirst) {
+    if (!outcomes.has(outcomeStep)) continue;
+    for (const before of stepsRequiredBefore(outcomeStep)) {
+      if (!reachedBy.has(before)) reachedBy.set(before, outcomeStep);
+    }
   }
+  const readsReached = (step: LeadStepOutcomeName) => outcomes.has(step) || reachedBy.has(step);
 
-  // The shallowest never that is NOT contradicted by that outcome. Everything from it on is never.
-  let earliestNever = -1;
-  for (let i = funnelSteps.length - 1; i > deepestOutcome; i--) {
-    if (nevers.has(funnelSteps[i])) earliestNever = i;
+  // Rule 4: a never that is not contradicted closes every step reachable only through it.
+  const closedBy = new Map<LeadStepOutcomeName, LeadStepOutcomeName>();
+  for (const step of STEP_ORDER) {
+    for (const before of [...stepsRequiredBefore(step)].reverse()) {
+      if (nevers.has(before) && !readsReached(before)) {
+        closedBy.set(step, before);
+        break;
+      }
+    }
   }
 
   return allSteps.map((step) => {
-    const index = funnelSteps.indexOf(step);
-    const inFunnel = index >= 0;
-    const stepIndex = inFunnel ? index : null;
     const outcome = outcomes.get(step) ?? null;
     const never = nevers.get(step) ?? null;
     const statedState: "outcome" | "never" | null = outcome ? "outcome" : never ? "never" : null;
@@ -153,8 +173,6 @@ export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[
         origin: "stated" as StepOrigin,
         impliedBy: null,
         statedState,
-        inFunnel,
-        stepIndex,
         source: outcome.source,
         valueCents: outcome.valueCents,
         costCents: outcome.costCents,
@@ -165,26 +183,8 @@ export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[
       };
     }
 
-    if (inFunnel && deepestOutcome >= 0 && index < deepestOutcome) {
-      // Reached, because a later step on this funnel demonstrably happened. Nobody stated it, so it
-      // carries no author, no note and no date.
-      return {
-        step,
-        state: "outcome" as StepState,
-        origin: "implied" as StepOrigin,
-        impliedBy: funnelSteps[deepestOutcome],
-        statedState,
-        inFunnel,
-        stepIndex,
-        source: null,
-        valueCents: null,
-        costCents: null,
-        causedByOutreach: null,
-        note: null,
-        statedByUserId: null,
-        at: null,
-      };
-    }
+    const reachedThrough = reachedBy.get(step);
+    if (reachedThrough) return implied(step, "outcome", reachedThrough, statedState);
 
     if (never) {
       return {
@@ -193,8 +193,6 @@ export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[
         origin: "stated" as StepOrigin,
         impliedBy: null,
         statedState,
-        inFunnel,
-        stepIndex,
         source: never.source ?? ("manual" as StatementSource),
         valueCents: null,
         costCents: never.costCents,
@@ -206,25 +204,9 @@ export function resolveStepStates(input: ResolveStepStatesInput): StepReadState[
       };
     }
 
-    if (inFunnel && earliestNever >= 0 && index > earliestNever) {
-      return {
-        step,
-        state: "never" as StepState,
-        origin: "implied" as StepOrigin,
-        impliedBy: funnelSteps[earliestNever],
-        statedState,
-        inFunnel,
-        stepIndex,
-        source: null,
-        valueCents: null,
-        costCents: null,
-        causedByOutreach: null,
-        note: null,
-        statedByUserId: null,
-        at: null,
-      };
-    }
+    const closedThrough = closedBy.get(step);
+    if (closedThrough) return implied(step, "never", closedThrough, statedState);
 
-    return pending(step, inFunnel, stepIndex);
+    return pending(step);
   });
 }

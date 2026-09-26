@@ -7,12 +7,12 @@ vi.mock("../../src/db/index.js", () => ({
   db: { execute: (...args: unknown[]) => execute(...args) },
 }));
 
-const fetchOrgCampaignFunnelKeys = vi.fn();
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
+const fetchOrgCampaignLegs = vi.fn();
+vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/lib/campaign-leg-client.js")>();
   return {
     ...actual,
-    fetchOrgCampaignFunnelKeys: (...args: unknown[]) => fetchOrgCampaignFunnelKeys(...args),
+    fetchOrgCampaignLegs: (...args: unknown[]) => fetchOrgCampaignLegs(...args),
   };
 });
 
@@ -71,9 +71,7 @@ beforeEach(() => {
   execute.mockReset().mockImplementation(async (q: unknown) =>
     sqlOf(q).includes("from conversion_events") ? outcomeRows : [],
   );
-  fetchOrgCampaignFunnelKeys
-    .mockReset()
-    .mockResolvedValue(new Map([["camp-1", "sales_meetings_from_conversation"]]));
+  fetchOrgCampaignLegs.mockReset().mockResolvedValue(new Map([["camp-1", "start_to_conversation"]]));
   loadCrmColdEligibility.mockReset().mockResolvedValue(USABLE);
   loadUnconfirmedPairingLeads.mockReset().mockResolvedValue(new Set());
 });

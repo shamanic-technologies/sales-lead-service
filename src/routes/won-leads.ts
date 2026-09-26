@@ -40,8 +40,8 @@ function normalizeEmail(value: string): string {
  *
  * "Won" is exactly what makes a lead's standing `customer` (`src/lib/lead-standing.ts`): a live,
  * attributed `sale` on the outcome ledger, whoever observed it — a person's statement
- * (`manual`), the brand's tracker (`tracker`), or the customer's own CRM (`crm`). Every funnel
- * this service knows ends at `sale`, so the funnel's last step reached IS a sale. Nothing is
+ * (`manual`), the brand's tracker (`tracker`), or the customer's own CRM (`crm`). Every path of
+ * the leg graph ends at `sale`, so the last step reached IS a sale. Nothing is
  * re-derived here: the same three filters every outcome read applies (`attribution_status =
  * 'attributed'`, `withdrawn_at IS NULL`, the brand) are the whole definition, so a withdrawn
  * statement, and a CRM row a person's statement superseded, stop counting on the very next read.

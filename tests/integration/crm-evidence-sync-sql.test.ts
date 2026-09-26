@@ -26,7 +26,7 @@ const state = vi.hoisted(() => ({
     events: Array<Record<string, unknown>>;
   }>,
   delivered: new Map<string, string | null>(),
-  funnelByCampaign: new Map<string, string>(),
+  legByCampaign: new Map<string, string>(),
 }));
 
 vi.mock("../../src/lib/crm-client.js", async (importOriginal) => {
@@ -69,11 +69,11 @@ vi.mock("../../src/lib/email-gateway-client.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
+vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/lib/campaign-leg-client.js")>();
   return {
     ...actual,
-    fetchOrgCampaignFunnelKeys: vi.fn(async () => new Map(state.funnelByCampaign)),
+    fetchOrgCampaignLegs: vi.fn(async () => new Map(state.legByCampaign)),
   };
 });
 
@@ -175,8 +175,8 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     await seedLead("unsure", [campaignA]);
     await seedLead("noshow", [campaignA, campaignB]);
     await seedLead("stated", [campaignA]);
-    state.funnelByCampaign.set(campaignA, "sales_meetings_from_conversation");
-    state.funnelByCampaign.set(campaignB, "sales_meetings_from_conversation");
+    state.legByCampaign.set(campaignA, "start_to_conversation");
+    state.legByCampaign.set(campaignB, "start_to_conversation");
 
     for (const key of ["after", "before", "undated", "noshow", "stated"]) {
       await pair(`c-${key}`, ids[key].leadId, "deterministic");

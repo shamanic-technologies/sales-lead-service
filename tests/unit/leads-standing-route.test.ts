@@ -116,7 +116,7 @@ vi.mock("../../src/lib/trace-event.js", () => ({
   traceEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Real campaign-funnel-client, mocked transport: the funnel comes from campaign-service or it is
+// Real campaign-leg-client, mocked transport: the leg comes from campaign-service or it is
 // not resolved at all — never inferred from the brand, the goal, or a sibling campaign.
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
@@ -167,8 +167,8 @@ function healthyCampaigns() {
         ok: true,
         json: async () => ({
           campaigns: [
-            { id: FORM_MAGNET, orgId: ORG, funnelKey: "form_magnet" },
-            { id: REPLY_LED, orgId: ORG, funnelKey: "sales_meetings_from_conversation" },
+            { id: FORM_MAGNET, orgId: ORG, legKey: "start_to_website_visit" },
+            { id: REPLY_LED, orgId: ORG, legKey: "start_to_conversation" },
           ],
         }),
       };
@@ -221,7 +221,7 @@ describe("a lead row carries where that person stands", () => {
     expect(lead.standing.state).toBe("sales_interest");
     expect(lead.standing.reachedEntryStep).toBe(true);
     expect(lead.standing.entryStep).toBe("website_visit");
-    expect(lead.standing.funnelKey).toBe("form_magnet");
+    expect(lead.standing.legKey).toBe("start_to_website_visit");
     // The raw facts stay exactly where they were: this is additive, and the policy is derived
     // beside them rather than replacing them.
     expect(lead.clicked).toBe(true);
@@ -229,7 +229,7 @@ describe("a lead row carries where that person stands", () => {
     expect(lead.replyClassification).toBeNull();
   });
 
-  it("serves engaged for the same click on a campaign whose funnel is entered by a reply", async () => {
+  it("serves engaged for the same click on a campaign whose leg enters at a reply", async () => {
     mockRows = [rawRow(1, REPLY_LED)];
     clickedEmails = new Set(["lead-1@example.com"]);
 
@@ -297,7 +297,7 @@ describe("a lead row carries where that person stands", () => {
   });
 
   // NO SILENT FALLBACK. campaign-service down does not make everybody "contacted".
-  it("says unresolved, with the reason, when the campaign's funnel cannot be resolved", async () => {
+  it("says unresolved, with the reason, when the campaign's leg cannot be resolved", async () => {
     mockRows = [rawRow(1)];
     clickedEmails = new Set(["lead-1@example.com"]);
     fetchSpy.mockImplementation(async () => {
@@ -315,17 +315,17 @@ describe("a lead row carries where that person stands", () => {
     expect(res.body.leads[0].clicked).toBe(true);
   });
 
-  it("says unresolved when the campaign states no funnel this service knows", async () => {
+  it("says unresolved when the campaign states no leg this service knows", async () => {
     mockRows = [rawRow(1)];
     fetchSpy.mockImplementation(async () => ({
       ok: true,
-      json: async () => ({ campaigns: [{ id: FORM_MAGNET, orgId: ORG, funnelKey: null }] }),
+      json: async () => ({ campaigns: [{ id: FORM_MAGNET, orgId: ORG, legKey: null }] }),
     }));
 
     const res = await get(app, `/orgs/leads?brandId=${BRAND}&view=basic`);
 
     expect(res.body.leads[0].standing.state).toBe("unresolved");
-    expect(res.body.leads[0].standing.reason).toBe("funnel_unstated");
+    expect(res.body.leads[0].standing.reason).toBe("leg_unstated");
   });
 
   it("says unresolved when the read named no scope, so the delivery layer was never asked", async () => {
@@ -348,15 +348,15 @@ describe("a lead row carries where that person stands", () => {
 
   // A per-row implementation fails this outright, and it is what makes the field affordable on the
   // endpoint the dashboard polls every 30 seconds.
-  it("resolves the campaign funnels ONCE for the whole response, whatever the row count", async () => {
+  it("resolves the campaign legs ONCE for the whole response, whatever the row count", async () => {
     mockRows = Array.from({ length: 1200 }, (_, i) => rawRow(i, i % 2 === 0 ? FORM_MAGNET : REPLY_LED));
 
     const res = await get(app, `/orgs/leads?brandId=${BRAND}&view=basic`);
 
     expect(res.body.leads).toHaveLength(1200);
     expect(fetchSpy.mock.calls.filter(([url]) => url === CAMPAIGNS_URL)).toHaveLength(1);
-    expect(res.body.leads[0].standing.funnelKey).toBe("form_magnet");
-    expect(res.body.leads[1].standing.funnelKey).toBe("sales_meetings_from_conversation");
+    expect(res.body.leads[0].standing.legKey).toBe("start_to_website_visit");
+    expect(res.body.leads[1].standing.legKey).toBe("start_to_conversation");
   });
 
   it("emits the same standing on the full projection as on the slim one", async () => {

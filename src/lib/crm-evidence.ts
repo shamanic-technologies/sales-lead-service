@@ -34,7 +34,7 @@
  *                                                reply for us" — written only when the whose-win
  *                                                rule says it answered our outreach)
  * A never is represented exactly as a person's "never" is (lead_step_disqualifications), so the
- * funnel's rules apply to it unchanged — and an outcome on the same step still beats it.
+ * leg graph's rules apply to it unchanged — and an outcome on the same step still beats it.
  */
 
 /** crm-service's funnel event, as its `/orgs/gohighlevel/funnel-events` serves it. */

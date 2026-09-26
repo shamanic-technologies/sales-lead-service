@@ -4,7 +4,7 @@
  * Wrong lead, wrong step, a reply read the wrong way round: before this, the only correction on
  * offer was stating the opposite thing — itself a false statement, and one that keeps counting. So
  * these assert the three things a consumer can observe: the statement stops being live (so the
- * counts and the customer's stated cost drop it), what the funnel implied from it falls away with
+ * counts and the customer's stated cost drop it), what the leg graph implied from it falls away with
  * it, and something nobody stated by hand is refused with a code rather than a 500.
  */
 import { describe, it, expect, vi, beforeAll, beforeEach } from "vitest";
@@ -26,23 +26,8 @@ vi.mock("../../src/config.js", () => ({
   CAMPAIGN_SERVICE_API_KEY: "campaign-key",
 }));
 
-const resolveCampaignFunnelSteps = vi.fn();
-const fetchOrgCampaignFunnelKeys = vi.fn();
 
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
-  return {
-    ...actual,
-    resolveCampaignFunnelSteps: (...args: unknown[]) => resolveCampaignFunnelSteps(...args),
-    fetchOrgCampaignFunnelKeys: (...args: unknown[]) => fetchOrgCampaignFunnelKeys(...args),
-  };
-});
 
-const REPLY_MEETING_FUNNEL = {
-  funnelKey: "sales_meetings_from_conversation",
-  funnelSteps: ["meeting_booked", "meeting_attended", "sale"],
-};
 
 const dialect = new PgDialect();
 function compile(call: unknown): { sql: string; params: unknown[] } {
@@ -111,8 +96,6 @@ describe("DELETE /orgs/leads/:id/step-statements/:step", () => {
   }, 30_000);
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
-    resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
-    fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
   });
 
   it("401 without the service api key", async () => {
@@ -194,7 +177,7 @@ describe("DELETE /orgs/leads/:id/step-statements/:step", () => {
     expect(sqlAt(1)).toContain("source = 'manual'");
   });
 
-  it("what the funnel only implied falls away with the statement", async () => {
+  it("what the leg graph only implied falls away with the statement", async () => {
     // Before: a stated sale made meeting_booked and meeting_attended read as reached.
     execute
       .mockResolvedValueOnce(leadRow())
@@ -291,14 +274,14 @@ describe("DELETE /orgs/leads/:id/step-statements/:step", () => {
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]) // nothing withdrawn
       .mockResolvedValueOnce([
-        { event: "sale", source: "manual", value_cents: 1000, cost_cents: 0, note: null, stated_by_user_id: "user-1", received_at: "2026-08-19 14:30:00+00" },
+        { event: "meeting_attended", source: "manual", value_cents: null, cost_cents: 0, note: null, stated_by_user_id: "user-1", received_at: "2026-08-19 14:30:00+00" },
       ])
       .mockResolvedValueOnce([]);
     const res = await withdraw(app, "meeting_booked");
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("nothing_stated");
     expect(res.body.origin).toBe("implied");
-    expect(res.body.impliedBy).toBe("sale");
+    expect(res.body.impliedBy).toBe("meeting_attended");
     expect(res.body.error).toMatch(/withdraw that statement instead/);
   });
 
@@ -316,25 +299,6 @@ describe("DELETE /orgs/leads/:id/step-statements/:step", () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe("not_a_statement");
     expect(allSql()).not.toContain("update conversion_events");
-  });
-
-  it("409 funnel_unstated when the campaign states no funnel — never a guessed order", async () => {
-    const { FunnelStepsError } = await import("../../src/lib/campaign-funnel-client.js");
-    execute.mockResolvedValueOnce(leadRow());
-    resolveCampaignFunnelSteps.mockRejectedValueOnce(new FunnelStepsError("unstated", "no funnel"));
-    const res = await withdraw(app, "sale");
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe("funnel_unstated");
-    expect(allSql()).not.toContain("update conversion_events");
-  });
-
-  it("502 when campaign-service cannot answer", async () => {
-    const { FunnelStepsError } = await import("../../src/lib/campaign-funnel-client.js");
-    execute.mockResolvedValueOnce(leadRow());
-    resolveCampaignFunnelSteps.mockRejectedValueOnce(new FunnelStepsError("unavailable", "down"));
-    const res = await withdraw(app, "sale");
-    expect(res.status).toBe(502);
-    expect(res.body.code).toBe("campaign_service_unavailable");
   });
 
   it("500 (not a hung socket) when the database throws", async () => {

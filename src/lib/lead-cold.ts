@@ -30,8 +30,7 @@
  * CAN see — a CRM contact that is a candidate for this lead but whose pairing is still unconfirmed —
  * is held back (`pairingUnconfirmed`): such a lead never goes cold until the pairing is decided.
  */
-import type { LeadStepOutcomeName } from "./step-statements.js";
-import type { StepReadState } from "./step-funnel-state.js";
+import type { StepReadState } from "./step-states.js";
 
 /** The owner's number: how long the next step may stay silent before the lead reads as cold. */
 export const COLD_AFTER_DAYS = 30;
@@ -88,9 +87,7 @@ export const CRM_COLD_INELIGIBLE: (reason: CrmColdIneligibleReason) => CrmColdEl
 
 export interface WentColdInput {
   eligibility: CrmColdEligibility;
-  /** The lead's funnel, in order. The rule only reaches steps that are on it. */
-  funnelSteps: readonly LeadStepOutcomeName[];
-  /** Every step's read state, with the funnel's rules already applied (`resolveStepStates`). */
+  /** Every step's read state, with the leg graph's rules already applied (`resolveStepStates`). */
   steps: readonly StepReadState[];
   /** When the lead first replied positively (delivery layer or their CRM's form), or null. */
   positiveReplyAt: string | null;
@@ -108,22 +105,23 @@ function coldAt(from: string | null, now: Date): string | null {
 }
 
 export function deriveWentCold(input: WentColdInput): WentCold | null {
-  const { eligibility, funnelSteps, now } = input;
+  const { eligibility, now } = input;
   if (!eligibility.eligible || input.pairingUnconfirmed) return null;
-  if (!funnelSteps.includes("meeting_booked")) return null;
 
   const byStep = new Map(input.steps.map((s) => [s.step, s]));
   const booked = byStep.get("meeting_booked");
   const attended = byStep.get("meeting_attended");
 
-  // Attended — stated, evidenced, or implied by a later outcome (a sale) — never goes cold. And a
-  // "never" on it is already a statement of what happened: nothing to derive.
+  // A lead who bought never goes cold, whatever the meetings read: a sale can close off a reply
+  // with no meeting at all, so it implies no attendance on the leg graph and has to be read here.
+  if (byStep.get("sale")?.state === "outcome") return null;
+
+  // Attended — stated or evidenced — never goes cold. And a "never" on it is already a statement
+  // of what happened: nothing to derive.
   if (attended && attended.state !== "pending") return null;
 
   if (booked?.state === "outcome") {
-    if (!funnelSteps.includes("meeting_attended") || !eligibility.evidences.meeting_attended) {
-      return null;
-    }
+    if (!eligibility.evidences.meeting_attended) return null;
     // An implied booking carries no date (nobody stated it), and without a date there is no
     // silence to measure: never cold.
     const since = coldAt(booked.at, now);

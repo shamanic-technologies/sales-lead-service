@@ -117,7 +117,7 @@ vi.mock("../../src/lib/trace-event.js", () => ({
   traceEvent: vi.fn().mockResolvedValue(undefined),
 }));
 
-// Real campaign-funnel-client, mocked transport: the funnel comes from campaign-service or it is
+// Real campaign-leg-client, mocked transport: the leg comes from campaign-service or it is
 // not resolved at all — never inferred from the brand, the goal, or a sibling campaign.
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
@@ -168,8 +168,8 @@ function healthyCampaigns() {
         ok: true,
         json: async () => ({
           campaigns: [
-            { id: FORM_MAGNET, orgId: ORG, funnelKey: "form_magnet" },
-            { id: REPLY_LED, orgId: ORG, funnelKey: "sales_meetings_from_conversation" },
+            { id: FORM_MAGNET, orgId: ORG, legKey: "start_to_website_visit" },
+            { id: REPLY_LED, orgId: ORG, legKey: "start_to_conversation" },
           ],
         }),
       };

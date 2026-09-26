@@ -1,7 +1,7 @@
 /**
- * What a funnel step cost the CUSTOMER.
+ * What a step cost the CUSTOMER.
  *
- * The platform automates the first link of a sales funnel and bills for it; the customer performs
+ * The platform automates the first leg and bills for it; the customer performs
  * the rest — they run the meeting, they close the deal — so they are the only one who can say what
  * those legs cost. Stating it is mandatory, ABSENT IS A REFUSAL (never a zero), a stated ZERO is a
  * real answer that must stay distinguishable from an absent one, and none of this money is ever
@@ -26,23 +26,8 @@ vi.mock("../../src/config.js", () => ({
   CAMPAIGN_SERVICE_API_KEY: "campaign-key",
 }));
 
-const resolveCampaignFunnelSteps = vi.fn();
-const fetchOrgCampaignFunnelKeys = vi.fn();
 
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>();
-  return {
-    ...actual,
-    resolveCampaignFunnelSteps: (...args: unknown[]) => resolveCampaignFunnelSteps(...args),
-    fetchOrgCampaignFunnelKeys: (...args: unknown[]) => fetchOrgCampaignFunnelKeys(...args),
-  };
-});
 
-const REPLY_MEETING_FUNNEL = {
-  funnelKey: "sales_meetings_from_conversation",
-  funnelSteps: ["meeting_booked", "meeting_attended", "sale"],
-};
 
 const dialect = new PgDialect();
 function compile(call: unknown): { sql: string; params: unknown[] } {
@@ -95,8 +80,6 @@ describe("a statement states what the step cost the customer", () => {
   }, 30_000);
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
-    resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
-    fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
   });
 
   it("refuses an outcome with no cost, and never touches the database", async () => {
@@ -200,7 +183,6 @@ describe("reading a stated cost back", () => {
   }, 30_000);
   beforeEach(() => {
     execute.mockReset().mockResolvedValue([]);
-    resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
   });
 
   function get() {
@@ -266,11 +248,11 @@ describe("reading a stated cost back", () => {
     );
     expect(byStep.meeting_booked.costCents).toBe(7_500);
     expect(byStep.meeting_booked.origin).toBe("stated");
-    // The funnel makes the later steps never — but nobody stated THOSE, so nobody stated a cost
-    // for them either. An implied step is not a statement.
-    expect(byStep.sale.state).toBe("never");
-    expect(byStep.sale.origin).toBe("implied");
-    expect(byStep.sale.costCents).toBeNull();
+    // The leg graph makes the attendance never — but nobody stated THAT, so nobody stated a cost
+    // for it either. An implied step is not a statement.
+    expect(byStep.meeting_attended.state).toBe("never");
+    expect(byStep.meeting_attended.origin).toBe("implied");
+    expect(byStep.meeting_attended.costCents).toBeNull();
   });
 });
 
