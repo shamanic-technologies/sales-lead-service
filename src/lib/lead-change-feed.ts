@@ -71,7 +71,7 @@ export const FEED_RECONCILE_AFTER_MS = READ_MODEL_REFRESH_AFTER_MS;
 export const FEED_MAX_RECONCILE_AGE_MS = READ_MODEL_MAX_EVIDENCE_AGE_MS;
 /**
  * A reconcile reuses delivery evidence asked at most this long before it started. Wide enough to
- * share the answers the read model's own two-minute rebuild of the same brand just asked for, so
+ * share the answers the read model's own three-minute refresh of the same brand just asked for, so
  * the two do not both fan out to email-gateway; narrow enough that reconcile interval + this stays
  * inside `FEED_MAX_RECONCILE_AGE_MS`.
  */

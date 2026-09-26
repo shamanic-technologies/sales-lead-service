@@ -19,6 +19,7 @@
  * enforces the bound (see lead-read-model.ts). FAIL LOUD: an address the gateway could not answer
  * for rejects the whole read; a stale or missing answer is never served as if it were current.
  */
+import { createHash } from "node:crypto";
 import { sql } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 
@@ -81,6 +82,45 @@ interface StoredEvidence {
 }
 
 /**
+ * When an address was last asked and the gateway gave back the SAME answer that is stored.
+ *
+ * Every read model refresh and every feed reconcile asks the gateway again about its whole scope,
+ * and almost every answer is the one already stored. Rewriting the row just to move `fetched_at`
+ * was ~112M updates in a few days — a large share of the box's write load for no new information.
+ * So an unchanged answer is not written; the moment it was confirmed is kept here, and a read takes
+ * the later of the two as the answer's age. The stored row is still exactly the gateway's latest
+ * answer; only its "last asked" instant can be newer in memory than on disk.
+ *
+ * A confirmation names the answer it confirmed (a digest), and counts only while the stored row
+ * still holds that answer — so a concurrent writer storing a DIFFERENT answer is never made to look
+ * fresher by a confirmation of the one it replaced.
+ *
+ * In-process on purpose: losing it (a restart) only makes stored answers look as old as their row
+ * says, so they are asked again once — never served past a bound. Bounded by clearing, same effect.
+ */
+const confirmedAt = new Map<string, { at: number; digest: string }>();
+const MAX_CONFIRMED = 500_000;
+
+function evidenceKey(orgId: string, brandId: string, campaignKey: string, email: string): string {
+  return `${orgId}\u0000${brandId}\u0000${campaignKey}\u0000${email}`;
+}
+
+/** A digest of an answer with object keys sorted — equal whatever key order jsonb kept. */
+function digestOf(value: unknown): string {
+  const canonical = JSON.stringify(value ?? null, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, (v as Record<string, unknown>)[k]]))
+      : v,
+  );
+  return createHash("sha1").update(canonical).digest("base64url");
+}
+
+/** Test seam: forget every in-memory confirmation. */
+export function resetEvidenceConfirmations(): void {
+  confirmedAt.clear();
+}
+
+/**
  * The gateway's answer for every address in `requests`, keyed by email — read from what is stored
  * when it is recent enough, asked again (and stored) when it is not.
  *
@@ -103,6 +143,8 @@ export async function readDeliveryEvidence(
 
   const toFetch: Array<{ brandId: string; emails: string[] }> = [];
   const acceptSince = options.acceptFetchedSince.getTime();
+  /** What is stored for each address asked again, so an unchanged answer is not rewritten. */
+  const storedResult = new Map<string, string>();
 
   for (const [brandId, emailSet] of byBrand) {
     const emails = [...emailSet];
@@ -116,7 +158,14 @@ export async function readDeliveryEvidence(
     `;
     const fresh = new Set<string>();
     for (const row of stored) {
-      const fetchedAt = new Date(row.fetched_at).getTime();
+      const key = evidenceKey(options.orgId, brandId, campaignKey, row.email);
+      const digest = digestOf(row.result);
+      const confirmed = confirmedAt.get(key);
+      const fetchedAt = Math.max(
+        new Date(row.fetched_at).getTime(),
+        confirmed && confirmed.digest === digest ? confirmed.at : 0,
+      );
+      storedResult.set(key, digest);
       if (fetchedAt < acceptSince) continue;
       const changedAt = options.changedAt?.get(row.email.toLowerCase());
       if (changedAt && fetchedAt < changedAt.getTime()) continue;
@@ -149,11 +198,28 @@ export async function readDeliveryEvidence(
     const answered = new Map<string, StatusResult>();
     for (const result of response.results) answered.set(result.email, result);
     for (const [email, result] of answered) out.set(email, result);
-    const emails = batch.emails;
-    const results = emails.map((e) => {
-      const r = answered.get(e);
-      return r ? JSON.stringify(r) : null;
-    });
+    // Only what is new or different is written; an answer identical to the stored one is only
+    // remembered as confirmed now (see `confirmedAt`).
+    const emails: string[] = [];
+    const results: Array<string | null> = [];
+    const askedAtMs = Date.parse(askedAt);
+    if (confirmedAt.size > MAX_CONFIRMED) confirmedAt.clear();
+    for (const email of batch.emails) {
+      const r = answered.get(email) ?? null;
+      const key = evidenceKey(options.orgId, batch.brandId, campaignKey, email);
+      const held = storedResult.get(key);
+      if (held !== undefined && held === digestOf(r)) {
+        const prior = confirmedAt.get(key);
+        confirmedAt.set(key, {
+          at: prior && prior.digest === held ? Math.max(prior.at, askedAtMs) : askedAtMs,
+          digest: held,
+        });
+        continue;
+      }
+      emails.push(email);
+      results.push(r ? JSON.stringify(r) : null);
+    }
+    if (emails.length === 0) return;
     await sql`
       INSERT INTO lead_delivery_evidence (org_id, brand_id, campaign_id, email, result, fetched_at)
       SELECT ${options.orgId}, ${batch.brandId}, ${campaignKey}, u.email, u.result::jsonb, ${askedAt}::timestamptz
