@@ -90,6 +90,7 @@
  * The raw delivery facts (`contacted`, `clicked`, `replied`, `replyClassification`, …) stay on the
  * wire beside this, untouched. They are what let the policy change later; this is the policy.
  */
+import type { WentCold } from "./lead-cold.js";
 import type { FunnelEntry, FunnelEntryMeasure, FunnelKey } from "./funnel-steps.js";
 import type { StepReadState } from "./step-funnel-state.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
@@ -153,6 +154,13 @@ export interface LeadStanding {
   deepestStep: LeadStepOutcomeName | null;
   /** When the deciding statement was made, when a statement decided it. */
   at: string | null;
+  /**
+   * Whether the lead WENT COLD at a step of its funnel, and since when (lead-cold.ts) — or null.
+   * A separate fact beside the state, never a state of its own: a cold lead keeps the standing it
+   * has, so a board partitioned by standing is unchanged. Only ever set for a brand whose CRM is
+   * connected and readable.
+   */
+  wentCold: WentCold | null;
 }
 
 export interface LeadStandingDelivery {
@@ -161,6 +169,8 @@ export interface LeadStandingDelivery {
   clicked: boolean;
   replied: boolean;
   replyClassification: "positive" | "negative" | "neutral" | null;
+  /** When the delivery layer first saw a reply. Only read by the went-cold rule. */
+  firstRepliedAt?: string | null;
   /**
    * Whether the delivery layer reports this person as PERMANENTLY out — the wrong contact, or
    * gone from the role. Derived by the provider from its own reply vocabulary and forwarded here;
@@ -198,6 +208,8 @@ export interface LeadStandingInput {
    * two surfaces cannot disagree about the same lead.
    */
   steps: readonly StepReadState[];
+  /** Derived by the caller (lead-cold.ts) off the same steps. Absent reads as null. */
+  wentCold?: WentCold | null;
 }
 
 function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "signal" | "origin" | "reason"> {
@@ -208,6 +220,7 @@ function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "signal" |
     reachedEntryStep: null,
     deepestStep: null,
     at: null,
+    wentCold: input.wentCold ?? null,
   };
 }
 
