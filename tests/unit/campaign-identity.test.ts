@@ -11,7 +11,8 @@ function row(id: string, over: Partial<Parameters<typeof identityKeyOf>[0]> = {}
     orgId: ORG,
     brandId: BRAND,
     brandIds: [BRAND],
-    funnelKey: "sales_meetings_from_conversation",
+    offerId: "offer-1",
+    legKey: "start_to_conversation",
     acquisitionChannel: "cold_email",
     status: "stopped",
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -36,12 +37,14 @@ describe("campaign identity families", () => {
       row("cold-1"),
       row("cold-2"),
       row("crm-1", { acquisitionChannel: "crm_email" }),
-      row("other-funnel-1", { funnelKey: "sales_meetings_from_website" }),
+      row("other-leg-1", { legKey: "start_to_website_visit" }),
+      row("other-offer-1", { offerId: "offer-2" }),
     ]);
 
     expect(families.familyOf("cold-1")).toEqual(["cold-1", "cold-2"]);
     expect(families.familyOf("crm-1")).toEqual(["crm-1"]);
-    expect(families.familyOf("other-funnel-1")).toEqual(["other-funnel-1"]);
+    expect(families.familyOf("other-leg-1")).toEqual(["other-leg-1"]);
+    expect(families.familyOf("other-offer-1")).toEqual(["other-offer-1"]);
   });
 
   it("a brand with exactly one campaign row is unchanged — its family is itself", () => {
@@ -49,11 +52,11 @@ describe("campaign identity families", () => {
     expect(families.familyOf("solo")).toEqual(["solo"]);
   });
 
-  it("groups the funnel-less rows of a channel together, exactly as campaign-service's own index does", () => {
+  it("groups the offer- and leg-less rows of a channel together, exactly as campaign-service's own index does", () => {
     const families = buildCampaignFamilies([
-      row("n1", { funnelKey: null }),
-      row("n2", { funnelKey: null }),
-      row("stated", { funnelKey: "sales_meetings_from_conversation" }),
+      row("n1", { offerId: null, legKey: null }),
+      row("n2", { offerId: null, legKey: null }),
+      row("stated"),
     ]);
 
     expect(families.familyOf("n1")).toEqual(["n1", "n2"]);

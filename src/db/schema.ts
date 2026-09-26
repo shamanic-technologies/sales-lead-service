@@ -507,14 +507,14 @@ export const leadStepDisqualifications = pgTable(
      * A "never" contradicted by an outcome is RETRACTED, never deleted: the record of what a
      * person stated is what makes this auditable, so every read filters `retracted_at IS NULL`
      * and the row survives. `retracted_by_step` is the outcome that retracted it — the same step
-     * for the same-step rule, a LATER step of the funnel for the funnel rule.
+     * for the same-step rule, a step only reachable through it for the leg-graph rule.
      */
     retractedAt: timestamp("retracted_at", { withTimezone: true }),
     retractedByStep: text("retracted_by_step"),
     retractedByUserId: text("retracted_by_user_id"),
     /**
      * The author TOOK THE STATEMENT BACK. A different fact from `retracted_at`: retraction is the
-     * funnel resolving a contradiction (an outcome proved the "never" wrong), withdrawal is the
+     * leg graph resolving a contradiction (an outcome proved the "never" wrong), withdrawal is the
      * person saying they should never have stated it. Every read filters both, the row survives,
      * and restating clears the mark.
      */

@@ -105,7 +105,7 @@ export function bucketsForRow(
  *
  * This is what `sort=activity` orders on, newest first: the page shows the people something most
  * recently happened to, and each one is dated by the thing that happened rather than by when we
- * first put them in a buffer. Precedence runs down the funnel, most advanced first: an outcome
+ * first put them in a buffer. Precedence runs down the steps, most advanced first: an outcome
  * somebody recorded, then a reply, then a click, then an open, then the send, then the moment the
  * lead was served, and finally the moment the membership row was written.
  *

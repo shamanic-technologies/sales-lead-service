@@ -4,7 +4,7 @@
  *
  * The board the customer's Leads page draws is partitioned by STANDING — still in play, sales
  * interest, disqualified, opted out — and this service is the only thing that can answer it: the
- * policy is authored here (lead-standing.ts), it is funnel-aware, and it reads both the delivery
+ * policy is authored here (lead-standing.ts), it is leg-aware, and it reads both the delivery
  * evidence and the hand-stated statements. A consumer that pulls a page of leads and sorts the
  * cards into columns in the browser states, per column, how many of the FETCHED rows landed there
  * — which is a different number from how many people are in that state, and it is stated beside
@@ -57,7 +57,7 @@ export function standingDelivery(status: FlattenedStatus): LeadStandingDelivery 
  * Attach a standing to every enriched index row, in bounded chunks.
  *
  * FAIL LOUD ON THE READ, not on the field: the resolver already answers `unresolved` with a reason
- * when campaign-service cannot say which funnel a campaign sells, so a genuine throw here is
+ * when campaign-service cannot say which leg a campaign works, so a genuine throw here is
  * something else entirely (the statements could not be read at all) and it propagates — a count
  * that silently reports a brand as entirely unresolved is a wrong number nothing would go red
  * about. The list read takes the opposite posture deliberately, because there a standing is one

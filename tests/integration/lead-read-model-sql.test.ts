@@ -29,10 +29,10 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
   },
 }));
 
-let funnelByCampaign = new Map<string, string | null>();
-vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../src/lib/campaign-funnel-client.js")>()),
-  fetchOrgCampaignFunnelKeys: () => Promise.resolve(funnelByCampaign),
+let legByCampaign = new Map<string, string | null>();
+vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/campaign-leg-client.js")>()),
+  fetchOrgCampaignLegs: () => Promise.resolve(legByCampaign),
 }));
 
 const { db, sql } = await import("../../src/db/index.js");
@@ -90,7 +90,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
 
   beforeEach(() => {
     gatewayCalls = [];
-    funnelByCampaign = new Map([[campaignId, "sales_meetings_from_website"]]);
+    legByCampaign = new Map([[campaignId, "start_to_website_visit"]]);
     statusByEmail = {
       "jane@acme.test": { contacted: true, sent: true, firstSentAt: "2026-02-01T00:00:00.000Z" },
       "john@globex.test": { contacted: true, clicked: true, firstClickedAt: "2026-02-02T00:00:00.000Z" },

@@ -11,7 +11,6 @@ import {
   LEAD_STANDING_STATES,
   LEAD_STANDING_UNRESOLVED_REASONS,
 } from "./lib/lead-standing.js";
-import { FUNNEL_KEYS } from "./lib/funnel-steps.js";
 // The published pairing vocabulary IS the policy's own vocabulary — read from the one module that
 // declares it, so the contract cannot drift from what the routes actually return.
 import {
@@ -1240,7 +1239,7 @@ const ClosedDealSchema = z
   });
 
 
-/** A lead that WENT COLD at a funnel step — derived, never stated (lead-cold.ts). */
+/** A lead that WENT COLD at a step — derived, never stated (lead-cold.ts). */
 export const WentColdSchema = z
   .object({
     step: z.enum(["meeting_booked", "meeting_attended"]).openapi({
@@ -1275,9 +1274,9 @@ const LeadStandingSchema = z
     state: z.enum(LEAD_STANDING_STATES as unknown as [string, ...string[]]).openapi({
       description:
         "Where this person stands on THIS campaign, decided by lead-service and by nobody else. " +
-        "`sales_interest` = they reached the step this campaign's sales funnel is entered by (a " +
-        "visit on a visit-led funnel, a positive reply on a conversation-led one) or a later step " +
-        "of it. `customer` = the funnel's last step (the sale) is reached. `opted_out` = the person " +
+        "`sales_interest` = they reached the step this campaign's LEG puts leads on (a visit where " +
+        "the leg enters at the site, a positive reply where it enters at a conversation) or a step " +
+        "reachable from it on the leg graph. `customer` = the sale is reached. `opted_out` = the person " +
         "asked not to be contacted (an unsubscribe, at this scope or globally); it is their own " +
         "act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. " +
         "`disqualified` = a commercial judgement of OURS: we realised they are not our target at " +
@@ -1293,7 +1292,7 @@ const LeadStandingSchema = z
         "an opinion about the person, and is named by `signal: \"bounced\"` rather than used as a " +
         "verdict. `not_contacted` = never written to. `unresolved` = a signal could not be resolved " +
         "and is stated as such rather than defaulted — read `reason`. A consumer needs to know " +
-        "none of the reply kinds or funnel step names to use this.",
+        "none of the reply kinds or step names to use this.",
       example: "sales_interest",
     }),
     signal: z.enum(LEAD_STANDING_SIGNALS as unknown as [string, ...string[]]).openapi({
@@ -1312,7 +1311,7 @@ const LeadStandingSchema = z
       .openapi({
         description:
           "Who said it: `stated` = a person stated it (or the website tracker reported it), " +
-          "`implied` = the campaign's funnel implies it from another statement, `measured` = the " +
+          "`implied` = the leg graph implies it from another statement, `measured` = the " +
           "delivery layer measured it. null when nothing decided the state.",
         example: "measured",
       }),
@@ -1323,9 +1322,10 @@ const LeadStandingSchema = z
         description:
           "Why the state is `unresolved`, and null for every other state. `delivery_not_queried` " +
           "= the read named no brand or campaign, so the delivery layer was never asked. " +
-          "`campaign_service_unavailable` / `campaign_unknown` / `funnel_unstated` = the " +
-          "campaign's sales funnel could not be resolved, so there is no telling whether a click " +
-          "is the step it sells. `statements_unreadable` = the hand-stated statements could not " +
+          "`campaign_service_unavailable` / `campaign_unknown` / `leg_unstated` = the " +
+          "campaign's leg could not be resolved (campaign-service unreachable, the campaign unknown " +
+          "to it, or the campaign states no leg this service knows), so there is no telling " +
+          "whether a click is the step it works. `statements_unreadable` = the hand-stated statements could not " +
           "be read. `reply_disqualification_unknown` = the reply reads as negative and the " +
           "provider serves no disqualification reading for it (a provider without reply " +
           "tracking, or a payload older than the field), so whether this is a decline about the " +
@@ -1333,23 +1333,23 @@ const LeadStandingSchema = z
           "plausible default.",
         example: null,
       }),
-    funnelKey: z
-      .enum(FUNNEL_KEYS as unknown as [string, ...string[]])
+    legKey: z
+      .string()
       .nullable()
       .openapi({
         description:
-          "The sales funnel this campaign sells, as campaign-service states it. Never inferred " +
-          "from the brand or from a goal; null when it could not be resolved.",
-        example: "form_magnet",
+          "The leg this campaign works, as campaign-service states it (`legKey`). Never inferred; " +
+          "null when it could not be resolved.",
+        example: "start_to_website_visit",
       }),
     entryStep: z
       .string()
       .nullable()
       .openapi({
         description:
-          "The step somebody takes to get ONTO this campaign's funnel, in the funnel vocabulary " +
-          "brand-service publishes: `website_visit`, `conversation_reply` or `ad_click`. This is " +
-          "what `sales_interest` means for this campaign.",
+          "Where this campaign's leg puts leads on the leg graph: `website_visit`, " +
+          "`conversation_reply`, or the step an ad delivers (`meeting_booked`, `form_submission`). " +
+          "This is what `sales_interest` means for this campaign.",
         example: "website_visit",
       }),
     entryMeasure: z
@@ -1359,8 +1359,8 @@ const LeadStandingSchema = z
         description:
           "Which signal that entry step is read off: `delivery_click` = a click on the email we " +
           "sent, `positive_reply` = a reply the delivery layer classified as positive. null when " +
-          "this service holds no signal for it at all (an ad click), which is why " +
-          "`reachedEntryStep` is null on ads-led funnels rather than false.",
+          "this service holds no signal for it at all (an ad), which is why " +
+          "`reachedEntryStep` is null on an ad-delivered entry rather than false.",
         example: "delivery_click",
       }),
     reachedEntryStep: z
@@ -1368,7 +1368,7 @@ const LeadStandingSchema = z
       .nullable()
       .openapi({
         description:
-          "Whether this person got onto the campaign's funnel. Answered separately from `state` " +
+          "Whether this person reached the campaign's entry step. Answered separately from `state` " +
           "because both can be true at once: somebody who clicked and then unsubscribed reached " +
           "the entry step AND is disqualified. null — never false — when the signal for it cannot " +
           "be resolved.",
@@ -1379,8 +1379,8 @@ const LeadStandingSchema = z
       .nullable()
       .openapi({
         description:
-          "The deepest step of this campaign's funnel known to have been reached, in this " +
-          "service's outcome vocabulary. null when no step is known reached.",
+          "The deepest step reachable from this campaign's entry known to have been reached, in " +
+          "this service's outcome vocabulary. null when no step is known reached.",
         example: null,
       }),
     at: z
@@ -1392,7 +1392,7 @@ const LeadStandingSchema = z
       }),
     wentCold: WentColdSchema.nullable().openapi({
       description:
-        "Whether the lead WENT COLD at a step of its funnel, or null. A fact BESIDE `state`, never a state: a cold lead keeps its standing, so a board partitioned by standing is unchanged.",
+        "Whether the lead WENT COLD at a step, or null. A fact BESIDE `state`, never a state: a cold lead keeps its standing, so a board partitioned by standing is unchanged.",
     }),
   })
   .openapi("LeadStanding", {
@@ -1463,7 +1463,7 @@ const LeadCampaignEvidenceSchema = z
     campaignIds: z.array(z.string()).openapi({
       description:
         "Every stored campaign id whose evidence this card reads — the campaign IDENTITY's " +
-        "members (org, brand, sales funnel, acquisition channel), restricted to the read's own " +
+        "members (org, brand, offer, leg, acquisition channel), restricted to the read's own " +
         "campaign scope when it has one. `[campaignId]` when the identity could not be resolved.",
       example: ["60000000-0000-0000-0000-000000000002"],
     }),
@@ -1660,7 +1660,7 @@ const LeadDetailSchema = z
           "served under (`campaignId` above, the attribution frozen on the leads_campaigns row), " +
           "with its name read from brand-service. null when that campaign names no offer, and also " +
           "when the resolution was unavailable (logged loudly server-side) — never inferred from " +
-          "the lead's brand, its funnel or a sibling campaign. Present on every lead in both views.",
+          "the lead's brand, its leg or a sibling campaign. Present on every lead in both views.",
       }),
     audienceId: z
       .string()
@@ -2113,22 +2113,6 @@ registry.registerPath({
     },
     {
       in: "query" as const,
-      name: "funnelKey",
-      required: false,
-      description:
-        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
-        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
-        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
-        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
-        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
-        "current keys and their retired spellings (`reply_meeting` = " +
-        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
-        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
-        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
-      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
-    },
-    {
-      in: "query" as const,
       name: "orgId",
       required: false,
       schema: { type: "string" as const },
@@ -2271,7 +2255,7 @@ registry.registerPath({
         "exactly that; naming one behaves exactly as before. An opt-out is the prospect's own act " +
         "and `disqualified` is a commercial judgement of ours, so they stay two states and each " +
         "pages on its own. This is the `standing.state` " +
-        "every row already carries — where the lead stands on the funnel ITS campaign sells, " +
+        "every row already carries — where the lead stands relative to the leg ITS campaign works, " +
         "decided by this service and rendered by everyone else. Unlike a `bucket` it IS a " +
         "partition: a lead has exactly one standing, so it is what a triage board draws a column " +
         "per. Naming a `bucket` too narrows to the rows satisfying both. `total` is then the " +
@@ -2287,15 +2271,15 @@ registry.registerPath({
       name: "stage",
       required: false,
       description:
-        "Restrict the read to `sales_interest` leads standing at one or SEVERAL funnel stages, " +
+        "Restrict the read to `sales_interest` leads standing at one or SEVERAL stages, " +
         "comma-separated, read as ONE set: `conversation_reply`, `website_visit`, `signup`, " +
-        "`form_submission`, `meeting_booked`, `meeting_attended`. A stage is WHERE ON THE FUNNEL a " +
-        "`sales_interest` lead stands: the deepest funnel step known to have been reached (stated, " +
-        "implied by a later step, tracker-reported or CRM-evidenced), else the funnel's entry step " +
-        "that put them there (a positive reply on a conversation-led funnel, a click on a visit-led " +
-        "one). It is a PARTITION of `sales_interest` — one stage per lead, so somebody who attended " +
+        "`form_submission`, `meeting_booked`, `meeting_attended`. A stage is WHERE a " +
+        "`sales_interest` lead stands: the deepest step known to have been reached (stated, " +
+        "implied by the leg graph, tracker-reported or CRM-evidenced), else the campaign's entry step " +
+        "that put them there (a positive reply where its leg enters at a conversation, a click where " +
+        "it enters at the site). It is a PARTITION of `sales_interest` — one stage per lead, so somebody who attended " +
         "is under `meeting_attended` and NOT also under `meeting_booked` — which is what lets a " +
-        "board draw one column per funnel step whose sizes add up (the engagement `bucket`s are " +
+        "board draw one column per step whose sizes add up (the engagement `bucket`s are " +
         "nested and cannot). Only `sales_interest` rows carry a stage, so naming one narrows to " +
         "them. `total` is then the column's size, and GET /orgs/leads/standing-counts?breakdown=" +
         "stage answers every stage's size. Row-level, the same answer is `standing.deepestStep ?? " +
@@ -2381,9 +2365,9 @@ const LeadBucketCountsResponseSchema = z
       .openapi({
         description:
           "How many people are in each engagement bucket. Every key is ALWAYS present — a bucket " +
-          "nobody is in is 0, never absent. A consumer shows whichever of the five outcomes its " +
-          "brand's funnel prices; this read does not decide that, because a brand can run several " +
-          "funnels at once.",
+          "nobody is in is 0, never absent. A consumer shows whichever of the five outcomes it " +
+          "cares about; this read does not decide that, because a brand works several legs at " +
+          "once.",
       }),
   })
   .openapi("LeadBucketCountsResponse", {
@@ -2405,10 +2389,10 @@ registry.registerPath({
     "counted is therefore exactly the set `GET /orgs/leads` returns for those parameters, so a " +
     "tab's count and what the tab shows cannot disagree. " +
     "FRESHNESS: answered from this scope's read model, never by walking the population. A person's " +
-    "statement (a funnel step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
+    "statement (a step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
     "very next read; delivery evidence another service pushes through POST /orgs/leads/evidence-changed " +
     "(an opt-out, a classified reply) shows on the next read too; everything else (delivery evidence " +
-    "nobody pushed, new serves, a campaign's funnel) is at most 5 minutes old, enforced: a model past " +
+    "nobody pushed, new serves, a campaign's leg) is at most 5 minutes old, enforced: a model past " +
     "that is rebuilt before it is read, never served. " +
     "email-gateway unreachable is a 502 — never a count of zero.",
   parameters: [
@@ -2423,22 +2407,6 @@ registry.registerPath({
         "Restrict the counted population to one offer, exactly as on the list. Mutually exclusive " +
         "with `campaignId`. An offer no campaign sells yet counts zero, never the brand.",
       schema: { type: "string" as const },
-    },
-    {
-      in: "query" as const,
-      name: "funnelKey",
-      required: false,
-      description:
-        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
-        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
-        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
-        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
-        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
-        "current keys and their retired spellings (`reply_meeting` = " +
-        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
-        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
-        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
-      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
     },
     { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },
@@ -2528,7 +2496,7 @@ registry.registerPath({
     "whole scope again with `full: true` and `reason: feed_replaced` — replace your copy; nothing " +
     "is ever answered as a partial delta. " +
     "Same scope vocabulary and meaning as the list: `brandId`, `campaignId` (the whole campaign " +
-    "identity), `offerId` + `funnelKey`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping " +
+    "identity), `offerId`, `status`, `orgId`, `userId`, `workflowSlug`. Page-shaping " +
     "parameters (`q`, `bucket`, `standing`, `stage`, `sort`, `format`, `include`, `limit`, `offset`, " +
     "`cursor`) are a 400: the feed is always the whole scope. Gzipped when the caller accepts it. " +
     "FRESHNESS: a serve, a re-point, a status, a name, an email or an employer written here, and " +
@@ -2548,7 +2516,6 @@ registry.registerPath({
     { in: "query" as const, name: "brandId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "campaignId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const } },
-    { in: "query" as const, name: "funnelKey", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "orgId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "userId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "workflowSlug", required: false, schema: { type: "string" as const } },
@@ -2651,7 +2618,7 @@ const LeadStandingCountsResponseSchema = z
           "How many leads stand in each state. Every key is ALWAYS present — a state nobody is in " +
           "is 0, never absent, so a consumer can draw a column per state without guessing. " +
           "`unresolved` is counted like any other: it is a stated non-answer (the campaign states " +
-          "no funnel, campaign-service could not be reached, the read named no scope so the " +
+          "no leg, campaign-service could not be reached, the read named no scope so the " +
           "delivery layer was never asked), and dropping it would make the columns fail to add up " +
           "to the population they say they are showing. `opted_out` and `disqualified` are two " +
           "separate keys — the prospect's own act versus a commercial judgement of ours — so each " +
@@ -2669,15 +2636,12 @@ const LeadStandingCountsResponseSchema = z
       .openapi({
         description:
           "Present ONLY when `breakdown=stage` is asked for. The `sales_interest` leads split by " +
-          "WHERE ON THE FUNNEL they stand — the deepest funnel step known to have been reached, " +
-          "else the funnel's entry step (`conversation_reply` for a positive reply on a " +
-          "conversation-led funnel, `website_visit` for a click on a visit-led one). A PARTITION " +
-          "of `counts.sales_interest`: one stage per lead, and the counts SUM to it exactly. When " +
-          "`funnelKey` is named, every stage of that funnel is present in funnel order (0 when " +
-          "nobody stands there) — for `sales_meetings_from_conversation`: `conversation_reply`, " +
-          "`meeting_booked`, `meeting_attended`; a scope spanning several funnels also lists every " +
-          "other stage observed. The funnel's last step is never a stage (a lead who reached it is " +
-          "a `customer`). Page one stage with `GET /orgs/leads?stage=<stage>`.",
+          "WHERE they stand — the deepest step known to have been reached, else the campaign's " +
+          "entry step (`conversation_reply` for a positive reply where its leg enters at a " +
+          "conversation, `website_visit` for a click where it enters at the site). A PARTITION " +
+          "of `counts.sales_interest`: one stage per lead, and the counts SUM to it exactly. Every " +
+          "stage observed is listed, shallowest first on the leg graph. `sale` is never a stage (a " +
+          "lead who reached it is a `customer`). Page one stage with `GET /orgs/leads?stage=<stage>`.",
       }),
   })
   .openapi("LeadStandingCountsResponse", {
@@ -2706,14 +2670,14 @@ registry.registerPath({
     "counts sum to `total` exactly, and `opted_out` (the prospect's own act) is counted apart " +
     "from `disqualified` (a commercial judgement of ours) so a board can size and page each of " +
     "those two columns on its own. " +
-    "Standing is funnel-aware and per campaign — deliberately NOT the engagement-bucket " +
+    "Standing is leg-aware and per campaign — deliberately NOT the engagement-bucket " +
     "vocabulary, which asks what happened to somebody rather than where they stand; see " +
     "GET /orgs/leads/bucket-counts for that. " +
     "FRESHNESS: answered from this scope's read model, never by walking the population. A person's " +
-    "statement (a funnel step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
+    "statement (a step, close won and its withdrawal, a never, a CRM-evidenced step) shows on the " +
     "very next read; delivery evidence another service pushes through POST /orgs/leads/evidence-changed " +
     "(an opt-out, a classified reply) shows on the next read too; everything else (delivery evidence " +
-    "nobody pushed, new serves, a campaign's funnel) is at most 5 minutes old, enforced: a model past " +
+    "nobody pushed, new serves, a campaign's leg) is at most 5 minutes old, enforced: a model past " +
     "that is rebuilt before it is read, never served. " +
     "email-gateway unreachable, or a standing that cannot be resolved, is a 502 — never zeros.",
   parameters: [
@@ -2731,27 +2695,11 @@ registry.registerPath({
     },
     {
       in: "query" as const,
-      name: "funnelKey",
-      required: false,
-      description:
-        "Narrow an `offerId` read to ONE of the offer's sales funnels: only the offer's campaigns " +
-        "that STATE this funnel (campaign-service's own `funnelKey` on the campaign) are read, over " +
-        "the same campaign-id filter, dedup, delivery overlay, order and search as the offer scope. " +
-        "A campaign stating no funnel (PR, hiring, press kit, a legacy row) belongs to no funnel, " +
-        "so each funnel's population is a subset of the offer's and never inferred. Accepts the " +
-        "current keys and their retired spellings (`reply_meeting` = " +
-        "`sales_meetings_from_conversation`, `visit_meeting`, `visit_signup`, `visit_form`). " +
-        "REQUIRES `offerId` (400 without it); an unknown key is a 400. An offer with no campaign " +
-        "on that funnel answers empty, never the whole offer. Absent: the read is unchanged.",
-      schema: { type: "string" as const, example: "sales_meetings_from_conversation" },
-    },
-    {
-      in: "query" as const,
       name: "breakdown",
       required: false,
       description:
-        "`stage` adds `salesInterestStages`: the `sales_interest` count split by where on the " +
-        "funnel each lead stands (a partition — sums to `counts.sales_interest`). Absent => the " +
+        "`stage` adds `salesInterestStages`: the `sales_interest` count split by where each " +
+        "lead stands (a partition — sums to `counts.sales_interest`). Absent => the " +
         "response is exactly what it always was. Any other value is a 400.",
       schema: { type: "string" as const, enum: ["stage"] },
     },
@@ -2789,7 +2737,7 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     502: {
       description:
-        "The delivery evidence, or the funnel each campaign sells, could not be read — refused rather than answered with zeros",
+        "The delivery evidence, or the leg each campaign works, could not be read — refused rather than answered with zeros",
       content: { "application/json": { schema: ErrorResponseSchema } },
     },
   },
@@ -3656,9 +3604,9 @@ const ConvertedLeadOutcomeSchema = z
     costCents: z.number().int().nullable().openapi({
       description:
         "What the CUSTOMER states this leg cost THEM, in cents — the meeting they ran, the call they " +
-        "took, their time valued however they chose. The platform automates the first link of a sales " +
-        "funnel and the customer performs the rest, so a cost of acquisition that omits this counts only " +
-        "the link we billed for. It is NEVER platform spend: nothing here was charged to the " +
+        "took, their time valued however they chose. The platform automates the first leg and the " +
+        "customer performs the rest, so a cost of acquisition that omits this counts only " +
+        "the leg we billed for. It is NEVER platform spend: nothing here was charged to the " +
         "organisation, no platform cost was declared for it, and it is absent from their billing. 0 is " +
         "a STATED zero; null means nobody was ever asked (a tracker-reported outcome knows nothing " +
         "about a customer's spend, and so does every statement made before the cost became mandatory). " +
@@ -3852,7 +3800,7 @@ registry.registerPath({
   summary: "Which people the named campaigns' workers claimed and answered through the follow-up queue (internal, service-auth)",
   description:
     "INTERNAL (service-auth: x-api-key, no org — the brand scopes it). Built for a campaign performing an " +
-    "INTERNAL funnel leg (ai-meeting-booking): it serves no lead of its own, it CLAIMS people held by its " +
+    "INTERNAL leg (ai-meeting-booking): it serves no lead of its own, it CLAIMS people held by its " +
     "predecessor leg's campaign through claim-next and answers them, so its lifecycle rows are zero and the " +
     "only record of who crossed its leg is this ledger. Each claim that hands somebody out and each `acted` " +
     "follow-up statement is recorded in the same statement as the write, attributed to the campaign the worker " +
@@ -3935,34 +3883,12 @@ const STEP_ENUM = [
   "purchase",
 ] as const;
 
-const FUNNEL_KEY_ENUM = [
-  "sales_meetings_from_conversation",
-  "sales_meetings_from_website",
-  "website_purchases",
-  "form_magnet",
-  "sales_from_conversation",
-  "sales_meetings_from_ads",
-  "lead_forms_from_ads",
-] as const;
-
-const FunnelFieldsSchema = {
-  funnelKey: z.enum(FUNNEL_KEY_ENUM).openapi({
-    description:
-      "The sales funnel this lead's CAMPAIGN states it sells through, read from campaign-service and never inferred. It is what gives the steps an order: \"before\" and \"after\" mean nothing without knowing which funnel the lead is on.",
-    example: "sales_meetings_from_conversation",
-  }),
-  funnelSteps: z.array(z.enum(STEP_ENUM)).openapi({
-    description:
-      "That funnel's steps, IN ORDER, expressed in this service's step vocabulary. A step of the vocabulary that is not on this funnel is constrained by nothing: no funnel rule reaches it.",
-    example: ["meeting_booked", "meeting_attended", "sale"],
-  }),
-};
 
 const StepStatementRequestSchema = z
   .object({
     step: z.enum(STEP_ENUM).openapi({
       description:
-        "The funnel step being stated. \"meeting_attended\" and \"website_visit\" exist here and nowhere in the tracker: attendance happens off the client's website, and a visit is measured by the delivery layer as a click, so for both only a human can state what those signals missed. A hand-stated visit ADDS to the measured one and never suppresses it: a lead carrying both is counted once, because the hand-stated row is left out of the counts. The legacy spelling \"purchase\" is accepted and normalized to \"sale\".",
+        "The step being stated. \"meeting_attended\" and \"website_visit\" exist here and nowhere in the tracker: attendance happens off the client's website, and a visit is measured by the delivery layer as a click, so for both only a human can state what those signals missed. A hand-stated visit ADDS to the measured one and never suppresses it: a lead carrying both is counted once, because the hand-stated row is left out of the counts. The legacy spelling \"purchase\" is accepted and normalized to \"sale\".",
       example: "meeting_booked",
     }),
     kind: z.enum(["outcome", "never"]).openapi({
@@ -3978,9 +3904,9 @@ const StepStatementRequestSchema = z
     costCents: z.number().int().openapi({
       description:
         "What this step cost YOU, in cents — MANDATORY on every statement, outcome and \"never\" " +
-        "alike. The platform automates the first link of a sales funnel and you perform the rest (you " +
+        "alike. The platform automates the first leg and you perform the rest (you " +
         "run the meeting, you close the deal), so you are the only one who can say what that leg cost; " +
-        "without it a funnel's cost of acquisition counts only the link we billed for and every return " +
+        "without it a cost of acquisition counts only the leg we billed for and every return " +
         "shown for it is too good. You choose what goes in: zero, your time valued however you like, " +
         "real expenses. ZERO IS A LEGITIMATE ANSWER and reads back as a stated zero — leaving the field " +
         "out is a 400 (code cost_required), never a zero, because an absent cost and a stated zero must " +
@@ -4015,7 +3941,7 @@ const StepStatementRequestSchema = z
     }),
   })
   .openapi("LeadStepStatementRequest", {
-    description: "A statement a human makes about one step of one lead's campaign funnel.",
+    description: "A statement a human makes about one step of one lead.",
   });
 
 const StepStatementSchema = z.object({
@@ -4050,10 +3976,9 @@ const StepStatementSchema = z.object({
 const StepStatementResponseSchema = z
   .object({
     statement: StepStatementSchema,
-    ...FunnelFieldsSchema,
     retractedNever: z.boolean().optional().openapi({
       description:
-        "True when this outcome superseded at least one earlier \"never\" — for the same step (the person did the thing after all) or for a step BEFORE it on the funnel (a lead that paid necessarily got through the steps that lead to paying). The two cannot both stand, and this is the only direction that can be true — stating \"never\" for a step that already happened, or that a later step on the funnel says already happened, is a 409.",
+        "True when this outcome superseded at least one earlier \"never\" — for the same step (the person did the thing after all) or for a step every path to it goes through (a lead that attended necessarily booked). The two cannot both stand, and this is the only direction that can be true — stating \"never\" for a step that already happened, or for a step that a step only reachable through it says already happened, is a 409.",
     }),
     retractedNeverSteps: z.array(z.enum(STEP_ENUM)).optional().openapi({
       description:
@@ -4066,7 +3991,7 @@ const StepStatementResponseSchema = z
 registry.registerPath({
   method: "post",
   path: "/orgs/leads/{id}/step-statements",
-  summary: "State by hand what happened to one lead at one funnel step (or that it never will)",
+  summary: "State by hand what happened to one lead at one step (or that it never will)",
   description:
     "Organisation-authenticated (the customer dashboard and the staff console are both org-authenticated; " +
     "the publishable website-tracker token is deliberately NOT a door to this — it is write-only, " +
@@ -4104,12 +4029,12 @@ registry.registerPath({
     404: { description: "No such lead row for this org (or for the requested brand scope)" },
     409: {
       description:
-        "Cannot state \"never\" for a step that already has an outcome, or that a LATER step of the campaign's funnel says already happened (code step_already_happened); or the campaign states no sales funnel, so its steps have no order (code funnel_unstated / campaign_unknown)",
+        "Cannot state \"never\" for a step that already has an outcome, or that a step only reachable through it says already happened (code step_already_happened)",
     },
     500: { description: "Internal server error" },
     502: {
       description:
-        "campaign-service could not say which funnel the campaign sells through (code campaign_service_unavailable) — no answer is returned rather than one built on a funnel nobody stated",
+        "email-gateway could not say whether the website visit was already measured",
     },
   },
 });
@@ -4119,26 +4044,19 @@ const StepStateSchema = z
     step: z.enum(STEP_ENUM),
     state: z.enum(["outcome", "never", "pending"]).openapi({
       description:
-        "outcome — it happened, either because somebody stated it or because a LATER step of this campaign's funnel did; never — it will not happen, either stated or implied by an EARLIER step of the funnel being never; pending — neither has been stated and no funnel rule reaches it. Nothing counts a \"never\", however it arose.",
+        "outcome — it happened, either because somebody stated it or because a step only reachable through it did (a lead that attended booked); never — it will not happen, either stated or implied by a never on a step every path to it goes through; pending — neither has been stated and no rule of the leg graph reaches it. Nothing counts a \"never\", however it arose.",
     }),
     origin: z.enum(["stated", "implied"]).nullable().openapi({
       description:
-        "Whether a PERSON stated this step or the FUNNEL implies it. Null exactly when the step is pending. An implied step is not a statement somebody made: it carries no author, no note and no date, and it moves automatically when the statement that implied it is retracted or superseded.",
+        "Whether a PERSON stated this step or the LEG GRAPH implies it. Null exactly when the step is pending. An implied step is not a statement somebody made: it carries no author, no note and no date, and it moves automatically when the statement that implied it is retracted or superseded.",
     }),
     impliedBy: z.enum(STEP_ENUM).nullable().openapi({
       description:
-        "The STATED step this one follows from — a later outcome for an implied outcome, an earlier \"never\" for an implied never. Null when nothing implies it.",
+        "The STATED step this one follows from — an outcome on a step only reachable through it for an implied outcome, a \"never\" on a step every path to it goes through for an implied never. Null when nothing implies it.",
     }),
     statedState: z.enum(["outcome", "never"]).nullable().openapi({
       description:
-        "What a person actually stated about THIS step, whatever the funnel concluded — so a real statement is never lost to satisfy the funnel. A \"never\" contradicted by a later outcome reads state=outcome, origin=implied, statedState=never.",
-    }),
-    inFunnel: z.boolean().openapi({
-      description:
-        "Whether this step is part of the lead's funnel. A step outside it reads from statements alone: no funnel rule reaches it.",
-    }),
-    stepIndex: z.number().int().nullable().openapi({
-      description: "Where the step sits on the funnel, or null when the funnel does not contain it.",
+        "What a person actually stated about THIS step, whatever the leg graph concluded — so a real statement is never lost to satisfy it. A \"never\" contradicted by a later outcome reads state=outcome, origin=implied, statedState=never.",
     }),
     source: z.enum(["tracker", "manual", "crm"]).nullable().openapi({
       description:
@@ -4178,32 +4096,30 @@ const StepStatementsListSchema = z
     leadId: z.string(),
     campaignId: z.string(),
     brandId: z.string(),
-    ...FunnelFieldsSchema,
     steps: z.array(StepStateSchema).openapi({
       description:
-        "One entry per step of the outcome vocabulary, ALWAYS all of them, in a fixed order: signup, meeting_booked, form_submission, sale, meeting_attended, website_visit. Each carries the funnel's two rules already applied — a \"never\" makes every LATER step of `funnelSteps` never, an outcome makes every EARLIER one reached — with `origin` telling a stated step from an implied one. The website visit additionally reads as an outcome with source=tracker when the delivery layer already measured a click for this lead, so the panel never invites somebody to state a fact the system already holds.",
+        "One entry per step of the outcome vocabulary, ALWAYS all of them, in a fixed order: signup, meeting_booked, form_submission, sale, meeting_attended, website_visit. Each carries the leg graph's two rules already applied — a \"never\" makes every step only reachable through it never, an outcome makes every step all paths to it go through reached — with `origin` telling a stated step from an implied one. The website visit additionally reads as an outcome with source=tracker when the delivery layer already measured a click for this lead, so the panel never invites somebody to state a fact the system already holds.",
     }),
     wentCold: WentColdSchema.nullable(),
     coldRule: ColdRuleSchema,
   })
   .openapi("LeadStepStatementsResponse", {
-    description: "What is known about every step of this lead's funnel.",
+    description: "What is known about every step of this lead.",
   });
 
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/{id}/step-statements",
-  summary: "Everything known about every funnel step of one lead",
+  summary: "Everything known about every step of one lead",
   description:
     "The read behind the panel a statement is made from: one entry per step, always all of them, each " +
     "either an outcome (with the source that reported or stated it), a \"never\", or pending. A " +
     "tracker-reported outcome is attributed to the person at brand grain, a hand-stated one to the exact " +
-    "row it was stated on; both are returned here. A funnel is ORDERED, so the answer respects it: a " +
-    "\"never\" makes every LATER step of that campaign's funnel read as never, and an outcome makes every " +
-    "EARLIER one read as reached — `origin` tells a step a person STATED from one the funnel IMPLIES, and " +
-    "`statedState` keeps what somebody really said readable even where the funnel concluded otherwise. The " +
-    "step order is per FUNNEL (`funnelKey` + `funnelSteps`), read from campaign-service and never guessed: a " +
-    "campaign that states no funnel is a 409, not a made-up order.",
+    "row it was stated on; both are returned here. Steps are ordered by the LEG GRAPH, so the answer " +
+    "respects it: a \"never\" makes every step only reachable through it read as never (never booked => " +
+    "never attended), and an outcome makes every step all paths to it go through read as reached (attended " +
+    "=> booked) — `origin` tells a step a person STATED from one the graph IMPLIES, and `statedState` " +
+    "keeps what somebody really said readable even where the graph concluded otherwise.",
   request: { params: LeadRowIdPathParam },
   parameters: StepStatementOrgHeaders,
   responses: {
@@ -4214,14 +4130,10 @@ registry.registerPath({
     400: { description: "id is not a uuid" },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org (or for the requested brand scope)" },
-    409: {
-      description:
-        "The campaign states no sales funnel this service has a funnel for, so its steps have no order (code funnel_unstated / campaign_unknown)",
-    },
     500: { description: "Internal server error" },
     502: {
       description:
-        "campaign-service could not say which funnel the campaign sells through (code campaign_service_unavailable)",
+        "email-gateway could not say whether the website visit was already measured, or when the lead replied",
     },
   },
 });
@@ -4250,10 +4162,9 @@ const StepStatementWithdrawalResponseSchema = z
         "The \"never\" statements that stand again. Withdrawing an OUTCOME un-retracts the \"never\"s that outcome had superseded: they were only set aside because of a statement that no longer stands. A \"never\" somebody withdrew on its own account is left alone — that was their decision, not a consequence of this one.",
       example: ["meeting_booked"],
     }),
-    ...FunnelFieldsSchema,
     steps: z.array(StepStateSchema).openapi({
       description:
-        "Every step of this lead's funnel RE-DERIVED after the withdrawal, so a caller never guesses what its withdrawal did. The funnel's rules are computed on read, so a step that only read as reached — or as dead — because of the withdrawn statement falls back to whatever the remaining statements imply.",
+        "Every step of this lead RE-DERIVED after the withdrawal, so a caller never guesses what its withdrawal did. The leg graph's rules are computed on read, so a step that only read as reached — or as dead — because of the withdrawn statement falls back to whatever the remaining statements imply.",
     }),
   })
   .openapi("LeadStepStatementWithdrawalResponse", {
@@ -4263,7 +4174,7 @@ const StepStatementWithdrawalResponseSchema = z
 registry.registerPath({
   method: "delete",
   path: "/orgs/leads/{id}/step-statements/{step}",
-  summary: "Withdraw a statement somebody made by hand about one funnel step of one lead",
+  summary: "Withdraw a statement somebody made by hand about one step of one lead",
   description:
     "Organisation-authenticated, same tier as the write. A statement made by mistake — wrong lead, wrong " +
     "step, a misread reply — is TAKEN BACK, so the step reads exactly as it did before anybody spoke. It " +
@@ -4273,7 +4184,7 @@ registry.registerPath({
     "withdrew it both stay readable, the same posture a retraction already takes. Withdrawing an outcome " +
     "also un-retracts the \"never\"s that outcome had superseded. ONLY A STATEMENT A PERSON MADE IS " +
     "WITHDRAWABLE: a tracker-reported or delivery-measured outcome is a 409 code=not_a_statement, and a " +
-    "step nobody stated (however the funnel makes it READ) is a 409 code=nothing_stated — both " +
+    "step nobody stated (however the leg graph makes it READ) is a 409 code=nothing_stated — both " +
     "distinguishable from a 500 by their code. Idempotent: withdrawing what is already withdrawn answers " +
     "200 with alreadyWithdrawn=true and writes nothing.",
   request: {
@@ -4281,7 +4192,7 @@ registry.registerPath({
       step: z.enum(STEP_ENUM).openapi({
         param: { name: "step", in: "path" },
         description:
-          "The funnel step whose statement is being withdrawn. The legacy spelling \"purchase\" folds to \"sale\"; anything else is a 400.",
+          "The step whose statement is being withdrawn. The legacy spelling \"purchase\" folds to \"sale\"; anything else is a 400.",
         example: "meeting_booked",
       }),
     }),
@@ -4293,17 +4204,17 @@ registry.registerPath({
         "The statement was withdrawn (or was already withdrawn), with every step re-derived",
       content: { "application/json": { schema: StepStatementWithdrawalResponseSchema } },
     },
-    400: { description: "id is not a uuid, or step is not one of the funnel steps" },
+    400: { description: "id is not a uuid, or step is not one of the steps" },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org (or for the requested brand scope)" },
     409: {
       description:
-        "Nothing a person stated to withdraw: the step was reported by the tracker or measured by the delivery layer (code not_a_statement), or nobody stated it and it only READS as reached or dead because the funnel implies it from a statement on another step (code nothing_stated). Also the campaign stating no sales funnel (code funnel_unstated / campaign_unknown).",
+        "Nothing a person stated to withdraw: the step was reported by the tracker or measured by the delivery layer (code not_a_statement), or nobody stated it and it only READS as reached or dead because the leg graph implies it from a statement on another step (code nothing_stated).",
     },
     500: { description: "Internal server error" },
     502: {
       description:
-        "campaign-service could not say which funnel the campaign sells through (code campaign_service_unavailable), or email-gateway could not say whether the visit was already measured",
+        "email-gateway could not say whether the visit was already measured",
     },
   },
 });
@@ -4366,14 +4277,14 @@ const StepDisqualificationsResponseSchema = z
   .extend({
     impliedCounts: StepCountsShape.optional().openapi({
       description:
-        "Only with ?implied=true. Per step, how many DISTINCT people NOBODY stated that step for, whom a \"never\" EARLIER on their campaign's funnel makes never anyway: once a step is false, everything after it is false. Kept apart from `counts` so a reader can always tell what somebody stated from what the funnel concluded.",
+        "Only with ?implied=true. Per step, how many DISTINCT people NOBODY stated that step for, whom a \"never\" on a step every path to it goes through makes never anyway (never booked => never attended). Kept apart from `counts` so a reader can always tell what somebody stated from what the leg graph concluded.",
     }),
     impliedByStep: StepEmailsShape.optional().openapi({
       description: "Only with ?implied=true. The same canonical-email join key, for the implied set.",
     }),
     effectiveCounts: StepCountsShape.optional().openapi({
       description:
-        "Only with ?implied=true. Stated and implied together — the answer to \"is this lead dead at this step?\". A \"never\" contradicted by an outcome further down the funnel is absent here (the lead demonstrably got there) while remaining in `counts`, which is the record of what was said.",
+        "Only with ?implied=true. Stated and implied together — the answer to \"is this lead dead at this step?\". A \"never\" contradicted by an outcome only reachable through it is absent here (the lead demonstrably got there) while remaining in `counts`, which is the record of what was said.",
     }),
     effectiveByStep: StepEmailsShape.optional().openapi({
       description: "Only with ?implied=true. The same canonical-email join key, for the effective set.",
@@ -4404,7 +4315,7 @@ const StepDisqualificationsResponseSchema = z
     }),
   })
   .openapi("LeadStepDisqualificationsResponse", {
-    description: "Per-brand, who is dead at which funnel step.",
+    description: "Per-brand, who is dead at which step.",
   });
 
 // --- What the CUSTOMER spent on the legs the platform does not automate ---
@@ -4478,19 +4389,19 @@ const StepCostsResponseSchema = z
     }),
   })
   .openapi("LeadStepCostsResponse", {
-    description: "Per-brand, what the customer says each funnel leg cost them.",
+    description: "Per-brand, what the customer says each leg cost them.",
   });
 
 registry.registerPath({
   method: "get",
   path: "/internal/brands/{brandId}/step-costs",
-  summary: "What the CUSTOMER spent on each funnel leg, per statement (internal, service-auth)",
+  summary: "What the CUSTOMER spent on each leg, per statement (internal, service-auth)",
   description:
     "INTERNAL (service-auth: x-api-key — the same tier as the conversion-count reads, NO Clerk). The " +
-    "platform automates the first link of a sales funnel and bills for it; the customer performs the rest " +
+    "platform automates the first leg and bills for it; the customer performs the rest " +
     "— they run the meeting, they close the deal — so they are the only one who knows what those legs " +
-    "cost. Without this read a funnel's cost of acquisition counts only the link the platform paid for and " +
-    "every return computed for that funnel is too good. THIS IS NOT PLATFORM SPEND: nothing here was ever " +
+    "cost. Without this read a cost of acquisition counts only the leg the platform paid for and " +
+    "every return computed on it is too good. THIS IS NOT PLATFORM SPEND: nothing here was ever " +
     "charged to the organisation, no platform cost was declared for it, and none of it appears in their " +
     "billing. The set is every LIVE hand statement for the brand — outcomes and \"never\"s alike, since a " +
     "dead leg still cost — which is deliberately not the set /conversion-counts counts, and that is not a " +
@@ -4525,7 +4436,7 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/internal/brands/{brandId}/step-disqualifications",
-  summary: "People stated to never reach a funnel step, per step, for a brand (internal, service-auth)",
+  summary: "People stated to never reach a step, per step, for a brand (internal, service-auth)",
   description:
     "INTERNAL (service-auth: x-api-key — the same tier as the conversion-count reads, NO Clerk). Nothing " +
     "here is an outcome and nothing counts it as one: this is what lets a consumer separate a lead that is " +
@@ -4538,7 +4449,7 @@ registry.registerPath({
       implied: z.literal("true").optional().openapi({
         param: { name: "implied", in: "query" },
         description:
-          "Apply each lead's campaign funnel FUNNEL as well: a lead that will never book has, by the same statement, never attended and never paid. Opt-in because it needs a campaign-service read per org; without it the response is byte-identical to what this endpoint has always answered.",
+          "Apply the leg graph as well: a lead that will never book has, by the same statement, never attended. Opt-in; without it the response is byte-identical to what this endpoint has always answered.",
       }),
     }),
   },
@@ -4549,14 +4460,6 @@ registry.registerPath({
       content: { "application/json": { schema: StepDisqualificationsResponseSchema } },
     },
     401: { description: "Unauthorized" },
-    409: {
-      description:
-        "Only with ?implied=true: some of these leads belong to campaigns that state no sales funnel, so no funnel can be applied (code funnel_unstated, with the offending campaignIds)",
-    },
-    502: {
-      description:
-        "Only with ?implied=true: campaign-service could not answer (code campaign_service_unavailable)",
-    },
   },
 });
 
@@ -4872,7 +4775,7 @@ const HistorySourceStateSchema = z
   .object({
     source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content", "campaigns"]).openapi({
       description:
-        "Who owns this fact. lead-service: the lifecycle, the funnel statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`).",
+        "Who owns this fact. lead-service: the lifecycle, the step statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`).",
     }),
     status: z.enum(["ok", "unavailable", "not_asked"]).openapi({
       description:
@@ -4946,7 +4849,7 @@ const HistoryEventSchema = z
       }),
     evidence: z.enum(["observed", "asserted"]).openapi({
       description:
-        "observed: a fact we hold — a message we can produce the words of, a milestone the delivery layer measured, an outcome the tracker reported. asserted: a fact somebody stated — a recorded reply, a recorded opt-out, a hand-stated funnel step.",
+        "observed: a fact we hold — a message we can produce the words of, a milestone the delivery layer measured, an outcome the tracker reported. asserted: a fact somebody stated — a recorded reply, a recorded opt-out, a hand-stated step.",
     }),
     source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content"]),
     campaignId: z.string().nullable().openapi({
@@ -5092,7 +4995,7 @@ registry.registerPath({
     "Both directions of every exchange WITH THE MESSAGE BODIES, what we sent and when it was delivered, " +
     "what the person did, what somebody recorded by hand and who recorded it, and what it converted into — " +
     "one ordered list a consumer renders without merging anything. Every fact is asked of the service that " +
-    "owns it and none is re-derived here; no funnel or outcome logic lives in this read. A fact we HOLD and " +
+    "owns it and none is re-derived here; no step or outcome logic lives in this read. A fact we HOLD and " +
     "a fact somebody ASSERTED are distinguishable (`evidence`), and so are a reply we can produce the words " +
     "of (a `message`) and a reply somebody wrote down because it never reached us (a `reply_statement`). A " +
     "source that could not be read is stated as unreachable in `sources` and sets `complete: false`; it " +
@@ -5677,7 +5580,7 @@ registry.registerPath({
   description:
     "For a lead PAIRED with a contact in the customer's own CRM (paired only — never unconfirmed or " +
     "rejected), the steps their CRM evidences (meeting booked, meeting attended, sale) count on our " +
-    "funnel exactly like any other evidence (source crm). Per step this answers the evidence, the default " +
+    "steps exactly like any other evidence (source crm). Per step this answers the evidence, the default " +
     "rule's answer to whose win it was, a person's override if any, and which of the two stands.",
   request: { params: LeadRowIdPathParam, query: CrmAttributionBrandQuery },
   parameters: StepStatementOrgHeaders,

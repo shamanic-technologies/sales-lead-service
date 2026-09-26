@@ -6,10 +6,9 @@ import {
   earlierInstant,
   type CrmColdEligibility,
 } from "../../src/lib/lead-cold.js";
-import { resolveStepStates, type StatedNever, type StatedOutcome } from "../../src/lib/step-funnel-state.js";
+import { resolveStepStates, type StatedNever, type StatedOutcome } from "../../src/lib/step-states.js";
 import { LEAD_STEP_OUTCOMES, type LeadStepOutcomeName } from "../../src/lib/step-statements.js";
 
-const FUNNEL: LeadStepOutcomeName[] = ["meeting_booked", "meeting_attended", "sale"];
 const NOW = new Date("2026-09-26T12:00:00Z");
 const USABLE: CrmColdEligibility = {
   eligible: true,
@@ -36,7 +35,6 @@ function steps(
 ) {
   return resolveStepStates({
     allSteps: LEAD_STEP_OUTCOMES,
-    funnelSteps: FUNNEL,
     outcomes: new Map(Object.entries(outcomes) as [LeadStepOutcomeName, StatedOutcome][]),
     nevers: new Map(Object.entries(nevers) as [LeadStepOutcomeName, StatedNever][]),
   });
@@ -45,7 +43,6 @@ function steps(
 function derive(overrides: Partial<Parameters<typeof deriveWentCold>[0]> = {}) {
   return deriveWentCold({
     eligibility: USABLE,
-    funnelSteps: FUNNEL,
     steps: steps(),
     positiveReplyAt: null,
     pairingUnconfirmed: false,
@@ -170,9 +167,14 @@ describe("deriveWentCold — the owner's rule", () => {
     expect(derive({ steps: steps({ meeting_booked: outcome(null) }) })).toBeNull();
   });
 
-  it("a funnel without a meeting step is never reached by the rule", () => {
+  it("a lead who bought never reads cold, even with no meeting on record", () => {
     expect(
-      derive({ funnelSteps: ["website_visit", "signup", "sale"], positiveReplyAt: "2026-05-01T00:00:00.000Z" }),
+      derive({ steps: steps({ sale: outcome("2026-06-01T00:00:00.000Z") }), positiveReplyAt: "2026-05-01T00:00:00.000Z" }),
+    ).toBeNull();
+    expect(
+      derive({
+        steps: steps({ meeting_booked: outcome("2026-05-01T00:00:00.000Z"), sale: outcome("2026-07-01T00:00:00.000Z") }),
+      }),
     ).toBeNull();
   });
 

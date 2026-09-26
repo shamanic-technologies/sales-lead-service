@@ -5,7 +5,7 @@ import {
   evidenceFromEvents,
   crmOutcomeSignature,
 } from "../../src/lib/crm-evidence.js";
-import { resolveStepStates } from "../../src/lib/step-funnel-state.js";
+import { resolveStepStates } from "../../src/lib/step-states.js";
 import { closedDealFrom } from "../../src/lib/closed-deal.js";
 import { LEAD_STEP_OUTCOMES, statementSourceOf } from "../../src/lib/step-statements.js";
 
@@ -80,12 +80,23 @@ describe("crmCauseRule — the owner's default", () => {
   });
 });
 
-describe("a CRM-evidenced step on the funnel", () => {
+describe("a CRM-evidenced step", () => {
   it("reads as a stated outcome with source crm, and closes the deal with its whose-win", () => {
     const steps = resolveStepStates({
       allSteps: LEAD_STEP_OUTCOMES,
-      funnelSteps: ["meeting_booked", "meeting_attended", "sale"],
       outcomes: new Map([
+        [
+          "meeting_attended",
+          {
+            source: statementSourceOf("crm"),
+            valueCents: null,
+            costCents: null,
+            causedByOutreach: false,
+            note: null,
+            statedByUserId: null,
+            at: "2026-05-10T16:07:06.493Z",
+          },
+        ],
         [
           "sale",
           {
@@ -102,7 +113,7 @@ describe("a CRM-evidenced step on the funnel", () => {
       nevers: new Map(),
     });
     expect(steps.find((s) => s.step === "sale")).toMatchObject({ state: "outcome", origin: "stated", source: "crm" });
-    // A sale implies every earlier step was reached.
+    // An attended meeting implies the booking.
     expect(steps.find((s) => s.step === "meeting_booked")).toMatchObject({ state: "outcome", origin: "implied" });
     expect(closedDealFrom(steps)).toMatchObject({ source: "crm", causedByOutreach: false });
   });
@@ -110,12 +121,12 @@ describe("a CRM-evidenced step on the funnel", () => {
   it("a CRM never carries source crm, and an outcome on the same step still beats it", () => {
     const base = {
       allSteps: LEAD_STEP_OUTCOMES,
-      funnelSteps: ["meeting_booked", "meeting_attended", "sale"] as const,
       nevers: new Map([["meeting_attended" as const, { source: "crm" as const, costCents: null, note: null, statedByUserId: null, at: null }]]),
     };
     const dead = resolveStepStates({ ...base, outcomes: new Map() });
     expect(dead.find((s) => s.step === "meeting_attended")).toMatchObject({ state: "never", source: "crm" });
-    expect(dead.find((s) => s.step === "sale")).toMatchObject({ state: "never", origin: "implied" });
+    // A sale can still close off a reply with no meeting, so a meeting not held closes nothing else.
+    expect(dead.find((s) => s.step === "sale")).toMatchObject({ state: "pending" });
   });
 
   it("stored sources read back: manual, crm, anything else is the tracker", () => {
