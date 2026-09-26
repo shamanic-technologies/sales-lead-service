@@ -352,4 +352,5 @@ const UNRESOLVED_STANDING: LeadStanding = {
   reachedEntryStep: null,
   deepestStep: null,
   at: null,
+  wentCold: null,
 };

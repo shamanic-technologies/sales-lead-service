@@ -36,6 +36,11 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-funnel-state.js";
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
+import { deriveWentCold, earlierInstant, type CrmColdEligibility } from "./lead-cold.js";
+import {
+  loadCrmColdEligibility,
+  loadUnconfirmedPairingLeads,
+} from "./crm-cold-eligibility.js";
 import {
   canonicalizeStepOutcome,
   statementSourceOf,
@@ -138,6 +143,13 @@ export function createLeadStandingResolver(
     keys: Map<string, FunnelKey | null> | null;
     reason: LeadStandingUnresolvedReason | null;
   }> | null = null;
+  // Whether each brand's CRM can prove an absence, asked once per brand per resolver.
+  const coldEligibility = new Map<string, Promise<CrmColdEligibility>>();
+  const eligibilityFor = (brandId: string) => {
+    let p = coldEligibility.get(brandId);
+    if (!p) coldEligibility.set(brandId, (p = loadCrmColdEligibility(ctx.orgId, brandId)));
+    return p;
+  };
 
   return {
     async resolve(rows: StandingRow[]): Promise<Map<string, ResolvedLeadFacts>> {
@@ -181,6 +193,21 @@ export function createLeadStandingResolver(
           AND retracted_at IS NULL
           AND withdrawn_at IS NULL
       `)) as unknown as NeverRow[];
+
+      // The went-cold rule reads the row's PRIMARY brand's CRM. Nothing below costs anything for a
+      // brand whose CRM is not usable.
+      const primaryBrands = Array.from(
+        new Set(rows.map((r) => r.brandIds[0]).filter((b): b is string => Boolean(b))),
+      );
+      const eligibilityByBrand = new Map<string, CrmColdEligibility>();
+      for (const b of primaryBrands) eligibilityByBrand.set(b, await eligibilityFor(b));
+      const unconfirmedByBrand = new Map<string, Set<string>>();
+      for (const [b, e] of eligibilityByBrand) {
+        if (!e.eligible) continue;
+        const ids = Array.from(new Set(rows.filter((r) => r.brandIds[0] === b).map((r) => r.leadId)));
+        unconfirmedByBrand.set(b, await loadUnconfirmedPairingLeads(b, ids));
+      }
+      const now = new Date();
 
       const outcomesByLead = new Map<string, OutcomeRow[]>();
       for (const o of outcomeRows) {
@@ -261,11 +288,12 @@ export function createLeadStandingResolver(
         // same fact as a positive reply the delivery layer classified, so the standing reads it the
         // same way: it is what puts a lead on a conversation-led funnel. Nothing else of the
         // delivery evidence moves — an opt-out still outranks it.
-        const ledgerPositiveReply = (outcomesByLead.get(row.leadId) ?? []).some(
+        const ledgerPositiveReplies = (outcomesByLead.get(row.leadId) ?? []).filter(
           (o) =>
             o.event === CRM_POSITIVE_REPLY_STEP &&
             (o.lead_campaign_id === null || o.lead_campaign_id === row.id),
         );
+        const ledgerPositiveReply = ledgerPositiveReplies.length > 0;
         const delivery: LeadStandingDelivery = ledgerPositiveReply
           ? { ...row.delivery, replied: true, replyClassification: "positive" }
           : row.delivery;
@@ -277,8 +305,32 @@ export function createLeadStandingResolver(
           nevers,
         });
 
+        // Went cold? The owner's rule over the SAME step states, only where the CRM could have
+        // shown the step that never came (lead-cold.ts).
+        const primaryBrand = row.brandIds[0];
+        const eligibility = primaryBrand ? eligibilityByBrand.get(primaryBrand) : undefined;
+        let positiveReplyAt: string | null =
+          deliveryQueried && row.delivery.replyClassification === "positive"
+            ? (row.delivery.firstRepliedAt ?? null)
+            : null;
+        for (const o of ledgerPositiveReplies) {
+          positiveReplyAt = earlierInstant(positiveReplyAt, toIsoTimestamp(o.received_at));
+        }
+        const wentCold =
+          eligibility && funnel
+            ? deriveWentCold({
+                eligibility,
+                funnelSteps: funnel.steps,
+                steps,
+                positiveReplyAt,
+                pairingUnconfirmed: unconfirmedByBrand.get(primaryBrand!)?.has(row.leadId) ?? false,
+                now,
+              })
+            : null;
+
         out.set(row.id, {
           standing: resolveLeadStanding({
+            wentCold,
             lifecycleStatus: row.status,
             deliveryQueried,
             delivery,

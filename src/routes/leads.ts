@@ -564,6 +564,7 @@ function unresolvedFacts(): ResolvedLeadFacts {
       reachedEntryStep: null,
       deepestStep: null,
       at: null,
+      wentCold: null,
     },
     closedDeal: null,
   };

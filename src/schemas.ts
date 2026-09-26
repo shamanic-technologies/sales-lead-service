@@ -1239,6 +1239,37 @@ const ClosedDealSchema = z
       "standing is, so withdrawing or restating one moves it with no write.",
   });
 
+
+/** A lead that WENT COLD at a funnel step — derived, never stated (lead-cold.ts). */
+export const WentColdSchema = z
+  .object({
+    step: z.enum(["meeting_booked", "meeting_attended"]).openapi({
+      description: "The step the lead went cold at: the one that never came.",
+    }),
+    since: z.string().openapi({ description: "When it went cold: `stalledSince` + `afterDays`." }),
+    after: z.enum(["positive_reply", "meeting_booked"]).openapi({
+      description: "The step reached before the silence.",
+    }),
+    stalledSince: z.string().openapi({
+      description:
+        "When that step was reached (the first positive reply, or the booking's date) — the instant the silence is measured from.",
+    }),
+    afterDays: z.number().int().openapi({ description: "The window, in days (the owner's 30).", example: 30 }),
+  })
+  .openapi("LeadWentCold", {
+    description:
+      "DERIVED, never a statement and never a \"never\": a positive reply with no meeting booked within 30 days goes cold at meeting_booked; a booked meeting not attended within 30 days of its date goes cold at meeting_attended; an attended meeting never goes cold. Applies ONLY to a brand whose CRM is connected, active, synced within 48h, not failing, with stages resolved to the missing step — no CRM, nothing goes cold. A person's statement on the step (outcome or never) always wins, a lead that later progresses stops reading as cold on the next read, and a lead with a CRM candidate whose pairing is still unconfirmed is held back.",
+  });
+
+const ColdRuleSchema = z.object({
+  afterDays: z.number().int(),
+  applies: z.boolean().openapi({ description: "Whether this brand's CRM can prove an absence at all." }),
+  reason: z.string().nullable().openapi({
+    description:
+      "Why the rule does not apply: crm_never_paired | no_crm_connection | crm_not_active | crm_not_synced | crm_sync_stale | crm_sync_failing | crm_unreadable. null when it applies.",
+  }),
+});
+
 const LeadStandingSchema = z
   .object({
     state: z.enum(LEAD_STANDING_STATES as unknown as [string, ...string[]]).openapi({
@@ -1359,6 +1390,10 @@ const LeadStandingSchema = z
         description: "When the deciding statement was made, when a statement decided the state.",
         example: null,
       }),
+    wentCold: WentColdSchema.nullable().openapi({
+      description:
+        "Whether the lead WENT COLD at a step of its funnel, or null. A fact BESIDE `state`, never a state: a cold lead keeps its standing, so a board partitioned by standing is unchanged.",
+    }),
   })
   .openapi("LeadStanding", {
     description:
@@ -4148,6 +4183,8 @@ const StepStatementsListSchema = z
       description:
         "One entry per step of the outcome vocabulary, ALWAYS all of them, in a fixed order: signup, meeting_booked, form_submission, sale, meeting_attended, website_visit. Each carries the funnel's two rules already applied — a \"never\" makes every LATER step of `funnelSteps` never, an outcome makes every EARLIER one reached — with `origin` telling a stated step from an implied one. The website visit additionally reads as an outcome with source=tracker when the delivery layer already measured a click for this lead, so the panel never invites somebody to state a fact the system already holds.",
     }),
+    wentCold: WentColdSchema.nullable(),
+    coldRule: ColdRuleSchema,
   })
   .openapi("LeadStepStatementsResponse", {
     description: "What is known about every step of this lead's funnel.",
@@ -4340,6 +4377,30 @@ const StepDisqualificationsResponseSchema = z
     }),
     effectiveByStep: StepEmailsShape.optional().openapi({
       description: "Only with ?implied=true. The same canonical-email join key, for the effective set.",
+    }),
+  })
+  .extend({
+    coldCounts: z
+      .object({ meeting_booked: z.number().int(), meeting_attended: z.number().int() })
+      .openapi({
+        description:
+          "Per step, how many DISTINCT people WENT COLD there (see LeadWentCold). Derived, never a statement: kept apart from `counts`/`effectiveCounts`, which stay exactly what they were. Always zero for a brand whose CRM cannot prove an absence.",
+      }),
+    coldByStep: z
+      .object({ meeting_booked: z.array(z.string()), meeting_attended: z.array(z.string()) })
+      .openapi({ description: "The same canonical-email join key, for the cold set." }),
+    coldLeads: z.array(
+      WentColdSchema.extend({
+        leadId: z.string(),
+        leadCampaignId: z.string(),
+        campaignId: z.string(),
+        email: z.string().nullable(),
+      }),
+    ),
+    coldRule: z.object({
+      afterDays: z.number().int(),
+      applies: z.boolean(),
+      byOrg: z.array(z.object({ orgId: z.string(), applies: z.boolean(), reason: z.string().nullable() })),
     }),
   })
   .openapi("LeadStepDisqualificationsResponse", {

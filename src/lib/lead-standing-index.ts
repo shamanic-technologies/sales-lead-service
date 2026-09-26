@@ -44,6 +44,7 @@ export function standingDelivery(status: FlattenedStatus): LeadStandingDelivery 
     clicked: status.clicked,
     replied: status.replied,
     replyClassification: status.replyClassification,
+    firstRepliedAt: status.firstRepliedAt,
     disqualified: status.disqualified,
     bounced: status.bounced,
     unsubscribed: status.unsubscribed,
