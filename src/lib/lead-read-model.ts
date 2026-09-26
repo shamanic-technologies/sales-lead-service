@@ -75,12 +75,20 @@ import {
 /**
  * The ENFORCED bound on how old anything a model was built from may be. A model older than this
  * is rebuilt before it is read — never served. Five minutes: long enough that the worker's
- * two-minute refresh, plus a rebuild of the largest brand, lands well inside it, so a read waits
- * only when nobody has read that scope for a while.
+ * three-minute refresh, plus the 30s of evidence reuse, plus a refresh of the largest brand under
+ * load (~16s measured), lands well inside it, so a read waits only when the worker has fallen
+ * behind.
  */
 export const READ_MODEL_MAX_EVIDENCE_AGE_MS = 5 * 60_000;
-/** The worker rebuilds a model somebody reads once it is this old. */
-export const READ_MODEL_REFRESH_AFTER_MS = 2 * 60_000;
+/**
+ * The worker refreshes a model once its evidence is this old. Three minutes, not two: the bound
+ * above is what consumers rely on and it is unchanged; this is only how early inside it the worker
+ * starts, and every refresh re-derives the whole scope. Two minutes (effectively every 90s after
+ * evidence reuse) spent most of the box's background CPU re-deriving populations that had not
+ * moved. Do not lower it without re-measuring; do not raise it past what keeps a refresh of the
+ * largest scope inside the bound, or reads start paying the rebuild.
+ */
+export const READ_MODEL_REFRESH_AFTER_MS = 3 * 60_000;
 /**
  * A build reuses delivery evidence asked at most this long before it started — which is what lets
  * the brand model and a campaign model of the same brand share one round of questions.
@@ -312,7 +320,13 @@ function asSql(tx: postgres.TransactionSql<Record<string, never>>): typeof sql {
   return tx as unknown as typeof sql;
 }
 
-/** Write derived rows into a model (upsert: a recompute replaces a person's rows in place). */
+/**
+ * Write derived rows into a model (upsert: a recompute replaces a person's rows in place).
+ *
+ * A row whose stored value already equals the derived one is filtered out BEFORE the insert, so it
+ * is neither written nor locked: a refresh of a scope where nothing moved writes nothing. The
+ * comparison runs in Postgres, over the stored types, so it is exact to the microsecond.
+ */
 async function writeRows(
   db: typeof sql,
   modelId: string,
@@ -335,6 +349,13 @@ async function writeRows(
       ${rows.map((r) => r.stage)}::text[],
       ${rows.map((r) => r.searchText)}::text[]
     ) AS u(id, lead_id, email, created_at_text, activity_at, buckets, standing, stage, search_text)
+    LEFT JOIN lead_read_model_rows held ON held.model_id = ${modelId}::uuid AND held.id = u.id
+    WHERE held.id IS NULL
+       OR (held.lead_id, held.email, held.created_at_text, held.activity_at, held.buckets,
+           held.standing, held.stage, held.search_text)
+          IS DISTINCT FROM
+          (u.lead_id, u.email, u.created_at_text, u.activity_at, string_to_array(u.buckets, ','),
+           u.standing, u.stage, u.search_text)
     ON CONFLICT (model_id, id) DO UPDATE SET
       lead_id = EXCLUDED.lead_id,
       email = EXCLUDED.email,
@@ -401,14 +422,78 @@ async function withBuildSlot<T>(task: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Build a scope's model from scratch and swap it in.
+ * Re-derive every person of a scope that already HAS a model, writing only what changed.
  *
- * The new model is written under its own id while the old one keeps answering, then swapped in
- * one transaction. The old one is RETIRED, not deleted: a read that picked it up a moment before
- * the swap still reads a whole model rather than an emptied one; the worker deletes it once no
- * read can still hold it.
+ * The derivation is exactly a build's (same stream, same evidence, same resolver); what differs is
+ * the write. A build writes the whole population into a new model and retires the old one — on the
+ * busiest scopes that was ~50k rows inserted and later deleted every refresh, the dominant write
+ * load of the whole box, to store rows that were almost all byte-identical to the ones replaced.
+ * Here a row is written only when its derived value differs (see writeRows), a person whose winning
+ * row changed has the old row removed in the same transaction as the new one is written, and a
+ * person who left the scope is removed at the end. `evidence_at` advances only once every person
+ * has been re-derived, so the bound it states is never claimed early.
+ *
+ * A read running concurrently sees each person either before or after their re-derivation — every
+ * row it reads is a correct answer from within the bound, and a count and the page it labels are
+ * still read in one snapshot.
  */
-async function buildModel(scope: ReadModelScope, key: string): Promise<ReadModel> {
+async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
+  const { scope } = model;
+  const startedAt = Date.now();
+  // Taken BEFORE any row is read, exactly as for a build: a change from a transaction still open
+  // now is re-applied by the next catch-up.
+  const xmin = await currentXmin();
+  const evidenceAt = new Date(startedAt - EVIDENCE_REUSE_MS);
+  const resolver = resolverFor(scope);
+  const seen: string[] = [];
+  for await (const chunk of streamLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
+    const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
+    const ids = derived.map((r) => r.id);
+    await sql.begin(async (rawTx) => {
+      const tx = asSql(rawTx);
+      // A person whose winning row is now a different one keeps exactly one row.
+      await tx`
+        DELETE FROM lead_read_model_rows
+        WHERE model_id = ${model.id}
+          AND lead_id = ANY(${derived.map((r) => r.leadId)}::uuid[])
+          AND NOT (id = ANY(${ids}::uuid[]))
+      `;
+      await writeRows(tx, model.id, derived);
+    });
+    for (const id of ids) seen.push(id);
+  }
+  // Whoever is still held and was not re-derived has left the scope.
+  await sql`
+    DELETE FROM lead_read_model_rows
+    WHERE model_id = ${model.id} AND NOT (id = ANY(${seen}::uuid[]))
+  `;
+  await sql`
+    UPDATE lead_read_models
+    SET evidence_at = ${evidenceAt.toISOString()}::timestamptz, built_at = now(), applied_xmin = ${xmin}::xid8
+    WHERE id = ${model.id}
+  `;
+  console.log(
+    `[lead-read-model] refreshed org=${scope.orgId} brand=${scope.brandId ?? "-"} ` +
+      `campaigns=${scope.campaignIds?.length ?? 0} people=${seen.length} in ${Date.now() - startedAt}ms`,
+  );
+  return { ...model, evidenceAt, appliedXmin: xmin };
+}
+
+/**
+ * Bring a scope's model to a fresh derivation: refreshed IN PLACE when one exists (see
+ * refreshModelInPlace), built from scratch and swapped in when none does.
+ *
+ * A from-scratch model is written under its own id, then swapped in one transaction. A model that
+ * is replaced is RETIRED, not deleted: a read that picked it up a moment before the swap still
+ * reads a whole model rather than an emptied one; the worker deletes it once no read can still
+ * hold it.
+ */
+async function buildModel(
+  scope: ReadModelScope,
+  key: string,
+  existing: ReadModel | null,
+): Promise<ReadModel> {
+  if (existing) return withBuildSlot(() => refreshModelInPlace(existing));
   return withBuildSlot(async () => {
     const startedAt = Date.now();
     // Taken BEFORE any row is read: every change from a transaction that was still open now is
@@ -598,7 +683,7 @@ export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel>
   return withKeyLock(key, async () => {
     let model = await loadModel(key);
     if (!model || !isWithinBound(model, Date.now())) {
-      model = await buildModel(scope, key);
+      model = await buildModel(scope, key, model);
     } else {
       await catchUp(model);
     }
@@ -619,7 +704,7 @@ export async function refreshReadModel(scope: ReadModelScope): Promise<"built" |
   return withKeyLock(key, async () => {
     const model = await loadModel(key);
     if (!model || model.evidenceAt.getTime() < Date.now() - READ_MODEL_REFRESH_AFTER_MS) {
-      await buildModel(scope, key);
+      await buildModel(scope, key, model);
       return "built" as const;
     }
     await catchUp(model);

@@ -39,6 +39,7 @@ const { db, sql } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations, conversionEvents } =
   await import("../../src/db/schema.js");
 const model = await import("../../src/lib/lead-read-model.js");
+const evidence = await import("../../src/lib/lead-delivery-evidence.js");
 const { decodeLeadCursor } = await import("../../src/lib/lead-list-query.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -286,7 +287,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect(gatewayCalls).toEqual([]);
   });
 
-  it("rebuilds a model past its bound instead of serving it, and retires the old one", async () => {
+  it("refreshes a model past its bound IN PLACE instead of serving it, asking everyone again", async () => {
     const before = await model.ensureReadModel(scope);
     await sql`
       UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${before.id}
@@ -295,19 +296,86 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     await sql`
       UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}
     `;
+    evidence.resetEvidenceConfirmations();
     gatewayCalls = [];
     const after = await model.ensureReadModel(scope);
-    expect(after.id).not.toBe(before.id);
+    // Same model, re-derived where it stands: no second copy written, none retired.
+    expect(after.id).toBe(before.id);
+    expect(after.evidenceAt.getTime()).toBeGreaterThan(Date.now() - 60_000);
     expect(gatewayCalls.flat().sort()).toEqual(
       ["jane@acme.test", "john@globex.test", "ten@disco.test", "ada@engines.test"].sort(),
     );
-    const old = await sql<Array<{ scope_key: string | null; retired_at: Date | null }>>`
-      SELECT scope_key, retired_at FROM lead_read_models WHERE id = ${before.id}
+    const models = await sql<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM lead_read_models WHERE org_id = ${orgId} AND retired_at IS NOT NULL
     `;
-    expect(old[0].scope_key).toBeNull();
-    expect(old[0].retired_at).not.toBeNull();
-    // The retired model still reads whole — a read that held it across the swap is not emptied.
-    expect((await model.readModelBucketCounts(before, null)).total).toBe(4);
+    expect(models[0].n).toBe(0);
+    expect((await model.readModelBucketCounts(after, null)).total).toBe(4);
+  });
+
+  it("a refresh where nothing moved writes NO model row and NO evidence row", async () => {
+    const m = await model.ensureReadModel(scope);
+    const rowVersions = async () =>
+      sql<Array<{ id: string; x: string }>>`
+        SELECT id::text AS id, xmin::text AS x FROM lead_read_model_rows WHERE model_id = ${m.id} ORDER BY id
+      `;
+    const evidenceVersions = async () =>
+      sql<Array<{ email: string; x: string }>>`
+        SELECT email, xmin::text AS x FROM lead_delivery_evidence WHERE org_id = ${orgId} ORDER BY email
+      `;
+    const rowsBefore = await rowVersions();
+    const evidenceBefore = await evidenceVersions();
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}`;
+    const evidenceStaled = await evidenceVersions();
+    evidence.resetEvidenceConfirmations();
+    gatewayCalls = [];
+    await model.ensureReadModel(scope);
+    // Everyone was asked again (the bound demands it) ...
+    expect(gatewayCalls.flat()).toHaveLength(3 + 1);
+    // ... and since every answer and every derived row is unchanged, nothing was rewritten.
+    expect(await rowVersions()).toEqual(rowsBefore);
+    expect(await evidenceVersions()).toEqual(evidenceStaled);
+    expect(evidenceStaled).not.toEqual(evidenceBefore);
+    // The answers asked just now count as fresh: the next read asks nothing.
+    gatewayCalls = [];
+    await model.ensureReadModel(scope);
+    expect(gatewayCalls).toEqual([]);
+  });
+
+  it("a refresh picks up evidence NOBODY pushed, and writes only the person it moved", async () => {
+    const m = await model.ensureReadModel(scope);
+    const version = async (rowId: string) =>
+      (
+        await sql<Array<{ x: string }>>`
+          SELECT xmin::text AS x FROM lead_read_model_rows WHERE model_id = ${m.id} AND id = ${rowId}
+        `
+      )[0].x;
+    const adaBefore = await version(people[3].rowId);
+    const janeBefore = await version(people[0].rowId);
+    statusByEmail["ada@engines.test"] = { contacted: true, sent: true, firstSentAt: "2026-02-04T00:00:00.000Z" };
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    const after = await model.ensureReadModel(scope);
+    expect((await model.readModelBucketCounts(after, null)).counts.contacted).toBe(4);
+    expect(await version(people[3].rowId)).not.toBe(adaBefore);
+    expect(await version(people[0].rowId)).toBe(janeBefore);
+    delete statusByEmail["ada@engines.test"];
+  });
+
+  it("a refresh removes a person who left the scope without any statement", async () => {
+    const m = await model.ensureReadModel(scope);
+    await db.update(leadsCampaigns).set({ status: "skipped" }).where(eq(leadsCampaigns.id, people[2].rowId));
+    try {
+      await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+      const after = await model.ensureReadModel(scope);
+      expect(after.id).toBe(m.id);
+      expect((await model.readModelBucketCounts(after, null)).total).toBe(3);
+    } finally {
+      await db.update(leadsCampaigns).set({ status: "served" }).where(eq(leadsCampaigns.id, people[2].rowId));
+    }
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+    expect((await model.readModelBucketCounts(await model.ensureReadModel(scope), null)).total).toBe(4);
   });
 
   it("drops a person who leaves the scope on the next read after their statement moves", async () => {
