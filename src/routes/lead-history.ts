@@ -154,7 +154,9 @@ interface StatementRows {
 
 /**
  * This service's own record of the person: the outcomes and "never"s somebody STATED, and the
- * outcomes the tracker REPORTED. Filtered exactly as every other read here filters — a withdrawn
+ * outcomes the tracker REPORTED. A statement is a fact about the PERSON at the brand, whichever of
+ * their rows it was stated from, so it is read on the person exactly as the tracker's report is —
+ * never only on the rows this history happened to select. Filtered exactly as every other read here filters — a withdrawn
  * statement is the absence of one, and a retracted "never" was superseded, so neither is history a
  * consumer should render as standing.
  */
@@ -162,9 +164,7 @@ async function fetchOwnStatements(
   orgId: string,
   leadId: string,
   brandId: string,
-  leadCampaignIds: string[],
 ): Promise<StatementRows> {
-  const ids = leadCampaignIds;
 
   const outcomeRows = (await sql`
     SELECT id, event, campaign_id, received_at, value_cents, cost_cents, stated_by_user_id, note
@@ -173,7 +173,7 @@ async function fetchOwnStatements(
       AND brand_id = ${brandId}
       AND source = 'manual'
       AND withdrawn_at IS NULL
-      AND lead_campaign_id = ANY(${ids}::uuid[])
+      AND matched_lead_id = ${leadId}::uuid
   `) as unknown as Array<{
     id: string;
     event: string;
@@ -213,7 +213,7 @@ async function fetchOwnStatements(
       AND brand_id = ${brandId}
       AND retracted_at IS NULL
       AND withdrawn_at IS NULL
-      AND lead_campaign_id = ANY(${ids}::uuid[])
+      AND lead_id = ${leadId}::uuid
   `) as unknown as Array<{
     id: string;
     step: string;
@@ -412,12 +412,7 @@ router.get(
         ]);
         return { candidate, conversation, generation };
       }),
-      fetchOwnStatements(
-        req.orgId!,
-        row.lead_id,
-        brandId,
-        selected.map((candidate) => candidate.id),
-      ),
+      fetchOwnStatements(req.orgId!, row.lead_id, brandId),
       owedCampaignIds.length > 0 ? fetchAnswerers(owedCampaignIds) : Promise.resolve(null),
     ]);
 

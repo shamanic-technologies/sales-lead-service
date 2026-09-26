@@ -255,7 +255,7 @@ describe("a lead row carries where that person stands", () => {
     mockRows = [rawRow(1)];
     outcomeRows = [
       {
-        lead_campaign_id: "lc-1",
+        brand_id: BRAND,
         matched_lead_id: "lead-1",
         event: "sale",
         source: "manual",
@@ -281,7 +281,7 @@ describe("a lead row carries where that person stands", () => {
     neverRows = [
       {
         lead_id: "lead-1",
-        campaign_id: FORM_MAGNET,
+        brand_id: BRAND,
         step: "sale",
         cost_cents: 0,
         note: null,

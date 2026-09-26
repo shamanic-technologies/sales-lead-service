@@ -91,7 +91,7 @@ describe("standing.wentCold — resolved in the same pass as the standing", () =
   it("the CRM's positive reply dates the reply when the delivery layer holds none", async () => {
     outcomeRows = [
       {
-        lead_campaign_id: null,
+        brand_id: "brand-1",
         matched_lead_id: "lead-1",
         event: "positive_reply",
         source: "crm",
@@ -112,7 +112,7 @@ describe("standing.wentCold — resolved in the same pass as the standing", () =
 
   it("a booked meeting not attended reads cold at meeting_attended; attended reads nothing", async () => {
     const booked = {
-      lead_campaign_id: null,
+      brand_id: "brand-1",
       matched_lead_id: "lead-1",
       event: "meeting_booked",
       source: "crm",

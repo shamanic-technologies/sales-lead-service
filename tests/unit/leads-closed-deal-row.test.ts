@@ -213,7 +213,7 @@ describe("a lead row carries the deal, and whose win it was", () => {
 
   function saleRow(i: number, causedByOutreach: boolean | null) {
     return {
-      lead_campaign_id: `lc-${i}`,
+      brand_id: BRAND,
       matched_lead_id: `lead-${i}`,
       event: "sale",
       source: "manual",
