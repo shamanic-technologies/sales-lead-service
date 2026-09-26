@@ -1266,7 +1266,7 @@ const ColdRuleSchema = z.object({
   applies: z.boolean().openapi({ description: "Whether this brand's CRM can prove an absence at all." }),
   reason: z.string().nullable().openapi({
     description:
-      "Why the rule does not apply: crm_never_paired | no_crm_connection | crm_not_active | crm_not_synced | crm_sync_stale | crm_sync_failing | crm_unreadable. null when it applies.",
+      "Why the rule does not apply: crm_never_paired | no_crm_connection | crm_not_active | crm_not_synced | crm_sync_stale | crm_sync_failing | crm_unreadable. null when it applies. The CRM is judged on its last SUCCESSFUL sync: one failed attempt while that sync is under 6h old keeps the rule applying; past 6h it is crm_sync_failing when the sync is still failing, crm_sync_stale otherwise.",
   }),
 });
 
