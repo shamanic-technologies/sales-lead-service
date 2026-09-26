@@ -21,7 +21,8 @@
  * there is no history to order without it.
  *
  * **It costs what a page view can afford.** One email-gateway call for the person, one Gmail-mirror
- * call, one recorded-reply call, one recorded-opt-out call, and two per campaign in scope
+ * call, one recorded-reply call, one recorded-opt-out call, one campaign-service call naming who
+ * answers the follow-ups still owed (only when one is), and two per campaign in scope
  * (the messages, the copy we generated) — bounded to a handful of campaigns, six requests in
  * flight, each on its own timeout.
  */
@@ -41,6 +42,7 @@ import {
 } from "../lib/outreach-client.js";
 import { fetchMailboxConversation } from "../lib/mailbox-client.js";
 import { fetchGeneratedEmail } from "../lib/generated-email-client.js";
+import { fetchAnswerers } from "../lib/answerer-client.js";
 import {
   assembleLeadHistory,
   type HistoryCampaignInput,
@@ -384,7 +386,14 @@ router.get(
       reason: "this lead carries no registered email, so this source cannot be asked about it",
     };
 
-    const [mailbox, replyStatements, optOuts, perCampaign, own] = await Promise.all([
+    // Who will answer each follow-up still owed. Asked ONCE, for exactly the campaigns whose row
+    // holds a scheduled follow-up — the campaign the debt is filed under, never its family or
+    // brand, because that is the id the claim is keyed on.
+    const owedCampaignIds = selected
+      .filter((candidate) => candidate.followup_due_at && !candidate.followup_stopped_reason)
+      .map((candidate) => candidate.campaign_id);
+
+    const [mailbox, replyStatements, optOuts, perCampaign, own, answerers] = await Promise.all([
       email
         ? fetchMailboxConversation(email, ctx)
         : Promise.resolve(noEmail as unknown as SourceRead<null>),
@@ -409,6 +418,7 @@ router.get(
         brandId,
         selected.map((candidate) => candidate.id),
       ),
+      owedCampaignIds.length > 0 ? fetchAnswerers(owedCampaignIds) : Promise.resolve(null),
     ]);
 
     const campaigns: HistoryCampaignInput[] = perCampaign.map(
@@ -441,6 +451,7 @@ router.get(
       statedOutcomes: own.outcomes,
       statedNevers: own.nevers,
       trackerConversions: own.tracker,
+      answerers,
     });
 
     res.json({

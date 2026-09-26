@@ -73,6 +73,11 @@ vi.mock("../../src/lib/generated-email-client.js", () => ({
   fetchGeneratedEmail: (...a: unknown[]) => fetchGeneratedEmail(...a),
 }));
 
+const fetchAnswerers = vi.fn();
+vi.mock("../../src/lib/answerer-client.js", () => ({
+  fetchAnswerers: (...a: unknown[]) => fetchAnswerers(...a),
+}));
+
 const { default: leadHistoryRoutes } = await import("../../src/routes/lead-history.js");
 
 const ORG = "11111111-1111-1111-1111-111111111111";
@@ -142,9 +147,68 @@ beforeEach(() => {
   fetchOutreachOptOuts.mockReset().mockResolvedValue({ ok: true, data: [] });
   fetchMailboxConversation.mockReset().mockResolvedValue({ ok: true, data: null });
   fetchGeneratedEmail.mockReset().mockResolvedValue({ ok: true, data: null });
+  fetchAnswerers.mockReset().mockResolvedValue({ ok: true, data: new Map() });
 });
 
 describe("GET /orgs/leads/:id/history", () => {
+  it("does not ask campaign-service when nothing in scope holds a scheduled follow-up", async () => {
+    const res = await get(`/orgs/leads/${ROW}/history`);
+    expect(res.status).toBe(200);
+    expect(fetchAnswerers).not.toHaveBeenCalled();
+    expect(res.body.sources.find((s: { source: string }) => s.source === "campaigns").status).toBe("not_asked");
+  });
+
+  it("asks who answers exactly the campaign holding a scheduled follow-up, and states the answer", async () => {
+    campaignRows[0] = { ...campaignRows[0], followup_due_at: "2026-09-06 09:00:00+00" };
+    // A stopped schedule on another campaign is not asked about.
+    campaignRows[1] = {
+      ...campaignRows[1],
+      followup_due_at: "2026-09-07 09:00:00+00",
+      followup_stopped_reason: "meeting booked",
+    };
+    resolveCampaignFamily.mockResolvedValue(["camp-1", "camp-2"]);
+    fetchAnswerers.mockResolvedValue({
+      ok: true,
+      data: new Map([
+        [
+          "camp-1",
+          {
+            ok: true,
+            campaignId: "camp-1",
+            answeredBy: null,
+            absence: "no_answering_campaign",
+            startableFeatureSlugs: ["ai-meeting-booking"],
+            candidate: null,
+            candidateAnswersCampaignId: null,
+          },
+        ],
+      ]),
+    });
+    const res = await get(`/orgs/leads/${ROW}/history`);
+    expect(res.status).toBe(200);
+    expect(fetchAnswerers).toHaveBeenCalledTimes(1);
+    expect(fetchAnswerers).toHaveBeenCalledWith(["camp-1"]);
+    const scheduled = res.body.events.find(
+      (e: { type: string; state: string }) => e.type === "followup" && e.state === "scheduled",
+    );
+    expect(scheduled.answerer).toMatchObject({ state: "unanswered", absence: "no_answering_campaign" });
+    const stopped = res.body.events.find(
+      (e: { type: string; state: string }) => e.type === "followup" && e.state === "stopped",
+    );
+    expect(stopped).not.toHaveProperty("answerer");
+  });
+
+  it("an unreadable campaign-service leaves the read answering, the follow-up unknown, complete false", async () => {
+    campaignRows[0] = { ...campaignRows[0], followup_due_at: "2026-09-06 09:00:00+00" };
+    fetchAnswerers.mockResolvedValue({ ok: false, reason: "campaign-service unreachable: fetch failed" });
+    const res = await get(`/orgs/leads/${ROW}/history`);
+    expect(res.status).toBe(200);
+    expect(res.body.complete).toBe(false);
+    const scheduled = res.body.events.find((e: { type: string }) => e.type === "followup");
+    expect(scheduled.answerer.state).toBe("unknown");
+    expect(res.body.sources.find((s: { source: string }) => s.source === "campaigns").status).toBe("unavailable");
+  });
+
   it("refuses an id that is not a uuid before doing any work", async () => {
     const res = await get("/orgs/leads/not-a-uuid/history");
     expect(res.status).toBe(400);

@@ -4692,9 +4692,10 @@
               "delivery",
               "outreach",
               "mailbox",
-              "content"
+              "content",
+              "campaigns"
             ],
-            "description": "Who owns this fact. lead-service: the lifecycle, the funnel statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned."
+            "description": "Who owns this fact. lead-service: the lifecycle, the funnel statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`)."
           },
           "status": {
             "type": "string",
@@ -4963,6 +4964,9 @@
           "stoppedReason": {
             "type": "string",
             "nullable": true
+          },
+          "answerer": {
+            "$ref": "#/components/schemas/LeadHistoryFollowupAnswerer"
           }
         },
         "required": [
@@ -4973,6 +4977,101 @@
           "source",
           "campaignId",
           "direction"
+        ]
+      },
+      "LeadHistoryFollowupAnswerer": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "answered",
+              "unanswered",
+              "unknown"
+            ],
+            "description": "answered: `answeredBy` names the live campaign that will claim this follow-up. unanswered: nobody will, and `absence` says why (campaign-service's own word) — the follow-up stays owed and is claimed the moment the customer starts the answering leg. unknown: campaign-service could not be read or could not resolve this campaign; `reason` says which. Never read `unknown` as either of the other two."
+          },
+          "answeredBy": {
+            "$ref": "#/components/schemas/LeadHistoryAnsweringCampaign"
+          },
+          "absence": {
+            "type": "string",
+            "nullable": true,
+            "description": "Non-null exactly when state is unanswered: no_answering_campaign | answering_campaign_stopped | answering_campaign_serves_another | no_leg_continues | campaign_states_no_leg | campaign_states_no_offer | campaign_states_no_brand. Verbatim from campaign-service; the vocabulary may grow."
+          },
+          "startableFeatureSlugs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The features the customer could start to have this person answered. Empty when nothing can, and on unknown."
+          },
+          "candidate": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeadHistoryAnsweringCampaign"
+              },
+              {
+                "description": "For answering_campaign_stopped / answering_campaign_serves_another: the campaign on the continuing leg."
+              }
+            ]
+          },
+          "candidateAnswersCampaignId": {
+            "type": "string",
+            "nullable": true,
+            "description": "For answering_campaign_serves_another: whose people that candidate answers instead."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why the state is unknown. Null otherwise."
+          }
+        },
+        "required": [
+          "state",
+          "answeredBy",
+          "absence",
+          "startableFeatureSlugs",
+          "candidate",
+          "candidateAnswersCampaignId",
+          "reason"
+        ],
+        "description": "On a `scheduled` followup ONLY: who will actually claim and answer it. A due date alone promises nothing — the debt is claimed only by a live campaign on the continuing leg whose predecessor is exactly this campaign. Absent on a stopped followup."
+      },
+      "LeadHistoryAnsweringCampaign": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "campaignId": {
+            "type": "string"
+          },
+          "legKey": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "featureSlug": {
+            "type": "string",
+            "nullable": true
+          },
+          "acquisitionChannel": {
+            "type": "string",
+            "nullable": true
+          },
+          "workflowSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "Null for a channel the customer operates: a person answers, no workflow claims."
+          }
+        },
+        "required": [
+          "campaignId",
+          "legKey",
+          "status",
+          "featureSlug",
+          "acquisitionChannel",
+          "workflowSlug"
         ]
       },
       "CrmPairingRow": {
