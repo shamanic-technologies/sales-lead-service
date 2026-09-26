@@ -25,7 +25,23 @@
  * reply, which the delivery layer measures) and `purchase` (the direct-purchase rung, which ends in
  * `sale`).
  */
-import { LEAD_STEP_OUTCOMES, type LeadStepOutcomeName } from "./step-statements.js";
+import type { LeadStepOutcomeName } from "./step-statements.js";
+
+/**
+ * The statable steps, in this service's canonical vocabulary order — the same list as
+ * `LEAD_STEP_OUTCOMES` (tests/unit/step-states.test.ts pins the two equal). Declared here rather
+ * than imported because `step-statements.ts` reaches the database module at import time, and this
+ * graph is loaded by `schemas.ts`, which the OpenAPI generator runs inside the Docker build with no
+ * database configured.
+ */
+const LEAD_STEP_OUTCOMES: readonly LeadStepOutcomeName[] = [
+  "signup",
+  "meeting_booked",
+  "form_submission",
+  "sale",
+  "meeting_attended",
+  "website_visit",
+];
 
 /** A node of the leg graph, in the fleet's leg vocabulary. */
 export type GraphStep =

@@ -12,6 +12,7 @@ Apollo/sales-lead service — buffering, deduplication, enrichment caching, and 
 - `npm run build` — compile TypeScript + generate OpenAPI spec
 - `npm run dev` — local dev server with hot reload
 - `npm run generate:openapi` — regenerate openapi.json from Zod schemas
+  ⚠️ It runs inside the Docker build with NO database configured, so nothing `src/schemas.ts` imports (transitively) may reach `src/db/index.ts` at import time — v0.82.3 imported `LEAD_STEP_OUTCOMES` from `step-statements.ts` (-> `conversions.ts` -> db) into `step-graph.ts`, the image failed with `LEAD_SERVICE_DATABASE_URL is not set`, and `deploy.sh` kept serving the old build. Gate before shipping: `env -u LEAD_SERVICE_DATABASE_URL npm run build`. A local `generate:openapi` that needs a DB URL is this bug, not a setup quirk.
 - `npm run db:generate` — generate Drizzle migrations (⚠️ see Migrations below — do NOT use)
 - `npm run db:migrate` — run Drizzle migrations
 - `npm run db:push` — push schema directly (dev only)
