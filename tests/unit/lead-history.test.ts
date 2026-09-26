@@ -525,6 +525,142 @@ describe("assembleLeadHistory — what we owe next", () => {
   });
 });
 
+describe("assembleLeadHistory — who will answer a scheduled follow-up", () => {
+  const scheduled = campaign({ servedAt: null, followupDueAt: "2026-09-06T00:00:00.000Z", followupCount: 0 });
+  const aiLeg = {
+    campaignId: "camp-ai",
+    legKey: "ai_meeting_booking",
+    status: "ongoing",
+    featureSlug: "ai-meeting-booking",
+    acquisitionChannel: "ai_meeting_booking",
+    workflowSlug: "ai-meeting-booking-v1",
+  };
+  const followupOf = (events: unknown[]) =>
+    events.find((e) => (e as { type: string }).type === "followup") as {
+      state: string;
+      answerer?: {
+        state: string;
+        answeredBy: unknown;
+        absence: string | null;
+        startableFeatureSlugs: string[];
+        reason: string | null;
+      };
+    };
+
+  it("names the live campaign that will claim it", () => {
+    const { events, sources, complete } = assembleLeadHistory(
+      input({
+        campaigns: [scheduled],
+        answerers: {
+          ok: true,
+          data: new Map([
+            [
+              "camp-1",
+              {
+                ok: true,
+                campaignId: "camp-1",
+                answeredBy: aiLeg,
+                absence: null,
+                startableFeatureSlugs: ["ai-meeting-booking"],
+                candidate: null,
+                candidateAnswersCampaignId: null,
+              },
+            ],
+          ]),
+        },
+      }),
+    );
+    const followup = followupOf(events);
+    expect(followup.answerer!.state).toBe("answered");
+    expect(followup.answerer!.answeredBy).toEqual(aiLeg);
+    expect(followup.answerer!.absence).toBeNull();
+    expect(sources.find((s) => s.source === "campaigns")!.status).toBe("ok");
+    expect(complete).toBe(true);
+  });
+
+  it("states nobody answers, with campaign-service's own reason, and keeps the due date", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [scheduled],
+        answerers: {
+          ok: true,
+          data: new Map([
+            [
+              "camp-1",
+              {
+                ok: true,
+                campaignId: "camp-1",
+                answeredBy: null,
+                absence: "no_answering_campaign",
+                startableFeatureSlugs: ["ai-meeting-booking"],
+                candidate: null,
+                candidateAnswersCampaignId: null,
+              },
+            ],
+          ]),
+        },
+      }),
+    );
+    const followup = followupOf(events) as ReturnType<typeof followupOf> & { dueAt: string };
+    expect(followup.state).toBe("scheduled");
+    expect(followup.dueAt).toBe("2026-09-06T00:00:00.000Z");
+    expect(followup.answerer!.state).toBe("unanswered");
+    expect(followup.answerer!.absence).toBe("no_answering_campaign");
+    expect(followup.answerer!.startableFeatureSlugs).toEqual(["ai-meeting-booking"]);
+  });
+
+  it("an unreadable campaign-service is UNKNOWN — never answered, never nobody — and the read is incomplete", () => {
+    const { events, sources, complete } = assembleLeadHistory(
+      input({
+        campaigns: [scheduled],
+        answerers: { ok: false, reason: "campaign-service unreachable: fetch failed" },
+      }),
+    );
+    const followup = followupOf(events);
+    expect(followup.answerer!.state).toBe("unknown");
+    expect(followup.answerer!.answeredBy).toBeNull();
+    expect(followup.answerer!.absence).toBeNull();
+    expect(followup.answerer!.reason).toContain("unreachable");
+    expect(sources.find((s) => s.source === "campaigns")!.status).toBe("unavailable");
+    expect(complete).toBe(false);
+  });
+
+  it("a campaign campaign-service could not resolve is unknown, naming why", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [scheduled],
+        answerers: {
+          ok: true,
+          data: new Map([
+            ["camp-1", { ok: false, campaignId: "camp-1", status: 409, reason: "unpublished_leg", error: "x" }],
+          ]),
+        },
+      }),
+    );
+    const followup = followupOf(events);
+    expect(followup.answerer!.state).toBe("unknown");
+    expect(followup.answerer!.reason).toContain("409");
+  });
+
+  it("a stopped follow-up carries no answerer and campaign-service is not claimed as asked", () => {
+    const { events, sources } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            followupDueAt: "2026-05-01T00:00:00.000Z",
+            followupStoppedReason: "they replied",
+            followupLastActionAt: "2026-04-20T00:00:00.000Z",
+          }),
+        ],
+        answerers: null,
+      }),
+    );
+    expect(followupOf(events)).not.toHaveProperty("answerer");
+    expect(sources.find((s) => s.source === "campaigns")!.status).toBe("not_asked");
+  });
+});
+
 describe("assembleLeadHistory — the copy we produced", () => {
   it("carries the words and the planned cadence, tagged to the campaign", () => {
     const { events } = assembleLeadHistory(

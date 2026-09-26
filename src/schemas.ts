@@ -4809,9 +4809,9 @@ registry.registerPath({
 
 const HistorySourceStateSchema = z
   .object({
-    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content"]).openapi({
+    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content", "campaigns"]).openapi({
       description:
-        "Who owns this fact. lead-service: the lifecycle, the funnel statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned.",
+        "Who owns this fact. lead-service: the lifecycle, the funnel statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`).",
     }),
     status: z.enum(["ok", "unavailable", "not_asked"]).openapi({
       description:
@@ -4822,6 +4822,43 @@ const HistorySourceStateSchema = z
     }),
   })
   .openapi("LeadHistorySourceState");
+
+const AnsweringCampaignSchema = z
+  .object({
+    campaignId: z.string(),
+    legKey: z.string(),
+    status: z.string(),
+    featureSlug: z.string().nullable(),
+    acquisitionChannel: z.string().nullable(),
+    workflowSlug: z.string().nullable().openapi({
+      description: "Null for a channel the customer operates: a person answers, no workflow claims.",
+    }),
+  })
+  .openapi("LeadHistoryAnsweringCampaign");
+
+const FollowupAnswererSchema = z
+  .object({
+    state: z.enum(["answered", "unanswered", "unknown"]).openapi({
+      description:
+        "answered: `answeredBy` names the live campaign that will claim this follow-up. unanswered: nobody will, and `absence` says why (campaign-service's own word) — the follow-up stays owed and is claimed the moment the customer starts the answering leg. unknown: campaign-service could not be read or could not resolve this campaign; `reason` says which. Never read `unknown` as either of the other two.",
+    }),
+    answeredBy: AnsweringCampaignSchema.nullable(),
+    absence: z.string().nullable().openapi({
+      description:
+        "Non-null exactly when state is unanswered: no_answering_campaign | answering_campaign_stopped | answering_campaign_serves_another | no_leg_continues | campaign_states_no_leg | campaign_states_no_offer | campaign_states_no_brand. Verbatim from campaign-service; the vocabulary may grow.",
+    }),
+    startableFeatureSlugs: z.array(z.string()).openapi({
+      description: "The features the customer could start to have this person answered. Empty when nothing can, and on unknown.",
+    }),
+    candidate: AnsweringCampaignSchema.nullable().openapi({
+      description: "For answering_campaign_stopped / answering_campaign_serves_another: the campaign on the continuing leg.",
+    }),
+    candidateAnswersCampaignId: z.string().nullable().openapi({
+      description: "For answering_campaign_serves_another: whose people that candidate answers instead.",
+    }),
+    reason: z.string().nullable().openapi({ description: "Why the state is unknown. Null otherwise." }),
+  })
+  .openapi("LeadHistoryFollowupAnswerer");
 
 const HistoryEventSchema = z
   .object({
@@ -4950,6 +4987,10 @@ const HistoryEventSchema = z
     }),
     followupCount: z.number().optional(),
     stoppedReason: z.string().nullable().optional(),
+    answerer: FollowupAnswererSchema.optional().openapi({
+      description:
+        "On a `scheduled` followup ONLY: who will actually claim and answer it. A due date alone promises nothing — the debt is claimed only by a live campaign on the continuing leg whose predecessor is exactly this campaign. Absent on a stopped followup.",
+    }),
   })
   .openapi("LeadHistoryEvent");
 

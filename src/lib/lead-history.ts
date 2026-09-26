@@ -57,6 +57,7 @@
  *     out from what we wrote), because a destination we measured and one we reasoned to are not
  *     the same claim.
  */
+import type { AnswererEntry, AnsweringCampaign } from "./answerer-client.js";
 import type { FlattenedStatus } from "./delivery-flatten.js";
 import type { GeneratedEmail } from "./generated-email-client.js";
 import type { MailboxConversation } from "./mailbox-client.js";
@@ -76,6 +77,7 @@ export const HISTORY_SOURCES = [
   "outreach",
   "mailbox",
   "content",
+  "campaigns",
 ] as const;
 export type HistorySource = (typeof HISTORY_SOURCES)[number];
 
@@ -238,6 +240,37 @@ export interface HistoryFollowupEvent extends HistoryEventBase {
   dueAt: string | null;
   followupCount: number;
   stoppedReason: string | null;
+  /** Present ONLY on a `scheduled` follow-up: who will actually claim and answer it. A stopped
+   * follow-up is byte-identical to what it always was. */
+  answerer?: FollowupAnswerer;
+}
+
+/**
+ * WHO WILL ANSWER A SCHEDULED FOLLOW-UP, as campaign-service states it.
+ *
+ * The debt sits on the campaign that reached the person and is claimed only by a live campaign on
+ * the continuing leg whose predecessor is exactly that campaign. So a due date alone promises
+ * nothing: five people waited up to twenty days under "Next follow-up due now" with nobody able to
+ * claim them. Three states, never collapsed:
+ * - `answered`: `answeredBy` names the live campaign that will claim it.
+ * - `unanswered`: nobody will, and `absence` is campaign-service's own reason, verbatim
+ *   (`no_answering_campaign`, `answering_campaign_stopped`, `answering_campaign_serves_another`,
+ *   `no_leg_continues`, `campaign_states_no_leg|offer|brand`). `startableFeatureSlugs` names what
+ *   the customer could start to have them answered. The debt stays owed either way.
+ * - `unknown`: the question could not be answered (campaign-service unreachable, or it could not
+ *   resolve this campaign) — `reason` says why. Never read as either of the other two.
+ */
+export interface FollowupAnswerer {
+  state: "answered" | "unanswered" | "unknown";
+  answeredBy: AnsweringCampaign | null;
+  absence: string | null;
+  startableFeatureSlugs: string[];
+  /** For `answering_campaign_stopped` / `_serves_another`: the campaign on the continuing leg. */
+  candidate: AnsweringCampaign | null;
+  /** For `answering_campaign_serves_another`: whose people that candidate answers instead. */
+  candidateAnswersCampaignId: string | null;
+  /** Why the answer is `unknown`. Null otherwise. */
+  reason: string | null;
 }
 
 export type HistoryEvent =
@@ -317,6 +350,9 @@ export interface AssembleHistoryInput {
   statedOutcomes: HistoryStatedOutcome[];
   statedNevers: HistoryStatedNever[];
   trackerConversions: HistoryTrackerConversion[];
+  /** campaign-service's answer to "who answers the follow-ups these campaigns hold", keyed by
+   * campaign id. Null when nothing in scope holds a scheduled follow-up, so it was not asked. */
+  answerers?: SourceRead<Map<string, AnswererEntry>> | null;
 }
 
 export interface AssembledHistory {
@@ -422,6 +458,48 @@ function clickDestinationOf(index: LinkDestinationIndex | undefined): ClickDesti
 function generatedBodyStatus(bodyText: string | null): "ok" | "empty" | "unavailable" {
   if (bodyText === null || bodyText === undefined) return "unavailable";
   return bodyText.trim().length > 0 ? "ok" : "empty";
+}
+
+function unknownAnswerer(reason: string): FollowupAnswerer {
+  return {
+    state: "unknown",
+    answeredBy: null,
+    absence: null,
+    startableFeatureSlugs: [],
+    candidate: null,
+    candidateAnswersCampaignId: null,
+    reason,
+  };
+}
+
+/** campaign-service's entry for one campaign, as the follow-up states it. Pure translation: the
+ * verdict is campaign-service's, nothing is re-derived. */
+export function followupAnswererOf(
+  read: SourceRead<Map<string, AnswererEntry>> | null | undefined,
+  campaignId: string,
+): FollowupAnswerer {
+  if (!read) return unknownAnswerer("campaign-service was not asked who answers this campaign");
+  if (!read.ok) return unknownAnswerer(read.reason);
+  const entry = read.data.get(campaignId);
+  if (!entry) return unknownAnswerer("campaign-service returned no answer for this campaign");
+  if (!entry.ok) {
+    return unknownAnswerer(`campaign-service could not resolve this campaign (${entry.status} ${entry.reason})`);
+  }
+  const common = {
+    startableFeatureSlugs: entry.startableFeatureSlugs ?? [],
+    candidate: entry.candidate ?? null,
+    candidateAnswersCampaignId: entry.candidateAnswersCampaignId ?? null,
+    reason: null,
+  };
+  if (entry.answeredBy) {
+    return { state: "answered", answeredBy: entry.answeredBy, absence: null, ...common };
+  }
+  if (entry.absence) {
+    return { state: "unanswered", answeredBy: null, absence: entry.absence, ...common };
+  }
+  // The contract says `absence` is non-null exactly when `answeredBy` is null. A body breaking it
+  // answers nothing we can state.
+  return unknownAnswerer("campaign-service named neither an answering campaign nor an absence");
 }
 
 export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHistory {
@@ -691,6 +769,12 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
         stoppedReason: campaign.followupStoppedReason,
       });
     } else if (campaign.followupDueAt) {
+      const answerer = followupAnswererOf(input.answerers, campaign.campaignId);
+      if (answerer.state === "unknown") {
+        noteSource("campaigns", "unavailable", answerer.reason);
+      } else {
+        noteSource("campaigns", "ok", null);
+      }
       events.push({
         id: `followup:${campaign.leadCampaignId}:scheduled`,
         at: campaign.followupLastActionAt ?? campaign.followupDueAt,
@@ -703,6 +787,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
         dueAt: campaign.followupDueAt,
         followupCount: campaign.followupCount,
         stoppedReason: null,
+        answerer,
       });
     }
   }
