@@ -9,9 +9,16 @@
  *     single call that returns every campaign of the org), not once per row and not once per chunk.
  *     A brand with 57k rows across a dozen campaigns therefore costs exactly one call. The leg says
  *     where the campaign's leads step onto the leg graph (step-graph.ts).
- *   - WHAT somebody stated about each row's steps. Two indexed reads per chunk, batched over the
+ *   - WHAT somebody stated about each row's PERSON. Two indexed reads per chunk, batched over the
  *     chunk's lead ids: the outcome ledger (`conversion_events`) and the disqualification table,
  *     filtered exactly as the panel filters them so the two surfaces cannot disagree.
+ *
+ * A statement is a fact about the PERSON at the BRAND, never about the membership row it was
+ * clicked from. One campaign as the customer knows it is often many stored rows (campaign-service
+ * used to mint a new row on every workflow switch), so a sale stated from one row must read as a
+ * sale on every row of that person — exactly as a tracker or CRM event, which names no row, always
+ * did. Reading it only on the row it names is what showed a won customer as a live prospect on the
+ * row the board happened to surface, while the buckets (keyed on the person) said they had bought.
  *
  * The measured website visit is folded in from the delivery overlay the caller already fetched —
  * a click on the email we sent IS the automatic half of `website_visit`, and the panel folds the
@@ -68,7 +75,7 @@ export interface StandingRow {
 }
 
 interface OutcomeRow {
-  lead_campaign_id: string | null;
+  brand_id: string;
   matched_lead_id: string;
   event: string;
   source: string;
@@ -82,7 +89,7 @@ interface OutcomeRow {
 
 interface NeverRow {
   lead_id: string;
-  campaign_id: string;
+  brand_id: string;
   step: string;
   source: string | null;
   cost_cents: number | null;
@@ -161,17 +168,15 @@ export function createLeadStandingResolver(
       const { legs, reason: legsFailure } = await campaignLegs;
 
       const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
-      const campaignIds = Array.from(new Set(rows.map((r) => r.campaignId)));
       const brandIds = Array.from(new Set(rows.flatMap((r) => r.brandIds)));
 
-      // Outcomes credited to these people for these brands. A hand-stated one is keyed to the row
-      // it was stated on; a tracker-reported one knows only the brand, so it is matched on the
-      // lead — exactly the pairing the one-lead panel reads.
+      // Outcomes credited to these people for these brands — hand-stated, tracker-reported or
+      // CRM-evidenced alike, all matched on the PERSON and the brand, exactly as the panel reads.
       const outcomeRows =
         brandIds.length === 0
           ? []
           : ((await db.execute(sql`
-              SELECT lead_campaign_id, matched_lead_id, event, source, value_cents, cost_cents,
+              SELECT brand_id, matched_lead_id, event, source, value_cents, cost_cents,
                      caused_by_outreach, note, stated_by_user_id, received_at
               FROM conversion_events
               WHERE brand_id = ANY(${sql.param(brandIds)}::text[])
@@ -184,16 +189,22 @@ export function createLeadStandingResolver(
             `)) as unknown as OutcomeRow[]);
 
       // Retracted and withdrawn statements are excluded: kept for the record, not read as live.
-      const neverRows = (await db.execute(sql`
-        SELECT lead_id, campaign_id, step, source, cost_cents, note, stated_by_user_id,
+      // Keyed on the person and the brand, like the outcomes: a "never" stated from any row of the
+      // person answers for all of them. A person's own statement answers before their CRM's.
+      const neverRows =
+        brandIds.length === 0
+          ? []
+          : ((await db.execute(sql`
+        SELECT lead_id, brand_id, step, source, cost_cents, note, stated_by_user_id,
                -- A CRM "never" is dated by the CRM or not at all — never by when we synced it.
                CASE WHEN source = 'crm' THEN occurred_at ELSE updated_at END AS updated_at
         FROM lead_step_disqualifications
         WHERE lead_id = ANY(${sql.param(leadIds)}::uuid[])
-          AND campaign_id = ANY(${sql.param(campaignIds)}::text[])
+          AND brand_id = ANY(${sql.param(brandIds)}::text[])
           AND retracted_at IS NULL
           AND withdrawn_at IS NULL
-      `)) as unknown as NeverRow[];
+        ORDER BY (source = 'crm') ASC, updated_at DESC NULLS LAST
+      `)) as unknown as NeverRow[]);
 
       // The went-cold rule reads the row's PRIMARY brand's CRM. Nothing below costs anything for a
       // brand whose CRM is not usable.
@@ -216,12 +227,11 @@ export function createLeadStandingResolver(
         if (list) list.push(o);
         else outcomesByLead.set(o.matched_lead_id, [o]);
       }
-      const neversByRow = new Map<string, NeverRow[]>();
+      const neversByLead = new Map<string, NeverRow[]>();
       for (const n of neverRows) {
-        const key = `${n.lead_id}:${n.campaign_id}`;
-        const list = neversByRow.get(key);
+        const list = neversByLead.get(n.lead_id);
         if (list) list.push(n);
-        else neversByRow.set(key, [n]);
+        else neversByLead.set(n.lead_id, [n]);
       }
 
       for (const row of rows) {
@@ -233,11 +243,12 @@ export function createLeadStandingResolver(
           ? null
           : (legsFailure ?? (legs && !legs.has(row.campaignId) ? "campaign_unknown" : "leg_unstated"));
 
-        // Rows arrive newest first, so the first one seen for a step is the one that answers. A
-        // hand-stated outcome is only this row's when it names this row; a tracker one names none.
+        // Rows arrive newest first, so the first one seen for a step is the one that answers. Any
+        // statement about this person under one of this row's brands answers, whichever of the
+        // person's rows it was stated from.
         const outcomes = new Map<LeadStepOutcomeName, StatedOutcome>();
         for (const o of outcomesByLead.get(row.leadId) ?? []) {
-          if (o.lead_campaign_id !== null && o.lead_campaign_id !== row.id) continue;
+          if (!row.brandIds.includes(o.brand_id)) continue;
           const step = canonicalizeStepOutcome(o.event);
           if (!step || outcomes.has(step)) continue;
           outcomes.set(step, {
@@ -267,9 +278,10 @@ export function createLeadStandingResolver(
         }
 
         const nevers = new Map<LeadStepOutcomeName, StatedNever>();
-        for (const n of neversByRow.get(`${row.leadId}:${row.campaignId}`) ?? []) {
+        for (const n of neversByLead.get(row.leadId) ?? []) {
+          if (!row.brandIds.includes(n.brand_id)) continue;
           const step = canonicalizeStepOutcome(n.step);
-          if (!step) continue;
+          if (!step || nevers.has(step)) continue;
           nevers.set(step, {
             source: n.source === "crm" ? "crm" : "manual",
             costCents: n.cost_cents,
@@ -285,8 +297,7 @@ export function createLeadStandingResolver(
         // delivery evidence moves — an opt-out still outranks it.
         const ledgerPositiveReplies = (outcomesByLead.get(row.leadId) ?? []).filter(
           (o) =>
-            o.event === CRM_POSITIVE_REPLY_STEP &&
-            (o.lead_campaign_id === null || o.lead_campaign_id === row.id),
+            o.event === CRM_POSITIVE_REPLY_STEP && row.brandIds.includes(o.brand_id),
         );
         const ledgerPositiveReply = ledgerPositiveReplies.length > 0;
         const delivery: LeadStandingDelivery = ledgerPositiveReply

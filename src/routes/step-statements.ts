@@ -315,9 +315,9 @@ router.post(
         }
       }
 
-      // Exactly the outcomes the READ answers with for this lead: a hand-stated one is keyed to
-      // the row it was stated on, a tracker-reported one knows only the brand. Asking a narrower
-      // question here than the read asks is how the panel and the write path come to disagree.
+      // Exactly the outcomes the READ answers with for this person at this brand, whichever of
+      // their rows each was stated from. Asking a narrower question here than the read asks is how
+      // the panel and the write path come to disagree.
       const existingOutcome = (await db.execute(sql`
         SELECT event
         FROM conversion_events
@@ -325,7 +325,6 @@ router.post(
           AND matched_lead_id = ${row.lead_id}
           AND attribution_status = 'attributed'
           AND withdrawn_at IS NULL
-          AND (lead_campaign_id IS NULL OR lead_campaign_id = ${row.id})
           AND event = ANY(${sql.param(blockedBy)}::text[])
         LIMIT 1
       `)) as unknown as Array<{ event: string }>;
@@ -342,44 +341,89 @@ router.post(
         return;
       }
 
+      // A "never" is a fact about the PERSON at the brand. If this person already carries one a
+      // person stated for this step — from ANY of their rows, live or not — this is that statement,
+      // restated: it is updated where it stands rather than written a second time (a second row
+      // would count its cost twice). Otherwise it is written on this row, taking over a CRM
+      // "never" on this campaign if there is one. One statement, so there is no gap between
+      // looking and writing.
       const inserted = (await db.execute(sql`
-        INSERT INTO lead_step_disqualifications (
-          lead_id, lead_campaign_id, campaign_id, brand_id, org_id, step, cost_cents, note,
-          stated_by_user_id
-        ) VALUES (
-          ${row.lead_id}, ${row.id}, ${row.campaign_id}, ${brandId}, ${req.orgId!}, ${step},
-          ${costCents}, ${body.note ?? null}, ${statedBy}
+        WITH prior AS (
+          SELECT id
+          FROM lead_step_disqualifications
+          WHERE brand_id = ${brandId}
+            AND lead_id = ${row.lead_id}
+            AND step = ${step}
+            AND source = 'manual'
+          ORDER BY (retracted_at IS NULL AND withdrawn_at IS NULL) DESC,
+                   (campaign_id = ${row.campaign_id}) DESC,
+                   updated_at DESC
+          LIMIT 1
+        ),
+        restated AS (
+          UPDATE lead_step_disqualifications SET
+            cost_cents = ${costCents},
+            note = ${body.note ?? null},
+            stated_by_user_id = ${statedBy},
+            retracted_at = NULL,
+            retracted_by_step = NULL,
+            retracted_by_user_id = NULL,
+            withdrawn_at = NULL,
+            withdrawn_by_user_id = NULL,
+            updated_at = now()
+          WHERE id IN (SELECT id FROM prior)
+          RETURNING id, lead_campaign_id, campaign_id, cost_cents, created_at, updated_at
+        ),
+        written AS (
+          INSERT INTO lead_step_disqualifications (
+            lead_id, lead_campaign_id, campaign_id, brand_id, org_id, step, cost_cents, note,
+            stated_by_user_id
+          )
+          SELECT
+            ${row.lead_id}::uuid, ${row.id}::uuid, ${row.campaign_id}, ${brandId}, ${req.orgId!},
+            ${step}, ${costCents}::int, ${body.note ?? null}::text, ${statedBy}::text
+          WHERE NOT EXISTS (SELECT 1 FROM prior)
+          ON CONFLICT (lead_id, campaign_id, step) DO UPDATE SET
+            -- A person stating "never" on a step their CRM also evidences as dead makes it THEIR
+            -- statement: a person outranks the CRM, and only a person's statement is withdrawable.
+            source = 'manual',
+            occurred_at = NULL,
+            crm_evidence = NULL,
+            cost_cents = EXCLUDED.cost_cents,
+            note = EXCLUDED.note,
+            stated_by_user_id = EXCLUDED.stated_by_user_id,
+            lead_campaign_id = EXCLUDED.lead_campaign_id,
+            brand_id = EXCLUDED.brand_id,
+            -- Restating a "never" that was retracted by an outcome makes it live again: the person
+            -- changed their mind again, and the row is the same statement, restated.
+            retracted_at = NULL,
+            retracted_by_step = NULL,
+            retracted_by_user_id = NULL,
+            -- Restating a statement its author had WITHDRAWN makes it live again: the withdrawal
+            -- said "I never should have stated this", and this is them stating it after all.
+            withdrawn_at = NULL,
+            withdrawn_by_user_id = NULL,
+            updated_at = now()
+          RETURNING id, lead_campaign_id, campaign_id, cost_cents, created_at, updated_at
         )
-        ON CONFLICT (lead_id, campaign_id, step) DO UPDATE SET
-          -- A person stating "never" on a step their CRM also evidences as dead makes it THEIR
-          -- statement: a person outranks the CRM, and only a person's statement is withdrawable.
-          source = 'manual',
-          occurred_at = NULL,
-          crm_evidence = NULL,
-          cost_cents = EXCLUDED.cost_cents,
-          note = EXCLUDED.note,
-          stated_by_user_id = EXCLUDED.stated_by_user_id,
-          lead_campaign_id = EXCLUDED.lead_campaign_id,
-          brand_id = EXCLUDED.brand_id,
-          -- Restating a "never" that was retracted by an outcome makes it live again: the person
-          -- changed their mind again, and the row is the same statement, restated.
-          retracted_at = NULL,
-          retracted_by_step = NULL,
-          retracted_by_user_id = NULL,
-          -- Restating a statement its author had WITHDRAWN makes it live again: the withdrawal
-          -- said "I never should have stated this", and this is them stating it after all.
-          withdrawn_at = NULL,
-          withdrawn_by_user_id = NULL,
-          updated_at = now()
-        RETURNING id, cost_cents, created_at, updated_at
-      `)) as unknown as Array<{ id: string; created_at: Date | string; updated_at: Date | string }>;
+        SELECT * FROM restated
+        UNION ALL
+        SELECT * FROM written
+      `)) as unknown as Array<{
+        id: string;
+        lead_campaign_id: string;
+        campaign_id: string;
+        created_at: Date | string;
+        updated_at: Date | string;
+      }>;
 
       res.status(201).json({
         statement: {
           id: inserted[0].id,
-          leadCampaignId: row.id,
+          // The row the statement stands on — the one it was first stated from when it is a restatement.
+          leadCampaignId: inserted[0].lead_campaign_id,
           leadId: row.lead_id,
-          campaignId: row.campaign_id,
+          campaignId: inserted[0].campaign_id,
           brandId,
           step,
           kind: "never",
@@ -405,6 +449,8 @@ router.post(
     // makes this auditable, and it must survive being superseded. Every read filters it out, so
     // nothing counts it and nothing shows it as live.
     const supersedes = [...stepsRequiredBefore(step), step];
+    // Every "never" this person carries at this brand, whichever row it was stated from: the fact
+    // contradicts them all.
     const retracted = (await db.execute(sql`
       UPDATE lead_step_disqualifications
       SET retracted_at = now(),
@@ -412,12 +458,31 @@ router.post(
           retracted_by_user_id = ${statedBy},
           updated_at = now()
       WHERE lead_id = ${row.lead_id}
-        AND campaign_id = ${row.campaign_id}
+        AND brand_id = ${brandId}
         AND step = ANY(${sql.param(supersedes)}::text[])
         AND retracted_at IS NULL
         AND withdrawn_at IS NULL
       RETURNING step
     `)) as unknown as Array<{ step: string }>;
+
+    // A hand-stated outcome is a fact about the PERSON at the brand. If this person already
+    // carries one for this step — stated from ANOTHER of their rows, live or withdrawn — this is
+    // that statement, restated: the insert takes that row's signature, so the upsert corrects it
+    // in place. A second row would count the same deal twice in every count and every money
+    // figure. Resolved inside the one statement, so there is no gap between looking and writing.
+    const spellings = step === "sale" ? ["sale", "purchase"] : [step];
+    const signature = sql`COALESCE(
+      (SELECT prior.dedupe_signature
+       FROM conversion_events prior
+       WHERE prior.brand_id = ${brandId}
+         AND prior.matched_lead_id = ${row.lead_id}
+         AND prior.source = 'manual'
+         AND prior.dedupe_signature IS NOT NULL
+         AND prior.event = ANY(${sql.param(spellings)}::text[])
+       ORDER BY (prior.withdrawn_at IS NULL) DESC, prior.received_at DESC NULLS LAST
+       LIMIT 1),
+      ${manualOutcomeSignature(row.id, step)}
+    )`;
 
     // Written into conversion_events — the ledger the counts already read — so a hand-stated
     // outcome moves the brand's numbers with no consumer change. match_* records how the identity
@@ -429,7 +494,7 @@ router.post(
         attribution_status, candidate_count, received_at, source, campaign_id, lead_campaign_id,
         stated_by_user_id, note
       ) VALUES (
-        ${brandId}, ${req.orgId!}, ${step}, ${manualOutcomeSignature(row.id, step)},
+        ${brandId}, ${req.orgId!}, ${step}, ${signature},
         ${body.valueCents ?? null}, ${costCents}, ${body.causedByOutreach ?? null},
         ${body.causedByOutreach ?? null},
         ${row.lead_id}, 'manual', 'deterministic',
@@ -456,7 +521,9 @@ router.post(
         note = EXCLUDED.note,
         received_at = EXCLUDED.received_at,
         stated_by_user_id = EXCLUDED.stated_by_user_id,
+        event = EXCLUDED.event,
         campaign_id = EXCLUDED.campaign_id,
+        lead_campaign_id = EXCLUDED.lead_campaign_id,
         -- Restating a withdrawn outcome revives the same row: the withdrawal is the absence of a
         -- statement, and this is the statement being made again.
         withdrawn_at = NULL,
@@ -514,8 +581,8 @@ async function loadStepStates(
   brandId: string,
   orgId: string,
 ) {
-  // Outcomes credited to this person for this brand. A hand-stated one is keyed to the row it
-  // was stated on; a tracker-reported one knows only the brand, so it is matched on the lead.
+  // Outcomes credited to this PERSON for this brand — hand-stated, tracker-reported or
+  // CRM-evidenced — whichever of their rows a hand statement was made from.
   const outcomeRows = (await db.execute(sql`
     SELECT event, source, value_cents, cost_cents, caused_by_outreach, note, stated_by_user_id,
            received_at
@@ -524,7 +591,6 @@ async function loadStepStates(
       AND matched_lead_id = ${row.lead_id}
       AND attribution_status = 'attributed'
       AND withdrawn_at IS NULL
-      AND (lead_campaign_id IS NULL OR lead_campaign_id = ${row.id})
     -- What the customer's CRM evidences answers a step only when nobody and nothing else of ours
     -- did: a person's statement and the tracker's report come first.
     ORDER BY (source = 'crm') ASC, received_at DESC NULLS LAST
@@ -540,15 +606,17 @@ async function loadStepStates(
   }>;
 
   // Retracted statements are excluded: they are kept for the record, not to be read as live.
+  // Keyed on the person at the brand, like the outcomes; a person's own answers before their CRM's.
   const neverRows = (await db.execute(sql`
     SELECT step, source, cost_cents, note, stated_by_user_id,
            -- A CRM "never" is dated by the CRM or not at all — never by when we synced it.
            CASE WHEN source = 'crm' THEN occurred_at ELSE updated_at END AS updated_at
     FROM lead_step_disqualifications
     WHERE lead_id = ${row.lead_id}
-      AND campaign_id = ${row.campaign_id}
+      AND brand_id = ${brandId}
       AND retracted_at IS NULL
       AND withdrawn_at IS NULL
+    ORDER BY (source = 'crm') ASC, updated_at DESC NULLS LAST
   `)) as unknown as Array<{
     step: string;
     source: string | null;
@@ -581,7 +649,7 @@ async function loadStepStates(
   const nevers = new Map<LeadStepOutcomeName, StatedNever>();
   for (const n of neverRows) {
     const step = canonicalizeStepOutcome(n.step);
-    if (!step) continue;
+    if (!step || nevers.has(step)) continue;
     nevers.set(step, {
       source: n.source === "crm" ? "crm" : "manual",
       costCents: n.cost_cents,
@@ -798,7 +866,6 @@ router.delete(
         AND source = 'manual'
         AND attribution_status = 'attributed'
         AND withdrawn_at IS NULL
-        AND (lead_campaign_id IS NULL OR lead_campaign_id = ${row.id})
       LIMIT 1
     `)) as unknown as Array<{ id: string }>;
 
@@ -806,7 +873,7 @@ router.delete(
       SELECT id
       FROM lead_step_disqualifications
       WHERE lead_id = ${row.lead_id}
-        AND campaign_id = ${row.campaign_id}
+        AND brand_id = ${brandId}
         AND step = ${step}
         -- Only a person's "never". One the customer's CRM evidences is not a statement.
         AND source = 'manual'
@@ -829,12 +896,11 @@ router.delete(
           AND event = ${step}
           AND source = 'manual'
           AND withdrawn_at IS NOT NULL
-          AND (lead_campaign_id IS NULL OR lead_campaign_id = ${row.id})
         UNION ALL
         SELECT 1 AS hit
         FROM lead_step_disqualifications
         WHERE lead_id = ${row.lead_id}
-          AND campaign_id = ${row.campaign_id}
+          AND brand_id = ${brandId}
           AND step = ${step}
           AND source = 'manual'
           AND withdrawn_at IS NOT NULL
@@ -912,7 +978,7 @@ router.delete(
             retracted_by_user_id = NULL,
             updated_at = now()
         WHERE lead_id = ${row.lead_id}
-          AND campaign_id = ${row.campaign_id}
+          AND brand_id = ${brandId}
           AND retracted_by_step = ${step}
           AND retracted_at IS NOT NULL
           AND withdrawn_at IS NULL
@@ -1174,7 +1240,7 @@ router.get(
       }
     }
 
-    // One resolution per (lead, campaign): that pair is the row a statement was made on.
+    // One resolution per PERSON: a statement is about the person at the brand, not the row.
     interface Group {
       leadId: string;
       campaignId: string;
@@ -1185,7 +1251,7 @@ router.get(
     for (const r of statementRows) {
       const step = canonicalizeStepOutcome(r.step);
       if (!step) continue;
-      const key = `${r.lead_id}|${r.campaign_id}`;
+      const key = r.lead_id;
       let group = groups.get(key);
       if (!group) {
         groups.set(
