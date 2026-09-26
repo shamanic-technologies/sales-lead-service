@@ -35,6 +35,22 @@ vi.mock("../../src/lib/campaign-funnel-client.js", async (importOriginal) => {
   };
 });
 
+/**
+ * Whether a lead went cold is derived by the standing resolver (tested in lead-cold*.test.ts);
+ * here it is stubbed to "the rule does not apply" so the statement reads keep their exact queries.
+ */
+const readBrandColdLeads = vi.fn();
+const readLeadRowCold = vi.fn();
+vi.mock("../../src/lib/lead-cold-read.js", () => ({
+  readBrandColdLeads: (...args: unknown[]) => readBrandColdLeads(...args),
+  readLeadRowCold: (...args: unknown[]) => readLeadRowCold(...args),
+}));
+const NO_CRM = {
+  eligible: false,
+  reason: "crm_never_paired",
+  evidences: { meeting_booked: false, meeting_attended: false },
+};
+
 const REPLY_MEETING_FUNNEL = {
   funnelKey: "sales_meetings_from_conversation",
   funnelSteps: ["meeting_booked", "meeting_attended", "sale"],
@@ -121,6 +137,8 @@ describe("POST /orgs/leads/:id/step-statements", () => {
     execute.mockReset().mockResolvedValue([]);
     resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
     fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
+    readBrandColdLeads.mockReset().mockResolvedValue({ eligibility: [], leads: [] });
+    readLeadRowCold.mockReset().mockResolvedValue({ wentCold: null, eligibility: NO_CRM });
   });
 
   it("401 without the service api key", async () => {
@@ -337,6 +355,8 @@ describe("GET /orgs/leads/:id/step-statements", () => {
     execute.mockReset().mockResolvedValue([]);
     resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
     fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
+    readBrandColdLeads.mockReset().mockResolvedValue({ eligibility: [], leads: [] });
+    readLeadRowCold.mockReset().mockResolvedValue({ wentCold: null, eligibility: NO_CRM });
   });
 
   function get() {
@@ -424,6 +444,8 @@ describe("the funnel constrains a statement's neighbours", () => {
     execute.mockReset().mockResolvedValue([]);
     resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
     fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
+    readBrandColdLeads.mockReset().mockResolvedValue({ eligibility: [], leads: [] });
+    readLeadRowCold.mockReset().mockResolvedValue({ wentCold: null, eligibility: NO_CRM });
   });
 
   it("refuses a \"never\" on a step a LATER step of the funnel says already happened", async () => {
@@ -574,6 +596,8 @@ describe("GET /internal/brands/:brandId/step-disqualifications", () => {
     execute.mockReset().mockResolvedValue([]);
     resolveCampaignFunnelSteps.mockReset().mockResolvedValue(REPLY_MEETING_FUNNEL);
     fetchOrgCampaignFunnelKeys.mockReset().mockResolvedValue(new Map());
+    readBrandColdLeads.mockReset().mockResolvedValue({ eligibility: [], leads: [] });
+    readLeadRowCold.mockReset().mockResolvedValue({ wentCold: null, eligibility: NO_CRM });
   });
 
   it("answers all-zero for a brand nobody disqualified anyone for", async () => {
@@ -716,7 +740,15 @@ describe("GET /internal/brands/:brandId/step-disqualifications", () => {
       .get("/internal/brands/brand-1/step-disqualifications")
       .set("x-api-key", "test-api-key");
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body).sort()).toEqual(["byStep", "counts"]);
+    expect(Object.keys(res.body).sort()).toEqual([
+      "byStep",
+      "coldByStep",
+      "coldCounts",
+      "coldLeads",
+      "coldRule",
+      "counts",
+    ]);
+    expect(res.body.coldCounts).toEqual({ meeting_booked: 0, meeting_attended: 0 });
     expect(fetchOrgCampaignFunnelKeys).not.toHaveBeenCalled();
   });
 

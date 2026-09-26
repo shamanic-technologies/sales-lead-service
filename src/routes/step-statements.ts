@@ -36,6 +36,9 @@ import {
   type StatedNever,
   type StatedOutcome,
 } from "../lib/step-funnel-state.js";
+import { readBrandColdLeads, readLeadRowCold } from "../lib/lead-cold-read.js";
+import { EvidenceUnavailableError } from "../lib/lead-delivery-evidence.js";
+import { COLD_AFTER_DAYS, type ColdStep } from "../lib/lead-cold.js";
 
 const router = Router();
 
@@ -751,6 +754,32 @@ router.get(
       throw error;
     }
 
+    // Whether the lead WENT COLD at a step (lead-cold.ts). Derived by the SAME resolver the Leads
+    // board reads its standing from; a step's `state` is untouched by it.
+    let cold;
+    try {
+      cold = await readLeadRowCold(
+        {
+          id: row.id,
+          leadId: row.lead_id,
+          campaignId: row.campaign_id,
+          brandIds: row.brand_ids,
+          email: row.email,
+        },
+        req.orgId!,
+        brandId,
+      );
+    } catch (error) {
+      console.error(`[step-statements] could not derive whether lead row ${row.id} went cold: ${error}`);
+      res.status(502).json({
+        error:
+          "The delivery layer could not say when this lead replied, so whether it went cold is " +
+          "unknown. No answer is returned rather than one that could contradict the board.",
+        code: "cold_unresolvable",
+      });
+      return;
+    }
+
     res.json({
       leadCampaignId: row.id,
       leadId: row.lead_id,
@@ -759,6 +788,12 @@ router.get(
       funnelKey: resolved.funnelKey,
       funnelSteps: resolved.funnelSteps,
       steps,
+      wentCold: cold.wentCold,
+      coldRule: {
+        afterDays: COLD_AFTER_DAYS,
+        applies: cold.eligibility.eligible,
+        reason: cold.eligibility.reason,
+      },
     });
   }),
 );
@@ -1092,8 +1127,63 @@ router.get(
       byStep[step].push(r.email);
     }
 
+    // Who WENT COLD at a step (lead-cold.ts): derived, never a statement, so it lives beside the
+    // stated sets and never inside them. Empty for a brand whose CRM cannot prove an absence.
+    let coldRead;
+    try {
+      coldRead = await readBrandColdLeads(brandId);
+    } catch (error) {
+      if (!(error instanceof EvidenceUnavailableError)) throw error;
+      console.error(`[step-disqualifications] ${error.message}`);
+      res.status(502).json({
+        error:
+          "email-gateway could not say when these leads replied, so who went cold is unknown. No " +
+          "answer is returned rather than one that misses cold leads.",
+        code: "cold_unresolvable",
+      });
+      return;
+    }
+    const coldCounts: Record<ColdStep, number> = { meeting_booked: 0, meeting_attended: 0 };
+    const coldByStep: Record<ColdStep, string[]> = { meeting_booked: [], meeting_attended: [] };
+    const coldLeadsByStep: Record<ColdStep, Set<string>> = {
+      meeting_booked: new Set(),
+      meeting_attended: new Set(),
+    };
+    const coldEmailsByStep: Record<ColdStep, Set<string>> = {
+      meeting_booked: new Set(),
+      meeting_attended: new Set(),
+    };
+    for (const lead of coldRead.leads) {
+      coldLeadsByStep[lead.wentCold.step].add(lead.leadId);
+      if (lead.email) coldEmailsByStep[lead.wentCold.step].add(lead.email);
+    }
+    for (const step of ["meeting_booked", "meeting_attended"] as const) {
+      coldCounts[step] = coldLeadsByStep[step].size;
+      coldByStep[step] = Array.from(coldEmailsByStep[step]);
+    }
+    const cold = {
+      coldCounts,
+      coldByStep,
+      coldLeads: coldRead.leads.map((l) => ({
+        leadId: l.leadId,
+        leadCampaignId: l.leadCampaignId,
+        campaignId: l.campaignId,
+        email: l.email,
+        ...l.wentCold,
+      })),
+      coldRule: {
+        afterDays: COLD_AFTER_DAYS,
+        applies: coldRead.eligibility.some((e) => e.eligible),
+        byOrg: coldRead.eligibility.map((e) => ({
+          orgId: e.orgId,
+          applies: e.eligible,
+          reason: e.reason,
+        })),
+      },
+    };
+
     if (!wantsImplied) {
-      res.json({ counts, byStep });
+      res.json({ counts, byStep, ...cold });
       return;
     }
 
@@ -1136,7 +1226,7 @@ router.get(
     ) as Record<LeadStepOutcomeName, string[]>;
 
     if (statementRows.length === 0) {
-      res.json({ counts, byStep, impliedCounts, impliedByStep, effectiveCounts, effectiveByStep });
+      res.json({ counts, byStep, impliedCounts, impliedByStep, effectiveCounts, effectiveByStep, ...cold });
       return;
     }
 
@@ -1273,7 +1363,7 @@ router.get(
       effectiveByStep[step] = Array.from(effectiveEmails[step]);
     }
 
-    res.json({ counts, byStep, impliedCounts, impliedByStep, effectiveCounts, effectiveByStep });
+    res.json({ counts, byStep, impliedCounts, impliedByStep, effectiveCounts, effectiveByStep, ...cold });
   }),
 );
 

@@ -102,6 +102,31 @@ export async function fetchCrmConnection(
   return connections[0] ?? null;
 }
 
+/**
+ * What crm-service decided one of the brand's pipeline stages MEANS, as it serves it. crm-service
+ * owns the meaning (a typed judgment per stage) and the confidence floor below which a meaning is
+ * recorded but never served as evidence; `servedAsEvidence` is that floor, applied by the owner.
+ */
+export interface CrmStageMeaning {
+  pipelineId: string;
+  stageId: string;
+  stageName: string;
+  meaning: string;
+  servedAsEvidence: boolean;
+}
+
+/** Every stage meaning of the brand's mirrored CRM. An empty list is an answer, not a failure. */
+export async function fetchCrmStageMeanings(
+  brandId: string,
+  ctx: CrmIdentityContext,
+): Promise<CrmStageMeaning[]> {
+  const body = await getJson<{ stageMeanings?: CrmStageMeaning[] }>(
+    `/orgs/gohighlevel/stage-meanings?brandId=${encodeURIComponent(brandId)}`,
+    ctx,
+  );
+  return Array.isArray(body.stageMeanings) ? body.stageMeanings : [];
+}
+
 // ---------------------------------------------------------------------------
 // Contacts
 // ---------------------------------------------------------------------------
