@@ -4955,6 +4955,11 @@
             "type": "string",
             "nullable": true
           },
+          "workflowRunId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The workflow run that GENERATED this email — open it to see the workflow, model, template, audience and mission that wrote it. On a `generated_email`, and on an OUTBOUND `message` the outreach side sent (one generation writes the whole sequence, so every outbound message of a campaign names the same run). `null` states the run is unknown (no generation readable for that campaign), never a guess. Absent on inbound messages, on outbound mail only the customer's mailbox holds (it may have been written by hand), and on every other event type."
+          },
           "replyKind": {
             "type": "string"
           },
