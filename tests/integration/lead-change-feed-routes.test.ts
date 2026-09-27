@@ -28,6 +28,14 @@ vi.mock("../../src/lib/email-gateway-client.js", async (importOriginal) => ({
   },
 }));
 
+// campaign-service is not reachable here: the identity a campaign read resolves to is stated by the
+// test (null = the named row alone), which is exactly the input that moved in prod.
+let campaignFamily: string[] | null = null;
+vi.mock("../../src/lib/campaign-identity-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/campaign-identity-client.js")>()),
+  resolveCampaignFamily: (campaignId: string) => Promise.resolve(campaignFamily ?? [campaignId]),
+}));
+
 const { db, sql } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations } = await import(
   "../../src/db/schema.js"
@@ -222,19 +230,11 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     // then to [A] alone (campaign-service fallback / identity re-keyed) — a NEW feed key, while the
     // old feed still exists. The cursor the old answer returned was refused as another scope's.
     const path = `/orgs/leads/changes?campaignId=${campaignA}&brandId=${brandId}`;
+    campaignFamily = [campaignA, `itest-feed-gone-${randomUUID()}`];
     const first = await get(path);
     expect(first.status).toBe(200);
     const oldFeedId = feedLib.decodeFeedPosition(first.body.cursor).feedId;
-    const widened = readModelScopeFor(
-      { orgId, campaignIds: [campaignA, `itest-feed-gone-${randomUUID()}`] } as never,
-      brandId,
-      true,
-    );
-    await sql`
-      UPDATE lead_change_feeds
-      SET scope = ${JSON.stringify(widened)}::jsonb, scope_key = ${feedLib.changeFeedKey(widened)}
-      WHERE id = ${oldFeedId}::uuid
-    `;
+    campaignFamily = null;
     const next = await get(`${path}&since=${encodeURIComponent(first.body.cursor)}`);
     expect(next.status).toBe(200);
     expect(next.body).toMatchObject({ full: true, reason: "feed_replaced", removed: [] });
