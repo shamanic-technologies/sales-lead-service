@@ -55,6 +55,7 @@ import {
 import {
   decodeFeedPosition,
   feedById,
+  sameNamedScope,
   FeedPositionError,
   openChangeFeed,
   readChangeFeed,
@@ -1528,7 +1529,10 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async
     // Whether the caller's position is one this scope's feed can continue from.
     let reason: "no_cursor" | "feed_replaced" | null = since ? null : "no_cursor";
     if (since && since.feedId !== feed.id) {
-      if (await feedById(since.feedId)) {
+      // A position from a feed of the SAME named scope (its resolved campaign set moved under the
+      // caller) is answered "start over", never refused; only a genuinely different scope is a 400.
+      const previous = await feedById(since.feedId);
+      if (previous && !sameNamedScope(previous.scope, feed.scope)) {
         return res.status(400).json({ error: "since belongs to a different scope than this read names" });
       }
       reason = "feed_replaced";
