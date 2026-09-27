@@ -534,6 +534,21 @@ async function touch(feed: ChangeFeed): Promise<void> {
   `;
 }
 
+/**
+ * Whether two feed scopes are the same read AS THE CALLER NAMED IT. A feed's key also hashes what
+ * the read RESOLVED — a campaign's identity members, an offer's campaigns, whether delivery was
+ * queried — and those move under a caller that never changed its query: a campaign identity gains
+ * or loses a member, campaign-service is briefly unreachable and the identity falls back to the
+ * named row. The old feed lives on for a day, so its position names a feed that exists under
+ * another key. That is the SAME scope (it must be answered "start over"), not another one (400).
+ * Only what the caller names distinguishes a genuinely different scope.
+ */
+export function sameNamedScope(a: ReadModelScope, b: ReadModelScope): boolean {
+  const named = (s: ReadModelScope) =>
+    JSON.stringify([s.orgId, s.brandId ?? null, [...(s.statuses ?? [])].sort(), s.queryOrgId ?? null, s.userId ?? null, s.workflowSlug ?? null]);
+  return named(a) === named(b);
+}
+
 /** The feed a position names, whatever scope it belongs to — or null when it no longer exists. */
 export async function feedById(feedId: string): Promise<ChangeFeed | null> {
   return loadFeedBy("id", feedId);

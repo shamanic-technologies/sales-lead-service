@@ -28,6 +28,14 @@ vi.mock("../../src/lib/email-gateway-client.js", async (importOriginal) => ({
   },
 }));
 
+// campaign-service is not reachable here: the identity a campaign read resolves to is stated by the
+// test (null = the named row alone), which is exactly the input that moved in prod.
+let campaignFamily: string[] | null = null;
+vi.mock("../../src/lib/campaign-identity-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/campaign-identity-client.js")>()),
+  resolveCampaignFamily: (campaignId: string) => Promise.resolve(campaignFamily ?? [campaignId]),
+}));
+
 const { db, sql } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations } = await import(
   "../../src/db/schema.js"
@@ -217,15 +225,39 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     cursor = res.body.cursor;
   });
 
+  it("never refuses its own position when the scope's resolved campaigns moved under the caller (prod 2026-09-26)", async () => {
+    // Prod: one campaign read, same query each time. Its identity resolved to [A, X] (the old feed),
+    // then to [A] alone (campaign-service fallback / identity re-keyed) — a NEW feed key, while the
+    // old feed still exists. The cursor the old answer returned was refused as another scope's.
+    const path = `/orgs/leads/changes?campaignId=${campaignA}&brandId=${brandId}`;
+    campaignFamily = [campaignA, `itest-feed-gone-${randomUUID()}`];
+    const first = await get(path);
+    expect(first.status).toBe(200);
+    const oldFeedId = feedLib.decodeFeedPosition(first.body.cursor).feedId;
+    campaignFamily = null;
+    const next = await get(`${path}&since=${encodeURIComponent(first.body.cursor)}`);
+    expect(next.status).toBe(200);
+    expect(next.body).toMatchObject({ full: true, reason: "feed_replaced", removed: [] });
+    expect(feedLib.decodeFeedPosition(next.body.cursor).feedId).not.toBe(oldFeedId);
+    expect((next.body.leads as Row[]).map((r) => r.id).sort()).toEqual(
+      (first.body.leads as Row[]).map((r) => r.id).sort(),
+    );
+    // And the new cursor continues as a delta.
+    const again = await get(`${path}&since=${encodeURIComponent(next.body.cursor)}`);
+    expect(again.status).toBe(200);
+    expect(again.body.full).toBe(false);
+  });
+
   it("refuses a position it did not issue, one from another scope, and page-shaping parameters", async () => {
     expect((await changes("nonsense")).status).toBe(400);
     expect((await changes(feedLib.encodeFeedPosition({ feedId: randomUUID(), version: "1" }))).status).toBe(200);
-    const other = await get(`/orgs/leads/changes?campaignId=${campaignA}&brandId=${brandId}`);
-    // campaign-service is not reachable here, so the identity falls back to the named row; either
-    // way it is a different scope from the brand's.
+    // A different BRAND is a genuinely different scope: its position is refused.
+    const other = await get(`/orgs/leads/changes?brandId=${randomUUID()}`);
     expect(other.status).toBe(200);
     const crossed = await changes(other.body.cursor);
     expect(crossed.status).toBe(400);
+    expect(crossed.body.error).toBe("since belongs to a different scope than this read names");
+    await sql`DELETE FROM lead_change_feeds WHERE id = ${feedLib.decodeFeedPosition(other.body.cursor).feedId}::uuid`;
     const decoded = feedLib.decodeFeedPosition(cursor);
     const ahead = feedLib.encodeFeedPosition({ feedId: decoded.feedId, version: "999999" });
     expect((await changes(ahead)).status).toBe(400);
