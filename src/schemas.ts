@@ -3015,10 +3015,16 @@ const TransferBrandResponseSchema = z
 registry.registerPath({
   method: "post",
   path: "/internal/transfer-brand",
-  summary: "Transfer a solo-brand from one org to another",
+  summary: "Move everything this service holds for one brand from one org to another",
   description:
-    "Updates org_id on all rows that reference exactly this one brand (solo-brand). " +
-    "Co-branding rows (multiple brand IDs) are skipped. Idempotent — running twice is a no-op.",
+    "Moves, in one transaction, every row tied to the brand (directly or through a campaign of the brand) " +
+    "from sourceOrgId to targetOrgId, rewriting the brand id to targetBrandId when given: leads_campaigns, " +
+    "followup_actions, requeued_serves, campaigns_apollo_strategies, brand_conversion_tokens, conversion_events, " +
+    "lead_step_disqualifications, lead_step_cause_statements, crm_pairing_matches/judgments/rulings and " +
+    "lead_delivery_evidence. Derived read models and change feeds of the affected scopes are dropped and rebuilt " +
+    "on the next read. Idempotent: a second call moves nothing and reports zero on every table. No x-run-id is " +
+    "required. A row shared with another brand cannot be split between two orgs, so its presence is a 409 and " +
+    "nothing is written.",
   request: {
     body: {
       content: { "application/json": { schema: TransferBrandRequestSchema } },
@@ -3035,6 +3041,14 @@ registry.registerPath({
       content: { "application/json": { schema: ErrorResponseSchema } },
     },
     401: { description: "Unauthorized" },
+    409: {
+      description: "The brand shares rows with another brand; nothing was moved",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    500: {
+      description: "The transfer failed and was rolled back; nothing was moved",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
   },
 });
 
