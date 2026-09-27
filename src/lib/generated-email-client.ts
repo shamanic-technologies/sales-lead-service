@@ -36,6 +36,9 @@ export interface GeneratedEmail {
   /** The planned sequence, verbatim from the producer. Shape is the producer's, not ours. */
   sequence: unknown;
   model: string | null;
+  /** The workflow run that generated this sequence (initial + follow-ups): the producer's
+   * `runId`, the run the generation was requested under. Null when the producer served none. */
+  runId: string | null;
   promptType: string | null;
   createdAt: string | null;
 }
@@ -107,6 +110,10 @@ export async function fetchGeneratedEmail(
         bodyHtml: (generation.bodyHtml as string | null) ?? null,
         sequence: generation.sequence ?? null,
         model: (generation.model as string | null) ?? null,
+        runId:
+          typeof generation.runId === "string" && generation.runId.length > 0
+            ? generation.runId
+            : null,
         promptType: (generation.promptType as string | null) ?? null,
         createdAt: generation.createdAt ? String(generation.createdAt) : null,
       },

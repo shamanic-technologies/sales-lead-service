@@ -141,6 +141,15 @@ export interface HistoryMessageEvent extends HistoryEventBase {
    * back. Null `href` when it cannot be resolved — never the provider's click-tracking redirect,
    * and never a guess. */
   links: MessageLink[];
+  /**
+   * The workflow run that WROTE this message, present ONLY on an outbound message held by the
+   * outreach side (a message our sequence sent, so it belongs to the campaign's generation). One
+   * generation writes the whole sequence, so every outbound message of a campaign names the same
+   * run. Null states the run is unknown (no generation readable for that campaign), never a guess.
+   * Absent on inbound messages and on outbound mail only the mailbox holds (the owner may have
+   * written it by hand; claiming a run for it would be a guess).
+   */
+  workflowRunId?: string | null;
 }
 
 /** Whether a destination is a record of where the click went, or a deduction from what we wrote. */
@@ -190,6 +199,8 @@ export interface HistoryGeneratedEmailEvent extends HistoryEventBase {
    * what is still owed is the `followup` event, which reads this service's live state. */
   plannedSequence: unknown;
   model: string | null;
+  /** The workflow run that generated this sequence. Null when the producer served none. */
+  workflowRunId: string | null;
 }
 
 export interface HistoryReplyStatementEvent extends HistoryEventBase {
@@ -565,6 +576,13 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   // that never touched the sequence visible at all.
   const byKey = new Map<string, HistoryMessageEvent>();
 
+  // The run that wrote each campaign's sequence. Undefined = no readable generation (null run).
+  const runByCampaign = new Map<string, string | null>();
+  for (const campaign of input.campaigns) {
+    const generation = campaign.generation.ok ? campaign.generation.data : null;
+    runByCampaign.set(campaign.campaignId, generation?.runId ?? null);
+  }
+
   for (const campaign of input.campaigns) {
     if (!campaign.conversation.ok) {
       noteSource("outreach", "unavailable", campaign.conversation.reason);
@@ -594,6 +612,9 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
         copy: conversation.source ?? null,
         links: resolveMessageLinks(message.text ?? null, destinations),
       };
+      if (message.direction === "outbound") {
+        event.workflowRunId = runByCampaign.get(campaign.campaignId) ?? null;
+      }
       const existing = byKey.get(key);
       if (existing) {
         if (!existing.heldBy.includes("outreach")) existing.heldBy.push("outreach");
@@ -692,6 +713,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
           bodyStatus: generatedBodyStatus(generation.bodyText),
           plannedSequence: generation.sequence,
           model: generation.model,
+          workflowRunId: generation.runId,
         });
       }
     }

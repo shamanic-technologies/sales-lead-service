@@ -4938,6 +4938,10 @@ const HistoryEventSchema = z
         "On a `generated_email`: the cadence the sequence PLANNED, verbatim from its producer. It is a plan, not a promise — what is still owed is the `followup` event, read from live state.",
     }),
     model: z.string().nullable().optional(),
+    workflowRunId: z.string().nullable().optional().openapi({
+      description:
+        "The workflow run that GENERATED this email — open it to see the workflow, model, template, audience and mission that wrote it. On a `generated_email`, and on an OUTBOUND `message` the outreach side sent (one generation writes the whole sequence, so every outbound message of a campaign names the same run). `null` states the run is unknown (no generation readable for that campaign), never a guess. Absent on inbound messages, on outbound mail only the customer's mailbox holds (it may have been written by hand), and on every other event type.",
+    }),
     replyKind: z.string().optional(),
     channel: z.string().optional(),
     step: z.string().optional(),
