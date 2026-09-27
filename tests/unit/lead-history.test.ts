@@ -678,6 +678,7 @@ describe("assembleLeadHistory — the copy we produced", () => {
                 bodyHtml: null,
                 sequence: [{ step: 2, waitDays: 3 }],
                 model: "claude-sonnet-4-6",
+                runId: null,
                 promptType: "cold",
                 createdAt: "2026-01-01T06:00:00.000Z",
               },
@@ -710,6 +711,7 @@ describe("assembleLeadHistory — the copy we produced", () => {
                 bodyHtml: null,
                 sequence: [{ step: 1 }],
                 model: "claude-sonnet-4-6",
+                runId: null,
                 promptType: "cold",
                 createdAt: "2026-01-01T06:00:00.000Z",
               },
@@ -740,6 +742,7 @@ describe("assembleLeadHistory — the copy we produced", () => {
                 bodyHtml: null,
                 sequence: null,
                 model: null,
+                runId: null,
                 promptType: null,
                 createdAt: "2026-01-01T06:00:00.000Z",
               },
@@ -765,6 +768,7 @@ describe("assembleLeadHistory — the copy we produced", () => {
                 bodyHtml: null,
                 sequence: null,
                 model: null,
+                runId: null,
                 promptType: null,
                 createdAt: "2026-01-01T06:00:00.000Z",
               },
@@ -792,6 +796,7 @@ function generation(over: Record<string, unknown> = {}) {
       bodyHtml: null,
       sequence: null,
       model: "gemini-3.5-flash-lite",
+      runId: null,
       promptType: "cold",
       createdAt: "2026-01-01T06:00:00.000Z",
       ...over,
@@ -1182,6 +1187,87 @@ describe("assembleLeadHistory — where a click went", () => {
 
     for (const event of events) {
       expect("destination" in event).toBe(false);
+    }
+  });
+});
+
+describe("assembleLeadHistory — the run that wrote each email", () => {
+  const RUN = "c376867e-f94f-435b-8833-355affca0a4b";
+
+  it("names the generation's run on the drafted copy", () => {
+    const { events } = assembleLeadHistory(
+      input({ campaigns: [campaign({ servedAt: null, generation: generation({ runId: RUN }) })] }),
+    );
+    const generated = events.find((e) => e.type === "generated_email") as { workflowRunId: unknown };
+    expect(generated.workflowRunId).toBe(RUN);
+  });
+
+  it("states an unknown run as null on the drafted copy", () => {
+    const { events } = assembleLeadHistory(
+      input({ campaigns: [campaign({ servedAt: null, generation: generation({ runId: null }) })] }),
+    );
+    const generated = events.find((e) => e.type === "generated_email")!;
+    expect(generated).toHaveProperty("workflowRunId", null);
+  });
+
+  it("names the same run on every outbound message of the sequence, and nothing on a reply", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: generation({ runId: RUN }),
+            conversation: conversation([
+              { direction: "outbound", from: "a@ours.com", to: "p@x.com", at: "2026-01-02T09:00:00.000Z", subject: "one", text: "first" },
+              { direction: "outbound", from: "a@ours.com", to: "p@x.com", at: "2026-01-05T09:00:00.000Z", subject: "Re: one", text: "follow-up" },
+              { direction: "inbound", from: "p@x.com", to: "a@ours.com", at: "2026-01-06T09:00:00.000Z", subject: "Re: one", text: "no thanks" },
+            ]),
+          }),
+        ],
+      }),
+    );
+    const messages = events.filter((e) => e.type === "message");
+    const outbound = messages.filter((m) => m.direction === "outbound");
+    expect(outbound).toHaveLength(2);
+    for (const m of outbound) expect(m).toHaveProperty("workflowRunId", RUN);
+    const inbound = messages.find((m) => m.direction === "inbound")!;
+    expect(inbound).not.toHaveProperty("workflowRunId");
+  });
+
+  it("states null on an outbound message whose campaign's generation could not be read", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: null,
+            generation: { ok: false, reason: "content-generation-service answered 500" },
+            conversation: conversation([
+              { direction: "outbound", from: "a@ours.com", to: "p@x.com", at: "2026-01-02T09:00:00.000Z", subject: "one", text: "first" },
+            ]),
+          }),
+        ],
+      }),
+    );
+    const message = events.find((e) => e.type === "message")!;
+    expect(message).toHaveProperty("workflowRunId", null);
+  });
+
+  it("carries nothing on events no run produced", () => {
+    const { events } = assembleLeadHistory(
+      input({
+        campaigns: [
+          campaign({
+            servedAt: "2026-01-01T00:00:00.000Z",
+            generation: generation({ runId: RUN }),
+            conversation: conversation([
+              { direction: "outbound", from: "a@ours.com", to: "p@x.com", at: "2026-01-02T09:00:00.000Z", subject: "one", text: "first" },
+            ]),
+          }),
+        ],
+      }),
+    );
+    for (const e of events.filter((e) => e.type !== "message" && e.type !== "generated_email")) {
+      expect(e).not.toHaveProperty("workflowRunId");
     }
   });
 });
