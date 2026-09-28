@@ -2150,7 +2150,14 @@ registry.registerPath({
         "Absent or any other value => the full FullLead payload (default, " +
         "backward-compatible). Use `basic` for list views. " +
         "`compact` is for a consumer computing figures over a whole population: each row carries " +
-        "ONLY id, leadId, campaignId, workflowSlug, status, email, the delivery flags (contacted, sent, " +
+        "ONLY id, leadId, campaignId, workflowSlug, status, " +
+        "servedAt (ISO; the ORIGINAL serve, equal to `servedAt` on `basic`; null when never served), " +
+        "lastServedAt (ISO; when the run that currently holds the lead took it — the retry pool hands a paid " +
+        "serve nobody contacted to a LATER run, and that run is the one that contacts the person, so USE THIS " +
+        "for 'when did the run that contacted this lead start'; equals servedAt when never re-handed; null " +
+        "when never served), audienceId (the audience the serve was made from, as tagged at serve time, " +
+        "equal to `audienceId` on `basic`, never a membership resolution; null when the serve carried none), " +
+        "email, the delivery flags (contacted, sent, " +
         "delivered, opened, clicked, bounced, unsubscribed, replied, replyClassification), " +
         "crmPositiveReplyAt (ISO date of a positive reply the customer's own CRM evidences — their form " +
         "submitted after our first delivered email; null when none; count a person once when either it " +
@@ -2475,7 +2482,9 @@ const LeadChangesResponseSchema = z
     leads: z.array(z.record(z.string(), z.unknown())).openapi({
       description:
         "Rows to put into your copy, keyed by `id` — each exactly the element `GET /orgs/leads?view=compact` " +
-        "emits for that row (same fields, same values). Unordered.",
+        "emits for that row (same fields, same values, including servedAt / lastServedAt / audienceId: " +
+        "lastServedAt is when the run that currently holds the lead took it — a retry-pool re-hand-out " +
+        "moves it and re-emits the row — and is the date to use for the run that contacted the lead). Unordered.",
     }),
     removed: z.array(z.string()).openapi({
       description: "Ids of rows that left the scope since `since`: drop them from your copy. Always empty when `full`.",

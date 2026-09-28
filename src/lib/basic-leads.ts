@@ -79,6 +79,12 @@ export interface BasicLeadRow {
   activeGoalId: string | null;
   brandProfileId: string | null;
   audienceId: string | null;
+  /**
+   * When the run that currently holds this lead took it: the retry pool's latest re-hand-out
+   * (`retry_claimed_at`) when there is one, else the original serve. See `lastServedAt` on the
+   * compact row. Null when never served.
+   */
+  lastServedAt: string | null;
   createdAt: Date;
   /** `created_at::text` — what a cursor is built from; keeps the microseconds a Date drops. */
   cursorCreatedAt: string;
@@ -115,6 +121,7 @@ interface RawBasicRow {
   active_goal_id: string | null;
   brand_profile_id: string | null;
   audience_id: string | null;
+  last_served_at: RawTimestamp;
   created_at: Date | string;
   // Full-precision text of the same column, for the keyset cursor (see LeadListCursor).
   created_at_cursor: string;
@@ -235,6 +242,7 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     activeGoalId: r.active_goal_id,
     brandProfileId: r.brand_profile_id,
     audienceId: r.audience_id,
+    lastServedAt: toIsoTimestamp(r.last_served_at),
     createdAt: toDateTimestamp(r.created_at),
     cursorCreatedAt: r.created_at_cursor,
     leadApolloPersonId: r.apollo_person_id,
@@ -262,6 +270,7 @@ function basicLeadQuery(
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
       lc.served_at, lc.workflow_slug, lc.feature_slug,
       lc.goal, lc.active_goal_id, lc.brand_profile_id, lc.audience_id,
+      COALESCE(lc.retry_claimed_at, lc.served_at) AS last_served_at,
       lc.created_at,
       lc.created_at::text AS created_at_cursor,
       l.id AS l_id, l.apollo_person_id, l.first_name, l.last_name, l.name,

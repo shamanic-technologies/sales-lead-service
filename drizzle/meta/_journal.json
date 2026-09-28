@@ -323,6 +323,13 @@
       "when": 1783728000000,
       "tag": "0045_followup_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1783814400000,
+      "tag": "0046_change_feed_serve_fields",
+      "breakpoints": true
     }
   ]
 }
