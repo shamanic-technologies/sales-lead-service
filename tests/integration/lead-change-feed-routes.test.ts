@@ -197,6 +197,32 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     expect(sorted(copy)).toEqual(sorted(await fullCompact()));
   });
 
+  it("re-emits a row the retry pool hands to a later run, carrying that run's moment and the serve's audience", async () => {
+    const audienceId = randomUUID();
+    await db
+      .update(leadsCampaigns)
+      .set({ retryClaimedAt: new Date("2026-02-10T09:30:00Z"), audienceId })
+      .where(eq(leadsCampaigns.id, people.Jane.rowId));
+    const res = await changes(cursor);
+    expect(res.status).toBe(200);
+    expect((res.body.leads as Row[]).map((r) => r.id)).toEqual([people.Jane.rowId]);
+    copy = apply(copy, res.body);
+    cursor = res.body.cursor;
+    const full = await fullCompact();
+    expect(sorted(copy)).toEqual(sorted(full));
+    expect(full.get(people.Jane.rowId)).toMatchObject({
+      servedAt: "2026-01-01T00:00:00.000Z",
+      lastServedAt: "2026-02-10T09:30:00.000Z",
+      audienceId,
+    });
+    // Never re-handed: the contacting run is the one that bought the lead; no audience tagged.
+    expect(full.get(people.Neo.rowId)).toMatchObject({
+      servedAt: "2026-01-04T00:00:00.000Z",
+      lastServedAt: "2026-01-04T00:00:00.000Z",
+      audienceId: null,
+    });
+  });
+
   it("catches delivery evidence nobody announced at the next reconcile", async () => {
     statusByEmail["neo@feed.test"] = { contacted: true, sent: true, opened: true };
     // Unannounced: the next delta does not know about it yet...
