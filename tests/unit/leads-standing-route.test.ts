@@ -229,14 +229,16 @@ describe("a lead row carries where that person stands", () => {
     expect(lead.replyClassification).toBeNull();
   });
 
-  it("serves engaged for the same click on a campaign whose leg enters at a reply", async () => {
+  // Owner-decided 2026-09-28: a website visit is interest whatever the campaign's leg.
+  it("serves sales_interest for the same click on a campaign whose leg enters at a reply", async () => {
     mockRows = [rawRow(1, REPLY_LED)];
     clickedEmails = new Set(["lead-1@example.com"]);
 
     const res = await get(app, `/orgs/leads?brandId=${BRAND}&campaignId=${REPLY_LED}&view=basic`);
 
     const lead = res.body.leads[0];
-    expect(lead.standing.state).toBe("engaged");
+    expect(lead.standing.state).toBe("sales_interest");
+    expect(lead.standing.signal).toBe("measured_visit");
     expect(lead.standing.reachedEntryStep).toBe(false);
     expect(lead.standing.entryStep).toBe("conversation_reply");
     expect(lead.clicked).toBe(true);
