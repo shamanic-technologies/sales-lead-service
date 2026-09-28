@@ -86,7 +86,9 @@ function basicRow(i: number, status: string) {
     goal: null,
     activeGoalId: null,
     brandProfileId: null,
-    audienceId: "aud-1",
+    audienceId: i === 2 ? null : "aud-1",
+    // lc-1 was re-handed by the retry pool to a later run; every other served row never was.
+    lastServedAt: status === "served" ? (i === 1 ? "2026-09-04T10:00:00.000Z" : "2026-09-01T00:00:00.000Z") : null,
     createdAt: new Date("2026-01-01T00:00:00Z"),
     cursorCreatedAt: `2026-01-01 00:00:00.00000${i}+00`,
     leadApolloPersonId: `ap-${i}`,
@@ -177,7 +179,8 @@ function get(query: string) {
 }
 
 const COMPACT_KEYS = [
-  "id", "leadId", "campaignId", "workflowSlug", "status", "email", "lead",
+  "id", "leadId", "campaignId", "workflowSlug", "status", "servedAt", "lastServedAt", "audienceId",
+  "email", "lead",
   "contacted", "sent", "delivered", "opened", "clicked", "bounced", "unsubscribed", "replied",
   "replyClassification", "crmPositiveReplyAt",
 ].sort();
@@ -208,7 +211,7 @@ describe("GET /orgs/leads?view=compact", () => {
     basic.body.leads.forEach((b: Record<string, any>, i: number) => {
       const c = compact.body.leads[i];
       for (const key of COMPACT_KEYS) {
-        if (key === "lead" || key === "crmPositiveReplyAt") continue;
+        if (key === "lead" || key === "crmPositiveReplyAt" || key === "lastServedAt") continue;
         expect(c[key], `${key} on row ${i}`).toEqual(b[key]);
       }
       for (const key of Object.keys(c.lead)) {
@@ -230,6 +233,25 @@ describe("GET /orgs/leads?view=compact", () => {
     expect(compact.body.leads[2].bounced).toBe(true);
     // A row that was never served carries no evidence, exactly as on basic.
     expect(compact.body.leads[3].contacted).toBe(false);
+  });
+
+  it("states when the lead was served, by the run that holds it, and the audience it was drawn from", async () => {
+    const res = await get(`?brandId=${BRAND}&view=compact`);
+    expect(res.status).toBe(200);
+    const [r0, r1, r2, r3] = res.body.leads;
+    // Never re-handed: the run that holds it is the one that bought it.
+    expect(r0.servedAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(r0.lastServedAt).toBe(r0.servedAt);
+    expect(r0.audienceId).toBe("aud-1");
+    // Re-handed by the retry pool: the original serve stays, the contacting run's moment moves.
+    expect(r1.servedAt).toBe("2026-09-01T00:00:00.000Z");
+    expect(r1.lastServedAt).toBe("2026-09-04T10:00:00.000Z");
+    // A serve that carried no audience says so; nothing is resolved from membership.
+    expect(r2.audienceId).toBeNull();
+    expect(resolveAudiencesMock).not.toHaveBeenCalled();
+    // Never served: no serve moment at all.
+    expect(r3.servedAt).toBeNull();
+    expect(r3.lastServedAt).toBeNull();
   });
 
   it("carries the positive reply the customer's CRM evidences, per person, dated by the CRM", async () => {

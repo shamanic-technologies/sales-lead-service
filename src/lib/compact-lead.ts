@@ -25,6 +25,20 @@ export function toCompactLead(
     campaignId: r.campaignId,
     workflowSlug: r.workflowSlug ?? null,
     status: r.status,
+    // WHEN and FROM WHICH AUDIENCE this lead was served, so a consumer can put the lead in the
+    // cohort of the run that took it and attribute it to the audience it was drawn from.
+    // `servedAt` is the ORIGINAL serve (the purchase), equal to `servedAt` on `view=basic`.
+    // `lastServedAt` is when the run that currently holds the lead took it: a paid serve that was
+    // never contacted is handed to a LATER run by the retry pool (`retry_claimed_at`), and that
+    // later run is the one that contacts the person, so this is the date to use for "when did the
+    // run that contacted this lead start". It equals `servedAt` for a row never re-handed. Both
+    // null when the row was never served. Neither reads `sent_at`.
+    servedAt: r.servedAt,
+    lastServedAt: r.lastServedAt,
+    // The audience the serve was made from, as tagged at serve time (`leads_campaigns.audience_id`,
+    // equal to `audienceId` on `view=basic`) — never a membership resolution. Null when the serve
+    // carried none.
+    audienceId: r.audienceId ?? null,
     email: r.email?.value ?? "",
     lead: r.lead
       ? {
