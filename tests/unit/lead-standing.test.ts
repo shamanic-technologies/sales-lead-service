@@ -9,6 +9,7 @@ import { entryOfLeg, legOf, type LegEntry } from "../../src/lib/step-graph.js";
 import { resolveStepStates } from "../../src/lib/step-states.js";
 import {
   resolveLeadStanding,
+  salesInterestStage,
   type LeadStandingDelivery,
 } from "../../src/lib/lead-standing.js";
 import {
@@ -93,16 +94,67 @@ describe("where a lead stands on the campaign it was served under", () => {
     expect(s.reason).toBeNull();
   });
 
-  // The other half of funnel-awareness, and the reason it is not simply "a click is intent".
-  it("does NOT count the same click on a campaign whose funnel prices a reply, not a visit", () => {
+  // Owner-decided 2026-09-28: a website visit is interest on EVERY campaign, whatever its leg —
+  // the board defines interested as "a website visit or a positive reply". What stays leg-aware is
+  // that the visit is not a reply leg's ENTRY, so `reachedEntryStep` stays false.
+  it("counts the same click on a campaign whose leg works a reply — as interest, not its entry", () => {
     const s = stand({
       entry: leg(REPLY),
       delivery: { contacted: true, clicked: true },
     });
-    expect(s.state).toBe("engaged");
-    expect(s.signal).toBe("click");
+    expect(s.state).toBe("sales_interest");
+    expect(s.signal).toBe("measured_visit");
+    expect(s.origin).toBe("measured");
     expect(s.reachedEntryStep).toBe(false);
     expect(s.entryStep).toBe("conversation_reply");
+    expect(salesInterestStage(s)).toBe("website_visit");
+  });
+
+  it("counts a visit folded in by the caller, or stated by a person, on a reply leg", () => {
+    const measured = stand({ entry: leg(REPLY), outcomes: { website_visit: "tracker" } });
+    expect(measured.state).toBe("sales_interest");
+    expect(measured.signal).toBe("measured_visit");
+    expect(salesInterestStage(measured)).toBe("website_visit");
+
+    const stated = stand({ entry: leg(REPLY), outcomes: { website_visit: "manual" } });
+    expect(stated.state).toBe("sales_interest");
+    expect(stated.signal).toBe("stated_outcome");
+    expect(stated.origin).toBe("stated");
+    expect(stated.at).toBe("2026-02-02T00:00:00.000Z");
+    expect(salesInterestStage(stated)).toBe("website_visit");
+  });
+
+  it("keeps everything that outranks a visit above it on a reply leg", () => {
+    const click = { contacted: true, clicked: true };
+    expect(stand({ entry: leg(REPLY), delivery: { ...click, unsubscribed: true } }).state).toBe(
+      "opted_out",
+    );
+    expect(stand({ entry: leg(REPLY), delivery: click, outcomes: { sale: "manual" } }).state).toBe(
+      "customer",
+    );
+    expect(stand({ entry: leg(REPLY), delivery: click, nevers: ["sale"] }).state).toBe("disqualified");
+    expect(
+      stand({ entry: leg(REPLY), delivery: { ...click, replied: true, disqualified: true } }).state,
+    ).toBe("disqualified");
+    // A positive reply is the leg's own entry, so it keeps naming itself.
+    const both = stand({
+      entry: leg(REPLY),
+      delivery: { ...click, replied: true, replyClassification: "positive" },
+    });
+    expect(both.signal).toBe("positive_reply");
+    expect(salesInterestStage(both)).toBe("conversation_reply");
+    // A visit outranks a decline, exactly as the entry step does.
+    expect(
+      stand({
+        entry: leg(REPLY),
+        delivery: { ...click, replied: true, replyClassification: "negative", disqualified: false },
+      }).state,
+    ).toBe("sales_interest");
+  });
+
+  it("does not count a click the delivery layer was never asked about", () => {
+    const s = stand({ entry: leg(REPLY), deliveryQueried: false, delivery: { clicked: true } });
+    expect(s.state).toBe("unresolved");
   });
 
   it("counts a positive reply on a conversation-led funnel, and not on a visit-led one", () => {
@@ -123,9 +175,9 @@ describe("where a lead stands on the campaign it was served under", () => {
 
   // The same person, two campaigns: the (lead, campaign) grain is what lets both answers be true.
   it("lets the same signals stand differently under two campaigns", () => {
-    const delivery = { contacted: true, clicked: true };
-    expect(stand({ entry: leg(VISIT), delivery }).state).toBe("sales_interest");
-    expect(stand({ entry: leg(REPLY), delivery }).state).toBe("engaged");
+    const delivery = { contacted: true, replied: true, replyClassification: "positive" as const };
+    expect(stand({ entry: leg(REPLY), delivery }).state).toBe("sales_interest");
+    expect(stand({ entry: leg(VISIT), delivery }).state).toBe("engaged");
   });
 
   describe("precedence", () => {
@@ -395,8 +447,9 @@ describe("where a lead stands on the campaign it was served under", () => {
       expect(s.entryStep).toBe("meeting_booked");
       expect(s.entryMeasure).toBeNull();
       expect(s.reachedEntryStep).toBeNull();
-      // The standing itself still says what IS known: they clicked, which is not the step sold.
-      expect(s.state).toBe("engaged");
+      // The standing itself still says what IS known: they visited, which is interest on any leg.
+      expect(s.state).toBe("sales_interest");
+      expect(salesInterestStage(s)).toBe("website_visit");
     });
 
     it("still says the entry step was reached on an ad-delivered entry when a step is stated", () => {

@@ -1276,7 +1276,9 @@ const LeadStandingSchema = z
         "Where this person stands on THIS campaign, decided by lead-service and by nobody else. " +
         "`sales_interest` = they reached the step this campaign's LEG puts leads on (a visit where " +
         "the leg enters at the site, a positive reply where it enters at a conversation) or a step " +
-        "reachable from it on the leg graph. `customer` = the sale is reached. `opted_out` = the person " +
+        "reachable from it on the leg graph — OR they visited the brand's website, on ANY leg (a " +
+        "visit is interest whatever the leg; off the leg it is not the entry, so `reachedEntryStep` " +
+        "stays false and the stage is `website_visit`). `customer` = the sale is reached. `opted_out` = the person " +
         "asked not to be contacted (an unsubscribe, at this scope or globally); it is their own " +
         "act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. " +
         "`disqualified` = a commercial judgement of OURS: we realised they are not our target at " +
