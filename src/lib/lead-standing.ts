@@ -11,14 +11,18 @@
  * delivery evidence it already joins onto the membership row, and the hand-stated step statements
  * it already owns — so the policy is authored here, once, and everything else reads it.
  *
- * LEG-AWARE, deliberately. The alternative — "a click is buying intent everywhere" — makes a click
- * mean interest on a campaign that works no click. A campaign is (offer x leg x channel), and its
+ * LEG-AWARE, with ONE exception the owner decided (2026-09-28): a WEBSITE VISIT is interest on
+ * every campaign, whatever its leg (rule 9a) — the dashboard's own definition of interested is "a
+ * website visit or a positive reply", and a board that filed visitors under `engaged` contradicted
+ * its own heading. What stays leg-aware is WHICH step counts as the one being worked (a visit off a
+ * reply leg is interest, not that leg's entry), and everything else below. A campaign is (offer x leg x channel), and its
  * leg says where its leads step onto the leg graph (step-graph.ts): a campaign working
  * `start_to_website_visit` puts leads on the site, so somebody landing there has reached the step
  * it works; a campaign working `start_to_conversation` works a positive REPLY, and the same person
- * visiting the site has done something that is not on the way from where that campaign put them.
+ * visiting the site reached a step off that leg — interest all the same (9a), but not its entry, so
+ * `reachedEntryStep` stays false and a disqualifying reply still outranks it there.
  * The grain makes that expressible: the row is `(lead, campaign)`, so the same person can
- * legitimately stand at `sales_interest` under one campaign and `engaged` under another.
+ * legitimately stand differently under two campaigns (a positive reply off a site leg is `engaged`).
  *
  * The ladder, and why it is in this order:
  *
@@ -59,12 +63,17 @@
  *                              MOMENT: the person is still reachable, the lead is still
  *                              recyclable, and the "no" is named as the evidence rather than
  *                              used as a verdict. Same posture as the bounce below.
+ *  9a. website visited, on a leg that does not enter at the site -> sales_interest, stage
+ *                              `website_visit`. Owner-decided 2026-09-28: a visit is interest
+ *                              whatever the leg, exactly as a positive reply is; filing it under
+ *                              `engaged` drew visitors in Contacted beneath a board heading that
+ *                              defines interested as "a website visit or a positive reply".
  *  9c. negative reply, nobody can say which -> unresolved, reason
  *                              `reply_disqualification_unknown`. A provider that does not track
  *                              replies serves no disqualification reading at all, and neither
  *                              does a payload older than the field. Absent is stated, never
  *                              defaulted in either direction.
- *  10. replied / clicked / opened -> engaged. Something happened; it is not the step being sold.
+ *  10. replied / opened      -> engaged. Something happened; it is not the step being sold.
  *  11. bounced              -> contacted, carrying `signal: "bounced"`. A failure of DELIVERY is
  *                             not an opinion: a bad address says nothing about whether the person
  *                             behind it would buy, so they stay in play and the bounce is named
@@ -94,6 +103,9 @@ import type { WentCold } from "./lead-cold.js";
 import { TERMINAL_STEP, type EntryMeasure, type LegEntry } from "./step-graph.js";
 import type { StepReadState } from "./step-states.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
+
+/** The step a website visit is, statable by hand and measured as a click on our email. */
+const WEBSITE_VISIT_STEP = "website_visit" as const;
 
 export const LEAD_STANDING_STATES = [
   "unresolved",
@@ -366,6 +378,31 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
     };
   }
 
+  // 9a. They VISITED the brand's website, on a campaign whose leg does not enter there. A visit is
+  //     interest whatever the leg (owner-decided 2026-09-28): the dashboard defines interested as
+  //     "a website visit or a positive reply", and filing a visitor under `engaged` put them in
+  //     Contacted beneath a heading that says otherwise. Measured (a click on our email, folded in
+  //     by the caller as the tracker's `website_visit`) or stated by a person, both read here as
+  //     the step's outcome. It sits BELOW a disqualifying reply on purpose: off the leg, the visit
+  //     is interest and not the step being worked, so a reply saying they are the wrong contact
+  //     still takes them out. It sits ABOVE a negative reply, exactly as the entry step does.
+  //     The click is read here too, not only through the caller's fold, so the rule does not
+  //     depend on every caller remembering to fold it.
+  const visit = byStep.get(WEBSITE_VISIT_STEP);
+  if (visit?.state === "outcome") {
+    return {
+      ...shared,
+      state: "sales_interest",
+      signal: statementSignal(visit),
+      origin: statementOrigin(visit),
+      reason: null,
+      at: visit.at ?? null,
+    };
+  }
+  if (input.deliveryQueried && delivery.clicked) {
+    return { ...shared, state: "sales_interest", signal: "measured_visit", origin: "measured", reason: null };
+  }
+
   // 11. They said no, in a message, and the campaign's own entry step was not reached.
   //
   //     A decline is a judgement about the MOMENT, not about the person: they are still reachable
@@ -453,7 +490,12 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
  */
 export function salesInterestStage(standing: LeadStanding): string | null {
   if (standing.state !== "sales_interest") return null;
-  const stage = standing.deepestStep ?? standing.entryStep;
+  // A lead at `sales_interest` without a reachable step reached either reached the campaign's
+  // entry (`reachedEntryStep`) or VISITED the site on a leg that does not enter there (9a) — the
+  // only other door into the state — and that one's stage is the visit.
+  const stage =
+    standing.deepestStep ??
+    (standing.reachedEntryStep === true ? standing.entryStep : WEBSITE_VISIT_STEP);
   if (stage === null) {
     // Unreachable by construction: `sales_interest` is only ever reached through a step reading as
     // reached or the campaign's measured entry. A stage nobody can name must not be counted under a
