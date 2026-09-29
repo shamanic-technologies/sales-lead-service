@@ -76,6 +76,7 @@ export const HISTORY_SOURCES = [
   "delivery",
   "outreach",
   "mailbox",
+  "staff-mailbox",
   "content",
   "campaigns",
 ] as const;
@@ -354,6 +355,10 @@ export interface AssembleHistoryInput {
   /** Whether the delivery layer answered at all, and why not when it did not. */
   deliveryRead: SourceRead<null>;
   mailbox: SourceRead<MailboxConversation | null>;
+  /** Our STAFF's side of the exchange, out of their own Gmail mirrors (google-service
+   * `/internal/staff-mailboxes/conversation`): only messages between a staff address and this
+   * person, never anything else of those mailboxes. Absent = not asked. */
+  staffMailbox?: SourceRead<MailboxConversation | null> | null;
   replyStatements: SourceRead<OutreachReplyStatement[]>;
   optOuts: SourceRead<OutreachOptOut[]>;
   /** This service's own statements and conversions, already filtered to what still STANDS —
@@ -413,6 +418,18 @@ function messageKey(
 ): string {
   const bodyHead = (body ?? "").replace(/\s+/g, " ").trim().slice(0, 120).toLowerCase();
   return `${direction}|${minuteKey(at)}|${normalizeSubject(subject)}|${bodyHead}`;
+}
+
+/** Same message, direction left out: one holder may label a staff message inbound. */
+function looseMessageKey(at: string | null, subject: string | null, body: string | null): string {
+  const bodyHead = (body ?? "").replace(/\s+/g, " ").trim().slice(0, 120).toLowerCase();
+  return `${minuteKey(at)}|${normalizeSubject(subject)}|${bodyHead}`;
+}
+
+/** One sender, one minute, one subject: the same message even when two holders render the body
+ * differently (a quoted tail kept by one and stripped by the other). */
+function senderKey(from: string | null, at: string | null, subject: string | null): string {
+  return `${(from ?? "").trim().toLowerCase()}|${minuteKey(at)}|${normalizeSubject(subject)}`;
 }
 
 function pushDelivery(
@@ -671,6 +688,85 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
           "unavailable",
           `the Gmail mirror answered status=${conversation.status} for this address`,
         );
+      }
+    }
+  }
+
+  // ── Our staff's own Gmail: what they wrote to this person by hand, as the agency ──
+  //
+  // A staff member taking over a thread answers from their own mailbox, which lives under THEIR
+  // org, so the customer's mailbox above cannot hold it. google-service hands over only messages
+  // between a staff address and this person, so everything here is part of the exchange.
+  //
+  // The same message is routinely held by the outreach side too (the staff member Cc'd the
+  // sending mailbox), and the outreach provider labels anything not sent by its own mailbox as
+  // inbound. So a staff message is matched to what is already here WITHOUT its direction, and
+  // when it matches, the staff mirror corrects the direction: it knows its own sender.
+  if (input.staffMailbox) {
+    if (!input.staffMailbox.ok) {
+      noteSource("staff-mailbox", "unavailable", input.staffMailbox.reason);
+    } else {
+      noteSource("staff-mailbox", "ok", null);
+      const conversation = input.staffMailbox.data;
+      if (conversation) {
+        const byLooseKey = new Map<string, HistoryMessageEvent>();
+        const bySender = new Map<string, HistoryMessageEvent>();
+        const index = (event: HistoryMessageEvent): void => {
+          byLooseKey.set(looseMessageKey(event.at, event.subject, event.bodyText), event);
+          if (event.from) bySender.set(senderKey(event.from, event.at, event.subject), event);
+        };
+        for (const event of byKey.values()) index(event);
+        for (const thread of conversation.threads) {
+          for (const message of thread.messages) {
+            const direction = message.direction === "other" ? null : message.direction;
+            const body = message.bodyText ?? message.snippet ?? null;
+            const existing =
+              byKey.get(messageKey(message.direction, message.sentAt, message.subject, body)) ??
+              byLooseKey.get(looseMessageKey(message.sentAt, message.subject, body)) ??
+              (message.fromEmail
+                ? bySender.get(senderKey(message.fromEmail, message.sentAt, message.subject))
+                : undefined);
+            if (existing) {
+              if (!existing.heldBy.includes("staff-mailbox")) existing.heldBy.push("staff-mailbox");
+              if (direction === "outbound" && existing.direction !== "outbound") {
+                existing.direction = "outbound";
+              }
+              continue;
+            }
+            const event: HistoryMessageEvent = {
+              id: `message:staff-mailbox:${message.gmailMessageId}`,
+              at: message.sentAt,
+              type: "message",
+              evidence: "observed",
+              source: "staff-mailbox",
+              // A staff mailbox knows an address, not a campaign. Claiming one would be a guess.
+              campaignId: null,
+              direction,
+              from: message.fromEmail,
+              to: message.to ?? [],
+              subject: message.subject,
+              bodyText: message.bodyStatus === "unavailable" ? null : body,
+              bodyStatus: message.bodyStatus,
+              threadId: message.threadId,
+              heldBy: ["staff-mailbox"],
+              copy: "staff_gmail_mirror",
+              links: resolveMessageLinks(
+                message.bodyStatus === "unavailable" ? null : body,
+                destinations,
+              ),
+            };
+            byKey.set(`staff:${message.gmailMessageId}`, event);
+            // Two staff mailboxes can hold one message (sender and a Cc'd colleague).
+            index(event);
+          }
+        }
+        if (conversation.status !== "ok") {
+          noteSource(
+            "staff-mailbox",
+            "unavailable",
+            `the staff Gmail mirror answered status=${conversation.status} for this address`,
+          );
+        }
       }
     }
   }
