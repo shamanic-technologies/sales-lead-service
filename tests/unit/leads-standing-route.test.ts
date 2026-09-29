@@ -424,7 +424,18 @@ describe("a lead row carries where that person stands", () => {
       fromEmail: email,
       subject: null,
       receivedAt,
-      verdict: { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt },
+      verdict: {
+        kind,
+        classification,
+        producerType: "model",
+        producer: "m",
+        attribution: "exact",
+        confidence: null,
+        decidedAt: receivedAt,
+        automatedAnswer: kind === "lead_out_of_office",
+        stopRequested: kind === "lead_opt_out_requested",
+        notOurTarget: false,
+      },
       verdictCount: 1,
     };
   }

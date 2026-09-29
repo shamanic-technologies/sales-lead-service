@@ -45,7 +45,7 @@ import {
   ReplyVerdictsUnavailableError,
   type ReplyVerdictView,
 } from "./reply-verdicts-client.js";
-import { isNotOurTarget, leadReplyOutcome, type LeadReplyOutcome } from "./reply-outcome.js";
+import { leadReplyOutcome, type LeadReplyOutcome } from "./reply-outcome.js";
 import { entryOfLeg, legOf, type LegEntry } from "./step-graph.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-states.js";
@@ -464,7 +464,7 @@ export function replyDelivery(
     ...base,
     replied: replies.offer.realReplies > 0 || ledgerPositiveReply,
     replyClassification,
-    disqualified: !ledgerIsNewer && latest !== null && isNotOurTarget(latest.kind),
+    disqualified: !ledgerIsNewer && latest !== null && latest.notOurTarget,
     positiveReplyReached: replies.offer.reached.positive !== null || ledgerPositiveReply,
     replyOptOut: replies.brand.optedOutAt !== null,
   };
