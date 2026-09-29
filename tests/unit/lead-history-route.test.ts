@@ -64,8 +64,10 @@ vi.mock("../../src/lib/outreach-client.js", () => ({
 }));
 
 const fetchMailboxConversation = vi.fn();
+const fetchStaffMailboxConversation = vi.fn();
 vi.mock("../../src/lib/mailbox-client.js", () => ({
   fetchMailboxConversation: (...a: unknown[]) => fetchMailboxConversation(...a),
+  fetchStaffMailboxConversation: (...a: unknown[]) => fetchStaffMailboxConversation(...a),
 }));
 
 const fetchGeneratedEmail = vi.fn();
@@ -146,6 +148,7 @@ beforeEach(() => {
   fetchOutreachReplyStatements.mockReset().mockResolvedValue({ ok: true, data: [] });
   fetchOutreachOptOuts.mockReset().mockResolvedValue({ ok: true, data: [] });
   fetchMailboxConversation.mockReset().mockResolvedValue({ ok: true, data: null });
+  fetchStaffMailboxConversation.mockReset().mockResolvedValue({ ok: true, data: null });
   fetchGeneratedEmail.mockReset().mockResolvedValue({ ok: true, data: null });
   fetchAnswerers.mockReset().mockResolvedValue({ ok: true, data: new Map() });
 });
@@ -268,6 +271,20 @@ describe("GET /orgs/leads/:id/history", () => {
     expect(mailbox.reason).toContain("google-service unreachable");
   });
 
+  it("asks the staff mailboxes about the lead's address, and states them when unreadable", async () => {
+    fetchStaffMailboxConversation.mockResolvedValue({
+      ok: false,
+      reason: "google-service answered 500",
+    });
+    const res = await get(`/orgs/leads/${ROW}/history`);
+    expect(res.status).toBe(200);
+    expect(fetchStaffMailboxConversation).toHaveBeenCalledTimes(1);
+    expect(fetchStaffMailboxConversation.mock.calls[0][0]).toBe(leadRow!.email);
+    const staff = res.body.sources.find((s: { source: string }) => s.source === "staff-mailbox");
+    expect(staff.status).toBe("unavailable");
+    expect(res.body.complete).toBe(false);
+  });
+
   it("does not fail the read when the delivery layer is down", async () => {
     checkDeliveryStatus.mockRejectedValue(new Error("boom"));
     const res = await get(`/orgs/leads/${ROW}/history`);
@@ -322,6 +339,8 @@ describe("GET /orgs/leads/:id/history", () => {
     expect(byName.mailbox.status).toBe("unavailable");
     expect(res.body.complete).toBe(false);
     expect(fetchMailboxConversation).not.toHaveBeenCalled();
+    expect(fetchStaffMailboxConversation).not.toHaveBeenCalled();
+    expect(byName["staff-mailbox"].status).toBe("unavailable");
   });
 
   it("bounds the campaign fan-out and SAYS it did", async () => {
