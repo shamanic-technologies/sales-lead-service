@@ -104,6 +104,7 @@ export async function readBrandColdLeads(brandId: string): Promise<BrandColdRead
           campaignId: r.campaign_id,
           brandIds: r.brand_ids,
           status: r.status,
+          email: r.email ?? null,
           delivery: standingDelivery(result ? flattenBrandStatus(result) : DEFAULT_STATUS),
         };
       });
@@ -163,6 +164,7 @@ export async function readLeadRowCold(
       // The panel names its brand: the rule reads that brand's CRM.
       brandIds: [brandId, ...row.brandIds.filter((b) => b !== brandId)],
       status: "served",
+      email: row.email ?? null,
       delivery: standingDelivery(delivery),
     },
   ]);

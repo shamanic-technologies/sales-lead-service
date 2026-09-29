@@ -122,7 +122,16 @@ vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
   CAMPAIGN_SERVICE_URL: "https://campaign.test",
   CAMPAIGN_SERVICE_API_KEY: "test-campaign-key",
+  INSTANTLY_SERVICE_URL: "https://instantly.test",
+  INSTANTLY_SERVICE_API_KEY: "test-instantly-key",
 }));
+
+// Every reply these people sent, each with its own verdict (instantly-service's contract). Answered
+// ahead of whatever the test does to the campaign-service transport.
+const VERDICTS_URL = "https://instantly.test/orgs/reply-verdicts/query";
+let mockReplies: Array<Record<string, unknown>> = [];
+let verdictsDown = false;
+const verdictRequests: Array<{ emails: string[] }> = [];
 
 const ORG = "30000000-0000-0000-0000-000000000001";
 const BRAND = "6e21bb6c-67bc-45f3-8a6d-52230338d7e4";
@@ -193,7 +202,23 @@ describe("a lead row carries where that person stands", () => {
   let app: express.Express;
 
   beforeEach(async () => {
-    vi.stubGlobal("fetch", fetchSpy);
+    mockReplies = [];
+    verdictsDown = false;
+    verdictRequests.length = 0;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (url === VERDICTS_URL) {
+        const body = JSON.parse(String(init?.body)) as { emails: string[] };
+        verdictRequests.push(body);
+        if (verdictsDown) return Promise.resolve({ ok: false, status: 500, text: async () => "down" });
+        const asked = new Set(body.emails);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ replies: mockReplies.filter((r) => asked.has(String(r.leadEmail))) }),
+        });
+      }
+      return fetchSpy(url, init);
+    });
     fetchSpy.mockReset();
     healthyCampaigns();
     mockRows = [];
@@ -384,5 +409,73 @@ describe("a lead row carries where that person stands", () => {
     ).body.leadDetail;
 
     expect(detail.standing).toEqual(list.standing);
+  });
+
+  // The reply half of the standing is read off every reply's own verdict (instantly-service), not
+  // off the one coarse value per (campaign x lead) that the latest verdict overwrites.
+  function verdictReply(email: string, receivedAt: string, kind: string, classification: string, campaignId = REPLY_LED) {
+    return {
+      replyId: `${email}-${receivedAt}`,
+      leadEmail: email,
+      instantlyCampaignId: "i-1",
+      campaignId,
+      brandIds: [BRAND],
+      transport: "instantly",
+      fromEmail: email,
+      subject: null,
+      receivedAt,
+      verdict: { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt },
+      verdictCount: 1,
+    };
+  }
+
+  it("serves the latest REAL reply on the standing, never the out-of-office before it", async () => {
+    mockRows = [rawRow(1, REPLY_LED)];
+    mockReplies = [
+      verdictReply("lead-1@example.com", "2026-09-24T11:10:37Z", "lead_out_of_office", "neutral"),
+      verdictReply("lead-1@example.com", "2026-09-28T04:52:00Z", "lead_referral", "neutral"),
+    ];
+
+    const res = await get(app, `/orgs/leads?brandId=${BRAND}&campaignId=${REPLY_LED}&view=basic`);
+
+    const standing = res.body.leads[0].standing;
+    expect(standing.replies.offer.latest.kind).toBe("lead_referral");
+    expect(standing.replies.offer.machineReplies).toBe(1);
+    // A referral is a hand-over to a person, never interest.
+    expect(standing.state).toBe("engaged");
+    expect(verdictRequests[0].emails).toEqual(["lead-1@example.com"]);
+  });
+
+  it("opts a person out on every campaign of the brand once they asked to stop in a reply", async () => {
+    mockRows = [rawRow(1, FORM_MAGNET)];
+    mockReplies = [verdictReply("lead-1@example.com", "2026-09-24T13:38:10Z", "lead_opt_out_requested", "negative", REPLY_LED)];
+
+    const res = await get(app, `/orgs/leads?brandId=${BRAND}&campaignId=${FORM_MAGNET}&view=basic`);
+
+    const standing = res.body.leads[0].standing;
+    expect(standing.state).toBe("opted_out");
+    expect(standing.signal).toBe("opt_out_reply");
+    expect(standing.replies.brand.optedOutAt).toBe("2026-09-24T13:38:10Z");
+  });
+
+  // Fail loud: instantly-service unreachable is stated, never read as "they never replied".
+  it("says unresolved, reply_verdicts_unreadable, when the replies cannot be read", async () => {
+    mockRows = [rawRow(1, REPLY_LED)];
+    verdictsDown = true;
+
+    const res = await get(app, `/orgs/leads?brandId=${BRAND}&view=basic`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].standing.state).toBe("unresolved");
+    expect(res.body.leads[0].standing.reason).toBe("reply_verdicts_unreadable");
+    expect(res.body.leads[0].contacted).toBe(true);
+  });
+
+  it("asks nothing of instantly-service on an unscoped read", async () => {
+    mockRows = [rawRow(1, REPLY_LED)];
+    const res = await get(app, `/orgs/leads?view=basic`);
+    expect(res.status).toBe(200);
+    expect(verdictRequests).toHaveLength(0);
+    expect(res.body.leads[0].standing.replies).toBeNull();
   });
 });

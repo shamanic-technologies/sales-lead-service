@@ -1599,9 +1599,10 @@
               "stated_outcome",
               "stated_never",
               "bounced",
-              "unsubscribed"
+              "unsubscribed",
+              "opt_out_reply"
             ],
-            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `disqualifying_reply` = the delivery layer reports this person as permanently out (the wrong contact, or gone from the role). `negative_reply` = they declined; that leaves them in play.",
+            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `disqualifying_reply` = the delivery layer reports this person as permanently out (the wrong contact, or gone from the role). `negative_reply` = they declined; that leaves them in play. `opt_out_reply` = they asked us to stop in a reply, under this brand — opted out on every offer of it.",
             "example": "measured_visit"
           },
           "origin": {
@@ -1626,9 +1627,10 @@
               "leg_unstated",
               "statements_unreadable",
               "reply_disqualification_unknown",
+              "reply_verdicts_unreadable",
               null
             ],
-            "description": "Why the state is `unresolved`, and null for every other state. `delivery_not_queried` = the read named no brand or campaign, so the delivery layer was never asked. `campaign_service_unavailable` / `campaign_unknown` / `leg_unstated` = the campaign's leg could not be resolved (campaign-service unreachable, the campaign unknown to it, or the campaign states no leg this service knows), so there is no telling whether a click is the step it works. `statements_unreadable` = the hand-stated statements could not be read. `reply_disqualification_unknown` = the reply reads as negative and the provider serves no disqualification reading for it (a provider without reply tracking, or a payload older than the field), so whether this is a decline about the moment or a permanent fact about the person cannot be told apart here. Never a plausible default.",
+            "description": "Why the state is `unresolved`, and null for every other state. `delivery_not_queried` = the read named no brand or campaign, so the delivery layer was never asked. `campaign_service_unavailable` / `campaign_unknown` / `leg_unstated` = the campaign's leg could not be resolved (campaign-service unreachable, the campaign unknown to it, or the campaign states no leg this service knows), so there is no telling whether a click is the step it works. `statements_unreadable` = the hand-stated statements could not be read. `reply_verdicts_unreadable` = instantly-service could not be asked what this person's replies were, so nothing is claimed about them. `reply_disqualification_unknown` = the reply reads as negative and the provider serves no disqualification reading for it (a provider without reply tracking, or a payload older than the field), so whether this is a decline about the moment or a permanent fact about the person cannot be told apart here. Never a plausible default.",
             "example": null
           },
           "legKey": {
@@ -1674,6 +1676,9 @@
           },
           "wentCold": {
             "$ref": "#/components/schemas/LeadWentCold"
+          },
+          "replies": {
+            "$ref": "#/components/schemas/LeadReplyOutcome"
           }
         },
         "required": [
@@ -1687,7 +1692,8 @@
           "reachedEntryStep",
           "deepestStep",
           "at",
-          "wentCold"
+          "wentCold",
+          "replies"
         ],
         "description": "Where this lead stands on the campaign it was served under, decided here so that two surfaces cannot say different things about the same person. Derived on read from the delivery evidence below plus the hand-stated step statements this service owns; nothing is stored, so a retracted or withdrawn statement moves it with no write."
       },
@@ -1733,6 +1739,235 @@
           "afterDays"
         ],
         "description": "Whether the lead WENT COLD at a step, or null. A fact BESIDE `state`, never a state: a cold lead keeps its standing, so a board partitioned by standing is unchanged."
+      },
+      "LeadReplyOutcome": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "offerKey": {
+            "type": "string",
+            "nullable": true,
+            "description": "The offer the row's campaign sells (`offer:<id>`), the campaign itself (`campaign:<id>`) when it states none, or null when the campaign is unknown."
+          },
+          "offer": {
+            "type": "object",
+            "properties": {
+              "replies": {
+                "type": "integer",
+                "description": "Every reply at this grain, judged or not."
+              },
+              "realReplies": {
+                "type": "integer",
+                "description": "Replies a person wrote (a machine answer excluded)."
+              },
+              "machineReplies": {
+                "type": "integer",
+                "description": "Out-of-office and auto-replies. Never decide anything."
+              },
+              "unjudgedReplies": {
+                "type": "integer",
+                "description": "Replies not judged yet; they decide nothing until judged."
+              },
+              "latest": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "replyId": {
+                    "type": "string",
+                    "description": "instantly-service's reply id."
+                  },
+                  "receivedAt": {
+                    "type": "string",
+                    "description": "When the reply was received."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "The campaign the reply was sent on."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "The reply's kind, verbatim from instantly-service, which owns that vocabulary."
+                  },
+                  "classification": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "positive",
+                      "negative",
+                      "neutral",
+                      null
+                    ],
+                    "description": "instantly-service's coarse reading of the kind. A referral and an off-topic reply read `neutral`: a hand-over to a person, never interest."
+                  },
+                  "producerType": {
+                    "type": "string",
+                    "description": "Who judged it: `human` | `instantly` | `model`."
+                  }
+                },
+                "required": [
+                  "replyId",
+                  "receivedAt",
+                  "campaignId",
+                  "kind",
+                  "classification",
+                  "producerType"
+                ],
+                "description": "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it."
+              },
+              "reached": {
+                "type": "object",
+                "properties": {
+                  "positive": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "negative": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "neutral": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "positive",
+                  "negative",
+                  "neutral"
+                ],
+                "description": "WHAT HAS THIS LEAD REACHED: when each classification was first seen among real replies. A positive reply followed by a 'not now' still reached interest."
+              },
+              "optedOutAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "When the person first asked us to stop in a reply. Sticky: nothing written after undoes it."
+              }
+            },
+            "required": [
+              "replies",
+              "realReplies",
+              "machineReplies",
+              "unjudgedReplies",
+              "latest",
+              "reached",
+              "optedOutAt"
+            ],
+            "description": "Lead x OFFER: the replies sent on a campaign selling this offer. Interest and disqualification are read here."
+          },
+          "brand": {
+            "type": "object",
+            "properties": {
+              "replies": {
+                "type": "integer",
+                "description": "Every reply at this grain, judged or not."
+              },
+              "realReplies": {
+                "type": "integer",
+                "description": "Replies a person wrote (a machine answer excluded)."
+              },
+              "machineReplies": {
+                "type": "integer",
+                "description": "Out-of-office and auto-replies. Never decide anything."
+              },
+              "unjudgedReplies": {
+                "type": "integer",
+                "description": "Replies not judged yet; they decide nothing until judged."
+              },
+              "latest": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "replyId": {
+                    "type": "string",
+                    "description": "instantly-service's reply id."
+                  },
+                  "receivedAt": {
+                    "type": "string",
+                    "description": "When the reply was received."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "The campaign the reply was sent on."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "The reply's kind, verbatim from instantly-service, which owns that vocabulary."
+                  },
+                  "classification": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "positive",
+                      "negative",
+                      "neutral",
+                      null
+                    ],
+                    "description": "instantly-service's coarse reading of the kind. A referral and an off-topic reply read `neutral`: a hand-over to a person, never interest."
+                  },
+                  "producerType": {
+                    "type": "string",
+                    "description": "Who judged it: `human` | `instantly` | `model`."
+                  }
+                },
+                "required": [
+                  "replyId",
+                  "receivedAt",
+                  "campaignId",
+                  "kind",
+                  "classification",
+                  "producerType"
+                ],
+                "description": "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it."
+              },
+              "reached": {
+                "type": "object",
+                "properties": {
+                  "positive": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "negative": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "neutral": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "positive",
+                  "negative",
+                  "neutral"
+                ],
+                "description": "WHAT HAS THIS LEAD REACHED: when each classification was first seen among real replies. A positive reply followed by a 'not now' still reached interest."
+              },
+              "optedOutAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "When the person first asked us to stop in a reply. Sticky: nothing written after undoes it."
+              }
+            },
+            "required": [
+              "replies",
+              "realReplies",
+              "machineReplies",
+              "unjudgedReplies",
+              "latest",
+              "reached",
+              "optedOutAt"
+            ],
+            "description": "Lead x BRAND: every reply sent under the brand. An opt-out is read here: it holds for every offer."
+          }
+        },
+        "required": [
+          "offerKey",
+          "offer",
+          "brand"
+        ],
+        "description": "The reply evidence the state was decided from, at lead x offer and lead x brand. The state reads the OFFER's latest real reply (interest, a decline, not our target) and the BRAND's opt-out; `reachedEntryStep` reads whether a positive reply was ever reached. null when replies were not read (an unscoped read, a row never served)."
       },
       "LeadClosedDeal": {
         "type": "object",
