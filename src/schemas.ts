@@ -1269,6 +1269,58 @@ const ColdRuleSchema = z.object({
   }),
 });
 
+const LatestReplySchema = z.object({
+  replyId: z.string().openapi({ description: "instantly-service's reply id." }),
+  receivedAt: z.string().openapi({ description: "When the reply was received." }),
+  campaignId: z.string().nullable().openapi({ description: "The campaign the reply was sent on." }),
+  kind: z.string().openapi({
+    description: "The reply's kind, verbatim from instantly-service, which owns that vocabulary.",
+  }),
+  classification: z.enum(["positive", "negative", "neutral"]).nullable().openapi({
+    description: "instantly-service's coarse reading of the kind. A referral and an off-topic reply read `neutral`: a hand-over to a person, never interest.",
+  }),
+  producerType: z.string().openapi({ description: "Who judged it: `human` | `instantly` | `model`." }),
+});
+
+const ReplyReadingSchema = z.object({
+  replies: z.number().int().openapi({ description: "Every reply at this grain, judged or not." }),
+  realReplies: z.number().int().openapi({ description: "Replies a person wrote (a machine answer excluded)." }),
+  machineReplies: z.number().int().openapi({ description: "Out-of-office and auto-replies. Never decide anything." }),
+  unjudgedReplies: z.number().int().openapi({ description: "Replies not judged yet; they decide nothing until judged." }),
+  latest: LatestReplySchema.nullable().openapi({
+    description: "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it.",
+  }),
+  reached: z
+    .object({
+      positive: z.string().nullable(),
+      negative: z.string().nullable(),
+      neutral: z.string().nullable(),
+    })
+    .openapi({
+      description: "WHAT HAS THIS LEAD REACHED: when each classification was first seen among real replies. A positive reply followed by a 'not now' still reached interest.",
+    }),
+  optedOutAt: z.string().nullable().openapi({
+    description: "When the person first asked us to stop in a reply. Sticky: nothing written after undoes it.",
+  }),
+});
+
+const LeadReplyOutcomeSchema = z
+  .object({
+    offerKey: z.string().nullable().openapi({
+      description: "The offer the row's campaign sells (`offer:<id>`), the campaign itself (`campaign:<id>`) when it states none, or null when the campaign is unknown.",
+    }),
+    offer: ReplyReadingSchema.openapi({
+      description: "Lead x OFFER: the replies sent on a campaign selling this offer. Interest and disqualification are read here.",
+    }),
+    brand: ReplyReadingSchema.openapi({
+      description: "Lead x BRAND: every reply sent under the brand. An opt-out is read here: it holds for every offer.",
+    }),
+  })
+  .openapi("LeadReplyOutcome", {
+    description:
+      "What this person's replies mean, rolled up by lead-service from every reply's own verdict (instantly-service). Two readings kept apart: `latest` (what do we do now) and `reached` (what has this lead reached).",
+  });
+
 const LeadStandingSchema = z
   .object({
     state: z.enum(LEAD_STANDING_STATES as unknown as [string, ...string[]]).openapi({
@@ -1304,7 +1356,8 @@ const LeadStandingSchema = z
         "`opted_out`, which is its own countable, pageable standing rather than a shade of " +
         "`disqualified`. `disqualifying_reply` = the " +
         "delivery layer reports this person as permanently out (the wrong contact, or gone from " +
-        "the role). `negative_reply` = they declined; that leaves them in play.",
+        "the role). `negative_reply` = they declined; that leaves them in play. `opt_out_reply` = " +
+        "they asked us to stop in a reply, under this brand — opted out on every offer of it.",
       example: "measured_visit",
     }),
     origin: z
@@ -1328,7 +1381,9 @@ const LeadStandingSchema = z
           "campaign's leg could not be resolved (campaign-service unreachable, the campaign unknown " +
           "to it, or the campaign states no leg this service knows), so there is no telling " +
           "whether a click is the step it works. `statements_unreadable` = the hand-stated statements could not " +
-          "be read. `reply_disqualification_unknown` = the reply reads as negative and the " +
+          "be read. `reply_verdicts_unreadable` = instantly-service could not be asked what this " +
+          "person's replies were, so nothing is claimed about them. " +
+          "`reply_disqualification_unknown` = the reply reads as negative and the " +
           "provider serves no disqualification reading for it (a provider without reply " +
           "tracking, or a payload older than the field), so whether this is a decline about the " +
           "moment or a permanent fact about the person cannot be told apart here. Never a " +
@@ -1395,6 +1450,10 @@ const LeadStandingSchema = z
     wentCold: WentColdSchema.nullable().openapi({
       description:
         "Whether the lead WENT COLD at a step, or null. A fact BESIDE `state`, never a state: a cold lead keeps its standing, so a board partitioned by standing is unchanged.",
+    }),
+    replies: LeadReplyOutcomeSchema.nullable().openapi({
+      description:
+        "The reply evidence the state was decided from, at lead x offer and lead x brand. The state reads the OFFER's latest real reply (interest, a decline, not our target) and the BRAND's opt-out; `reachedEntryStep` reads whether a positive reply was ever reached. null when replies were not read (an unscoped read, a row never served).",
     }),
   })
   .openapi("LeadStanding", {

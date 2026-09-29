@@ -75,6 +75,7 @@ export async function attachLeadStandings(
       campaignId: row.campaignId,
       brandIds: row.brandIds,
       status: row.status,
+      email: row.email ?? null,
       delivery: standingDelivery(row.delivery),
     }));
     const resolved = await resolver.resolve(standingRows);

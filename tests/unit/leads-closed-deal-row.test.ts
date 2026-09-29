@@ -123,7 +123,16 @@ vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
   CAMPAIGN_SERVICE_URL: "https://campaign.test",
   CAMPAIGN_SERVICE_API_KEY: "test-campaign-key",
+  INSTANTLY_SERVICE_URL: "https://instantly.test",
+  INSTANTLY_SERVICE_API_KEY: "test-instantly-key",
 }));
+
+// Every reply these people sent, each with its own verdict (instantly-service's contract). Answered
+// ahead of whatever the test does to the campaign-service transport.
+const VERDICTS_URL = "https://instantly.test/orgs/reply-verdicts/query";
+let mockReplies: Array<Record<string, unknown>> = [];
+let verdictsDown = false;
+const verdictRequests: Array<{ emails: string[] }> = [];
 
 const ORG = "30000000-0000-0000-0000-000000000001";
 const BRAND = "6e21bb6c-67bc-45f3-8a6d-52230338d7e4";
@@ -195,7 +204,23 @@ describe("a lead row carries the deal, and whose win it was", () => {
   let app: express.Express;
 
   beforeEach(async () => {
-    vi.stubGlobal("fetch", fetchSpy);
+    mockReplies = [];
+    verdictsDown = false;
+    verdictRequests.length = 0;
+    vi.stubGlobal("fetch", (url: string, init?: RequestInit) => {
+      if (url === VERDICTS_URL) {
+        const body = JSON.parse(String(init?.body)) as { emails: string[] };
+        verdictRequests.push(body);
+        if (verdictsDown) return Promise.resolve({ ok: false, status: 500, text: async () => "down" });
+        const asked = new Set(body.emails);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ replies: mockReplies.filter((r) => asked.has(String(r.leadEmail))) }),
+        });
+      }
+      return fetchSpy(url, init);
+    });
     fetchSpy.mockReset();
     healthyCampaigns();
     mockRows = [];

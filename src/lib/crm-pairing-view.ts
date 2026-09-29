@@ -174,6 +174,7 @@ export async function resolveStandingsForLeads(
       campaignId: lead.campaignId,
       brandIds: lead.brandIds,
       status: lead.status,
+      email: lead.email ?? null,
       delivery: standingDelivery(deliveryByLead.get(lead.leadId) ?? DEFAULT_STATUS),
     })),
   );
