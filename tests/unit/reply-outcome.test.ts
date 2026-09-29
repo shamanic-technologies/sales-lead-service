@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { leadReplyOutcome, offerKeyOf, readReplies } from "../../src/lib/reply-outcome.js";
-import { replyDelivery } from "../../src/lib/lead-standing-resolver.js";
+import { replyDelivery, withUnrecordedReplyStatement } from "../../src/lib/lead-standing-resolver.js";
 import { resolveLeadStanding, salesInterestStage, type LeadStandingDelivery } from "../../src/lib/lead-standing.js";
 import { entryOfLeg, legOf } from "../../src/lib/step-graph.js";
 import { resolveStepStates } from "../../src/lib/step-states.js";
@@ -81,9 +81,13 @@ function standingFor(
   rowCampaignId = CAMP_A,
   opts: { leg?: string; base?: Partial<LeadStandingDelivery>; ledgerAt?: string | null } = {},
 ) {
-  const outcome = leadReplyOutcome({ replies, rowCampaignId, rowBrandIds: [BRAND], offers: OFFERS });
+  const baseDelivery = { ...BASE_DELIVERY, ...opts.base };
+  const outcome = withUnrecordedReplyStatement(
+    leadReplyOutcome({ replies, rowCampaignId, rowBrandIds: [BRAND], offers: OFFERS }),
+    baseDelivery,
+  );
   const delivery = replyDelivery(
-    { ...BASE_DELIVERY, ...opts.base },
+    baseDelivery,
     outcome,
     opts.ledgerAt !== undefined && opts.ledgerAt !== null,
     opts.ledgerAt ?? null,
@@ -282,6 +286,45 @@ describe("the standing reads it", () => {
     });
     expect(standing.state).toBe("engaged");
     expect(standing.reachedEntryStep).toBe(true);
+  });
+});
+
+// A reply somebody recorded BY HAND, whose message was never mirrored: instantly-service keeps its
+// verdict in bronze attributed to no reply, so the per-reply layer holds nothing for that person.
+// Measured at ship (2026-09-29): 16 leads, e.g. jason@uhmedical.com stated interested on 09-03.
+describe("a reply recorded by hand, never mirrored as a message", () => {
+  it("the delivery layer's positive statement stands, and says where it came from", () => {
+    const { outcome, standing } = standingFor([], CAMP_A, { base: { replyClassification: "positive" } });
+    expect(outcome.offerEvidence).toBe("delivery_statement");
+    expect(standing.state).toBe("sales_interest");
+    expect(standing.reachedEntryStep).toBe(true);
+  });
+
+  it("a stated 'wrong person' stands as disqualified", () => {
+    const { standing } = standingFor([], CAMP_A, { base: { replyClassification: "negative", disqualified: true } });
+    expect(standing.state).toBe("disqualified");
+  });
+
+  it("a stated positive after an out-of-office message stands too", () => {
+    const { outcome, standing } = standingFor([reply("2026-09-01T00:00:00Z", ...OOO)], CAMP_A, {
+      base: { replyClassification: "positive" },
+    });
+    expect(outcome.offerEvidence).toBe("delivery_statement");
+    expect(standing.state).toBe("sales_interest");
+  });
+
+  it("a NEUTRAL coarse value is not taken: that is what an out-of-office overwrites it with", () => {
+    const { outcome, standing } = standingFor([], CAMP_A, { base: { replyClassification: "neutral" } });
+    expect(outcome.offerEvidence).toBe("replies");
+    expect(standing.state).toBe("contacted");
+  });
+
+  it("a person's reply in the per-reply layer always wins over the coarse value", () => {
+    const { outcome, standing } = standingFor([reply("2026-09-01T00:00:00Z", ...NOT_NOW)], CAMP_A, {
+      base: { replyClassification: "positive" },
+    });
+    expect(outcome.offerEvidence).toBe("replies");
+    expect(standing.state).toBe("engaged");
   });
 });
 
