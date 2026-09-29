@@ -13,8 +13,32 @@ vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
   return {
     ...actual,
     fetchOrgCampaignLegs: (...args: unknown[]) => fetchOrgCampaignLegs(...args),
+    fetchOrgCampaignOffers: () => Promise.resolve(new Map([["camp-1", "offer-1"]])),
   };
 });
+
+// The replies, each with its own verdict (instantly-service). A positive reply on camp-1 by default.
+let replies: unknown[] = [];
+vi.mock("../../src/lib/reply-verdicts-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/reply-verdicts-client.js")>()),
+  fetchReplyVerdicts: () => Promise.resolve(replies),
+}));
+
+function reply(receivedAt: string, kind: string, classification: string | null) {
+  return {
+    replyId: `r-${receivedAt}`,
+    leadEmail: "lead-1@example.com",
+    instantlyCampaignId: "i-1",
+    campaignId: "camp-1",
+    brandIds: ["brand-1"],
+    transport: "instantly",
+    fromEmail: "lead-1@example.com",
+    subject: null,
+    receivedAt,
+    verdict: { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt },
+    verdictCount: 1,
+  };
+}
 
 const loadCrmColdEligibility = vi.fn();
 const loadUnconfirmedPairingLeads = vi.fn();
@@ -40,6 +64,7 @@ function row(overrides: Partial<StandingRow> = {}): StandingRow {
     campaignId: "camp-1",
     brandIds: ["brand-1"],
     status: "served",
+    email: "lead-1@example.com",
     delivery: {
       contacted: true,
       opened: true,
@@ -68,6 +93,7 @@ function resolver() {
 
 beforeEach(() => {
   outcomeRows = [];
+  replies = [reply("2026-06-01T00:00:00.000Z", "lead_interested", "positive")];
   execute.mockReset().mockImplementation(async (q: unknown) =>
     sqlOf(q).includes("from conversion_events") ? outcomeRows : [],
   );
@@ -89,6 +115,7 @@ describe("standing.wentCold — resolved in the same pass as the standing", () =
   });
 
   it("the CRM's positive reply dates the reply when the delivery layer holds none", async () => {
+    replies = [];
     outcomeRows = [
       {
         brand_id: "brand-1",

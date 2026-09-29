@@ -33,7 +33,33 @@ let legByCampaign = new Map<string, string | null>();
 vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/campaign-leg-client.js")>()),
   fetchOrgCampaignLegs: () => Promise.resolve(legByCampaign),
+  fetchOrgCampaignOffers: () => Promise.resolve(new Map([...legByCampaign.keys()].map((id) => [id, null]))),
 }));
+
+// The replies, each with its own verdict (instantly-service), stubbed at the HTTP-client boundary.
+let repliesByEmail: Record<string, Array<{ receivedAt: string; kind: string; classification: string }>> = {};
+vi.mock("../../src/lib/reply-verdicts-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/reply-verdicts-client.js")>()),
+  fetchReplyVerdicts: (emails: string[]) =>
+    Promise.resolve(
+      emails.flatMap((email) =>
+        (repliesByEmail[email] ?? []).map((r, i) => ({
+          replyId: `${email}-${i}`,
+          leadEmail: email,
+          instantlyCampaignId: "i",
+          campaignId: [...legByCampaign.keys()][0] ?? null,
+          brandIds: [brandIdForReplies],
+          transport: "instantly",
+          fromEmail: email,
+          subject: null,
+          receivedAt: r.receivedAt,
+          verdict: { kind: r.kind, classification: r.classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: r.receivedAt },
+          verdictCount: 1,
+        })),
+      ),
+    ),
+}));
+let brandIdForReplies = "";
 
 const { db, sql } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations, conversionEvents } =
@@ -90,6 +116,10 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
   }, 60_000);
 
   beforeEach(() => {
+    brandIdForReplies = brandId;
+    repliesByEmail = {
+      "ten@disco.test": [{ receivedAt: "2026-02-03T00:00:00.000Z", kind: "positive_kind", classification: "positive" }],
+    };
     gatewayCalls = [];
     legByCampaign = new Map([[campaignId, "start_to_website_visit"]]);
     statusByEmail = {

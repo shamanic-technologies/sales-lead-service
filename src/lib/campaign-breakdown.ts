@@ -233,6 +233,7 @@ export function createCampaignBreakdownResolver(
         membership: MembershipRow;
         campaignIds: string[];
         delivery: FlattenedStatus | null;
+        email: string | null;
       }
       const pending: PendingCard[] = [];
       const cardsByRow = new Map<string, PendingCard[]>();
@@ -265,7 +266,13 @@ export function createCampaignBreakdownResolver(
             : statusResult
               ? flattenCampaignSubsetStatus(statusResult, new Set(ids))
               : null;
-          cards.push({ rowId: row.id, membership: winner, campaignIds: ids, delivery });
+          cards.push({
+            rowId: row.id,
+            membership: winner,
+            campaignIds: ids,
+            delivery,
+            email: row.email ?? null,
+          });
         }
         cards.sort((a, b) =>
           (toIsoTimestamp(a.membership.created_at) ?? "") <
@@ -290,6 +297,7 @@ export function createCampaignBreakdownResolver(
         campaignId: c.membership.campaign_id,
         brandIds: c.membership.brand_ids ?? [],
         status: c.membership.status,
+        email: c.email,
         delivery: {
           contacted: !!c.delivery?.contacted,
           opened: !!c.delivery?.opened,
@@ -353,4 +361,5 @@ const UNRESOLVED_STANDING: LeadStanding = {
   deepestStep: null,
   at: null,
   wentCold: null,
+  replies: null,
 };

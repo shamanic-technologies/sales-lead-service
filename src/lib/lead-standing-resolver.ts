@@ -36,9 +36,16 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
   fetchOrgCampaignLegs,
+  fetchOrgCampaignOffers,
   CampaignLegsUnavailableError,
   type CampaignLegContext,
 } from "./campaign-leg-client.js";
+import {
+  fetchReplyVerdicts,
+  ReplyVerdictsUnavailableError,
+  type ReplyVerdictView,
+} from "./reply-verdicts-client.js";
+import { isNotOurTarget, leadReplyOutcome, type LeadReplyOutcome } from "./reply-outcome.js";
 import { entryOfLeg, legOf, type LegEntry } from "./step-graph.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-states.js";
@@ -71,6 +78,11 @@ export interface StandingRow {
   campaignId: string;
   brandIds: string[];
   status: string;
+  /**
+   * The person's registered email — what their replies are keyed on at instantly-service. null
+   * when the lead has none, in which case no reply can be attributed to them.
+   */
+  email: string | null;
   delivery: LeadStandingDelivery;
 }
 
@@ -147,6 +159,20 @@ export function createLeadStandingResolver(
   options: LeadStandingResolverOptions,
 ): LeadStandingResolver {
   const { deliveryQueried, ...ctx } = options;
+  // Which offer each campaign sells, read only once a reply needs placing on an offer.
+  let campaignOffers: Promise<Map<string, string | null>> | null = null;
+  const offersFor = () => {
+    if (!campaignOffers) {
+      campaignOffers = fetchOrgCampaignOffers(ctx).catch((error: unknown) => {
+        campaignOffers = null;
+        throw new ReplyVerdictsUnavailableError(
+          `[lead-standing] campaign-service could not say which offer each campaign sells, so no ` +
+            `reply can be placed on an offer: ${(error as Error).message}`,
+        );
+      });
+    }
+    return campaignOffers;
+  };
   let campaignLegs: Promise<{
     legs: Map<string, string | null> | null;
     reason: LeadStandingUnresolvedReason | null;
@@ -168,6 +194,30 @@ export function createLeadStandingResolver(
       const { legs, reason: legsFailure } = await campaignLegs;
 
       const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
+
+      // Every reply these people sent us, each with its own current verdict. Only a scoped read asks
+      // (an unscoped one asked the delivery layer nothing either), and only for rows that were
+      // written to. A failure THROWS: "they never replied" is the one wrong answer that looks right.
+      const repliesByEmail = new Map<string, ReplyVerdictView[]>();
+      // campaign-service down leaves every served row unresolved on its leg, so nothing a reply
+      // could say would be read; its own failure is already the reason on the wire.
+      const replyEmails = deliveryQueried && legs !== null
+        ? rows.filter((r) => r.status === "served" && r.email).map((r) => r.email!.toLowerCase())
+        : [];
+      if (replyEmails.length > 0) {
+        const replies = await fetchReplyVerdicts(replyEmails, {
+          orgId: ctx.orgId,
+          userId: ctx.userId ?? null,
+          runId: ctx.runId ?? null,
+        });
+        for (const r of replies) {
+          const key = r.leadEmail.toLowerCase();
+          const list = repliesByEmail.get(key);
+          if (list) list.push(r);
+          else repliesByEmail.set(key, [r]);
+        }
+      }
+      const offers = repliesByEmail.size > 0 ? await offersFor() : null;
       const brandIds = Array.from(new Set(rows.flatMap((r) => r.brandIds)));
 
       // Outcomes credited to these people for these brands — hand-stated, tracker-reported or
@@ -299,10 +349,23 @@ export function createLeadStandingResolver(
           (o) =>
             o.event === CRM_POSITIVE_REPLY_STEP && row.brandIds.includes(o.brand_id),
         );
-        const ledgerPositiveReply = ledgerPositiveReplies.length > 0;
-        const delivery: LeadStandingDelivery = ledgerPositiveReply
-          ? { ...row.delivery, replied: true, replyClassification: "positive" }
-          : row.delivery;
+        let ledgerPositiveReplyAt: string | null = null;
+        for (const o of ledgerPositiveReplies) {
+          ledgerPositiveReplyAt = earlierInstant(ledgerPositiveReplyAt, toIsoTimestamp(o.received_at));
+        }
+
+        // The reply half of the evidence, read off every reply's own verdict (reply-outcome.ts)
+        // rather than off the one coarse value the delivery layer overwrites with the latest.
+        const replies: LeadReplyOutcome | null =
+          deliveryQueried && row.status === "served"
+            ? leadReplyOutcome({
+                replies: row.email ? (repliesByEmail.get(row.email.toLowerCase()) ?? []) : [],
+                rowCampaignId: row.campaignId,
+                rowBrandIds: row.brandIds,
+                offers,
+              })
+            : null;
+        const delivery = replyDelivery(row.delivery, replies, ledgerPositiveReplies.length > 0, ledgerPositiveReplyAt);
 
         const steps = resolveStepStates({
           allSteps: LEAD_STEP_OUTCOMES,
@@ -314,13 +377,11 @@ export function createLeadStandingResolver(
         // shown the step that never came (lead-cold.ts).
         const primaryBrand = row.brandIds[0];
         const eligibility = primaryBrand ? eligibilityByBrand.get(primaryBrand) : undefined;
-        let positiveReplyAt: string | null =
-          deliveryQueried && row.delivery.replyClassification === "positive"
-            ? (row.delivery.firstRepliedAt ?? null)
-            : null;
-        for (const o of ledgerPositiveReplies) {
-          positiveReplyAt = earlierInstant(positiveReplyAt, toIsoTimestamp(o.received_at));
-        }
+        // The FIRST positive reply the person sent under the brand — reached, whatever came after.
+        const positiveReplyAt: string | null = earlierInstant(
+          replies?.brand.reached.positive ?? null,
+          ledgerPositiveReplyAt,
+        );
         const wentCold =
           eligibility && entry
             ? deriveWentCold({
@@ -335,6 +396,7 @@ export function createLeadStandingResolver(
         out.set(row.id, {
           standing: resolveLeadStanding({
             wentCold,
+            replies,
             lifecycleStatus: row.status,
             deliveryQueried,
             delivery,
@@ -351,3 +413,46 @@ export function createLeadStandingResolver(
     },
   };
 }
+
+/**
+ * The delivery facts the standing reads, with the REPLY half taken from the reply outcome.
+ *
+ *   - `replied` / `replyClassification` / `disqualified` = the OFFER's latest REAL reply ("what do we
+ *     do now"): a machine answer never overrides a person's, and a reply on another offer of the
+ *     brand says nothing about this one.
+ *   - `positiveReplyReached` = a positive reply was EVER reached on this offer ("what has this lead
+ *     reached").
+ *   - `replyOptOut` = the person asked us to stop in any reply under the BRAND, at any point.
+ *
+ * A positive reply their CRM evidences (a form submitted after our first email, on the ledger) is a
+ * real positive reply too: it counts as reached, and decides "now" unless a real reply came after.
+ *
+ * With no reply outcome (an unscoped read, a row never served) the delivery facts stand as they are.
+ */
+export function replyDelivery(
+  base: LeadStandingDelivery,
+  replies: LeadReplyOutcome | null,
+  ledgerPositiveReply: boolean,
+  ledgerPositiveReplyAt: string | null,
+): LeadStandingDelivery {
+  if (!replies) {
+    return ledgerPositiveReply ? { ...base, replied: true, replyClassification: "positive" } : base;
+  }
+  const latest = replies.offer.latest;
+  const ledgerIsNewer =
+    ledgerPositiveReply &&
+    (latest === null ||
+      ledgerPositiveReplyAt === null ||
+      Date.parse(ledgerPositiveReplyAt) >= Date.parse(latest.receivedAt));
+  const replyClassification = ledgerIsNewer ? "positive" : (latest?.classification ?? null);
+  return {
+    ...base,
+    replied: replies.offer.realReplies > 0 || ledgerPositiveReply,
+    replyClassification,
+    disqualified: !ledgerIsNewer && latest !== null && isNotOurTarget(latest.kind),
+    positiveReplyReached: replies.offer.reached.positive !== null || ledgerPositiveReply,
+    replyOptOut: replies.brand.optedOutAt !== null,
+  };
+}
+
+export { ReplyVerdictsUnavailableError };

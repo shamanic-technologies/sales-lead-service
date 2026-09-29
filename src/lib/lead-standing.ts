@@ -100,6 +100,7 @@
  * wire beside this, untouched. They are what let the policy change later; this is the policy.
  */
 import type { WentCold } from "./lead-cold.js";
+import type { LeadReplyOutcome } from "./reply-outcome.js";
 import { TERMINAL_STEP, type EntryMeasure, type LegEntry } from "./step-graph.js";
 import type { StepReadState } from "./step-states.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
@@ -134,6 +135,7 @@ export const LEAD_STANDING_SIGNALS = [
   "stated_never",
   "bounced",
   "unsubscribed",
+  "opt_out_reply",
 ] as const;
 export type LeadStandingSignal = (typeof LEAD_STANDING_SIGNALS)[number];
 
@@ -144,6 +146,7 @@ export const LEAD_STANDING_UNRESOLVED_REASONS = [
   "leg_unstated",
   "statements_unreadable",
   "reply_disqualification_unknown",
+  "reply_verdicts_unreadable",
 ] as const;
 export type LeadStandingUnresolvedReason = (typeof LEAD_STANDING_UNRESOLVED_REASONS)[number];
 
@@ -174,6 +177,12 @@ export interface LeadStanding {
    * connected and readable.
    */
   wentCold: WentCold | null;
+  /**
+   * What this person's replies mean, at the lead x OFFER and lead x BRAND grains (reply-outcome.ts),
+   * built from every reply's own verdict. null when the replies were not read (an unscoped read, a
+   * row never served). The state above is decided off it; this is the evidence, served beside it.
+   */
+  replies: LeadReplyOutcome | null;
 }
 
 export interface LeadStandingDelivery {
@@ -197,6 +206,17 @@ export interface LeadStandingDelivery {
   unsubscribed: boolean;
   globalBounced: boolean;
   globalUnsubscribed: boolean;
+  /**
+   * The person asked us to STOP in a reply, under this brand (reply-outcome.ts: sticky, brand-wide).
+   * Absent reads as false: the delivery layer's own unsubscribe flags above still decide.
+   */
+  replyOptOut?: boolean;
+  /**
+   * Whether a positive reply was EVER reached at this grain ("what has this lead reached"), while
+   * `replyClassification` is the latest real reply ("what do we do now"). Absent reads as
+   * `replyClassification === "positive"` — the two readings coincide when only one is known.
+   */
+  positiveReplyReached?: boolean;
 }
 
 export interface LeadStandingInput {
@@ -217,6 +237,8 @@ export interface LeadStandingInput {
   steps: readonly StepReadState[];
   /** Derived by the caller (lead-cold.ts) off the same steps. Absent reads as null. */
   wentCold?: WentCold | null;
+  /** The reply outcome the delivery facts above were read off, served beside the state. */
+  replies?: LeadReplyOutcome | null;
 }
 
 function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "signal" | "origin" | "reason"> {
@@ -228,6 +250,7 @@ function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "signal" |
     deepestStep: null,
     at: null,
     wentCold: input.wentCold ?? null,
+    replies: input.replies ?? null,
   };
 }
 
@@ -248,7 +271,12 @@ function resolveEntryReached(
   if (measure === null) return null;
   if (!input.deliveryQueried) return null;
   if (measure === "delivery_click") return input.delivery.clicked;
-  return input.delivery.replyClassification === "positive";
+  return positiveReached(input.delivery);
+}
+
+/** "What has this lead reached": a positive reply at least once, whatever came after. */
+function positiveReached(delivery: LeadStandingDelivery): boolean {
+  return delivery.positiveReplyReached ?? delivery.replyClassification === "positive";
 }
 
 export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
@@ -284,6 +312,17 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
       ...shared,
       state: "opted_out",
       signal: "unsubscribed",
+      origin: "measured",
+      reason: null,
+    };
+  }
+  // 2b. They asked us to stop IN A REPLY, under this brand — on any of its offers, at any point,
+  //     whatever they wrote after. Same act as clicking the link, said in words.
+  if (delivery.replyOptOut === true) {
+    return {
+      ...shared,
+      state: "opted_out",
+      signal: "opt_out_reply",
       origin: "measured",
       reason: null,
     };
@@ -355,7 +394,12 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
 
   // 9. The measured half of the entry step: a click where the campaign enters at the site, a
   //    positive reply where it enters at a conversation. This is what a click on the campaign that sells a visit means.
-  if (reachedEntryStep === true) {
+  //    On a conversation entry the STATE reads the latest real reply ("what do we do now"): a
+  //    positive reply followed by a "not now" reached the entry (`reachedEntryStep` stays true, the
+  //    stats count it) and is no longer interest today.
+  const entryHoldsNow =
+    entry.measure === "delivery_click" ? reachedEntryStep === true : delivery.replyClassification === "positive";
+  if (reachedEntryStep === true && entryHoldsNow) {
     return {
       ...shared,
       state: "sales_interest",
@@ -493,9 +537,15 @@ export function salesInterestStage(standing: LeadStanding): string | null {
   // A lead at `sales_interest` without a reachable step reached either reached the campaign's
   // entry (`reachedEntryStep`) or VISITED the site on a leg that does not enter there (9a) — the
   // only other door into the state — and that one's stage is the visit.
-  const stage =
-    standing.deepestStep ??
-    (standing.reachedEntryStep === true ? standing.entryStep : WEBSITE_VISIT_STEP);
+  // The entry decided it exactly when the deciding signal is the entry's own measure: a positive
+  // reply on a conversation entry, a measured visit on a site entry. A lead who reached a
+  // conversation entry once and reads as interest today only because they visited the site (their
+  // latest reply is not positive) stands at the visit.
+  const entryDecided =
+    standing.reachedEntryStep === true &&
+    ((standing.entryMeasure === "positive_reply" && standing.signal === "positive_reply") ||
+      standing.entryMeasure === "delivery_click");
+  const stage = standing.deepestStep ?? (entryDecided ? standing.entryStep : WEBSITE_VISIT_STEP);
   if (stage === null) {
     // Unreachable by construction: `sales_interest` is only ever reached through a step reading as
     // reached or the campaign's measured entry. A stage nobody can name must not be counted under a

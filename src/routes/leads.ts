@@ -76,12 +76,14 @@ import {
   type LeadStandingResolver,
   type StandingRow,
 } from "../lib/lead-standing-resolver.js";
+import { ReplyVerdictsUnavailableError } from "../lib/reply-verdicts-client.js";
 import {
   parseLeadStandingFilter,
   parseSalesInterestStageFilter,
   SALES_INTEREST_STAGES,
   zeroStandingCounts,
   type LeadStandingState,
+  type LeadStandingUnresolvedReason,
   type SalesInterestStage,
 } from "../lib/lead-standing.js";
 
@@ -534,7 +536,10 @@ async function resolveStandings(
       "[lead-service] lead standing could not be resolved for this chunk; every row in it reads " +
         `as unresolved rather than as a guess: ${(error as Error).message}`,
     );
-    return new Map();
+    // Say WHICH read failed: the replies (instantly-service) or the statements (this database).
+    const reason: LeadStandingUnresolvedReason =
+      error instanceof ReplyVerdictsUnavailableError ? "reply_verdicts_unreadable" : "statements_unreadable";
+    return new Map(rows.map((r) => [r.id, unresolvedFacts(reason)]));
   }
 }
 
@@ -544,13 +549,15 @@ async function resolveStandings(
  * a consumer that reads one reads the other, so an unreadable row is never mistaken for a person
  * who simply has not bought.
  */
-function unresolvedFacts(): ResolvedLeadFacts {
+function unresolvedFacts(
+  reason: LeadStandingUnresolvedReason = "statements_unreadable",
+): ResolvedLeadFacts {
   return {
     standing: {
       state: "unresolved",
       signal: "none",
       origin: null,
-      reason: "statements_unreadable",
+      reason,
       legKey: null,
       entryStep: null,
       entryMeasure: null,
@@ -558,6 +565,7 @@ function unresolvedFacts(): ResolvedLeadFacts {
       deepestStep: null,
       at: null,
       wentCold: null,
+      replies: null,
     },
     closedDeal: null,
   };
@@ -1018,6 +1026,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             campaignId: r.campaignId,
             brandIds: r.brandIds,
             status: r.status,
+            email: r.email?.value ?? null,
             delivery: standingDelivery(deliveryByRow.get(r.id)!),
           })),
         );
@@ -1203,6 +1212,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           campaignId: row.campaignId,
           brandIds: row.brandIds,
           status: row.status,
+          email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
           delivery: standingDelivery(deliveryByRow.get(row.id)!),
         })),
       );
@@ -1736,6 +1746,7 @@ router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: Authenticate
           campaignId: row.campaignId,
           brandIds: row.brandIds,
           status: row.status,
+          email: email?.value ?? null,
           delivery: standingDelivery(deliveryStatus),
         },
       ],

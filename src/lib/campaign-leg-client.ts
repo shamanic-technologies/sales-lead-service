@@ -25,8 +25,37 @@ export interface CampaignLegContext {
   brandId?: string | null;
 }
 
+interface OrgCampaignRow {
+  id?: string;
+  legKey?: string | null;
+  offerId?: string | null;
+}
+
 /** Every campaign of one org and the leg it states (null = states none) — one read. */
 export async function fetchOrgCampaignLegs(ctx: CampaignLegContext): Promise<Map<string, string | null>> {
+  const byId = new Map<string, string | null>();
+  for (const row of await fetchOrgCampaignRows(ctx)) {
+    if (!row?.id) continue;
+    byId.set(row.id, typeof row.legKey === "string" && row.legKey.length > 0 ? row.legKey : null);
+  }
+  return byId;
+}
+
+/**
+ * Every campaign of one org and the OFFER it sells (null = states none) — one read. Which offer a
+ * reply was about is what makes interest per offer (reply-outcome.ts); it is campaign-service's
+ * `offerId` on the campaign row, never inferred.
+ */
+export async function fetchOrgCampaignOffers(ctx: CampaignLegContext): Promise<Map<string, string | null>> {
+  const byId = new Map<string, string | null>();
+  for (const row of await fetchOrgCampaignRows(ctx)) {
+    if (!row?.id) continue;
+    byId.set(row.id, typeof row.offerId === "string" && row.offerId.length > 0 ? row.offerId : null);
+  }
+  return byId;
+}
+
+async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaignRow[]> {
   const headers: Record<string, string> = {
     "X-API-Key": CAMPAIGN_SERVICE_API_KEY,
     "x-org-id": ctx.orgId,
@@ -53,18 +82,11 @@ export async function fetchOrgCampaignLegs(ctx: CampaignLegContext): Promise<Map
       `[campaign-leg-client] campaign-service /campaigns failed (${response.status}): ${body}`,
     );
   }
-  const data = (await response.json()) as {
-    campaigns?: Array<{ id?: string; legKey?: string | null }>;
-  };
+  const data = (await response.json()) as { campaigns?: OrgCampaignRow[] };
   if (!Array.isArray(data.campaigns)) {
     throw new CampaignLegsUnavailableError(
       "[campaign-leg-client] campaign-service /campaigns returned no campaigns array",
     );
   }
-  const byId = new Map<string, string | null>();
-  for (const row of data.campaigns) {
-    if (!row?.id) continue;
-    byId.set(row.id, typeof row.legKey === "string" && row.legKey.length > 0 ? row.legKey : null);
-  }
-  return byId;
+  return data.campaigns;
 }

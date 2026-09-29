@@ -115,7 +115,10 @@ vi.mock("../../src/lib/lead-standing-resolver.js", async (importOriginal) => ({
                 standing: {
                   state: standingByRow[r.id],
                   entryStep: "conversation_reply",
-                  // Every sales_interest row here reached the leg's entry (a positive reply).
+                  entryMeasure: "positive_reply",
+                  // Every sales_interest row here reached the leg's entry (a positive reply), and
+                  // that reply is the latest one, so the entry is what decided it.
+                  signal: "positive_reply",
                   reachedEntryStep: true,
                   deepestStep: deepestByRow[r.id] ?? null,
                 },
