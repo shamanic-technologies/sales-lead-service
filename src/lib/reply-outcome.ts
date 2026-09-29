@@ -17,16 +17,15 @@
  *     it from there, never from the offer reading alone.
  *   - INTEREST AND DISQUALIFICATION ARE PER OFFER. Interested in offer A says nothing about offer B,
  *     so the offer reading is what decides them.
- *   - A REFERRAL OR AN OFF-TOPIC REPLY IS A HAND-OVER TO A HUMAN, NEVER INTEREST. Nothing here names
- *     them: instantly-service's own classification already reports both as `neutral`, and interest is
- *     read off `classification === "positive"` and nothing else.
+ *   - A REFERRAL OR AN OFF-TOPIC REPLY IS A HAND-OVER TO A HUMAN, NEVER INTEREST: instantly-service's
+ *     own classification reports both as `neutral`, and interest is read off
+ *     `classification === "positive"` and nothing else.
  *
- * WHAT IS READ, WHAT IS NOT. The reply vocabulary is instantly-service's and is NOT copied here: the
- * coarse `classification` it serves decides interest, and the kind is read for exactly the three
- * facts the classification cannot carry and this service must act on (`reply-kind-facts` below):
- * whether a MACHINE answered, whether the person asked us to STOP, and whether the reply says they
- * are the WRONG PERSON for us (a fact about the person, not the moment). A kind this service does not
- * name is a real reply judged by its classification — never guessed into one of the three.
+ * WHAT IS READ, WHAT IS NOT. The reply vocabulary is instantly-service's and is NOT copied here. It
+ * serves, per verdict, the coarse `classification` (interest) and three flags it derives itself:
+ * `automatedAnswer` (a machine answered), `stopRequested` (they asked us to stop) and `notOurTarget`
+ * (wrong contact, left the role). The only kind still read by name is the hand-over pair below,
+ * because no flag carries it yet.
  *
  * A reply nobody has judged yet (`verdict: null`) is counted (`unjudgedReplies`) and decides nothing:
  * whether it is even a real reply is unknown until it is judged, and instantly-service judges within
@@ -35,33 +34,18 @@
 import type { ReplyVerdictView } from "./reply-verdicts-client.js";
 
 /**
- * The only reply kinds this service acts on by name — each a fact instantly-service's coarse
- * classification cannot express. Everything else is read through `classification`.
+ * The ONE thing about a reply that neither instantly-service's classification nor its per-verdict
+ * flags (`automatedAnswer`, `stopRequested`, `notOurTarget`) can express: that a `neutral` reply
+ * HANDS THE THREAD TO A PERSON (a referral, an off-topic reply) rather than merely being neutral.
+ * Owner rule: a hand-over replaces an interest in the "now" reading, a plain neutral reply does not.
+ * These two names stay here until instantly-service serves a hand-over flag; nothing else names a
+ * reply kind.
  */
-const MACHINE_ANSWER_KINDS: ReadonlySet<string> = new Set(["lead_out_of_office", "auto_reply_received"]);
-const STOP_REQUEST_KINDS: ReadonlySet<string> = new Set(["lead_opt_out_requested"]);
-const NOT_OUR_TARGET_KINDS: ReadonlySet<string> = new Set(["lead_wrong_person", "lead_changed_job"]);
 const HAND_OVER_KINDS: ReadonlySet<string> = new Set(["lead_referral", "lead_off_topic"]);
 
-/** True iff a machine answered, not the person (an out-of-office, an auto-reply). */
-export function isMachineAnswer(kind: string): boolean {
-  return MACHINE_ANSWER_KINDS.has(kind);
-}
-/** True iff the person asked us to stop contacting them. */
-export function isStopRequest(kind: string): boolean {
-  return STOP_REQUEST_KINDS.has(kind);
-}
-/**
- * True iff the reply hands the thread to a person rather than answering the offer (a referral, an
- * off-topic reply). Both are `neutral` in the classification, and unlike a plain neutral reply they
- * DO replace an interest in the "now" reading.
- */
+/** True iff the reply hands the thread to a person (a referral, an off-topic reply). */
 export function isHandOver(kind: string): boolean {
   return HAND_OVER_KINDS.has(kind);
-}
-/** True iff the reply says they are not who we sell to (wrong contact, gone from the role). */
-export function isNotOurTarget(kind: string): boolean {
-  return NOT_OUR_TARGET_KINDS.has(kind);
 }
 
 /** The reply that decides "what do we do now". */
@@ -73,6 +57,10 @@ export interface LatestReply {
   classification: "positive" | "negative" | "neutral" | null;
   /** Who judged it: `human` | `instantly` | `model`, verbatim from instantly-service. */
   producerType: string;
+  /** They asked us to stop (instantly-service's flag). */
+  stopRequested: boolean;
+  /** Not who we sell to (instantly-service's flag). */
+  notOurTarget: boolean;
 }
 
 /** What a set of replies means, at one grain. */
@@ -151,7 +139,7 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
       reading.unjudgedReplies++;
       continue;
     }
-    if (isMachineAnswer(v.kind)) {
+    if (v.automatedAnswer) {
       reading.machineReplies++;
       continue;
     }
@@ -164,6 +152,8 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
       kind: v.kind,
       classification: v.classification,
       producerType: v.producerType,
+      stopRequested: v.stopRequested,
+      notOurTarget: v.notOurTarget,
     };
     reading.lastRealReply = seen;
     const keepsInterest =
@@ -174,7 +164,7 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
     if (v.classification && reading.reached[v.classification] === null) {
       reading.reached[v.classification] = r.receivedAt;
     }
-    if (isStopRequest(v.kind) && reading.optedOutAt === null) reading.optedOutAt = r.receivedAt;
+    if (v.stopRequested && reading.optedOutAt === null) reading.optedOutAt = r.receivedAt;
   }
   return reading;
 }
