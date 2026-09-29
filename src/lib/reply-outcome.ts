@@ -41,6 +41,7 @@ import type { ReplyVerdictView } from "./reply-verdicts-client.js";
 const MACHINE_ANSWER_KINDS: ReadonlySet<string> = new Set(["lead_out_of_office", "auto_reply_received"]);
 const STOP_REQUEST_KINDS: ReadonlySet<string> = new Set(["lead_opt_out_requested"]);
 const NOT_OUR_TARGET_KINDS: ReadonlySet<string> = new Set(["lead_wrong_person", "lead_changed_job"]);
+const HAND_OVER_KINDS: ReadonlySet<string> = new Set(["lead_referral", "lead_off_topic"]);
 
 /** True iff a machine answered, not the person (an out-of-office, an auto-reply). */
 export function isMachineAnswer(kind: string): boolean {
@@ -49,6 +50,14 @@ export function isMachineAnswer(kind: string): boolean {
 /** True iff the person asked us to stop contacting them. */
 export function isStopRequest(kind: string): boolean {
   return STOP_REQUEST_KINDS.has(kind);
+}
+/**
+ * True iff the reply hands the thread to a person rather than answering the offer (a referral, an
+ * off-topic reply). Both are `neutral` in the classification, and unlike a plain neutral reply they
+ * DO replace an interest in the "now" reading.
+ */
+export function isHandOver(kind: string): boolean {
+  return HAND_OVER_KINDS.has(kind);
 }
 /** True iff the reply says they are not who we sell to (wrong contact, gone from the role). */
 export function isNotOurTarget(kind: string): boolean {
@@ -76,8 +85,16 @@ export interface ReplyReading {
   machineReplies: number;
   /** Replies nobody has judged yet — they decide nothing until judged. */
   unjudgedReplies: number;
-  /** "What do we do now": the latest real reply, or null when the person has written none. */
+  /**
+   * "What do we do now": the real reply that decides it, or null when the person has written none.
+   * Normally the latest real reply — except that a plain NEUTRAL reply (not a hand-over) never
+   * replaces an interest (owner-decided 2026-09-29): "thanks, talk soon" after "yes, let's book" is
+   * still interest. Only a negative reply, a stop request or a hand-over (referral, off-topic)
+   * replaces one; a machine answer never replaces anything.
+   */
   latest: LatestReply | null;
+  /** The latest reply a PERSON wrote, whatever it says — which may differ from `latest`. */
+  lastRealReply: LatestReply | null;
   /** "What has this lead reached": when each classification was FIRST seen among real replies. */
   reached: {
     positive: string | null;
@@ -124,6 +141,7 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
     machineReplies: 0,
     unjudgedReplies: 0,
     latest: null,
+    lastRealReply: null,
     reached: { positive: null, negative: null, neutral: null },
     optedOutAt: null,
   };
@@ -139,7 +157,7 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
     }
     reading.realReplies++;
     // Ascending order, so the last real reply seen is the latest one.
-    reading.latest = {
+    const seen: LatestReply = {
       replyId: r.replyId,
       receivedAt: r.receivedAt,
       campaignId: r.campaignId,
@@ -147,6 +165,12 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
       classification: v.classification,
       producerType: v.producerType,
     };
+    reading.lastRealReply = seen;
+    const keepsInterest =
+      reading.latest?.classification === "positive" &&
+      v.classification === "neutral" &&
+      !isHandOver(v.kind);
+    if (!keepsInterest) reading.latest = seen;
     if (v.classification && reading.reached[v.classification] === null) {
       reading.reached[v.classification] = r.receivedAt;
     }

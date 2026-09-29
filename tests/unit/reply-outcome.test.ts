@@ -289,6 +289,53 @@ describe("the standing reads it", () => {
   });
 });
 
+// Owner-decided 2026-09-29: a plain neutral reply after a positive one does NOT cancel interest.
+// joanie@aimforwellness.com asked for a meeting at 15:06 and wrote a neutral reply at 15:09.
+describe("a neutral reply keeps an interest; a decline, a stop or a hand-over replaces it", () => {
+  const NEUTRAL = ["lead_neutral", "neutral"] as const;
+  it("positive then neutral: still interest now, and the neutral reply is the last one written", () => {
+    const r = readReplies([
+      reply("2026-09-28T15:06:39Z", "lead_meeting_requested", "positive"),
+      reply("2026-09-28T15:09:15Z", ...NEUTRAL),
+    ]);
+    expect(r.latest?.kind).toBe("lead_meeting_requested");
+    expect(r.lastRealReply?.kind).toBe("lead_neutral");
+    const { standing } = standingFor([
+      reply("2026-09-28T15:06:39Z", "lead_meeting_requested", "positive"),
+      reply("2026-09-28T15:09:15Z", ...NEUTRAL),
+    ]);
+    expect(standing.state).toBe("sales_interest");
+  });
+
+  it.each([
+    ["a decline", NOT_NOW, "engaged"],
+    ["a referral", REFERRAL, "engaged"],
+    ["an off-topic reply", OFF_TOPIC, "engaged"],
+    ["a stop request", STOP, "opted_out"],
+  ])("positive then %s: replaced", (_label, kind, state) => {
+    const { outcome, standing } = standingFor([
+      reply("2026-09-20T00:00:00Z", ...INTERESTED),
+      reply("2026-09-21T00:00:00Z", ...kind),
+    ]);
+    expect(outcome.offer.latest?.kind).toBe(kind[0]);
+    expect(standing.state).toBe(state);
+  });
+
+  it("a neutral reply with no interest before it decides now as before", () => {
+    const r = readReplies([reply("2026-09-20T00:00:00Z", ...NOT_NOW), reply("2026-09-21T00:00:00Z", ...NEUTRAL)]);
+    expect(r.latest?.kind).toBe("lead_neutral");
+  });
+
+  it("positive, neutral, then a decline: the decline replaces it", () => {
+    const r = readReplies([
+      reply("2026-09-20T00:00:00Z", ...INTERESTED),
+      reply("2026-09-21T00:00:00Z", ...NEUTRAL),
+      reply("2026-09-22T00:00:00Z", ...NOT_NOW),
+    ]);
+    expect(r.latest?.kind).toBe("lead_not_interested");
+  });
+});
+
 // A reply somebody recorded BY HAND, whose message was never mirrored: instantly-service keeps its
 // verdict in bronze attributed to no reply, so the per-reply layer holds nothing for that person.
 // Measured at ship (2026-09-29): 16 leads, e.g. jason@uhmedical.com stated interested on 09-03.
