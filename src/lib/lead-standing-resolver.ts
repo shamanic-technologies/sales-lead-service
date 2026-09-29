@@ -358,15 +358,12 @@ export function createLeadStandingResolver(
         // rather than off the one coarse value the delivery layer overwrites with the latest.
         const replies: LeadReplyOutcome | null =
           deliveryQueried && row.status === "served"
-            ? withUnrecordedReplyStatement(
-                leadReplyOutcome({
-                  replies: row.email ? (repliesByEmail.get(row.email.toLowerCase()) ?? []) : [],
-                  rowCampaignId: row.campaignId,
-                  rowBrandIds: row.brandIds,
-                  offers,
-                }),
-                row.delivery,
-              )
+            ? leadReplyOutcome({
+                replies: row.email ? (repliesByEmail.get(row.email.toLowerCase()) ?? []) : [],
+                rowCampaignId: row.campaignId,
+                rowBrandIds: row.brandIds,
+                offers,
+              })
             : null;
         const delivery = replyDelivery(row.delivery, replies, ledgerPositiveReplies.length > 0, ledgerPositiveReplyAt);
 
@@ -441,18 +438,6 @@ export function replyDelivery(
   if (!replies) {
     return ledgerPositiveReply ? { ...base, replied: true, replyClassification: "positive" } : base;
   }
-  if (replies.offerEvidence === "delivery_statement") {
-    // A reply recorded by hand, never mirrored as a message: the delivery layer's statement stands
-    // for the offer. The brand's opt-out still reads the per-reply layer.
-    const positive = base.replyClassification === "positive" || ledgerPositiveReply;
-    return {
-      ...base,
-      replied: true,
-      replyClassification: ledgerPositiveReply ? "positive" : base.replyClassification,
-      positiveReplyReached: positive,
-      replyOptOut: replies.brand.optedOutAt !== null,
-    };
-  }
   const latest = replies.offer.latest;
   const ledgerIsNewer =
     ledgerPositiveReply &&
@@ -468,24 +453,6 @@ export function replyDelivery(
     positiveReplyReached: replies.offer.reached.positive !== null || ledgerPositiveReply,
     replyOptOut: replies.brand.optedOutAt !== null,
   };
-}
-
-/**
- * Mark the offer's evidence as the delivery layer's statement when the per-reply layer holds no
- * person's reply (judged or not) for that offer and the delivery layer holds a person's positive or negative reply (see
- * `LeadReplyOutcome.offerEvidence`). A `neutral` delivery value is not taken: it is exactly what an
- * out-of-office overwrote the coarse value with, which is the bug the per-reply layer fixes.
- */
-export function withUnrecordedReplyStatement(
-  outcome: LeadReplyOutcome,
-  base: LeadStandingDelivery,
-): LeadReplyOutcome {
-  // Machine answers do not count as holding the person's reply: a positive or negative delivery
-  // value can only be a person's statement made AFTER them (the coarse value is the latest verdict).
-  const offerHasNothing = outcome.offer.realReplies === 0 && outcome.offer.unjudgedReplies === 0;
-  const statedReply =
-    base.replied && (base.replyClassification === "positive" || base.replyClassification === "negative");
-  return offerHasNothing && statedReply ? { ...outcome, offerEvidence: "delivery_statement" } : outcome;
 }
 
 export { ReplyVerdictsUnavailableError };
