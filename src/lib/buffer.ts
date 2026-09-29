@@ -7,6 +7,7 @@ import {
   registerServedEmail,
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
+import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { getCurrentGoal } from "./brand-client.js";
 import { fetchCampaign } from "./campaign-client.js";
 import { pickRetryCandidate } from "./retry-pool.js";
@@ -53,6 +54,8 @@ interface PullNextResult {
     activeGoalId: string | null;
     brandProfileId: string | null;
     audienceId: string | null;
+    /** The buying signal the serve carried, or null. Never derived here. */
+    buyingSignal: BuyingSignal | null;
   };
 }
 
@@ -179,6 +182,8 @@ export async function pullNext(
         brandProfileId: params.brandProfileId ?? null,
         // The audience this person was originally served from, when the row carries it.
         audienceId: retry.audienceId ?? audienceId,
+        // The signal stored on the original serve — the one that bought this person.
+        buyingSignal: retry.buyingSignal,
       },
     };
   }
@@ -198,6 +203,9 @@ export async function pullNext(
   }
 
   const person: Person = served.person;
+  // Read BEFORE any write: a malformed signal is a producer contract break and must
+  // fail the serve loudly rather than half-record it.
+  const buyingSignal = readBuyingSignal(person.buyingSignal);
   if (!person.email) {
     // serve-next promised a contactable person but gave no email — a producer
     // contract violation, not an empty result. Fail loud.
@@ -245,6 +253,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       audienceId: audienceId,
+      buyingSignal,
     })
     .onConflictDoNothing();
 
@@ -268,6 +277,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       audienceId: audienceId,
+      buyingSignal,
     },
   };
 }

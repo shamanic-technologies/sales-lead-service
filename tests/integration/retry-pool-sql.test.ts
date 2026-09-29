@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
-import { leads, leadsCampaigns } from "../../src/db/schema.js";
+import { leadContactMethods, leads, leadsCampaigns } from "../../src/db/schema.js";
 import {
   claimCandidate,
   loadRetryCandidates,
@@ -62,6 +62,47 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
 
   afterAll(async () => {
     await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, campaignId));
+  });
+
+  it("hands a retried serve the buying signal stored on the original serve", async () => {
+    // A separate campaign so the shared rows above keep their exact state.
+    const signalCampaignId = `itest-signal-${randomUUID()}`;
+    const signal = {
+      type: "hiring",
+      occurredOn: "2026-09-21",
+      fact: "Acme Clinics posted a job for Office Manager on September 21, 2026",
+      source: "apollo:job_postings",
+      sourceUrl: null,
+    } as const;
+    const [lead] = await db
+      .insert(leads)
+      .values({ name: `itest ${randomUUID()}` })
+      .returning({ id: leads.id });
+    await db.insert(leadContactMethods).values({
+      leadId: lead.id,
+      channel: "email",
+      value: `signal-${randomUUID()}@itest.example`,
+      source: "apollo",
+    });
+    await db.insert(leadsCampaigns).values([
+      {
+        leadId: lead.id,
+        campaignId: signalCampaignId,
+        orgId,
+        brandIds: [brandId],
+        status: "served",
+        servedAt: new Date(Date.now() - 60_000),
+        buyingSignal: signal,
+      },
+    ]);
+    try {
+      const candidates = await loadRetryCandidates({ orgId, campaignId: signalCampaignId, nowMs: Date.now() });
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0].buyingSignal).toEqual(signal);
+    } finally {
+      await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, signalCampaignId));
+      await db.delete(leadContactMethods).where(eq(leadContactMethods.leadId, lead.id));
+    }
   });
 
   it("marks several candidates sent in one statement", async () => {
