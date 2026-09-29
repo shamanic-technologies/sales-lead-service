@@ -189,6 +189,12 @@ export interface Person {
    * remains the only employment we can record. Never synthesized here.
    */
   employmentHistory?: PersonEmployment[] | null;
+  /**
+   * The buying signal this person's audience matched (human-service `BuyingSignal`),
+   * or null. OPTIONAL: absent under a producer that does not serve it. Read through
+   * `readBuyingSignal` (src/lib/buying-signal.ts) — never trusted raw, never derived.
+   */
+  buyingSignal?: unknown;
 }
 
 export interface ServiceContext {

@@ -13,6 +13,7 @@ import {
   doublePrecision,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
+import type { BuyingSignal } from "../lib/buying-signal.js";
 
 // --- Leads — global identity registry ---
 export const leads = pgTable(
@@ -177,6 +178,13 @@ export const leadsCampaigns = pgTable(
     activeGoalId: text("active_goal_id"),
     brandProfileId: text("brand_profile_id"),
     audienceId: text("audience_id"),
+    // The buying signal the served person's audience matched (hiring, job
+    // change, funding), exactly as human-service served it on that person:
+    // { type, occurredOn, fact, source, sourceUrl }. A fact about THIS serve
+    // (which audience surfaced the person, when), not about the person, which
+    // is why it lives on the lifecycle row and not on `leads`. NULL when the
+    // serve carried none — never defaulted, never derived here.
+    buyingSignal: jsonb("buying_signal").$type<BuyingSignal>(),
     // Audit trail for the one-time served-lead email repair
     // (scripts/repair-served-lead-emails.ts). Rows served before the
     // email-owner-first identity fix were attributed to a lead that could never

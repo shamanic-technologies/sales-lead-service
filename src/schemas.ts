@@ -6,6 +6,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { BUYING_SIGNAL_TYPES } from "./lib/buying-signal.js";
 import {
   LEAD_STANDING_SIGNALS,
   LEAD_STANDING_STATES,
@@ -965,6 +966,30 @@ export const BufferNextRequestSchema = z
       "Empty body. The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both.",
   });
 
+export const ServedBuyingSignalSchema = z
+  .object({
+    type: z.enum(BUYING_SIGNAL_TYPES).openapi({
+      description: "What happened: the company is hiring, the person changed jobs, or the company raised funding.",
+      example: "hiring",
+    }),
+    occurredOn: z.string().openapi({
+      description: "Day the signal happened (YYYY-MM-DD), as the provider recorded it.",
+      example: "2026-09-21",
+    }),
+    fact: z.string().openapi({
+      description: "One English sentence stating the signal, for the email writer to reference.",
+      example: "Acme Clinics posted a job for Office Manager (Austin, United States) on September 21, 2026",
+    }),
+    source: z.string().openapi({
+      description: "Where the evidence came from.",
+      example: "apollo:job_postings",
+    }),
+    sourceUrl: z.string().nullable().openapi({
+      description: "The posting or news link when the provider gave one.",
+    }),
+  })
+  .openapi("ServedBuyingSignal");
+
 const ServedLeadSchema = z
   .object({
     leadId: z
@@ -1042,6 +1067,16 @@ const ServedLeadSchema = z
       .openapi({
         description: "Audience ID (human-service audience.id) this served lead is attributed to. null means unattributed.",
         example: "audience_123",
+      }),
+    buyingSignal: ServedBuyingSignalSchema.nullable()
+      .optional()
+      .openapi({
+        description:
+          "The buying signal this lead's audience matched (the company is hiring, the person just changed jobs, " +
+          "the company just raised), carried verbatim from human-service's served person and kept on the serve, " +
+          "so a retried serve hands out the same signal. `fact` is one English sentence the email writer can " +
+          "reference. null when the serve carried none — a lead not served from a buying-signal audience, and " +
+          "every lead served before this was carried. Never defaulted, never derived by lead-service.",
       }),
   })
   .openapi("ServedLead", {

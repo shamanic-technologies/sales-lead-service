@@ -1,4 +1,5 @@
 import { and, inArray, isNull, sql } from "drizzle-orm";
+import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
@@ -118,6 +119,8 @@ export interface RetryCandidate {
   /** Raw `timestamptz`: postgres.js hands these back as `Date` OR `string`. */
   servedAt: Date | string | null;
   audienceId: string | null;
+  /** The buying signal stored on the ORIGINAL serve (null when it carried none). */
+  buyingSignal: BuyingSignal | null;
   goal: string | null;
   retryCount: number;
 }
@@ -224,6 +227,7 @@ interface RawCandidateRow {
   email: string | null;
   served_at: Date | string | null;
   audience_id: string | null;
+  buying_signal: unknown;
   goal: string | null;
   retry_count: number | string | null;
 }
@@ -250,7 +254,7 @@ export async function loadRetryCandidates(params: {
 
   const rows = (await db.execute(sql<RawCandidateRow[]>`
     SELECT
-      lc.id, lc.lead_id, lc.served_at, lc.audience_id, lc.goal,
+      lc.id, lc.lead_id, lc.served_at, lc.audience_id, lc.buying_signal, lc.goal,
       COALESCE(lc.retry_count, 0) AS retry_count,
       em.value AS email
     FROM leads_campaigns lc
@@ -279,6 +283,7 @@ export async function loadRetryCandidates(params: {
       email: r.email,
       servedAt: r.served_at,
       audienceId: r.audience_id,
+      buyingSignal: readBuyingSignal(r.buying_signal),
       goal: r.goal,
       retryCount: Number(r.retry_count ?? 0),
     }));
