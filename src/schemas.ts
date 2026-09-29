@@ -1318,10 +1318,6 @@ const LeadReplyOutcomeSchema = z
     brand: ReplyReadingSchema.openapi({
       description: "Lead x BRAND: every reply sent under the brand. An opt-out is read here: it holds for every offer.",
     }),
-    offerEvidence: z.enum(["replies", "delivery_statement"]).openapi({
-      description:
-        "Where the offer's reply evidence comes from. `replies` = every reply's own verdict. `delivery_statement` = instantly-service holds NO reply message for this offer while the delivery layer holds a person's positive or negative reply statement (a reply recorded by hand, never mirrored as a message); that statement stands rather than reading as 'never replied'.",
-    }),
   })
   .openapi("LeadReplyOutcome", {
     description:
