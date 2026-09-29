@@ -4798,9 +4798,9 @@ registry.registerPath({
 
 const HistorySourceStateSchema = z
   .object({
-    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content", "campaigns"]).openapi({
+    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "staff-mailbox", "content", "campaigns"]).openapi({
       description:
-        "Who owns this fact. lead-service: the lifecycle, the step statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`).",
+        "Who owns this fact. lead-service: the lifecycle, the step statements, the conversions and the follow-up debt. delivery: email-gateway's measured evidence. outreach: the messages the outreach provider carried, plus the reply and opt-out statements a human recorded. mailbox: the customer's own Gmail mirror — for some prospects the ONLY copy of the exchange. staff-mailbox: our staff's own Gmail mirrors, limited to the messages between a staff address and this person (a staff member answering a prospect by hand as the agency). content: the copy we generated and the cadence it planned. campaigns: campaign-service's answer to who will answer a scheduled follow-up (asked only when one is scheduled; `unavailable` means every such follow-up reads `answerer.state: unknown`).",
     }),
     status: z.enum(["ok", "unavailable", "not_asked"]).openapi({
       description:
@@ -4876,7 +4876,7 @@ const HistoryEventSchema = z
       description:
         "observed: a fact we hold — a message we can produce the words of, a milestone the delivery layer measured, an outcome the tracker reported. asserted: a fact somebody stated — a recorded reply, a recorded opt-out, a hand-stated step.",
     }),
-    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "content"]),
+    source: z.enum(["lead-service", "delivery", "outreach", "mailbox", "staff-mailbox", "content"]),
     campaignId: z.string().nullable().openapi({
       description:
         "The campaign this happened on, when the fact belongs to one. Null where the holder genuinely does not know: a mailbox knows an address, a website tracker knows a brand, an opt-out belongs to the person.",

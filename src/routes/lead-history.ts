@@ -40,7 +40,10 @@ import {
   fetchOutreachReplyStatements,
   type SourceRead,
 } from "../lib/outreach-client.js";
-import { fetchMailboxConversation } from "../lib/mailbox-client.js";
+import {
+  fetchMailboxConversation,
+  fetchStaffMailboxConversation,
+} from "../lib/mailbox-client.js";
 import { fetchGeneratedEmail } from "../lib/generated-email-client.js";
 import { fetchAnswerers } from "../lib/answerer-client.js";
 import {
@@ -393,28 +396,32 @@ router.get(
       .filter((candidate) => candidate.followup_due_at && !candidate.followup_stopped_reason)
       .map((candidate) => candidate.campaign_id);
 
-    const [mailbox, replyStatements, optOuts, perCampaign, own, answerers] = await Promise.all([
-      email
-        ? fetchMailboxConversation(email, ctx)
-        : Promise.resolve(noEmail as unknown as SourceRead<null>),
-      email
-        ? fetchOutreachReplyStatements(email, ctx)
-        : Promise.resolve(noEmail as unknown as SourceRead<never[]>),
-      email
-        ? fetchOutreachOptOuts(email, ctx)
-        : Promise.resolve(noEmail as unknown as SourceRead<never[]>),
-      mapWithConcurrency(selected, CONCURRENCY, async (candidate) => {
-        const [conversation, generation] = await Promise.all([
-          email
-            ? fetchOutreachConversation(candidate.campaign_id, email, ctx)
-            : Promise.resolve(noEmail as unknown as SourceRead<null>),
-          fetchGeneratedEmail(row.lead_id, candidate.campaign_id, ctx),
-        ]);
-        return { candidate, conversation, generation };
-      }),
-      fetchOwnStatements(req.orgId!, row.lead_id, brandId),
-      owedCampaignIds.length > 0 ? fetchAnswerers(owedCampaignIds) : Promise.resolve(null),
-    ]);
+    const [mailbox, staffMailbox, replyStatements, optOuts, perCampaign, own, answerers] =
+      await Promise.all([
+        email
+          ? fetchMailboxConversation(email, ctx)
+          : Promise.resolve(noEmail as unknown as SourceRead<null>),
+        email
+          ? fetchStaffMailboxConversation(email, ctx)
+          : Promise.resolve(noEmail as unknown as SourceRead<null>),
+        email
+          ? fetchOutreachReplyStatements(email, ctx)
+          : Promise.resolve(noEmail as unknown as SourceRead<never[]>),
+        email
+          ? fetchOutreachOptOuts(email, ctx)
+          : Promise.resolve(noEmail as unknown as SourceRead<never[]>),
+        mapWithConcurrency(selected, CONCURRENCY, async (candidate) => {
+          const [conversation, generation] = await Promise.all([
+            email
+              ? fetchOutreachConversation(candidate.campaign_id, email, ctx)
+              : Promise.resolve(noEmail as unknown as SourceRead<null>),
+            fetchGeneratedEmail(row.lead_id, candidate.campaign_id, ctx),
+          ]);
+          return { candidate, conversation, generation };
+        }),
+        fetchOwnStatements(req.orgId!, row.lead_id, brandId),
+        owedCampaignIds.length > 0 ? fetchAnswerers(owedCampaignIds) : Promise.resolve(null),
+      ]);
 
     const campaigns: HistoryCampaignInput[] = perCampaign.map(
       ({ candidate, conversation, generation }) => ({
@@ -441,6 +448,7 @@ router.get(
       campaigns,
       deliveryRead,
       mailbox,
+      staffMailbox,
       replyStatements,
       optOuts,
       statedOutcomes: own.outcomes,

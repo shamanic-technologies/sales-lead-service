@@ -125,3 +125,71 @@ export async function fetchMailboxConversation(
     return { ok: false, reason: `google-service payload unreadable: ${(error as Error).message}` };
   }
 }
+
+/**
+ * Our STAFF's side of the exchange with one address, out of their own Gmail mirrors
+ * (google-service `GET /internal/staff-mailboxes/conversation`). A staff member operating a brand
+ * as the agency answers prospects by hand from their own mailbox, which lives under THEIR org, so
+ * the org-scoped read above can never see it. google-service returns ONLY messages between a
+ * staff address and this person — never the rest of a thread, never anything else of the mailbox.
+ *
+ * Both 404 reasons (no staff mailbox mirrored / no such exchange) mean "nothing here"; any other
+ * failure is a stated `{ ok: false }`, never an empty answer.
+ */
+export async function fetchStaffMailboxConversation(
+  email: string,
+  ctx: MailboxContext,
+  limit = 200,
+): Promise<SourceRead<MailboxConversation | null>> {
+  if (!ctx.userId || !UUID_RE.test(ctx.userId) || !ctx.runId || !UUID_RE.test(ctx.runId)) {
+    return {
+      ok: false,
+      reason:
+        "google-service requires x-user-id and x-run-id as UUIDs; this request carried neither, and an identity is never invented for it",
+    };
+  }
+
+  const headers: Record<string, string> = {
+    "X-API-Key": GOOGLE_SERVICE_API_KEY,
+    "x-org-id": ctx.orgId,
+    "x-user-id": ctx.userId,
+    "x-run-id": ctx.runId,
+  };
+  if (ctx.brandId) headers["x-brand-id"] = ctx.brandId;
+
+  const url = `${GOOGLE_SERVICE_URL}/internal/staff-mailboxes/conversation?email=${encodeURIComponent(email)}&limit=${limit}`;
+
+  let response: Response;
+  try {
+    response = await fetchWithRetry(url, {
+      method: "GET",
+      headers,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (error) {
+    return { ok: false, reason: `google-service unreachable: ${(error as Error).message}` };
+  }
+
+  if (response.status === 404) return { ok: true, data: null };
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return {
+      ok: false,
+      reason: `google-service answered ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
+    };
+  }
+
+  try {
+    const conversation = (await response.json()) as MailboxConversation;
+    return {
+      ok: true,
+      data: {
+        ...conversation,
+        threads: Array.isArray(conversation.threads) ? conversation.threads : [],
+      },
+    };
+  } catch (error) {
+    return { ok: false, reason: `google-service payload unreadable: ${(error as Error).message}` };
+  }
+}
