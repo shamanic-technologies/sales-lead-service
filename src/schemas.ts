@@ -1288,7 +1288,10 @@ const ReplyReadingSchema = z.object({
   machineReplies: z.number().int().openapi({ description: "Out-of-office and auto-replies. Never decide anything." }),
   unjudgedReplies: z.number().int().openapi({ description: "Replies not judged yet; they decide nothing until judged." }),
   latest: LatestReplySchema.nullable().openapi({
-    description: "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it.",
+    description: "WHAT DO WE DO NOW: the real reply that decides it — the latest reply a person wrote, except that a plain neutral reply never replaces an interest (only a negative reply, a stop request or a hand-over does). An out-of-office never overrides anything.",
+  }),
+  lastRealReply: LatestReplySchema.nullable().openapi({
+    description: "The latest reply a person wrote, whatever it says. May differ from `latest`.",
   }),
   reached: z
     .object({

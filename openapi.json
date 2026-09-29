@@ -1813,7 +1813,54 @@
                   "classification",
                   "producerType"
                 ],
-                "description": "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it."
+                "description": "WHAT DO WE DO NOW: the real reply that decides it — the latest reply a person wrote, except that a plain neutral reply never replaces an interest (only a negative reply, a stop request or a hand-over does). An out-of-office never overrides anything."
+              },
+              "lastRealReply": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "replyId": {
+                    "type": "string",
+                    "description": "instantly-service's reply id."
+                  },
+                  "receivedAt": {
+                    "type": "string",
+                    "description": "When the reply was received."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "The campaign the reply was sent on."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "The reply's kind, verbatim from instantly-service, which owns that vocabulary."
+                  },
+                  "classification": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "positive",
+                      "negative",
+                      "neutral",
+                      null
+                    ],
+                    "description": "instantly-service's coarse reading of the kind. A referral and an off-topic reply read `neutral`: a hand-over to a person, never interest."
+                  },
+                  "producerType": {
+                    "type": "string",
+                    "description": "Who judged it: `human` | `instantly` | `model`."
+                  }
+                },
+                "required": [
+                  "replyId",
+                  "receivedAt",
+                  "campaignId",
+                  "kind",
+                  "classification",
+                  "producerType"
+                ],
+                "description": "The latest reply a person wrote, whatever it says. May differ from `latest`."
               },
               "reached": {
                 "type": "object",
@@ -1850,6 +1897,7 @@
               "machineReplies",
               "unjudgedReplies",
               "latest",
+              "lastRealReply",
               "reached",
               "optedOutAt"
             ],
@@ -1919,7 +1967,54 @@
                   "classification",
                   "producerType"
                 ],
-                "description": "WHAT DO WE DO NOW: the latest reply a person wrote. An out-of-office never overrides it."
+                "description": "WHAT DO WE DO NOW: the real reply that decides it — the latest reply a person wrote, except that a plain neutral reply never replaces an interest (only a negative reply, a stop request or a hand-over does). An out-of-office never overrides anything."
+              },
+              "lastRealReply": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "replyId": {
+                    "type": "string",
+                    "description": "instantly-service's reply id."
+                  },
+                  "receivedAt": {
+                    "type": "string",
+                    "description": "When the reply was received."
+                  },
+                  "campaignId": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "The campaign the reply was sent on."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "description": "The reply's kind, verbatim from instantly-service, which owns that vocabulary."
+                  },
+                  "classification": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "positive",
+                      "negative",
+                      "neutral",
+                      null
+                    ],
+                    "description": "instantly-service's coarse reading of the kind. A referral and an off-topic reply read `neutral`: a hand-over to a person, never interest."
+                  },
+                  "producerType": {
+                    "type": "string",
+                    "description": "Who judged it: `human` | `instantly` | `model`."
+                  }
+                },
+                "required": [
+                  "replyId",
+                  "receivedAt",
+                  "campaignId",
+                  "kind",
+                  "classification",
+                  "producerType"
+                ],
+                "description": "The latest reply a person wrote, whatever it says. May differ from `latest`."
               },
               "reached": {
                 "type": "object",
@@ -1956,6 +2051,7 @@
               "machineReplies",
               "unjudgedReplies",
               "latest",
+              "lastRealReply",
               "reached",
               "optedOutAt"
             ],
