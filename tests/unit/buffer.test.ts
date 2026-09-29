@@ -317,6 +317,76 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(insertValues).not.toHaveBeenCalled();
   });
 
+  it("keeps the buying signal the served person carried, on the serve row and on the lead", async () => {
+    const signal = {
+      type: "hiring",
+      occurredOn: "2026-09-21",
+      fact: "Acme Clinics posted a job for Office Manager (Austin, United States) on September 21, 2026",
+      source: "apollo:job_postings",
+      sourceUrl: "https://example.com/jobs/1",
+    };
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, buyingSignal: signal } });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    const result = await pullNext(baseParams);
+
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ buyingSignal: signal }));
+    expect(result.lead?.buyingSignal).toEqual(signal);
+  });
+
+  it("a person with no signal serves exactly as before: null, never a default", async () => {
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    const result = await pullNext(baseParams);
+
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ buyingSignal: null }));
+    expect(result.lead?.buyingSignal).toBeNull();
+  });
+
+  it("fails the serve loudly on a malformed signal, before writing anything", async () => {
+    serveNext.mockResolvedValueOnce({
+      status: "served",
+      person: { ...person, buyingSignal: { type: "hiring", occurredOn: "2026-09-21", source: "apollo" } },
+    });
+
+    await expect(pullNext(baseParams)).rejects.toThrow(/malformed buyingSignal/);
+    expect(upsertLeadFromPerson).not.toHaveBeenCalled();
+    expect(insertValues).not.toHaveBeenCalled();
+  });
+
+  it("a retried serve hands out the signal stored on its original serve", async () => {
+    const signal = {
+      type: "funding",
+      occurredOn: "2026-09-02",
+      fact: "Acme raised a Series A on September 2, 2026",
+      source: "apollo:funding_events",
+      sourceUrl: null,
+    };
+    pickRetryCandidate.mockResolvedValueOnce({
+      id: "lc-1",
+      leadId: "lead-paid",
+      email: "stranded@cascobay.com",
+      servedAt: "2026-08-25T09:00:00.000Z",
+      audienceId: "aud-original",
+      buyingSignal: signal,
+      goal: "meetingBooked",
+      retryCount: 0,
+    });
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-paid" });
+
+    const result = await pullNext(baseParams);
+
+    expect(result.lead?.buyingSignal).toEqual(signal);
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+
   it("passes the claiming run to the pool so the retry is attributed to it", async () => {
     pickRetryCandidate.mockResolvedValueOnce(null);
     serveNext.mockResolvedValueOnce({ status: "exhausted", person: null });

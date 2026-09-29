@@ -330,6 +330,13 @@
       "when": 1783814400000,
       "tag": "0046_change_feed_serve_fields",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1783900800000,
+      "tag": "0047_leads_campaigns_buying_signal",
+      "breakpoints": true
     }
   ]
 }

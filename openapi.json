@@ -248,6 +248,50 @@
             "nullable": true,
             "description": "Audience ID (human-service audience.id) this served lead is attributed to. null means unattributed.",
             "example": "audience_123"
+          },
+          "buyingSignal": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "hiring",
+                  "job_change",
+                  "funding"
+                ],
+                "description": "What happened: the company is hiring, the person changed jobs, or the company raised funding.",
+                "example": "hiring"
+              },
+              "occurredOn": {
+                "type": "string",
+                "description": "Day the signal happened (YYYY-MM-DD), as the provider recorded it.",
+                "example": "2026-09-21"
+              },
+              "fact": {
+                "type": "string",
+                "description": "One English sentence stating the signal, for the email writer to reference.",
+                "example": "Acme Clinics posted a job for Office Manager (Austin, United States) on September 21, 2026"
+              },
+              "source": {
+                "type": "string",
+                "description": "Where the evidence came from.",
+                "example": "apollo:job_postings"
+              },
+              "sourceUrl": {
+                "type": "string",
+                "nullable": true,
+                "description": "The posting or news link when the provider gave one."
+              }
+            },
+            "required": [
+              "type",
+              "occurredOn",
+              "fact",
+              "source",
+              "sourceUrl"
+            ],
+            "description": "The buying signal this lead's audience matched (the company is hiring, the person just changed jobs, the company just raised), carried verbatim from human-service's served person and kept on the serve, so a retried serve hands out the same signal. `fact` is one English sentence the email writer can reference. null when the serve carried none — a lead not served from a buying-signal audience, and every lead served before this was carried. Never defaulted, never derived by lead-service."
           }
         },
         "required": [
