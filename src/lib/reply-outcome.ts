@@ -98,6 +98,15 @@ export interface LeadReplyOutcome {
   offerKey: string | null;
   offer: ReplyReading;
   brand: ReplyReading;
+  /**
+   * Where the OFFER's reply evidence comes from. `replies` = every reply's own verdict (the rule).
+   * `delivery_statement` = the per-reply layer holds NO reply for this offer while the delivery
+   * layer holds a person's positive or negative reply statement: a reply somebody recorded by hand
+   * whose message was never mirrored (instantly-service keeps such a verdict in its bronze history,
+   * attributed to no reply). Reading the per-reply layer alone would state "they never replied"
+   * about a person who did, so the delivery statement stands for that offer — and says so here.
+   */
+  offerEvidence: "replies" | "delivery_statement";
 }
 
 function instant(iso: string): number {
@@ -177,5 +186,10 @@ export function leadReplyOutcome(input: {
     offerKey === null
       ? []
       : brandReplies.filter((r) => offerKeyOf(r.campaignId, input.offers) === offerKey);
-  return { offerKey, offer: readReplies(offerReplies), brand: readReplies(brandReplies) };
+  return {
+    offerKey,
+    offer: readReplies(offerReplies),
+    brand: readReplies(brandReplies),
+    offerEvidence: "replies",
+  };
 }
