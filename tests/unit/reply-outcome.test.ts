@@ -26,6 +26,16 @@ const OFFERS = new Map<string, string | null>([
   [CAMP_NO_OFFER, null],
 ]);
 
+
+/** instantly-service's per-verdict flags, as it derives them for these kinds (test fixtures only). */
+function flagsOf(kind: string) {
+  return {
+    automatedAnswer: kind === "lead_out_of_office" || kind === "auto_reply_received",
+    stopRequested: kind === "lead_opt_out_requested",
+    notOurTarget: kind === "lead_wrong_person" || kind === "lead_changed_job",
+  };
+}
+
 let seq = 0;
 function reply(
   receivedAt: string,
@@ -47,7 +57,7 @@ function reply(
     verdict:
       kind === null
         ? null
-        : { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt },
+        : { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt, ...flagsOf(kind) },
     verdictCount: kind === null ? 0 : 1,
     ...over,
   };
@@ -384,6 +394,14 @@ describe("the reply vocabulary is not copied", () => {
       return statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") ? [p] : [];
     });
   }
+  it("reply-outcome.ts names only the hand-over pair no flag carries yet", () => {
+    const src = readFileSync(join(__dirname, "../../src/lib/reply-outcome.ts"), "utf8");
+    const named = new Set(
+      [...src.matchAll(/["'](lead_[a-z_]+|auto_reply_received)["']/g)].map((m) => m[1]),
+    );
+    expect([...named].sort()).toEqual(["lead_off_topic", "lead_referral"]);
+  });
+
   it("no reply kind is named outside reply-outcome.ts", () => {
     const kind = /["'](lead_(interested|referral|info_requested|meeting_requested|not_interested|wrong_person|changed_job|opt_out_requested|neutral|off_topic|out_of_office)|auto_reply_received)["']/;
     const offenders = walk(join(__dirname, "../../src"))
