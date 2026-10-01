@@ -21,6 +21,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
+import { supersedeReplyOutcome } from "./existing-customer.js";
 import {
   crmOutcomeSignature,
   type CrmCauseRule,
@@ -76,6 +77,9 @@ export async function upsertCrmOutcome(w: CrmOutcomeWrite): Promise<void> {
       withdrawn_by_user_id = NULL
     WHERE conversion_events.source = 'crm'
   `);
+  // The CRM evidences this sale with its own value and date: a sale we had only read off the
+  // prospect's reply is set aside so the deal counts once (existing-customer.ts).
+  await supersedeReplyOutcome(w.brandId, w.leadId, w.step);
 }
 
 /**
@@ -129,6 +133,9 @@ export async function loadNonCrmOutcomeKeys(
     WHERE brand_id = ${brandId}
       AND matched_lead_id = ANY(${sql.param(leadIds)}::uuid[])
       AND source <> 'crm'
+      -- A sale only read off the prospect's reply is weaker than what the CRM evidences: the CRM
+      -- row is written and sets the reply-read one aside (upsertCrmOutcome).
+      AND source <> 'reply'
       AND attribution_status = 'attributed'
       AND withdrawn_at IS NULL
   `)) as unknown as Array<{ matched_lead_id: string; event: string }>;

@@ -2142,9 +2142,10 @@
             "enum": [
               "tracker",
               "manual",
-              "crm"
+              "crm",
+              "reply"
             ],
-            "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs."
+            "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs; reply — the prospect's own reply says they already buy from the brand (causedByOutreach false, no value, no cost: nobody knows either)."
           }
         },
         "required": [
@@ -3335,14 +3336,58 @@
                   "website_visit",
                   "purchase"
                 ]
+              },
+              "reply": {
+                "type": "object",
+                "properties": {
+                  "signup": {
+                    "type": "integer",
+                    "example": 12
+                  },
+                  "meeting_booked": {
+                    "type": "integer",
+                    "example": 3
+                  },
+                  "meeting_attended": {
+                    "type": "integer",
+                    "example": 2
+                  },
+                  "form_submission": {
+                    "type": "integer",
+                    "example": 7
+                  },
+                  "sale": {
+                    "type": "integer",
+                    "example": 2
+                  },
+                  "website_visit": {
+                    "type": "integer",
+                    "description": "Website visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is NOT counted here, so this number can be ADDED to the measured click count without counting anybody twice. Nothing about what the delivery layer measures changes.",
+                    "example": 1
+                  },
+                  "purchase": {
+                    "type": "integer",
+                    "example": 2
+                  }
+                },
+                "required": [
+                  "signup",
+                  "meeting_booked",
+                  "meeting_attended",
+                  "form_submission",
+                  "sale",
+                  "website_visit",
+                  "purchase"
+                ]
               }
             },
             "required": [
               "tracker",
               "manual",
-              "crm"
+              "crm",
+              "reply"
             ],
-            "description": "The SAME rows, split by who said so: tracker — reported by the client's website; manual — stated by a human about a lead named by id; crm — evidenced by the customer's own CRM for a lead paired with a contact of theirs. For every key, tracker + manual + crm === counts. This is how a hand-stated outcome stays distinguishable from a tracker-reported one after the fact without changing what either counts toward."
+            "description": "The SAME rows, split by who said so: tracker — reported by the client's website; manual — stated by a human about a lead named by id; crm — evidenced by the customer's own CRM for a lead paired with a contact of theirs; reply — the prospect's own reply says they already buy from the brand (only ever a sale, always byCause.other). For every key, tracker + manual + crm + reply === counts. This is how a hand-stated outcome stays distinguishable from a tracker-reported one after the fact without changing what either counts toward."
           },
           "byCause": {
             "type": "object",
@@ -3727,9 +3772,10 @@
             "enum": [
               "person",
               "rule",
+              "reply",
               null
             ],
-            "description": "Where `causedByOutreach` comes from. person — somebody answered it (the \"Caused by us?\" of a stated outcome, or an override of a CRM-evidenced step); rule — nobody did, so the owner's default rule answered it: after our first delivered email to that person -> ours, before -> not ours, undated / not attributed to a lead / never delivered -> null. The rule applies to every source (tracker, manual, crm). null — the rule has not evaluated this row yet (a new outcome, within one worker interval).",
+            "description": "Where `causedByOutreach` comes from. person — somebody answered it (the \"Caused by us?\" of a stated outcome, or an override of a CRM-evidenced step); rule — nobody did, so the owner's default rule answered it: after our first delivered email to that person -> ours, before -> not ours, undated / not attributed to a lead / never delivered -> null. The rule applies to every source (tracker, manual, crm). null — the rule has not evaluated this row yet (a new outcome, within one worker interval). reply — the prospect's own reply says they already bought from the brand before we wrote (causeReason already_a_customer).",
             "example": "rule"
           },
           "causeReason": {
@@ -3751,9 +3797,10 @@
             "enum": [
               "tracker",
               "manual",
-              "crm"
+              "crm",
+              "reply"
             ],
-            "description": "manual — a human stated it; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs (causedByOutreach then follows the date rule unless a person overrode it)."
+            "description": "manual — a human stated it; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs (causedByOutreach then follows the date rule unless a person overrode it); reply — the prospect's own reply says they already buy from the brand: a sale, causedByOutreach false, valueCents and costCents null (nobody knows either; never price it at an average), occurredAt null (undated)."
           }
         },
         "required": [
@@ -4203,9 +4250,10 @@
               "tracker",
               "manual",
               "crm",
+              "reply",
               null
             ],
-            "description": "Who said so. manual — a person; tracker — the website tag or the delivery layer; crm — the customer's own CRM, for a lead paired with a contact of theirs (not a person's statement, so not withdrawable here). Null on a pending step (nobody has said anything) and on an implied one (nobody stated it)."
+            "description": "Who said so. manual — a person; tracker — the website tag or the delivery layer; crm — the customer's own CRM, for a lead paired with a contact of theirs (not a person's statement, so not withdrawable here); reply — the prospect's own reply says they already buy from the brand (a sale our outreach did not cause, not withdrawable here). Null on a pending step (nobody has said anything) and on an implied one (nobody stated it)."
           },
           "valueCents": {
             "type": "integer",
@@ -5859,9 +5907,10 @@
                 "enum": [
                   "tracker",
                   "manual",
-                  "crm"
+                  "crm",
+                  "reply"
                 ],
-                "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs."
+                "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs; reply — the prospect's own reply says they already buy from the brand (causedByOutreach false, no value, no cost: nobody knows either)."
               }
             },
             "required": [
@@ -6318,10 +6367,11 @@
               "enum": [
                 "manual",
                 "tracker",
-                "crm"
+                "crm",
+                "reply"
               ]
             },
-            "description": "Who observed the sale: `manual` (a person stated it), `tracker` (the brand's website tag reported it), `crm` (the customer's own CRM evidences it)."
+            "description": "Who observed the sale: `manual` (a person stated it), `tracker` (the brand's website tag reported it), `crm` (the customer's own CRM evidences it), `reply` (the prospect's own reply says they already buy from the brand)."
           }
         },
         "required": [
@@ -6329,6 +6379,193 @@
           "emails",
           "wonAt",
           "sources"
+        ]
+      },
+      "ExistingCustomerResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "recorded",
+              "already_recorded",
+              "already_won"
+            ],
+            "description": "recorded — written now (or revived after a withdrawal); already_recorded — this reply-read sale already stands, nothing written; already_won — a person, the tracker or the customer's CRM already holds this person's sale, which is stronger evidence, so nothing was written (one deal counts once)."
+          },
+          "wonBy": {
+            "type": "string",
+            "enum": [
+              "tracker",
+              "manual",
+              "crm",
+              "reply"
+            ],
+            "description": "Which source holds the sale that stands for this person now."
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "leadCampaignId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "description": "The registered address, as stored."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ExistingCustomerOutcome"
+          }
+        },
+        "required": [
+          "status",
+          "wonBy",
+          "leadId",
+          "leadCampaignId",
+          "brandId",
+          "email",
+          "outcome"
+        ]
+      },
+      "ExistingCustomerOutcome": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "leadCampaignId": {
+            "type": "string"
+          },
+          "campaignId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string",
+            "enum": [
+              "sale"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "reply"
+            ]
+          },
+          "valueCents": {
+            "nullable": true,
+            "description": "Nobody knows what they pay: never fabricated, never an average."
+          },
+          "costCents": {
+            "nullable": true
+          },
+          "causedByOutreach": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "occurredAt": {
+            "nullable": true,
+            "description": "Undated: they became a customer at a moment nobody told us."
+          },
+          "replyRef": {
+            "type": "string",
+            "nullable": true
+          },
+          "recordedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "leadId",
+          "leadCampaignId",
+          "campaignId",
+          "brandId",
+          "email",
+          "step",
+          "source",
+          "valueCents",
+          "costCents",
+          "causedByOutreach",
+          "occurredAt",
+          "replyRef",
+          "recordedAt"
+        ],
+        "description": "The reply-read sale, when it is the one that stands; null on already_won."
+      },
+      "ExistingCustomerRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The person's email address. Matched EXACTLY (case-folded equality on the registered contact method, scoped to the org and the campaign named), never fuzzily.",
+            "example": "drjane@clinic.com"
+          },
+          "replyRef": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Provenance: the caller's own id for the reply that says so (instantly-service's reply id). Stored on the outcome, never interpreted.",
+            "example": "ie:019f3c1e-7a2b-7c11-9d0e-5f1a2b3c4d5e"
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "ExistingCustomerWithdrawResponse": {
+        "type": "object",
+        "properties": {
+          "withdrawn": {
+            "type": "boolean"
+          },
+          "alreadyWithdrawn": {
+            "type": "boolean"
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "leadCampaignId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "withdrawn",
+          "alreadyWithdrawn",
+          "leadId",
+          "leadCampaignId",
+          "brandId"
+        ]
+      },
+      "ExistingCustomerWithdrawRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "email"
         ]
       }
     },
@@ -8624,7 +8861,7 @@
     "/internal/brands/{brandId}/conversion-counts": {
       "get": {
         "summary": "Real conversion counts per event type for a brand (internal, service-auth)",
-        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (ours caused it), other (something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (undecided). A person's answer outranks the owner's date rule, which answers every other outcome whatever its source: after our first delivered email to that person -> outreach, before -> other, undated / unmatched / never delivered -> unstated. outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
+        "description": "INTERNAL (service-auth: x-api-key — same tier as other /internal/* routes, NO Clerk). Returns the per-event-type COUNT of REAL, attributed conversions for the brand. Each count is deduped (rows are deduped at write via the (brand_id, dedupe_signature) partial unique index) and filtered to attribution_status = 'attributed' (credited to a lead we emailed for the brand; excludes needs_review and unmatched). The \"ping\" liveness heartbeat never lands in conversion_events, so it is excluded. All six step keys are ALWAYS present (0 when none received), including \"meeting_attended\" and \"website_visit\", which are statable by hand only. \"website_visit\" counts the visits known ONLY by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so this number can be added to the measured click count without counting anybody twice (email-gateway unreachable → 502, never a guessed count). `bySource` splits the same rows into tracker-reported, hand-stated, CRM-evidenced and reply-read (tracker + manual + crm + reply === counts, per key), and `byCause` splits them by WHOSE win each was: outreach (ours caused it), other (something else of theirs did — a real outcome, counted here like any other, simply not one to compute OUR return on) and unstated (undecided). A person's answer outranks the owner's date rule, which answers every other outcome whatever its source: after our first delivered email to that person -> outreach, before -> other, undated / unmatched / never delivered -> unstated. outreach + other + unstated === counts, per key. A \"never\" statement is not an outcome and is counted by nothing here. A brand with zero conversions returns all-zero counts (200, never 404).",
         "parameters": [
           {
             "in": "header",
@@ -10798,6 +11035,180 @@
           },
           "500": {
             "description": "The won set could not be read — never answered as an empty set"
+          }
+        }
+      }
+    },
+    "/orgs/campaigns/{campaignId}/existing-customers/by-email": {
+      "post": {
+        "summary": "State, from the prospect's own reply, that this person already buys from the brand",
+        "description": "For the service that classifies replies (instantly-service). A prospect answers \"I already have your product\": they are a WON customer of the brand, and our outreach did not win them. This records a `sale` on the outcome ledger with source `reply`, causedByOutreach FALSE (the prospect's words answer it; the date rule never overwrites it), no value, no cost and no date (nobody knows any of them; nothing is estimated). Consequences: the lead's standing reads `customer` (it no longer reads as a positive reply / sales interest), it is in /won-leads, it counts in conversion-counts under bySource.reply and byCause.OTHER, so no figure crediting OUR outreach (return, ROI, cost of acquisition) includes it. It is the WEAKEST evidence of a sale: when a person, the tracker or the CRM already holds this person's sale nothing is written (status already_won), and any of them stating it later sets this one aside. IDEMPOTENT per person per brand: stating it twice records it once (already_recorded). Identification is the follow-up queue's: org + campaign + case-folded registered email.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The campaign the reply came in on — the id named, not its identity family.",
+              "example": "camp-1"
+            },
+            "required": true,
+            "description": "The campaign the reply came in on — the id named, not its identity family.",
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExistingCustomerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Nothing written: already recorded, or already won by a stronger source",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExistingCustomerResponse"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Recorded now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExistingCustomerResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing x-org-id or an empty `email`"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No lead on this campaign holds that email address (code lead_not_found)"
+          },
+          "409": {
+            "description": "Refused, nothing written: the address matches more than one row on this campaign (code ambiguous_lead, with matches); the row carries no brand (code lead_has_no_brand); or a person stated this lead will never buy (code stated_never), which a reading of a reply does not overrule."
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/campaigns/{campaignId}/existing-customers/by-email/withdraw": {
+      "post": {
+        "summary": "Take back a reply-read \"already a customer\"",
+        "description": "The classifier re-read the reply (or a person corrected its verdict). The reply-read sale is set aside, never deleted; a later POST revives it. Idempotent: a second withdrawal answers alreadyWithdrawn true. Touches nothing a person, the tracker or the CRM stated.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The campaign the reply came in on — the id named, not its identity family.",
+              "example": "camp-1"
+            },
+            "required": true,
+            "description": "The campaign the reply came in on — the id named, not its identity family.",
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExistingCustomerWithdrawRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Withdrawn (or already withdrawn)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExistingCustomerWithdrawResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing x-org-id or an empty `email`"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No lead on this campaign holds that email address (code lead_not_found)"
+          },
+          "409": {
+            "description": "ambiguous_lead / lead_has_no_brand as on the POST, or nothing_recorded: nothing was ever read off a reply for this person."
+          },
+          "500": {
+            "description": "Internal server error"
           }
         }
       }
