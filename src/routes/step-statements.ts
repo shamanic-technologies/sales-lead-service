@@ -3,6 +3,7 @@ import { z } from "zod";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { supersedeCrmOutcome } from "../lib/crm-evidence-store.js";
+import { supersedeReplyOutcome } from "../lib/existing-customer.js";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { toIsoTimestamp } from "../lib/basic-leads.js";
 import {
@@ -536,6 +537,9 @@ router.post(
     // make one deal read as two. It is set aside (never deleted); the CRM sync stands it back up if
     // this statement is later withdrawn.
     await supersedeCrmOutcome(brandId, row.lead_id, step);
+    // Same for a sale only read off the prospect's reply ("I already buy from you"): a person's
+    // statement is the stronger fact, and one deal must count once (existing-customer.ts).
+    await supersedeReplyOutcome(brandId, row.lead_id, step);
 
     res.status(201).json({
       statement: {

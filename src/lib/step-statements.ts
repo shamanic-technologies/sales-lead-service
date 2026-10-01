@@ -92,9 +92,13 @@ export function canonicalizeStepOutcome(value: unknown): LeadStepOutcomeName | n
  *   crm     — the customer's OWN CRM evidences it, for a lead paired with that CRM contact
  *             (crm-evidence.ts). Not a person's statement: it is corrected by rejecting the pairing,
  *             or overridden by a person stating the step.
+ *   reply   — the PROSPECT's own reply says it, read by the service that classified the reply
+ *             (existing-customer.ts: "I already buy from you"). Only ever a `sale` the outreach did
+ *             NOT cause, with no value and no cost (nobody knows either). The weakest evidence: a
+ *             person, the tracker or the CRM stating the same sale sets it aside.
  */
-export type StatementSource = "tracker" | "manual" | "crm";
-export const STATEMENT_SOURCES: readonly StatementSource[] = ["tracker", "manual", "crm"];
+export type StatementSource = "tracker" | "manual" | "crm" | "reply";
+export const STATEMENT_SOURCES: readonly StatementSource[] = ["tracker", "manual", "crm", "reply"];
 
 /**
  * A stored `source` read back. Anything that is not explicitly `manual` or `crm` came off the
@@ -103,6 +107,7 @@ export const STATEMENT_SOURCES: readonly StatementSource[] = ["tracker", "manual
 export function statementSourceOf(raw: unknown): StatementSource {
   if (raw === "manual") return "manual";
   if (raw === "crm") return "crm";
+  if (raw === "reply") return "reply";
   return "tracker";
 }
 
