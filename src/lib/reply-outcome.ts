@@ -22,31 +22,17 @@
  *     `classification === "positive"` and nothing else.
  *
  * WHAT IS READ, WHAT IS NOT. The reply vocabulary is instantly-service's and is NOT copied here. It
- * serves, per verdict, the coarse `classification` (interest) and three flags it derives itself:
- * `automatedAnswer` (a machine answered), `stopRequested` (they asked us to stop) and `notOurTarget`
- * (wrong contact, left the role). The only kind still read by name is the hand-over pair below,
- * because no flag carries it yet.
+ * serves, per verdict, the coarse `classification` (interest) and four flags it derives itself:
+ * `automatedAnswer` (a machine answered), `stopRequested` (they asked us to stop), `notOurTarget`
+ * (wrong contact, left the role) and `handedToPerson` (a referral or an off-topic reply: classified
+ * `neutral` like a plain neutral reply, but it hands the thread to a person). No reply kind is named
+ * anywhere in this service.
  *
  * A reply nobody has judged yet (`verdict: null`) is counted (`unjudgedReplies`) and decides nothing:
  * whether it is even a real reply is unknown until it is judged, and instantly-service judges within
  * minutes. Nothing is re-derived from a reply's text here — that is the producer's job.
  */
 import type { ReplyVerdictView } from "./reply-verdicts-client.js";
-
-/**
- * The ONE thing about a reply that neither instantly-service's classification nor its per-verdict
- * flags (`automatedAnswer`, `stopRequested`, `notOurTarget`) can express: that a `neutral` reply
- * HANDS THE THREAD TO A PERSON (a referral, an off-topic reply) rather than merely being neutral.
- * Owner rule: a hand-over replaces an interest in the "now" reading, a plain neutral reply does not.
- * These two names stay here until instantly-service serves a hand-over flag; nothing else names a
- * reply kind.
- */
-const HAND_OVER_KINDS: ReadonlySet<string> = new Set(["lead_referral", "lead_off_topic"]);
-
-/** True iff the reply hands the thread to a person (a referral, an off-topic reply). */
-export function isHandOver(kind: string): boolean {
-  return HAND_OVER_KINDS.has(kind);
-}
 
 /** The reply that decides "what do we do now". */
 export interface LatestReply {
@@ -150,7 +136,7 @@ export function readReplies(replies: readonly ReplyVerdictView[]): ReplyReading 
     const keepsInterest =
       reading.latest?.classification === "positive" &&
       v.classification === "neutral" &&
-      !isHandOver(v.kind);
+      !v.handedToPerson;
     if (!keepsInterest) reading.latest = seen;
     if (v.classification && reading.reached[v.classification] === null) {
       reading.reached[v.classification] = r.receivedAt;

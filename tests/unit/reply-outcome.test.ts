@@ -33,6 +33,7 @@ function flagsOf(kind: string) {
     automatedAnswer: kind === "lead_out_of_office" || kind === "auto_reply_received",
     stopRequested: kind === "lead_opt_out_requested",
     notOurTarget: kind === "lead_wrong_person" || kind === "lead_changed_job",
+    handedToPerson: kind === "lead_referral" || kind === "lead_off_topic",
   };
 }
 
@@ -354,8 +355,9 @@ describe("the delivery layer's coarse reply value is never read", () => {
   });
 });
 
-// The reply vocabulary is instantly-service's. This service reads the classification it serves and
-// names exactly the kinds it must act on, in ONE module — a second list elsewhere is how it drifts.
+// The reply vocabulary is instantly-service's. This service reads the classification and the
+// per-verdict flags it serves (automatedAnswer, stopRequested, notOurTarget, handedToPerson) and
+// names NO reply kind anywhere: a list here is how it drifts from the producer's.
 describe("the reply vocabulary is not copied", () => {
   function walk(dir: string): string[] {
     return readdirSync(dir).flatMap((f) => {
@@ -363,19 +365,9 @@ describe("the reply vocabulary is not copied", () => {
       return statSync(p).isDirectory() ? walk(p) : p.endsWith(".ts") ? [p] : [];
     });
   }
-  it("reply-outcome.ts names only the hand-over pair no flag carries yet", () => {
-    const src = readFileSync(join(__dirname, "../../src/lib/reply-outcome.ts"), "utf8");
-    const named = new Set(
-      [...src.matchAll(/["'](lead_[a-z_]+|auto_reply_received)["']/g)].map((m) => m[1]),
-    );
-    expect([...named].sort()).toEqual(["lead_off_topic", "lead_referral"]);
-  });
-
-  it("no reply kind is named outside reply-outcome.ts", () => {
+  it("no reply kind is named anywhere in src", () => {
     const kind = /["'](lead_(interested|referral|info_requested|meeting_requested|not_interested|wrong_person|changed_job|opt_out_requested|neutral|off_topic|out_of_office)|auto_reply_received)["']/;
-    const offenders = walk(join(__dirname, "../../src"))
-      .filter((p) => !p.endsWith("reply-outcome.ts"))
-      .filter((p) => kind.test(readFileSync(p, "utf8")));
+    const offenders = walk(join(__dirname, "../../src")).filter((p) => kind.test(readFileSync(p, "utf8")));
     expect(offenders).toEqual([]);
   });
 });

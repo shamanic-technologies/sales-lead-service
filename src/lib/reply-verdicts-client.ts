@@ -36,6 +36,8 @@ export interface ReplyVerdict {
   stopRequested: boolean;
   /** Not who we sell to (wrong contact, left the role); a plain "not interested" is NOT this. */
   notOurTarget: boolean;
+  /** The reply hands the lead to a person (a referral, an off-topic reply); a plain neutral is NOT. */
+  handedToPerson: boolean;
 }
 
 /** One real inbound reply, as instantly-service serves it. */
@@ -74,13 +76,14 @@ function parseVerdict(raw: unknown): ReplyVerdict | null {
   if (classification !== null && !(isString(classification) && CLASSIFICATIONS.has(classification))) {
     throw new Error(`verdict.classification '${String(classification)}' is not positive|negative|neutral|null`);
   }
-  for (const flag of ["automatedAnswer", "stopRequested", "notOurTarget"] as const) {
+  for (const flag of ["automatedAnswer", "stopRequested", "notOurTarget", "handedToPerson"] as const) {
     if (typeof v[flag] !== "boolean") throw new Error(`verdict.${flag} is not a boolean`);
   }
   return {
     automatedAnswer: v.automatedAnswer as boolean,
     stopRequested: v.stopRequested as boolean,
     notOurTarget: v.notOurTarget as boolean,
+    handedToPerson: v.handedToPerson as boolean,
     kind: v.kind,
     classification: classification as ReplyVerdict["classification"],
     producerType: isString(v.producerType) ? v.producerType : "",
