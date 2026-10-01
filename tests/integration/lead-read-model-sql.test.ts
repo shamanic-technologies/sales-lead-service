@@ -53,7 +53,7 @@ vi.mock("../../src/lib/reply-verdicts-client.js", async (importOriginal) => ({
           fromEmail: email,
           subject: null,
           receivedAt: r.receivedAt,
-          verdict: { kind: r.kind, classification: r.classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: r.receivedAt, automatedAnswer: false, stopRequested: false, notOurTarget: false },
+          verdict: { kind: r.kind, classification: r.classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: r.receivedAt, automatedAnswer: false, stopRequested: false, notOurTarget: false, handedToPerson: false },
           verdictCount: 1,
         })),
       ),
