@@ -1260,10 +1260,12 @@ const ClosedDealSchema = z
         "Null is never read as either answer.",
       example: true,
     }),
-    source: z.enum(["tracker", "manual", "crm"]).openapi({
+    source: z.enum(["tracker", "manual", "crm", "reply"]).openapi({
       description:
         "manual — a human stated the deal; tracker — the website tag reported it; crm — the " +
-        "customer's own CRM evidences it for a lead paired with a contact of theirs.",
+        "customer's own CRM evidences it for a lead paired with a contact of theirs; reply — the " +
+        "prospect's own reply says they already buy from the brand (causedByOutreach false, no " +
+        "value, no cost: nobody knows either).",
     }),
   })
   .openapi("LeadClosedDeal", {
@@ -3450,13 +3452,19 @@ const ConversionCountsResponseSchema = z
         "NOT an outcome and is counted by nothing here.",
     }),
     bySource: z
-      .object({ tracker: StepCountsSchema, manual: StepCountsSchema, crm: StepCountsSchema })
+      .object({
+        tracker: StepCountsSchema,
+        manual: StepCountsSchema,
+        crm: StepCountsSchema,
+        reply: StepCountsSchema,
+      })
       .openapi({
         description:
           "The SAME rows, split by who said so: tracker — reported by the client's website; " +
           "manual — stated by a human about a lead named by id; crm — evidenced by the customer's " +
-          "own CRM for a lead paired with a contact of theirs. For every key, " +
-          "tracker + manual + crm === counts. This is how a hand-stated outcome stays distinguishable " +
+          "own CRM for a lead paired with a contact of theirs; reply — the prospect's own reply says " +
+          "they already buy from the brand (only ever a sale, always byCause.other). For every key, " +
+          "tracker + manual + crm + reply === counts. This is how a hand-stated outcome stays distinguishable " +
           "from a tracker-reported one after the fact without changing what either counts toward.",
       }),
     byCause: z
@@ -3502,7 +3510,7 @@ registry.registerPath({
     "by hand: a visit stated for a lead whose click the delivery layer already measured is left out, so " +
     "this number can be added to the measured click count without counting anybody twice (email-gateway " +
     "unreachable → 502, never a guessed count). `bySource` splits the same " +
-    "rows into tracker-reported, hand-stated and CRM-evidenced (tracker + manual + crm === counts, per key), and `byCause` " +
+    "rows into tracker-reported, hand-stated, CRM-evidenced and reply-read (tracker + manual + crm + reply === counts, per key), and `byCause` " +
     "splits them by WHOSE win each was: outreach (ours caused it), other (something else of theirs " +
     "did — a real outcome, counted here like any other, simply not one to compute OUR return on) and " +
     "unstated (undecided). A person's answer outranks the owner's date rule, which answers every " +
@@ -3748,14 +3756,15 @@ const ConvertedLeadOutcomeSchema = z
         "which answers whether we managed to identify who somebody was.",
       example: true,
     }),
-    causeBasis: z.enum(["person", "rule"]).nullable().openapi({
+    causeBasis: z.enum(["person", "rule", "reply"]).nullable().openapi({
       description:
         "Where `causedByOutreach` comes from. person — somebody answered it (the \"Caused by us?\" " +
         "of a stated outcome, or an override of a CRM-evidenced step); rule — nobody did, so the " +
         "owner's default rule answered it: after our first delivered email to that person -> ours, " +
         "before -> not ours, undated / not attributed to a lead / never delivered -> null. The rule " +
         "applies to every source (tracker, manual, crm). null — the rule has not evaluated this " +
-        "row yet (a new outcome, within one worker interval).",
+        "row yet (a new outcome, within one worker interval). reply — the prospect's own reply says " +
+        "they already bought from the brand before we wrote (causeReason already_a_customer).",
       example: "rule",
     }),
     causeReason: z
@@ -3772,11 +3781,13 @@ const ConvertedLeadOutcomeSchema = z
           "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise.",
         example: "after_first_delivery",
       }),
-    source: z.enum(["tracker", "manual", "crm"]).openapi({
+    source: z.enum(["tracker", "manual", "crm", "reply"]).openapi({
       description:
         "manual — a human stated it; tracker — the website tag reported it; crm — the customer's " +
         "own CRM evidences it for a lead paired with a contact of theirs (causedByOutreach then " +
-        "follows the date rule unless a person overrode it).",
+        "follows the date rule unless a person overrode it); reply — the prospect's own reply says " +
+        "they already buy from the brand: a sale, causedByOutreach false, valueCents and costCents " +
+        "null (nobody knows either; never price it at an average), occurredAt null (undated).",
     }),
   })
   .openapi("ConvertedLeadOutcome");
@@ -4180,11 +4191,12 @@ const StepStateSchema = z
       description:
         "What a person actually stated about THIS step, whatever the leg graph concluded — so a real statement is never lost to satisfy it. A \"never\" contradicted by a later outcome reads state=outcome, origin=implied, statedState=never.",
     }),
-    source: z.enum(["tracker", "manual", "crm"]).nullable().openapi({
+    source: z.enum(["tracker", "manual", "crm", "reply"]).nullable().openapi({
       description:
         "Who said so. manual — a person; tracker — the website tag or the delivery layer; crm — the " +
         "customer's own CRM, for a lead paired with a contact of theirs (not a person's statement, " +
-        "so not withdrawable here). Null on a pending step (nobody has said anything) and on an " +
+        "so not withdrawable here); reply — the prospect's own reply says they already buy from the " +
+        "brand (a sale our outreach did not cause, not withdrawable here). Null on a pending step (nobody has said anything) and on an " +
         "implied one (nobody stated it).",
     }),
     valueCents: z.number().int().nullable(),
@@ -5836,9 +5848,9 @@ const WonLeadSchema = z
       description:
         "When the earliest live sale for this lead happened, ISO-8601. Null only when genuinely undated (e.g. a CRM deal with no date) — never fabricated.",
     }),
-    sources: z.array(z.enum(["manual", "tracker", "crm"])).openapi({
+    sources: z.array(z.enum(["manual", "tracker", "crm", "reply"])).openapi({
       description:
-        "Who observed the sale: `manual` (a person stated it), `tracker` (the brand's website tag reported it), `crm` (the customer's own CRM evidences it).",
+        "Who observed the sale: `manual` (a person stated it), `tracker` (the brand's website tag reported it), `crm` (the customer's own CRM evidences it), `reply` (the prospect's own reply says they already buy from the brand).",
     }),
   })
   .openapi("WonLead");
@@ -5896,5 +5908,157 @@ registry.registerPath({
     400: { description: "Missing x-org-id, or an empty `email`" },
     401: { description: "Unauthorized" },
     500: { description: "The won set could not be read — never answered as an empty set" },
+  },
+});
+
+// --- "Already a customer", read off the prospect's own reply ---
+
+const ExistingCustomerCampaignParam = z.object({
+  campaignId: z.string().openapi({
+    param: { name: "campaignId", in: "path" },
+    description: "The campaign the reply came in on — the id named, not its identity family.",
+    example: "camp-1",
+  }),
+});
+
+const ExistingCustomerRequestSchema = z
+  .object({
+    email: z.string().min(1).openapi({
+      description:
+        "The person's email address. Matched EXACTLY (case-folded equality on the registered contact method, scoped to the org and the campaign named), never fuzzily.",
+      example: "drjane@clinic.com",
+    }),
+    replyRef: z.string().min(1).max(200).optional().openapi({
+      description:
+        "Provenance: the caller's own id for the reply that says so (instantly-service's reply id). Stored on the outcome, never interpreted.",
+      example: "ie:019f3c1e-7a2b-7c11-9d0e-5f1a2b3c4d5e",
+    }),
+  })
+  .openapi("ExistingCustomerRequest");
+
+const ExistingCustomerOutcomeSchema = z
+  .object({
+    id: z.string(),
+    leadId: z.string(),
+    leadCampaignId: z.string(),
+    campaignId: z.string(),
+    brandId: z.string(),
+    email: z.string(),
+    step: z.literal("sale"),
+    source: z.literal("reply"),
+    valueCents: z.null().openapi({ description: "Nobody knows what they pay: never fabricated, never an average." }),
+    costCents: z.null(),
+    causedByOutreach: z.literal(false),
+    occurredAt: z.null().openapi({ description: "Undated: they became a customer at a moment nobody told us." }),
+    replyRef: z.string().nullable(),
+    recordedAt: z.string().nullable(),
+  })
+  .openapi("ExistingCustomerOutcome");
+
+const ExistingCustomerResponseSchema = z
+  .object({
+    status: z.enum(["recorded", "already_recorded", "already_won"]).openapi({
+      description:
+        "recorded — written now (or revived after a withdrawal); already_recorded — this reply-read sale already stands, nothing written; already_won — a person, the tracker or the customer's CRM already holds this person's sale, which is stronger evidence, so nothing was written (one deal counts once).",
+    }),
+    wonBy: z.enum(["tracker", "manual", "crm", "reply"]).openapi({
+      description: "Which source holds the sale that stands for this person now.",
+    }),
+    leadId: z.string(),
+    leadCampaignId: z.string(),
+    brandId: z.string(),
+    email: z.string().openapi({ description: "The registered address, as stored." }),
+    outcome: ExistingCustomerOutcomeSchema.nullable().openapi({
+      description: "The reply-read sale, when it is the one that stands; null on already_won.",
+    }),
+  })
+  .openapi("ExistingCustomerResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/campaigns/{campaignId}/existing-customers/by-email",
+  summary: "State, from the prospect's own reply, that this person already buys from the brand",
+  description:
+    "For the service that classifies replies (instantly-service). A prospect answers \"I already have " +
+    "your product\": they are a WON customer of the brand, and our outreach did not win them. This " +
+    "records a `sale` on the outcome ledger with source `reply`, causedByOutreach FALSE (the " +
+    "prospect's words answer it; the date rule never overwrites it), no value, no cost and no date " +
+    "(nobody knows any of them; nothing is estimated). Consequences: the lead's standing reads " +
+    "`customer` (it no longer reads as a positive reply / sales interest), it is in /won-leads, " +
+    "it counts in conversion-counts under bySource.reply and byCause.OTHER, so no figure crediting " +
+    "OUR outreach (return, ROI, cost of acquisition) includes it. It is the WEAKEST evidence of a " +
+    "sale: when a person, the tracker or the CRM already holds this person's sale nothing is " +
+    "written (status already_won), and any of them stating it later sets this one aside. " +
+    "IDEMPOTENT per person per brand: stating it twice records it once (already_recorded). " +
+    "Identification is the follow-up queue's: org + campaign + case-folded registered email.",
+  request: {
+    params: ExistingCustomerCampaignParam,
+    body: { content: { "application/json": { schema: ExistingCustomerRequestSchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    201: {
+      description: "Recorded now",
+      content: { "application/json": { schema: ExistingCustomerResponseSchema } },
+    },
+    200: {
+      description: "Nothing written: already recorded, or already won by a stronger source",
+      content: { "application/json": { schema: ExistingCustomerResponseSchema } },
+    },
+    400: { description: "Missing x-org-id or an empty `email`" },
+    401: { description: "Unauthorized" },
+    404: { description: "No lead on this campaign holds that email address (code lead_not_found)" },
+    409: {
+      description:
+        "Refused, nothing written: the address matches more than one row on this campaign (code ambiguous_lead, with matches); the row carries no brand (code lead_has_no_brand); or a person stated this lead will never buy (code stated_never), which a reading of a reply does not overrule.",
+    },
+    500: { description: "Internal server error" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/campaigns/{campaignId}/existing-customers/by-email/withdraw",
+  summary: "Take back a reply-read \"already a customer\"",
+  description:
+    "The classifier re-read the reply (or a person corrected its verdict). The reply-read sale is set " +
+    "aside, never deleted; a later POST revives it. Idempotent: a second withdrawal answers " +
+    "alreadyWithdrawn true. Touches nothing a person, the tracker or the CRM stated.",
+  request: {
+    params: ExistingCustomerCampaignParam,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ email: z.string().min(1) }).openapi("ExistingCustomerWithdrawRequest"),
+        },
+      },
+    },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "Withdrawn (or already withdrawn)",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              withdrawn: z.boolean(),
+              alreadyWithdrawn: z.boolean(),
+              leadId: z.string(),
+              leadCampaignId: z.string(),
+              brandId: z.string(),
+            })
+            .openapi("ExistingCustomerWithdrawResponse"),
+        },
+      },
+    },
+    400: { description: "Missing x-org-id or an empty `email`" },
+    401: { description: "Unauthorized" },
+    404: { description: "No lead on this campaign holds that email address (code lead_not_found)" },
+    409: {
+      description:
+        "ambiguous_lead / lead_has_no_brand as on the POST, or nothing_recorded: nothing was ever read off a reply for this person.",
+    },
+    500: { description: "Internal server error" },
   },
 });

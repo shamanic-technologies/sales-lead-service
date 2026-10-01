@@ -18,6 +18,7 @@ import featureMembershipsRoutes from "./routes/feature-memberships.js";
 import conversionsRoutes from "./routes/conversions.js";
 import stepStatementsRoutes from "./routes/step-statements.js";
 import followupsRoutes from "./routes/followups.js";
+import existingCustomersRoutes from "./routes/existing-customers.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
@@ -67,6 +68,7 @@ app.use(featureMembershipsRoutes);
 app.use(conversionsRoutes);
 app.use(stepStatementsRoutes);
 app.use(followupsRoutes);
+app.use(existingCustomersRoutes);
 app.use(leadHistoryRoutes);
 
 app.use((req, res) => {

@@ -28,6 +28,7 @@ import {
   fetchMeasuredVisitEmails,
 } from "../lib/measured-visits.js";
 import { toIsoTimestamp } from "../lib/basic-leads.js";
+import { supersedeReplyOutcome } from "../lib/existing-customer.js";
 
 const router = Router();
 
@@ -209,6 +210,13 @@ router.post("/public/conversions", conversionTokenAuth, wrap(async (req: Convers
     ON CONFLICT (brand_id, dedupe_signature) WHERE dedupe_signature IS NOT NULL DO NOTHING
   `);
 
+  // A sale the website reports for a person whose sale we had only read off their reply ("I
+  // already buy from you") is the stronger fact: the reply-read row is set aside so the deal
+  // counts once (existing-customer.ts).
+  if (match.attributionStatus === "attributed" && match.matchedLeadId) {
+    await supersedeReplyOutcome(brandId, match.matchedLeadId, event);
+  }
+
   res.json({ received: true });
 }));
 
@@ -242,9 +250,9 @@ router.get(
              array_agg(DISTINCT event) AS event_types
       FROM conversion_events
       WHERE brand_id = ${brandId}
-        -- The tracker's liveness: what the customer's own CRM evidences is not a signal the
-        -- website tag sent.
-        AND source <> 'crm'
+        -- The tracker's liveness: what the customer's own CRM evidences, or what a prospect's reply
+        -- says, is not a signal the website tag sent.
+        AND source NOT IN ('crm', 'reply')
     `)) as unknown as Array<{
       last_event_at: Date | string | null;
       event_types: string[] | null;
@@ -450,6 +458,9 @@ router.get(
       manual: zeroed(),
       // What the customer's OWN CRM evidences, for leads paired with a contact of theirs.
       crm: zeroed(),
+      // What a prospect's own reply says ("I already buy from you"), read by the classifier that
+      // read it: a sale the outreach did NOT cause, carrying no value and no cost.
+      reply: zeroed(),
     };
     // WHOSE win each outcome was. `outreach` — the customer says ours caused it; `other` — they say
     // something else of theirs did (a referral, a conference, their own pipeline: a REAL outcome,
@@ -479,6 +490,7 @@ router.get(
         tracker: withLegacyPurchaseAlias(bySource.tracker),
         manual: withLegacyPurchaseAlias(bySource.manual),
         crm: withLegacyPurchaseAlias(bySource.crm),
+        reply: withLegacyPurchaseAlias(bySource.reply),
       },
       byCause: {
         outreach: withLegacyPurchaseAlias(byCause.outreach),
@@ -828,7 +840,10 @@ function causeProvenance(r: {
   stated_caused_by_outreach: boolean | null;
   cause_rule: { reason?: string } | string | null;
   crm_override: boolean;
-}): { causeBasis: "person" | "rule" | null; causeReason: string | null } {
+}): { causeBasis: "person" | "rule" | "reply" | null; causeReason: string | null } {
+  // The prospect's own words: "I already buy from you". Not a person of the customer's answering,
+  // and not the date rule either.
+  if (r.source === "reply") return { causeBasis: "reply", causeReason: "already_a_customer" };
   const person =
     (r.source === "crm" && r.crm_override === true) ||
     (r.source !== "crm" && typeof r.stated_caused_by_outreach === "boolean");
