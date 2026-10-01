@@ -35,7 +35,7 @@ function reply(receivedAt: string, kind: string, classification: string | null) 
     fromEmail: "lead-1@example.com",
     subject: null,
     receivedAt,
-    verdict: { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt, automatedAnswer: false, stopRequested: false, notOurTarget: false },
+    verdict: { kind, classification, producerType: "model", producer: "m", attribution: "exact", confidence: null, decidedAt: receivedAt, automatedAnswer: false, stopRequested: false, notOurTarget: false, handedToPerson: false },
     verdictCount: 1,
   };
 }

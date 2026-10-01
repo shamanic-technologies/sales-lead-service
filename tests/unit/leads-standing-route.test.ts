@@ -435,6 +435,7 @@ describe("a lead row carries where that person stands", () => {
         automatedAnswer: kind === "lead_out_of_office",
         stopRequested: kind === "lead_opt_out_requested",
         notOurTarget: false,
+        handedToPerson: kind === "lead_referral",
       },
       verdictCount: 1,
     };

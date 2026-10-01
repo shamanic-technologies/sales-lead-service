@@ -86,6 +86,7 @@ describe("reply-verdicts client — instantly-service's locked contract, read fa
             automatedAnswer: false,
             stopRequested: false,
             notOurTarget: true,
+            handedToPerson: true,
           },
           verdictCount: 1,
         },
@@ -94,6 +95,7 @@ describe("reply-verdicts client — instantly-service's locked contract, read fa
     });
     expect(judged.verdict?.classification).toBe("neutral");
     expect(judged.verdict?.notOurTarget).toBe(true);
+    expect(judged.verdict?.handedToPerson).toBe(true);
     expect(pending.verdict).toBeNull();
     expect(pending.campaignId).toBeNull();
   });
@@ -111,6 +113,27 @@ describe("reply-verdicts client — instantly-service's locked contract, read fa
         ],
       }),
     ).toThrow(/notOurTarget/);
+  });
+
+  it("refuses a verdict missing the hand-over flag", () => {
+    expect(() =>
+      parseReplyVerdictsBody({
+        replies: [
+          {
+            replyId: "x",
+            leadEmail: "a@x.com",
+            receivedAt: "2026-09-29T00:00:00.000Z",
+            verdict: {
+              kind: "k",
+              classification: "neutral",
+              automatedAnswer: false,
+              stopRequested: false,
+              notOurTarget: false,
+            },
+          },
+        ],
+      }),
+    ).toThrow(/handedToPerson/);
   });
 
   it("refuses a classification outside the coarse three", () => {
