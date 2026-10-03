@@ -258,9 +258,10 @@
                 "enum": [
                   "hiring",
                   "job_change",
-                  "funding"
+                  "funding",
+                  "linkedin_engagement"
                 ],
-                "description": "What happened: the company is hiring, the person changed jobs, or the company raised funding.",
+                "description": "What happened: the company is hiring, the person changed jobs, the company raised funding, or the person reacted to / commented on a competitor's LinkedIn post (linkedin_engagement).",
                 "example": "hiring"
               },
               "occurredOn": {
@@ -282,6 +283,52 @@
                 "type": "string",
                 "nullable": true,
                 "description": "The posting or news link when the provider gave one."
+              },
+              "engagement": {
+                "type": "object",
+                "properties": {
+                  "competitorPage": {
+                    "type": "string"
+                  },
+                  "postUrl": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "postPublishedOn": {
+                    "type": "string",
+                    "nullable": true,
+                    "description": "Approximate (LinkedIn gives a relative age)."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "reaction",
+                      "comment"
+                    ]
+                  },
+                  "reactionType": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "commentText": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "commentedAt": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "competitorPage",
+                  "postUrl",
+                  "postPublishedOn",
+                  "kind",
+                  "reactionType",
+                  "commentText",
+                  "commentedAt"
+                ],
+                "description": "linkedin_engagement only, absent otherwise: which competitor post the person reacted to or commented on. Chooses WHO is written to; an email must never mention it."
               }
             },
             "required": [
