@@ -337,6 +337,35 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(result.lead?.buyingSignal).toEqual(signal);
   });
 
+  it("serves and persists a linkedin_engagement signal with its engagement evidence", async () => {
+    const signal = {
+      type: "linkedin_engagement",
+      occurredOn: "2026-09-28",
+      fact: "Dana Ruiz commented on a LinkedIn post by Rival Co on September 28, 2026",
+      source: "linkedin:company/rival-co",
+      sourceUrl: "https://www.linkedin.com/feed/update/urn:li:activity:1",
+      engagement: {
+        competitorPage: "https://www.linkedin.com/company/rival-co",
+        postUrl: "https://www.linkedin.com/feed/update/urn:li:activity:1",
+        postPublishedOn: "2026-09-27",
+        kind: "comment",
+        reactionType: null,
+        commentText: "Great insight",
+        commentedAt: "2026-09-28",
+      },
+    };
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, buyingSignal: signal } });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    const result = await pullNext(baseParams);
+
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ buyingSignal: signal }));
+    expect(result.lead?.buyingSignal).toEqual(signal);
+  });
+
   it("a person with no signal serves exactly as before: null, never a default", async () => {
     serveNext.mockResolvedValueOnce({ status: "served", person });
     upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
