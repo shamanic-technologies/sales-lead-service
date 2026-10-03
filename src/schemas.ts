@@ -6,7 +6,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
-import { BUYING_SIGNAL_TYPES } from "./lib/buying-signal.js";
+import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
 import {
   LEAD_STANDING_SIGNALS,
   LEAD_STANDING_STATES,
@@ -969,7 +969,8 @@ export const BufferNextRequestSchema = z
 export const ServedBuyingSignalSchema = z
   .object({
     type: z.enum(BUYING_SIGNAL_TYPES).openapi({
-      description: "What happened: the company is hiring, the person changed jobs, or the company raised funding.",
+      description:
+        "What happened: the company is hiring, the person changed jobs, the company raised funding, or the person reacted to / commented on a competitor's LinkedIn post (linkedin_engagement).",
       example: "hiring",
     }),
     occurredOn: z.string().openapi({
@@ -987,6 +988,21 @@ export const ServedBuyingSignalSchema = z
     sourceUrl: z.string().nullable().openapi({
       description: "The posting or news link when the provider gave one.",
     }),
+    engagement: z
+      .object({
+        competitorPage: z.string(),
+        postUrl: z.string().nullable(),
+        postPublishedOn: z.string().nullable().openapi({ description: "Approximate (LinkedIn gives a relative age)." }),
+        kind: z.enum(ENGAGEMENT_KINDS),
+        reactionType: z.string().nullable(),
+        commentText: z.string().nullable(),
+        commentedAt: z.string().nullable(),
+      })
+      .optional()
+      .openapi({
+        description:
+          "linkedin_engagement only, absent otherwise: which competitor post the person reacted to or commented on. Chooses WHO is written to; an email must never mention it.",
+      }),
   })
   .openapi("ServedBuyingSignal");
 
