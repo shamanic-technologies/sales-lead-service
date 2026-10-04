@@ -416,6 +416,79 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(serveNext).not.toHaveBeenCalled();
   });
 
+  describe("personId: which human-service person the served lead is", () => {
+    const humanPersonId = "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f";
+
+    function mockRecordPath() {
+      upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+      recordEmploymentHistory.mockResolvedValueOnce(undefined);
+      registerServedEmail.mockResolvedValueOnce("lead-1");
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+    }
+
+    it("a person served via human-service carries its person id, on the serve row and on the lead", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: humanPersonId });
+      mockRecordPath();
+
+      const result = await pullNext(baseParams);
+
+      expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ personId: humanPersonId }));
+      expect(result.lead?.personId).toBe(humanPersonId);
+      // A different concept from the lead: never aliased onto leadId.
+      expect(result.lead?.leadId).toBe("lead-1");
+    });
+
+    it("a person served without one omits it: serve succeeds, no key, never derived from leadId", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person });
+      mockRecordPath();
+
+      const result = await pullNext(baseParams);
+
+      expect(result.found).toBe(true);
+      expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ personId: null }));
+      expect(result.lead).not.toHaveProperty("personId");
+      expect(JSON.parse(JSON.stringify(result)).lead).not.toHaveProperty("personId");
+    });
+
+    it("an explicit null from the producer is the same as absent", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: null });
+      mockRecordPath();
+
+      const result = await pullNext(baseParams);
+
+      expect(result.found).toBe(true);
+      expect(result.lead).not.toHaveProperty("personId");
+    });
+
+    it("fails the serve loudly on a malformed person id, before writing anything", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: "lead-1" });
+
+      await expect(pullNext(baseParams)).rejects.toThrow(/malformed personId/);
+      expect(upsertLeadFromPerson).not.toHaveBeenCalled();
+      expect(insertValues).not.toHaveBeenCalled();
+    });
+
+    it("a retried serve hands out the person stored on its original serve, and omits it when none was", async () => {
+      const candidate = {
+        id: "lc-1",
+        leadId: "lead-paid",
+        email: "stranded@cascobay.com",
+        servedAt: "2026-08-25T09:00:00.000Z",
+        audienceId: "aud-original",
+        buyingSignal: null,
+        goal: "meetingBooked",
+        retryCount: 0,
+      };
+      pickRetryCandidate.mockResolvedValueOnce({ ...candidate, personId: humanPersonId });
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-paid" });
+      expect((await pullNext(baseParams)).lead?.personId).toBe(humanPersonId);
+
+      pickRetryCandidate.mockResolvedValueOnce({ ...candidate, personId: null });
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-paid" });
+      expect((await pullNext(baseParams)).lead).not.toHaveProperty("personId");
+    });
+  });
+
   it("passes the claiming run to the pool so the retry is attributed to it", async () => {
     pickRetryCandidate.mockResolvedValueOnce(null);
     serveNext.mockResolvedValueOnce({ status: "exhausted", person: null });
