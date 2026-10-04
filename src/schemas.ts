@@ -2493,6 +2493,28 @@ const LeadBucketCountsResponseSchema = z
           "cares about; this read does not decide that, because a brand works several legs at " +
           "once.",
       }),
+    people: z
+      .object({
+        delivered: z.number().int().openapi({
+          description:
+            "People we contacted whose email was DELIVERED: contacted, and no bounce recorded at this " +
+            "read's scope. A subset of `counts.contacted`, so never above it. Counted in PEOPLE, " +
+            "never emails.",
+          example: 4120,
+        }),
+        interested: z.number().int().openapi({
+          description:
+            "DISTINCT people who showed interest: in `website_visit` OR `positive_reply`. Somebody " +
+            "who did both is ONE person here, so this is the union of the two buckets: at least " +
+            "the larger of them, at most their sum. Never add the two buckets instead.",
+          example: 57,
+        }),
+      })
+      .openapi({
+        description:
+          "The people counts a funnel draws that the (non-exclusive) buckets cannot give by " +
+          "arithmetic. Same scope, same rows, same instant as `counts`. Always present.",
+      }),
   })
   .openapi("LeadBucketCountsResponse", {
     description: "Response shape for GET /orgs/leads/bucket-counts. Counts only — never any rows.",

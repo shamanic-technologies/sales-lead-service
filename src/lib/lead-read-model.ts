@@ -48,7 +48,14 @@ import {
   type FlattenedStatus,
 } from "./delivery-flatten.js";
 import type { StatusResult } from "./email-gateway-client.js";
-import { zeroBucketCounts, type LeadBucket, LEAD_BUCKETS } from "./lead-buckets.js";
+import {
+  INTEREST_BUCKETS,
+  isDelivered,
+  zeroBucketCounts,
+  type LeadBucket,
+  type LeadPeopleCounts,
+  LEAD_BUCKETS,
+} from "./lead-buckets.js";
 import {
   EvidenceUnavailableError,
   readDeliveryEvidence,
@@ -222,6 +229,8 @@ interface DerivedRow {
   createdAtText: string;
   activityAt: string;
   buckets: LeadBucket[];
+  /** Contacted and not bounced at this scope (`isDelivered`). */
+  delivered: boolean;
   standing: LeadStandingState;
   /** Where a `sales_interest` row stands; null for every other standing. */
   stage: string | null;
@@ -306,6 +315,7 @@ async function deriveRows(
     createdAtText: row.createdAtText,
     activityAt: row.activityAt,
     buckets: LEAD_BUCKETS.filter((b) => row.buckets.has(b)),
+    delivered: isDelivered(row.delivery),
     standing: row.standing ?? "unresolved",
     stage: row.stage ?? null,
     searchText: row.searchText,
@@ -333,11 +343,13 @@ async function writeRows(
   rows: readonly DerivedRow[],
 ): Promise<void> {
   if (rows.length === 0) return;
+  // `delivered` travels as text and is cast in SQL: postgres.js cannot bind a boolean[]
+  // ("cannot cast type boolean to boolean[]").
   await db`
     INSERT INTO lead_read_model_rows
-      (model_id, id, lead_id, email, created_at_text, activity_at, buckets, standing, stage, search_text)
+      (model_id, id, lead_id, email, created_at_text, activity_at, buckets, delivered, standing, stage, search_text)
     SELECT ${modelId}::uuid, u.id, u.lead_id, u.email, u.created_at_text, u.activity_at,
-           string_to_array(u.buckets, ','), u.standing, u.stage, u.search_text
+           string_to_array(u.buckets, ','), u.delivered::boolean, u.standing, u.stage, u.search_text
     FROM unnest(
       ${rows.map((r) => r.id)}::uuid[],
       ${rows.map((r) => r.leadId)}::uuid[],
@@ -345,23 +357,25 @@ async function writeRows(
       ${rows.map((r) => r.createdAtText)}::text[],
       ${rows.map((r) => r.activityAt)}::timestamptz[],
       ${rows.map((r) => r.buckets.join(","))}::text[],
+      ${rows.map((r) => (r.delivered ? "true" : "false"))}::text[],
       ${rows.map((r) => r.standing)}::text[],
       ${rows.map((r) => r.stage)}::text[],
       ${rows.map((r) => r.searchText)}::text[]
-    ) AS u(id, lead_id, email, created_at_text, activity_at, buckets, standing, stage, search_text)
+    ) AS u(id, lead_id, email, created_at_text, activity_at, buckets, delivered, standing, stage, search_text)
     LEFT JOIN lead_read_model_rows held ON held.model_id = ${modelId}::uuid AND held.id = u.id
     WHERE held.id IS NULL
        OR (held.lead_id, held.email, held.created_at_text, held.activity_at, held.buckets,
-           held.standing, held.stage, held.search_text)
+           held.delivered, held.standing, held.stage, held.search_text)
           IS DISTINCT FROM
           (u.lead_id, u.email, u.created_at_text, u.activity_at, string_to_array(u.buckets, ','),
-           u.standing, u.stage, u.search_text)
+           u.delivered::boolean, u.standing, u.stage, u.search_text)
     ON CONFLICT (model_id, id) DO UPDATE SET
       lead_id = EXCLUDED.lead_id,
       email = EXCLUDED.email,
       created_at_text = EXCLUDED.created_at_text,
       activity_at = EXCLUDED.activity_at,
       buckets = EXCLUDED.buckets,
+      delivered = EXCLUDED.delivered,
       standing = EXCLUDED.standing,
       stage = EXCLUDED.stage,
       search_text = EXCLUDED.search_text
@@ -730,26 +744,38 @@ function modelFilter(
   return predicate;
 }
 
-/** Every bucket's size, and the size of the (searched) population, in one statement. */
+/**
+ * Every bucket's size, the size of the (searched) population, and the two PEOPLE counts a funnel
+ * draws beside them (delivered; interested = website visit OR positive reply, one person once), in
+ * one statement over the same rows.
+ */
 export async function readModelBucketCounts(
   model: ReadModel,
   tokens: readonly string[] | null,
-): Promise<{ total: number; counts: Record<LeadBucket, number> }> {
-  const rows = await sql<Array<{ bucket: string | null; n: number }>>`
+): Promise<{ total: number; counts: Record<LeadBucket, number>; people: LeadPeopleCounts }> {
+  const rows = await sql<Array<{ bucket: string | null; n: number; delivered: number; interested: number }>>`
     WITH base AS (
-      SELECT buckets FROM lead_read_model_rows WHERE ${modelFilter(model, tokens, null, null)}
+      SELECT buckets, delivered FROM lead_read_model_rows WHERE ${modelFilter(model, tokens, null, null)}
     )
-    SELECT NULL AS bucket, count(*)::int AS n FROM base
+    SELECT NULL AS bucket, count(*)::int AS n,
+           count(*) FILTER (WHERE delivered)::int AS delivered,
+           count(*) FILTER (WHERE buckets && ${[...INTEREST_BUCKETS]}::text[])::int AS interested
+    FROM base
     UNION ALL
-    SELECT b AS bucket, count(*)::int AS n FROM base, unnest(buckets) AS b GROUP BY b
+    SELECT b AS bucket, count(*)::int AS n, 0 AS delivered, 0 AS interested
+    FROM base, unnest(buckets) AS b GROUP BY b
   `;
   const counts = zeroBucketCounts();
   let total = 0;
+  const people: LeadPeopleCounts = { delivered: 0, interested: 0 };
   for (const row of rows) {
-    if (row.bucket === null) total = row.n;
-    else if (row.bucket in counts) counts[row.bucket as LeadBucket] = row.n;
+    if (row.bucket === null) {
+      total = row.n;
+      people.delivered = row.delivered;
+      people.interested = row.interested;
+    } else if (row.bucket in counts) counts[row.bucket as LeadBucket] = row.n;
   }
-  return { total, counts };
+  return { total, counts, people };
 }
 
 /** Every standing's size. A partition: the counts sum to `total`. */
