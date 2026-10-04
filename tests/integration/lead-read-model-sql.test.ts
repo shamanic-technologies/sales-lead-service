@@ -148,6 +148,8 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const buckets = await model.readModelBucketCounts(m, null);
     expect(buckets.total).toBe(4);
     expect(buckets.counts).toMatchObject({ contacted: 3, website_visit: 1, positive_reply: 1, sale: 0 });
+    // Nobody bounced: all three contacted were delivered. Interested = John (visit) + Ten (reply).
+    expect(buckets.people).toEqual({ delivered: 3, interested: 2 });
     const standings = await model.readModelStandingCounts(m, null);
     expect(standings.total).toBe(4);
     expect(Object.values(standings.counts).reduce((a, b) => a + b, 0)).toBe(4);

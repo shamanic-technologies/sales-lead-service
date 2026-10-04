@@ -101,6 +101,31 @@ export function bucketsForRow(
 }
 
 /**
+ * The two buckets a person shows INTEREST through: a website visit or a positive reply. A person
+ * known both ways is ONE interested person, so the interested population is the UNION of the two
+ * buckets, never their sum (it lies between the larger of them and their sum).
+ */
+export const INTEREST_BUCKETS: readonly LeadBucket[] = ["website_visit", "positive_reply"];
+
+/**
+ * Whether the email we sent this person was DELIVERED, as a fact about the person: contacted, and
+ * no bounce recorded at the read's scope. Always a subset of the `contacted` bucket. Deliberately
+ * NOT the provider's own `delivered` flag (not every provider reports one) and NOT the org-wide
+ * bounce (another brand's bounce says nothing about whether OUR email arrived).
+ */
+export function isDelivered(delivery: FlattenedStatus | null): boolean {
+  return !!delivery?.contacted && !delivery.bounced;
+}
+
+/** The people counts a funnel draws beside the (non-exclusive) bucket counts. */
+export interface LeadPeopleCounts {
+  /** People contacted whose email did not bounce. Never above `counts.contacted`. */
+  delivered: number;
+  /** Distinct people in `website_visit` OR `positive_reply`. */
+  interested: number;
+}
+
+/**
  * WHEN a lead last got as far as it has got — the timestamp that dates its most advanced status.
  *
  * This is what `sort=activity` orders on, newest first: the page shows the people something most

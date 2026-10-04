@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   LEAD_BUCKETS,
   bucketsForRow,
+  isDelivered,
   leadActivityAt,
   outcomeBucketsAreStepOutcomes,
   parseLeadBucket,
@@ -102,5 +103,17 @@ describe("when a lead last got as far as it has got", () => {
   it("falls back to the serve, then to the row itself — never to null", () => {
     expect(leadActivityAt(DEFAULT_STATUS, null, served, created)).toBe(served);
     expect(leadActivityAt(null, null, null, created)).toBe(created);
+  });
+});
+
+describe("whether a person's email was delivered", () => {
+  it("is contacted and not bounced at this scope — a subset of contacted", () => {
+    expect(isDelivered(null)).toBe(false);
+    expect(isDelivered(DEFAULT_STATUS)).toBe(false);
+    expect(isDelivered(delivery({ contacted: true }))).toBe(true);
+    expect(isDelivered(delivery({ contacted: true, bounced: true }))).toBe(false);
+    // Another brand's bounce says nothing about whether OUR email arrived.
+    expect(isDelivered(delivery({ contacted: true, global: { bounced: true, unsubscribed: false } }))).toBe(true);
+    expect(isDelivered(delivery({ bounced: true }))).toBe(false);
   });
 });
