@@ -427,7 +427,7 @@ describe("pullNext (audience serve-next flow)", () => {
     }
 
     it("a person served via human-service carries its person id, on the serve row and on the lead", async () => {
-      serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, personId: humanPersonId } });
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: humanPersonId });
       mockRecordPath();
 
       const result = await pullNext(baseParams);
@@ -451,7 +451,7 @@ describe("pullNext (audience serve-next flow)", () => {
     });
 
     it("an explicit null from the producer is the same as absent", async () => {
-      serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, personId: null } });
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: null });
       mockRecordPath();
 
       const result = await pullNext(baseParams);
@@ -461,7 +461,7 @@ describe("pullNext (audience serve-next flow)", () => {
     });
 
     it("fails the serve loudly on a malformed person id, before writing anything", async () => {
-      serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, personId: "lead-1" } });
+      serveNext.mockResolvedValueOnce({ status: "served", person, personId: "lead-1" });
 
       await expect(pullNext(baseParams)).rejects.toThrow(/malformed personId/);
       expect(upsertLeadFromPerson).not.toHaveBeenCalled();

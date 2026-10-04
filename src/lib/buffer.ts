@@ -214,7 +214,7 @@ export async function pullNext(
   // Read BEFORE any write: a malformed signal is a producer contract break and must
   // fail the serve loudly rather than half-record it.
   const buyingSignal = readBuyingSignal(person.buyingSignal);
-  const personId = readServedPersonId(person.personId);
+  const personId = readServedPersonId(served.personId);
   if (!person.email) {
     // serve-next promised a contactable person but gave no email — a producer
     // contract violation, not an empty result. Fail loud.
