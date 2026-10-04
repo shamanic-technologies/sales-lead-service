@@ -344,6 +344,13 @@
       "when": 1783987200000,
       "tag": "0048_lead_read_model_delivered",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1784073600000,
+      "tag": "0049_leads_campaigns_person_id",
+      "breakpoints": true
     }
   ]
 }

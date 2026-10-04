@@ -195,6 +195,12 @@ export interface Person {
    * `readBuyingSignal` (src/lib/buying-signal.ts) — never trusted raw, never derived.
    */
   buyingSignal?: unknown;
+  /**
+   * The human-service person this is (its `people.id`), when the producer states
+   * one. OPTIONAL: absent under a producer that does not serve it. Read through
+   * `readServedPersonId` (src/lib/served-person-id.ts), never derived.
+   */
+  personId?: unknown;
 }
 
 export interface ServiceContext {

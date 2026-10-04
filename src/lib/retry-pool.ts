@@ -121,6 +121,8 @@ export interface RetryCandidate {
   audienceId: string | null;
   /** The buying signal stored on the ORIGINAL serve (null when it carried none). */
   buyingSignal: BuyingSignal | null;
+  /** The human-service person stored on the ORIGINAL serve (null when it carried none). */
+  personId: string | null;
   goal: string | null;
   retryCount: number;
 }
@@ -228,6 +230,7 @@ interface RawCandidateRow {
   served_at: Date | string | null;
   audience_id: string | null;
   buying_signal: unknown;
+  person_id: string | null;
   goal: string | null;
   retry_count: number | string | null;
 }
@@ -254,7 +257,7 @@ export async function loadRetryCandidates(params: {
 
   const rows = (await db.execute(sql<RawCandidateRow[]>`
     SELECT
-      lc.id, lc.lead_id, lc.served_at, lc.audience_id, lc.buying_signal, lc.goal,
+      lc.id, lc.lead_id, lc.served_at, lc.audience_id, lc.buying_signal, lc.person_id, lc.goal,
       COALESCE(lc.retry_count, 0) AS retry_count,
       em.value AS email
     FROM leads_campaigns lc
@@ -284,6 +287,7 @@ export async function loadRetryCandidates(params: {
       servedAt: r.served_at,
       audienceId: r.audience_id,
       buyingSignal: readBuyingSignal(r.buying_signal),
+      personId: r.person_id ?? null,
       goal: r.goal,
       retryCount: Number(r.retry_count ?? 0),
     }));
