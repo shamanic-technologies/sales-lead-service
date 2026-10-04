@@ -210,6 +210,18 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(upsertLeadFromPerson).not.toHaveBeenCalled();
   });
 
+  it("reads a pending serve-next (producer budget spent mid-walk) as timed out, never exhausted", async () => {
+    // Shockwavecenters 2026-10-04: the teaser screen rejected ~99.7% of an audience, so
+    // one serve-next walked 700+ teasers and outran our 300s client timeout. human-service
+    // now stops at its own budget and answers `pending`; the walk resumes on the next call.
+    serveNext.mockResolvedValueOnce({ status: "pending", person: null });
+
+    const result = await pullNext(baseParams);
+
+    expect(result).toEqual({ found: false, reason: "serve_timed_out" });
+    expect(upsertLeadFromPerson).not.toHaveBeenCalled();
+  });
+
   it("names a timed-out look as timed out, never as an exhausted audience", async () => {
     // The serve budget expired before serve-next answered. An unfinished look says
     // nothing about who is left, so it must not arrive looking like exhaustion.

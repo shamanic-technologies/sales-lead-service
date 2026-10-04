@@ -256,8 +256,14 @@ async function callHuman<T>(
 // request body carries NO filters and NO provider. The returned person is
 // already recorded as served, so the next call returns someone new.
 
+/**
+ * `pending`: human-service spent its per-call budget walking the audience (screening
+ * and dropping teasers) before it found someone to serve. The walk's progress is kept
+ * on its side, so the NEXT call continues where this one stopped. Not exhaustion, not
+ * an error: no lead on this run, ask again on the next.
+ */
 export interface ServeNextResult {
-  status: "served" | "exhausted";
+  status: "served" | "exhausted" | "pending";
   person: Person | null;
 }
 
