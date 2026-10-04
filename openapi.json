@@ -2468,11 +2468,32 @@
               "sale"
             ],
             "description": "How many people are in each engagement bucket. Every key is ALWAYS present — a bucket nobody is in is 0, never absent. A consumer shows whichever of the five outcomes it cares about; this read does not decide that, because a brand works several legs at once."
+          },
+          "people": {
+            "type": "object",
+            "properties": {
+              "delivered": {
+                "type": "integer",
+                "description": "People we contacted whose email was DELIVERED: contacted, and no bounce recorded at this read's scope. A subset of `counts.contacted`, so never above it. Counted in PEOPLE, never emails.",
+                "example": 4120
+              },
+              "interested": {
+                "type": "integer",
+                "description": "DISTINCT people who showed interest: in `website_visit` OR `positive_reply`. Somebody who did both is ONE person here, so this is the union of the two buckets: at least the larger of them, at most their sum. Never add the two buckets instead.",
+                "example": 57
+              }
+            },
+            "required": [
+              "delivered",
+              "interested"
+            ],
+            "description": "The people counts a funnel draws that the (non-exclusive) buckets cannot give by arithmetic. Same scope, same rows, same instant as `counts`. Always present."
           }
         },
         "required": [
           "total",
-          "counts"
+          "counts",
+          "people"
         ],
         "description": "Response shape for GET /orgs/leads/bucket-counts. Counts only — never any rows."
       },

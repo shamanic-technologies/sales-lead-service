@@ -24,7 +24,12 @@ import {
   zeroStandingCounts,
   type LeadStandingState,
 } from "../../src/lib/lead-standing.js";
-import { zeroBucketCounts, type LeadBucket } from "../../src/lib/lead-buckets.js";
+import {
+  INTEREST_BUCKETS,
+  isDelivered,
+  zeroBucketCounts,
+  type LeadBucket,
+} from "../../src/lib/lead-buckets.js";
 import type * as RealModule from "../../src/lib/lead-read-model.js";
 
 type Real = typeof RealModule;
@@ -34,6 +39,7 @@ interface FakeRow {
   createdAtText: string;
   activityAt: string;
   buckets: Set<LeadBucket>;
+  delivered: boolean;
   standing: LeadStandingState;
   stage: string | null;
   searchText: string;
@@ -121,6 +127,7 @@ export function fakeReadModelModule(real: Real): Real {
           createdAtText: row.createdAtText,
           activityAt: row.activityAt,
           buckets: row.buckets,
+          delivered: isDelivered(row.delivery),
           standing: row.standing ?? "unresolved",
           stage: row.stage ?? null,
           searchText: row.searchText ?? "",
@@ -165,7 +172,11 @@ export function fakeReadModelModule(real: Real): Real {
       const rows = filtered(model, tokens, null, null);
       const counts = zeroBucketCounts();
       for (const row of rows) for (const b of row.buckets) counts[b] += 1;
-      return { total: rows.length, counts };
+      const people = {
+        delivered: rows.filter((r) => r.delivered).length,
+        interested: rows.filter((r) => INTEREST_BUCKETS.some((b) => r.buckets.has(b))).length,
+      };
+      return { total: rows.length, counts, people };
     },
     readModelStandingCounts: async (model, tokens) => {
       const rows = filtered(model, tokens, null, null);
