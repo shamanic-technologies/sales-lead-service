@@ -185,6 +185,10 @@ export const leadsCampaigns = pgTable(
     // is why it lives on the lifecycle row and not on `leads`. NULL when the
     // serve carried none — never defaulted, never derived here.
     buyingSignal: jsonb("buying_signal").$type<BuyingSignal>(),
+    // Which human-service person this serve handed out (its `people.id`), as
+    // human-service stated it on the serve. Distinct from lead_id, never derived
+    // from it. NULL when the serve carried none (src/lib/served-person-id.ts).
+    personId: uuid("person_id"),
     // Audit trail for the one-time served-lead email repair
     // (scripts/repair-served-lead-emails.ts). Rows served before the
     // email-owner-first identity fix were attributed to a lead that could never

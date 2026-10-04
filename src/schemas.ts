@@ -1094,6 +1094,20 @@ const ServedLeadSchema = z
           "reference. null when the serve carried none — a lead not served from a buying-signal audience, and " +
           "every lead served before this was carried. Never defaulted, never derived by lead-service.",
       }),
+    personId: z
+      .string()
+      .uuid()
+      .optional()
+      .openapi({
+        description:
+          "Which human-service person this lead is: the id of the canonical person human-service resolved when it " +
+          "served this lead from the audience (human-service `people.id`, the same `personId` its audience-members " +
+          "read returns). Use it as the durable identity of the person contacted. It is a different concept from " +
+          "`leadId` (lead-service's lead / provenance id): the two may differ and are never derived from each other. " +
+          "OMITTED when the serve stated no person (a lead served before this field existed, or a producer that did " +
+          "not state one). A retried serve hands out the value stored on the original serve.",
+        example: "60000000-0000-0000-0000-000000000001",
+      }),
   })
   .openapi("ServedLead", {
     description:

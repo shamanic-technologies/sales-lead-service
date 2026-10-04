@@ -93,12 +93,14 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
         status: "served",
         servedAt: new Date(Date.now() - 60_000),
         buyingSignal: signal,
+        personId: "6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f",
       },
     ]);
     try {
       const candidates = await loadRetryCandidates({ orgId, campaignId: signalCampaignId, nowMs: Date.now() });
       expect(candidates).toHaveLength(1);
       expect(candidates[0].buyingSignal).toEqual(signal);
+      expect(candidates[0].personId).toBe("6f1c2d3e-4a5b-4c6d-8e7f-9a0b1c2d3e4f");
     } finally {
       await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, signalCampaignId));
       await db.delete(leadContactMethods).where(eq(leadContactMethods.leadId, lead.id));

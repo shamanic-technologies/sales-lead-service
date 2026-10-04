@@ -8,6 +8,7 @@ import {
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
+import { readServedPersonId } from "./served-person-id.js";
 import { getCurrentGoal } from "./brand-client.js";
 import { fetchCampaign } from "./campaign-client.js";
 import { pickRetryCandidate } from "./retry-pool.js";
@@ -56,6 +57,11 @@ interface PullNextResult {
     audienceId: string | null;
     /** The buying signal the serve carried, or null. Never derived here. */
     buyingSignal: BuyingSignal | null;
+    /**
+     * The human-service person this lead is (its `people.id`), when the serve
+     * stated one. OMITTED otherwise, never null-filled, never derived from leadId.
+     */
+    personId?: string;
   };
 }
 
@@ -184,6 +190,8 @@ export async function pullNext(
         audienceId: retry.audienceId ?? audienceId,
         // The signal stored on the original serve — the one that bought this person.
         buyingSignal: retry.buyingSignal,
+        // The person stored on the original serve, when it carried one.
+        ...(retry.personId ? { personId: retry.personId } : {}),
       },
     };
   }
@@ -192,6 +200,17 @@ export async function pullNext(
 
   // 4. Next unserved person of that audience (human-service owns filters/provider/dedup).
   const served = await serveNext(audienceId, ctx);
+
+  // human-service bounds each serve-next call: when its budget runs out mid-walk it
+  // answers `pending` with no person, and the next call resumes the walk. That is an
+  // unfinished look, never exhaustion — reading it as exhaustion would stop the
+  // campaign for good on an audience that still has people.
+  if (served.status === "pending") {
+    console.log(
+      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId} serveNext=pending`,
+    );
+    return { found: false, reason: SERVE_TIMED_OUT_REASON };
+  }
 
   if (served.status === "exhausted" || !served.person) {
     console.log(
@@ -206,6 +225,7 @@ export async function pullNext(
   // Read BEFORE any write: a malformed signal is a producer contract break and must
   // fail the serve loudly rather than half-record it.
   const buyingSignal = readBuyingSignal(person.buyingSignal);
+  const personId = readServedPersonId(served.personId);
   if (!person.email) {
     // serve-next promised a contactable person but gave no email — a producer
     // contract violation, not an empty result. Fail loud.
@@ -254,6 +274,7 @@ export async function pullNext(
       brandProfileId: params.brandProfileId ?? null,
       audienceId: audienceId,
       buyingSignal,
+      personId,
     })
     .onConflictDoNothing();
 
@@ -278,6 +299,7 @@ export async function pullNext(
       brandProfileId: params.brandProfileId ?? null,
       audienceId: audienceId,
       buyingSignal,
+      ...(personId ? { personId } : {}),
     },
   };
 }
