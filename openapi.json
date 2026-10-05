@@ -2427,6 +2427,46 @@
         ],
         "description": "The delivery evidence for THIS campaign alone, read out of the per-campaign breakdown email-gateway returns in brand mode. **null means the provider reports none for this campaign — 'we cannot tell', NOT 'nothing happened'.** An all-false status is never substituted for it, because the two are different facts."
       },
+      "ConversationCountsResponse": {
+        "type": "object",
+        "properties": {
+          "campaignId": {
+            "type": "string"
+          },
+          "conversations": {
+            "type": "object",
+            "properties": {
+              "handed": {
+                "type": "integer",
+                "description": "Distinct people the queue handed to this campaign's worker (positive replies given to it)."
+              },
+              "ongoing": {
+                "type": "integer",
+                "description": "Handed, not booked, and still owed an answer (due date set) or being answered now."
+              },
+              "meetingsBooked": {
+                "type": "integer",
+                "description": "Handed, and a live meeting_booked / meeting_attended / sale is on record for that person at the brand."
+              },
+              "dropped": {
+                "type": "integer",
+                "description": "Handed, not booked, and no longer owed anything (stopped: the responder could not answer, a person took over, not interested, no reply owed)."
+              }
+            },
+            "required": [
+              "handed",
+              "ongoing",
+              "meetingsBooked",
+              "dropped"
+            ],
+            "description": "A partition per person: handed = ongoing + meetingsBooked + dropped. Precedence booked > ongoing > dropped."
+          }
+        },
+        "required": [
+          "campaignId",
+          "conversations"
+        ]
+      },
       "LeadBucketCountsResponse": {
         "type": "object",
         "properties": {
@@ -7159,6 +7199,152 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/orgs/leads/conversation-counts": {
+      "get": {
+        "summary": "What a conversation-leg campaign (ai-meeting-booking) did with the people handed to it",
+        "description": "Counts of PEOPLE, since inception, for ONE campaign performing a conversation leg (the ACTING campaign). Such a campaign holds no lead of its own (the people it answers stay on the predecessor campaign), so the campaign-scoped bucket counts read zero for it; this reads the follow-up ledger keyed on the acting campaign plus the queue state of the rows it was handed. A campaign handed nobody answers zeros. Scoped to the caller's org.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "campaignId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The ACTING campaign (the one dispatched to hold the conversation), never the campaign holding the person."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The four counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationCountsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "campaignId missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Read failed"
           }
         }
       }

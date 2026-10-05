@@ -37,6 +37,7 @@ import { ResponseWriter } from "../lib/stream-writer.js";
 import { leadExportHeader, leadExportLine } from "../lib/lead-export.js";
 import { parseLeadBucket, zeroBucketCounts, type LeadBucket } from "../lib/lead-buckets.js";
 import { countLeadListRows } from "../lib/lead-index.js";
+import { readConversationCounts } from "../lib/followup-actions.js";
 import { standingDelivery } from "../lib/lead-standing-index.js";
 import { parseLeadSort, type LeadSortOrder } from "../lib/lead-page-plan.js";
 import {
@@ -1386,6 +1387,31 @@ function stageBreakdown(observed: ReadonlyMap<string, number>): Array<{ stage: s
   for (const stage of observed.keys()) if (!order.includes(stage)) order.push(stage);
   return order.map((stage) => ({ stage, count: observed.get(stage) ?? 0 }));
 }
+
+/**
+ * GET /orgs/leads/conversation-counts?campaignId= — what a campaign performing a CONVERSATION leg
+ * (ai-meeting-booking) did with the people handed to it, in PEOPLE, since inception.
+ *
+ * Such a campaign holds nobody: the people it answers stay on the predecessor leg's campaign, and
+ * what it did is the follow-up ledger (`followup_actions`, keyed on the ACTING campaign) plus the
+ * queue columns of the rows it was handed. So the campaign-scoped bucket counts read zero for it;
+ * this is its read. `campaignId` is the ACTING campaign, scoped to the caller's org. A partition:
+ * `handed = ongoing + meetingsBooked + dropped` (see readConversationCounts). A campaign that was
+ * handed nobody answers zeros, never 404. Registered BEFORE `/orgs/leads/:id`.
+ */
+router.get("/orgs/leads/conversation-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+  try {
+    const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId.trim() : "";
+    if (!campaignId) {
+      return res.status(400).json({ error: "campaignId is required (the campaign that performs the conversation)" });
+    }
+    const conversations = await readConversationCounts({ orgId: req.orgId!, campaignId, nowMs: Date.now() });
+    return res.json({ campaignId, conversations });
+  } catch (error) {
+    console.error("[lead-service] conversation counts failed:", error);
+    return res.status(500).json({ error: "conversation counts failed" });
+  }
+});
 
 /**
  * GET /orgs/leads/standing-counts — how many leads stand in each state, and no rows.
