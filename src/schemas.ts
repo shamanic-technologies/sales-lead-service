@@ -2509,11 +2509,19 @@ const LeadBucketCountsResponseSchema = z
       }),
     people: z
       .object({
+        sent: z.number().int().openapi({
+          description:
+            "People to whom at least one email was actually SENT at this read's scope, as the " +
+            "sender reports it. Not `counts.contacted`: a person is contacted once put in a " +
+            "sequence, before anything leaves, so a queued person is contacted but not sent. " +
+            "Never above `counts.contacted`. Counted in PEOPLE, never emails.",
+          example: 4210,
+        }),
         delivered: z.number().int().openapi({
           description:
-            "People we contacted whose email was DELIVERED: contacted, and no bounce recorded at this " +
-            "read's scope. A subset of `counts.contacted`, so never above it. Counted in PEOPLE, " +
-            "never emails.",
+            "People whose email was DELIVERED: at least one email SENT, and no bounce recorded at " +
+            "this read's scope. A subset of `sent`, so never above it, and 0 while nothing has " +
+            "been sent. Counted in PEOPLE, never emails.",
           example: 4120,
         }),
         interested: z.number().int().openapi({

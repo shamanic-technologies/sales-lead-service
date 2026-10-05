@@ -108,18 +108,31 @@ export function bucketsForRow(
 export const INTEREST_BUCKETS: readonly LeadBucket[] = ["website_visit", "positive_reply"];
 
 /**
- * Whether the email we sent this person was DELIVERED, as a fact about the person: contacted, and
- * no bounce recorded at the read's scope. Always a subset of the `contacted` bucket. Deliberately
- * NOT the provider's own `delivered` flag (not every provider reports one) and NOT the org-wide
- * bounce (another brand's bounce says nothing about whether OUR email arrived).
+ * Whether at least one email was actually SENT to this person at the read's scope, as the sender
+ * reports it (`sent`). Deliberately NOT `contacted`: a person is contacted the moment the sender
+ * puts them in a sequence, long before anything leaves (a queued person is contacted, never sent).
+ */
+export function isSent(delivery: FlattenedStatus | null): boolean {
+  return !!delivery?.sent;
+}
+
+/**
+ * Whether the email we sent this person was DELIVERED, as a fact about the person: at least one
+ * email SENT, and no bounce recorded at the read's scope. Always a subset of `isSent` (so 0 while
+ * nothing has gone out: a person nobody emailed cannot have bounced, which is why `contacted` is
+ * the wrong base). Deliberately NOT the provider's own `delivered` flag (not every provider reports
+ * one) and NOT the org-wide bounce (another brand's bounce says nothing about whether OUR email
+ * arrived).
  */
 export function isDelivered(delivery: FlattenedStatus | null): boolean {
-  return !!delivery?.contacted && !delivery.bounced;
+  return isSent(delivery) && !delivery?.bounced;
 }
 
 /** The people counts a funnel draws beside the (non-exclusive) bucket counts. */
 export interface LeadPeopleCounts {
-  /** People contacted whose email did not bounce. Never above `counts.contacted`. */
+  /** People to whom at least one email was actually sent. Never above `counts.contacted`. */
+  sent: number;
+  /** People sent at least one email that did not bounce. Never above `sent`. */
   delivered: number;
   /** Distinct people in `website_visit` OR `positive_reply`. */
   interested: number;
