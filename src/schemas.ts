@@ -2542,6 +2542,48 @@ const LeadBucketCountsResponseSchema = z
     description: "Response shape for GET /orgs/leads/bucket-counts. Counts only — never any rows.",
   });
 
+const ConversationCountsResponseSchema = z
+  .object({
+    campaignId: z.string(),
+    conversations: z
+      .object({
+        handed: z.number().int().openapi({ description: "Distinct people the queue handed to this campaign's worker (positive replies given to it)." }),
+        ongoing: z.number().int().openapi({ description: "Handed, not booked, and still owed an answer (due date set) or being answered now." }),
+        meetingsBooked: z.number().int().openapi({ description: "Handed, and a live meeting_booked / meeting_attended / sale is on record for that person at the brand." }),
+        dropped: z.number().int().openapi({ description: "Handed, not booked, and no longer owed anything (stopped: the responder could not answer, a person took over, not interested, no reply owed)." }),
+      })
+      .openapi({ description: "A partition per person: handed = ongoing + meetingsBooked + dropped. Precedence booked > ongoing > dropped." }),
+  })
+  .openapi("ConversationCountsResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/conversation-counts",
+  summary: "What a conversation-leg campaign (ai-meeting-booking) did with the people handed to it",
+  description:
+    "Counts of PEOPLE, since inception, for ONE campaign performing a conversation leg (the ACTING " +
+    "campaign). Such a campaign holds no lead of its own (the people it answers stay on the predecessor " +
+    "campaign), so the campaign-scoped bucket counts read zero for it; this reads the follow-up ledger " +
+    "keyed on the acting campaign plus the queue state of the rows it was handed. A campaign handed " +
+    "nobody answers zeros. Scoped to the caller's org.",
+  parameters: [
+    ...AuthHeaders,
+    {
+      in: "query" as const,
+      name: "campaignId",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The ACTING campaign (the one dispatched to hold the conversation), never the campaign holding the person.",
+    },
+  ],
+  responses: {
+    200: { description: "The four counts", content: { "application/json": { schema: ConversationCountsResponseSchema } } },
+    400: { description: "campaignId missing" },
+    401: { description: "Unauthorized" },
+    500: { description: "Read failed" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/bucket-counts",

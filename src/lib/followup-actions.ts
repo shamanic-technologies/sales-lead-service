@@ -24,6 +24,7 @@
  */
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
+import { FOLLOWUP_BOOKED_OUTCOMES, FOLLOWUP_CLAIM_LEASE_MS } from "./followup-queue.js";
 
 export type FollowupAction = "claimed" | "acted";
 
@@ -166,4 +167,84 @@ export async function readFollowupActions(params: {
   });
 
   return { leads, campaigns };
+}
+
+/**
+ * What one acting campaign did with the people handed to it, in PEOPLE, since inception.
+ *
+ * A partition per person — `handed = ongoing + meetingsBooked + dropped` — decided in this order:
+ *  - meetingsBooked: a live booked outcome (meeting_booked / meeting_attended / sale, the same set
+ *    that stops the queue) is on record for that person at the brand, on a row the campaign was
+ *    handed or by matched lead.
+ *  - ongoing: not booked, and a row the campaign was handed still owes an action (a due date is
+ *    set) or is being answered right now (a live claim lease).
+ *  - dropped: neither — the schedule was stopped (the responder could not answer, a person took it
+ *    over, they declined, no reply owed) or the row no longer exists.
+ * Read off the ledger and the queue columns as they stand; nothing is inferred from timing.
+ */
+export interface ConversationCounts {
+  handed: number;
+  ongoing: number;
+  meetingsBooked: number;
+  dropped: number;
+}
+
+export async function readConversationCounts(params: {
+  orgId: string;
+  campaignId: string;
+  nowMs: number;
+}): Promise<ConversationCounts> {
+  const leaseCutoffIso = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
+  const rows = (await db.execute(sql`
+    WITH handed AS (
+      SELECT DISTINCT fa.lead_id
+      FROM followup_actions fa
+      WHERE fa.org_id = ${params.orgId} AND fa.acting_campaign_id = ${params.campaignId}
+    ),
+    per_person AS (
+      SELECT
+        h.lead_id,
+        EXISTS (
+          SELECT 1
+          FROM followup_actions fa
+          JOIN conversion_events ce
+            ON ce.org_id = fa.org_id
+           AND ce.brand_id = ANY(fa.brand_ids)
+           AND (ce.lead_campaign_id = fa.lead_campaign_id OR ce.matched_lead_id = fa.lead_id)
+          WHERE fa.org_id = ${params.orgId}
+            AND fa.acting_campaign_id = ${params.campaignId}
+            AND fa.lead_id = h.lead_id
+            AND ce.withdrawn_at IS NULL
+            AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
+        ) AS booked,
+        EXISTS (
+          SELECT 1
+          FROM followup_actions fa
+          JOIN leads_campaigns lc ON lc.id = fa.lead_campaign_id
+          WHERE fa.org_id = ${params.orgId}
+            AND fa.acting_campaign_id = ${params.campaignId}
+            AND fa.lead_id = h.lead_id
+            AND (lc.followup_due_at IS NOT NULL OR lc.followup_claimed_at > ${leaseCutoffIso}::timestamptz)
+        ) AS owed
+      FROM handed h
+    )
+    SELECT
+      count(*) AS handed,
+      count(*) FILTER (WHERE booked) AS meetings_booked,
+      count(*) FILTER (WHERE NOT booked AND owed) AS ongoing,
+      count(*) FILTER (WHERE NOT booked AND NOT owed) AS dropped
+    FROM per_person
+  `)) as unknown as Array<Record<"handed" | "meetings_booked" | "ongoing" | "dropped", number | string>>;
+
+  const r = rows[0];
+  const counts: ConversationCounts = {
+    handed: Number(r.handed),
+    ongoing: Number(r.ongoing),
+    meetingsBooked: Number(r.meetings_booked),
+    dropped: Number(r.dropped),
+  };
+  if (counts.handed !== counts.ongoing + counts.meetingsBooked + counts.dropped) {
+    throw new Error(`[followup-actions] conversation counts are not a partition: ${JSON.stringify(counts)}`);
+  }
+  return counts;
 }
