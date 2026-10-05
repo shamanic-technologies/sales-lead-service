@@ -3,6 +3,7 @@ import {
   LEAD_BUCKETS,
   bucketsForRow,
   isDelivered,
+  isSent,
   leadActivityAt,
   outcomeBucketsAreStepOutcomes,
   parseLeadBucket,
@@ -106,14 +107,25 @@ describe("when a lead last got as far as it has got", () => {
   });
 });
 
-describe("whether a person's email was delivered", () => {
-  it("is contacted and not bounced at this scope — a subset of contacted", () => {
+describe("whether a person was sent an email, and whether it was delivered", () => {
+  it("is sent only when an email actually left — contacted (queued in a sequence) is not sent", () => {
+    expect(isSent(null)).toBe(false);
+    expect(isSent(DEFAULT_STATUS)).toBe(false);
+    expect(isSent(delivery({ contacted: true }))).toBe(false);
+    expect(isSent(delivery({ contacted: true, sent: true }))).toBe(true);
+  });
+
+  it("is delivered when sent and not bounced at this scope — a subset of sent", () => {
     expect(isDelivered(null)).toBe(false);
     expect(isDelivered(DEFAULT_STATUS)).toBe(false);
-    expect(isDelivered(delivery({ contacted: true }))).toBe(true);
-    expect(isDelivered(delivery({ contacted: true, bounced: true }))).toBe(false);
+    // Queued, nothing sent: nobody can have bounced, and nothing was delivered either.
+    expect(isDelivered(delivery({ contacted: true }))).toBe(false);
+    expect(isDelivered(delivery({ contacted: true, sent: true }))).toBe(true);
+    expect(isDelivered(delivery({ contacted: true, sent: true, bounced: true }))).toBe(false);
     // Another brand's bounce says nothing about whether OUR email arrived.
-    expect(isDelivered(delivery({ contacted: true, global: { bounced: true, unsubscribed: false } }))).toBe(true);
+    expect(
+      isDelivered(delivery({ contacted: true, sent: true, global: { bounced: true, unsubscribed: false } })),
+    ).toBe(true);
     expect(isDelivered(delivery({ bounced: true }))).toBe(false);
   });
 });

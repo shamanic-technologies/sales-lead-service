@@ -224,26 +224,43 @@ describe("GET /orgs/leads/bucket-counts", () => {
     expect(hydrated).toEqual([]);
   });
 
-  it("states delivered and interested in PEOPLE: a bounce is not delivered, both ways is one person", async () => {
-    // p1 clicked AND replied positively: one interested person, in both buckets.
+  it("states sent, delivered and interested in PEOPLE: a bounce is not delivered, both ways is one person", async () => {
+    // p1 was sent, clicked AND replied positively: one interested person, in both buckets.
     statusByEmail["p1@example.test"] = {
       contacted: true,
+      sent: true,
       clicked: true,
       firstClickedAt: "2026-02-02T00:00:00.000Z",
       replied: true,
       replyClassification: "positive",
       firstRepliedAt: "2026-02-03T00:00:00.000Z",
     };
-    // p4 was contacted and bounced: contacted, not delivered.
+    statusByEmail["p2@example.test"] = { ...statusByEmail["p2@example.test"], sent: true };
+    // p4 was sent and bounced: sent, not delivered.
     statusByEmail["p4@example.test"] = { contacted: true, sent: true, bounced: true };
+    // p5 is in the sequence, nothing has left yet: contacted, not sent, so not delivered either.
+    statusByEmail["p5@example.test"] = { contacted: true };
     const res = await counts(`?brandId=${BRAND}`);
     expect(res.status).toBe(200);
-    expect(res.body.counts).toMatchObject({ contacted: 4, website_visit: 1, positive_reply: 2 });
-    expect(res.body.people).toEqual({ delivered: 3, interested: 2 });
-    expect(res.body.people.delivered).toBeLessThanOrEqual(res.body.counts.contacted);
+    expect(res.body.counts).toMatchObject({ contacted: 5, website_visit: 1, positive_reply: 2 });
+    expect(res.body.people).toEqual({ sent: 4, delivered: 3, interested: 2 });
+    expect(res.body.people.delivered).toBeLessThanOrEqual(res.body.people.sent);
+    expect(res.body.people.sent).toBeLessThanOrEqual(res.body.counts.contacted);
     const { website_visit, positive_reply } = res.body.counts;
     expect(res.body.people.interested).toBeGreaterThanOrEqual(Math.max(website_visit, positive_reply));
     expect(res.body.people.interested).toBeLessThanOrEqual(website_visit + positive_reply);
+  });
+
+  it("states nobody sent and nobody delivered while every contacted person is still queued", async () => {
+    // The campaign that went out with "Delivered 197" beside "0 emails sent": everyone is in a
+    // sequence, nothing has left, and nobody can have bounced.
+    statusByEmail = Object.fromEntries(
+      indexRows.map((_, i) => [`p${i}@example.test`, { contacted: true }]),
+    );
+    const res = await counts(`?brandId=${BRAND}`);
+    expect(res.status).toBe(200);
+    expect(res.body.counts.contacted).toBe(6);
+    expect(res.body.people).toMatchObject({ sent: 0, delivered: 0 });
   });
 
   it("refuses rather than reporting zero when the evidence cannot be read", async () => {
