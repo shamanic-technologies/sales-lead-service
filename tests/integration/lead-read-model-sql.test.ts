@@ -124,9 +124,10 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     legByCampaign = new Map([[campaignId, "start_to_website_visit"]]);
     statusByEmail = {
       "jane@acme.test": { contacted: true, sent: true, firstSentAt: "2026-02-01T00:00:00.000Z" },
-      "john@globex.test": { contacted: true, clicked: true, firstClickedAt: "2026-02-02T00:00:00.000Z" },
+      "john@globex.test": { contacted: true, sent: true, clicked: true, firstClickedAt: "2026-02-02T00:00:00.000Z" },
       "ten@disco.test": {
         contacted: true,
+        sent: true,
         replied: true,
         replyClassification: "positive",
         firstRepliedAt: "2026-02-03T00:00:00.000Z",
@@ -148,8 +149,9 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const buckets = await model.readModelBucketCounts(m, null);
     expect(buckets.total).toBe(4);
     expect(buckets.counts).toMatchObject({ contacted: 3, website_visit: 1, positive_reply: 1, sale: 0 });
-    // Nobody bounced: all three contacted were delivered. Interested = John (visit) + Ten (reply).
-    expect(buckets.people).toEqual({ delivered: 3, interested: 2 });
+    // All three contacted were sent and nobody bounced: all three delivered. Interested = John
+    // (visit) + Ten (reply).
+    expect(buckets.people).toEqual({ sent: 3, delivered: 3, interested: 2 });
     const standings = await model.readModelStandingCounts(m, null);
     expect(standings.total).toBe(4);
     expect(Object.values(standings.counts).reduce((a, b) => a + b, 0)).toBe(4);

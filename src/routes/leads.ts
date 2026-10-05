@@ -1310,8 +1310,9 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
  * membership is NOT exclusive and the counts do not sum to it: somebody who bought was also
  * contacted, and is in both.
  *
- * `people` carries the two counts a people funnel needs and cannot derive from the buckets:
- * `delivered` (contacted and not bounced, never above `contacted`) and `interested` (website visit
+ * `people` carries the counts a people funnel needs and cannot derive from the buckets: `sent`
+ * (at least one email actually sent, never above `contacted`), `delivered` (sent and not bounced,
+ * never above `sent`) and `interested` (website visit
  * OR positive reply, one person once — the union, never the sum of the two buckets).
  *
  * FAIL LOUD: email-gateway unreachable is a 502, never a count of zero — a wrong number here is
@@ -1334,7 +1335,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
     }
     // An offer no campaign sells: a real, empty population, stated as such rather than widened.
     if (resolved.kind === "empty") {
-      return res.json({ total: 0, counts: zeroBucketCounts(), people: { delivered: 0, interested: 0 } });
+      return res.json({ total: 0, counts: zeroBucketCounts(), people: { sent: 0, delivered: 0, interested: 0 } });
     }
 
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : undefined;

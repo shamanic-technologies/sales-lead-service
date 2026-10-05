@@ -27,6 +27,7 @@ import {
 import {
   INTEREST_BUCKETS,
   isDelivered,
+  isSent,
   zeroBucketCounts,
   type LeadBucket,
 } from "../../src/lib/lead-buckets.js";
@@ -39,6 +40,7 @@ interface FakeRow {
   createdAtText: string;
   activityAt: string;
   buckets: Set<LeadBucket>;
+  sent: boolean;
   delivered: boolean;
   standing: LeadStandingState;
   stage: string | null;
@@ -127,6 +129,7 @@ export function fakeReadModelModule(real: Real): Real {
           createdAtText: row.createdAtText,
           activityAt: row.activityAt,
           buckets: row.buckets,
+          sent: isSent(row.delivery),
           delivered: isDelivered(row.delivery),
           standing: row.standing ?? "unresolved",
           stage: row.stage ?? null,
@@ -173,6 +176,7 @@ export function fakeReadModelModule(real: Real): Real {
       const counts = zeroBucketCounts();
       for (const row of rows) for (const b of row.buckets) counts[b] += 1;
       const people = {
+        sent: rows.filter((r) => r.sent).length,
         delivered: rows.filter((r) => r.delivered).length,
         interested: rows.filter((r) => INTEREST_BUCKETS.some((b) => r.buckets.has(b))).length,
       };
