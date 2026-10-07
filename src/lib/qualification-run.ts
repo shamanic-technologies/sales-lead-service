@@ -6,7 +6,7 @@ import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { leadsCampaigns, qualificationCriteria, qualificationObservations, qualificationVerdicts } from "../db/schema.js";
 import { getOfferText } from "./brand-client.js";
-import { complete, stripDashes } from "./chat-complete-client.js";
+import { ModelInvalidJsonError, complete, stripDashes } from "./chat-complete-client.js";
 import { buildFullLeadsBatch, type FullLead } from "./lead-shape.js";
 import { priceCentsPerUnit } from "./price-client.js";
 import {
@@ -249,7 +249,7 @@ export class SuggestionDraftUnreadableError extends Error {
 /**
  * The draft's checks. The model answers either `{"checks":[...]}` (what the prompt asks) or the
  * bare list (seen in prod 2026-10-07, every run on a chiropractic offer): both are read. Anything
- * else throws with the raw answer, so the failure names what came back.
+ * else, or invalid JSON twice in a row, throws with the raw answer, so the failure names what came back.
  */
 export function readDraftChecks(json: unknown, content: string): DraftCheck[] {
   if (Array.isArray(json)) return json as DraftCheck[];
@@ -292,16 +292,32 @@ async function pickCatalogProbe(question: string, phrase: string, identity: Spen
  */
 export async function generateSuggestions(params: OfferScope & { identity: SpendIdentity }): Promise<{ rows: QualificationCriterionRow[]; dropped: DroppedSuggestion[] }> {
   const offer = await getOfferText(params.orgId, params.brandId, params.offerId);
-  const drafted = await complete(
-    {
-      systemPrompt: SUGGEST_PROMPT,
-      message: `Offer: ${offer.name}\nDescription: ${offer.description ?? "(none)"}\nStated fields: ${JSON.stringify(offer.fields).slice(0, 12_000)}`,
-      json: true,
-      maxTokens: 2_500,
-      model: "flash",
-    },
-    params.identity,
-  );
+  const ask = () =>
+    complete(
+      {
+        systemPrompt: SUGGEST_PROMPT,
+        message: `Offer: ${offer.name}\nDescription: ${offer.description ?? "(none)"}\nStated fields: ${JSON.stringify(offer.fields).slice(0, 12_000)}`,
+        json: true,
+        maxTokens: 2_500,
+        model: "flash",
+      },
+      params.identity,
+    );
+  // Invalid JSON from the model is intermittent (prod 2026-10-07: failed, then the same offer drafted
+  // fine): ask ONCE more, then name it. Any other failure is not retried.
+  let drafted;
+  try {
+    drafted = await ask();
+  } catch (error) {
+    if (!(error instanceof ModelInvalidJsonError)) throw error;
+    console.warn(`[lead-service] suggestion draft for offer ${params.offerId} was invalid JSON, asking once more: ${error.message}`);
+    try {
+      drafted = await ask();
+    } catch (again) {
+      if (again instanceof ModelInvalidJsonError) throw new SuggestionDraftUnreadableError(again.message);
+      throw again;
+    }
+  }
   const checks = readDraftChecks(drafted.json, drafted.content);
 
   const drafts: Array<{ question: string; why: string; spec: ProbeSpec }> = [];
