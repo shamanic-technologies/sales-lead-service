@@ -358,6 +358,13 @@
       "when": 1784160000000,
       "tag": "0050_lead_read_model_sent",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1784246400000,
+      "tag": "0051_qualification",
+      "breakpoints": true
     }
   ]
 }

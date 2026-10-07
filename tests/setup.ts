@@ -33,6 +33,11 @@ const TEST_ENV_VARS: Record<string, string> = {
   CONTENT_GENERATION_SERVICE_API_KEY: "test-content-generation-key",
   CRM_SERVICE_URL: "http://crm:3016",
   CRM_SERVICE_API_KEY: "test-crm-key",
+  BILLING_SERVICE_URL: "http://billing:3017",
+  BILLING_SERVICE_API_KEY: "test-billing-key",
+  COSTS_SERVICE_URL: "http://costs:3018",
+  CLOUDFLARE_SERVICE_URL: "http://cloudflare:3019",
+  CLOUDFLARE_SERVICE_API_KEY: "test-cloudflare-key",
   NODE_ENV: "test",
 };
 

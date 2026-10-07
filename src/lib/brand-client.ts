@@ -99,3 +99,35 @@ export async function getCurrentGoal(
   const data = (await response.json()) as { currentGoal: CurrentGoal };
   return data.currentGoal;
 }
+
+/** What a brand's offer says about itself, in its own words: the input to suggested qualification criteria. */
+export interface OfferText {
+  offerId: string;
+  name: string;
+  description: string | null;
+  /** The offer's stated fields (services, dreamOutcome, targetAudience, socialProof...), values as stored. */
+  fields: Record<string, unknown>;
+}
+
+/**
+ * Read one offer and its stated fields, for the org that owns the configuration. Fails loud on any
+ * non-2xx: suggestions written from a missing offer would be suggestions about nothing.
+ */
+export async function getOfferText(orgId: string, brandId: string, offerId: string): Promise<OfferText> {
+  const headers = buildHeaders(orgId);
+  const base = `${BRAND_SERVICE_URL}/orgs/brands/${encodeURIComponent(brandId)}/offers/${encodeURIComponent(offerId)}`;
+  const [offerRes, fieldsRes] = await Promise.all([
+    fetchWithRetry(base, { method: "GET", headers, signal: AbortSignal.timeout(30_000) }),
+    fetchWithRetry(`${base}/user-fields`, { method: "GET", headers, signal: AbortSignal.timeout(30_000) }),
+  ]);
+  if (!offerRes.ok) throw new Error(`[lead-service] brand-service offer ${offerId} failed: ${offerRes.status} ${(await offerRes.text()).slice(0, 200)}`);
+  if (!fieldsRes.ok) throw new Error(`[lead-service] brand-service offer fields ${offerId} failed: ${fieldsRes.status} ${(await fieldsRes.text()).slice(0, 200)}`);
+  const { offer } = (await offerRes.json()) as { offer?: { offerId: string; name: string; description: string | null } };
+  const { fields } = (await fieldsRes.json()) as { fields?: Record<string, { value: unknown }> };
+  if (!offer) throw new Error(`[lead-service] brand-service answered offer ${offerId} without an offer`);
+  const values: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(fields ?? {})) {
+    if (v && v.value !== null && v.value !== undefined && v.value !== "") values[k] = v.value;
+  }
+  return { offerId: offer.offerId, name: offer.name, description: offer.description, fields: values };
+}

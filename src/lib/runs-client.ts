@@ -154,3 +154,12 @@ export async function addCosts(
     headers,
   });
 }
+
+/** A run's total cost, its descendants included (runs-service sums recursively), in USD cents. */
+export async function getRunTotalCents(runId: string, orgId: string): Promise<{ totalCents: number; actualCents: number }> {
+  const run = (await callRunsService(`/runs/${runId}`, { method: "GET", headers: { "x-org-id": orgId } })) as {
+    totalCostInUsdCents?: string;
+    actualCostInUsdCents?: string;
+  };
+  return { totalCents: Number(run.totalCostInUsdCents ?? 0), actualCents: Number(run.actualCostInUsdCents ?? 0) };
+}

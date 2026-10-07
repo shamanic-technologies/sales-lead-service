@@ -757,3 +757,79 @@ export type CrmPairingJudgmentRow = typeof crmPairingJudgments.$inferSelect;
 export type NewCrmPairingJudgmentRow = typeof crmPairingJudgments.$inferInsert;
 export type CrmPairingRulingRow = typeof crmPairingRulings.$inferSelect;
 export type NewCrmPairingRulingRow = typeof crmPairingRulings.$inferInsert;
+
+// --- Qualification: does the lead's COMPANY meet a business condition? (migration 0051) ---
+// Semantics in src/lib/qualification.ts; the probe catalogue in src/lib/qualification-probes.ts.
+export const qualificationCriteria = pgTable(
+  "qualification_criteria",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    question: text("question").notNull(),
+    probe: jsonb("probe").notNull(),
+    mode: text("mode").notNull(),
+    createdByUserId: text("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (table) => [index("idx_qc_org_brand").on(table.orgId, table.brandId)],
+);
+
+export const qualificationObservations = pgTable(
+  "qualification_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    probeKey: text("probe_key").notNull(),
+    domain: text("domain").notNull(),
+    status: text("status").notNull(),
+    reason: text("reason"),
+    endpointId: text("endpoint_id"),
+    content: text("content"),
+    imageUrl: text("image_url"),
+    vendorCostMicro: integer("vendor_cost_micro").notNull().default(0),
+    runId: text("run_id"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_qo_probe_domain").on(table.probeKey, table.domain, table.observedAt)],
+);
+
+export const qualificationVerdicts = pgTable(
+  "qualification_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    criterionKey: text("criterion_key").notNull(),
+    domain: text("domain").notNull(),
+    observationId: uuid("observation_id")
+      .notNull()
+      .references(() => qualificationObservations.id, { onDelete: "cascade" }),
+    verdict: text("verdict").notNull(),
+    yesProbability: doublePrecision("yes_probability"),
+    reason: text("reason"),
+    evidence: text("evidence"),
+    judgmentModel: text("judgment_model"),
+    runId: text("run_id"),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_qv_key_observation").on(table.criterionKey, table.observationId),
+    index("idx_qv_key_domain").on(table.criterionKey, table.domain, table.judgedAt),
+  ],
+);
+
+export const qualificationSuggestions = pgTable(
+  "qualification_suggestions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    suggestions: jsonb("suggestions").notNull(),
+    runId: text("run_id"),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_qs_org_brand").on(table.orgId, table.brandId, table.generatedAt)],
+);
+
+export type QualificationCriterionRow = typeof qualificationCriteria.$inferSelect;
+export type QualificationObservationRow = typeof qualificationObservations.$inferSelect;
+export type QualificationVerdictRow = typeof qualificationVerdicts.$inferSelect;
