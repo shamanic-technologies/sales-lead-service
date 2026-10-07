@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { contentOfAnswer, criterionKey, findImageUrl, normalizeDomain, subjectFromOrganization } from "../../src/lib/qualification.js";
 import { BUILTIN_PROBES } from "../../src/lib/qualification-probes.js";
 import type { OrganizationView } from "../../src/lib/lead-shape.js";
+import { keepsDraft } from "../../src/lib/qualification-run.js";
 
 describe("qualification helpers", () => {
   it("normalizes a domain from any spelling, refuses garbage", () => {
@@ -35,5 +36,20 @@ describe("qualification helpers", () => {
     const spec = BUILTIN_PROBES.homepage_text.spec;
     expect(criterionKey("Is there a  newsletter?", spec)).toBe(criterionKey("is there a newsletter?", spec));
     expect(criterionKey("Is there a newsletter?", spec)).not.toBe(criterionKey("Is there a newsletter?", BUILTIN_PROBES.company_data.spec));
+  });
+});
+
+describe("suggestions keep need signals, drop firmographics unless universal for the offer", () => {
+  const base = { question: "q", why: "w", source: "homepage_text" };
+  it("keeps a need signal", () => {
+    expect(keepsDraft({ ...base, kind: "need" })).toEqual({ keep: true });
+  });
+  it("drops a firmographic unless stated universal with a reason", () => {
+    expect(keepsDraft({ ...base, kind: "firmographic" })).toEqual({ keep: false, reason: "firmographic_not_universal" });
+    expect(keepsDraft({ ...base, kind: "firmographic", universal: true })).toEqual({ keep: false, reason: "firmographic_not_universal" });
+    expect(keepsDraft({ ...base, kind: "firmographic", universal: true, universalWhy: "The offer only works for companies selling online." })).toEqual({ keep: true });
+  });
+  it("drops an unclassified check", () => {
+    expect(keepsDraft({ ...base })).toEqual({ keep: false, reason: "unclassified_kind:undefined" });
   });
 });

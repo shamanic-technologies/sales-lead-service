@@ -766,14 +766,22 @@ export const qualificationCriteria = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     orgId: text("org_id").notNull(),
     brandId: text("brand_id").notNull(),
+    /** The offer the criterion belongs to (migration 0053). NULL only on retired brand-level rows. */
+    offerId: text("offer_id"),
     question: text("question").notNull(),
     probe: jsonb("probe").notNull(),
     mode: text("mode").notNull(),
+    enabled: boolean("enabled").notNull().default(false),
+    /** suggested = written by the AI suggestion run (off); custom = created by a person. */
+    origin: text("origin").notNull().default("custom"),
+    why: text("why"),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Set when a person changes the row; a suggestion nobody touched is replaced by the next list. */
+    updatedAt: timestamp("updated_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
   },
-  (table) => [index("idx_qc_org_brand").on(table.orgId, table.brandId)],
+  (table) => [index("idx_qc_org_brand_offer").on(table.orgId, table.brandId, table.offerId)],
 );
 
 export const qualificationObservations = pgTable(
@@ -817,17 +825,25 @@ export const qualificationVerdicts = pgTable(
   ],
 );
 
-export const qualificationSuggestions = pgTable(
-  "qualification_suggestions",
+/** Each time a criterion was applied to a person: the pass rate is counted here (migration 0053). */
+export const qualificationChecks = pgTable(
+  "qualification_checks",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    criterionId: uuid("criterion_id").notNull(),
     orgId: text("org_id").notNull(),
     brandId: text("brand_id").notNull(),
-    suggestions: jsonb("suggestions").notNull(),
+    offerId: text("offer_id").notNull(),
+    /** `lead:<leadId>` or `candidate:<audienceId>:<providerPersonId>`. */
+    subject: text("subject").notNull(),
+    domain: text("domain"),
+    /** NULL = nothing could be judged (no company domain): counted unavailable, with `reason`. */
+    verdictId: uuid("verdict_id").references(() => qualificationVerdicts.id),
+    reason: text("reason"),
     runId: text("run_id"),
-    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index("idx_qs_org_brand").on(table.orgId, table.brandId, table.generatedAt)],
+  (table) => [uniqueIndex("idx_qck_criterion_subject").on(table.criterionId, table.subject)],
 );
 
 export type QualificationCriterionRow = typeof qualificationCriteria.$inferSelect;

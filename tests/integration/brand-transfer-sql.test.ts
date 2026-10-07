@@ -26,7 +26,7 @@ const BRAND_SCALAR_TABLES = [
   "crm_pairing_judgments",
   "crm_pairing_rulings",
   "qualification_criteria",
-  "qualification_suggestions",
+  "qualification_checks",
   "candidate_screenings",
   "lead_delivery_evidence",
 ] as const;
@@ -113,10 +113,12 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.insert(schema.crmPairingRulings).values({
       orgId: org, brandId: brand, crmContactId: contact, leadId, ruling: "paired",
     });
-    await db.insert(schema.qualificationCriteria).values({
-      orgId: org, brandId: brand, question: "Is the site slow on mobile?", probe: { kind: "company_data" }, mode: "mention",
+    const [criterion] = await db.insert(schema.qualificationCriteria).values({
+      orgId: org, brandId: brand, offerId: randomUUID(), question: "Is the site slow on mobile?", probe: { kind: "company_data" }, mode: "mention", enabled: true,
+    }).returning();
+    await db.insert(schema.qualificationChecks).values({
+      criterionId: criterion.id, orgId: org, brandId: brand, offerId: criterion.offerId as string, subject: `lead:${leadId}`, reason: "no_company_domain",
     });
-    await db.insert(schema.qualificationSuggestions).values({ orgId: org, brandId: brand, suggestions: [] });
     await db.insert(schema.candidateScreenings).values({
       orgId: org, brandId: brand, audienceId: randomUUID(), providerPersonId: randomUUID(), candidateId: randomUUID(),
       targetHash: "h", promptVersion: "v1", verdict: "pass",

@@ -148,7 +148,7 @@ describe("pullNext (audience serve-next flow)", () => {
 
     const result = await pullNext(baseParams);
 
-    expect(serveThroughCandidates).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1", orgId: "org-1" }), undefined);
+    expect(serveThroughCandidates).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1", orgId: "org-1" }), null, undefined);
     expect(serveNext).not.toHaveBeenCalled();
     expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", status: "served", personId: "8d2f6c1e-3b4a-4f5e-9a7b-1c2d3e4f5a6b" }));
     expect(result.found).toBe(true);
@@ -209,6 +209,9 @@ describe("pullNext (audience serve-next flow)", () => {
     await pullNext(baseParams);
 
     expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), "offer-9");
+    // The same offer decides which must-pass checks the candidate serve applies.
+    const { serveThroughCandidates } = await import("../../src/lib/candidate-serve.js");
+    expect(serveThroughCandidates).toHaveBeenCalledWith("aud-1", expect.any(Object), "offer-9", undefined);
   });
 
   it("falls back to brand scope (which fails loud on a multi-offer brand) when the campaign cannot be read", async () => {

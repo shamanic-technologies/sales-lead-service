@@ -7,8 +7,10 @@
  *      The same yes/no judgment human-service used to run inside serve-next (same input fields,
  *      same question, same `P(yes) > 0.5` rule), now decided and stored here
  *      (`candidate_screenings`); a person offered again after a crash is not judged twice.
- *   2. the brand's MUST-PASS qualification checks on the person's company
- *      (src/lib/qualification.ts): a company that fails one is declined before its reveal is paid.
+ *   2. the MUST-PASS qualification checks of the campaign's OFFER on the person's company
+ *      (src/lib/qualification.ts; enabled, mode must_pass, every audience of the offer): a company
+ *      that fails one is declined before its reveal is paid. Every check applied is recorded
+ *      (`qualification_checks`), which is what the offer's pass rate counts.
  *      A check that cannot answer (no domain, probe failed) does NOT decline: an unknown is not a
  *      no, and declining on it would starve the audience on our own blind spots. It is logged.
  *   3. REVEAL (billed, recorded as served exactly as serve-next) or DECLINE (never offered again
@@ -32,7 +34,7 @@ import {
   type ServeNextResult,
   type ServiceContext,
 } from "./people-client.js";
-import { criterionKey, judge, listCriteria, observe, probeOf, subjectFromOrganization, YES_THRESHOLD } from "./qualification.js";
+import { criterionKey, judge, mustPassCriteria, observe, probeOf, recordCheck, subjectFromOrganization, YES_THRESHOLD } from "./qualification.js";
 import { judgeYesNo } from "./qualification-judge.js";
 import { TregMeter, type SpendIdentity } from "./treg-client.js";
 
@@ -171,14 +173,19 @@ async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[
   if (mustPass.length === 0) return null;
   const org = organizationFromCandidate(c);
   const subject = subjectFromOrganization(org);
+  const who = `candidate:${c.audienceId}:${c.providerPersonId}`;
   if (!subject) {
     console.log(`[lead-service] candidate ${c.candidateId} has no company domain: must-pass checks cannot answer, not declined on them`);
+    for (const criterion of mustPass) {
+      await recordCheck({ criterion, subject: who, domain: null, verdictId: null, reason: "no_company_domain", runId: identity.runId });
+    }
     return null;
   }
   for (const criterion of mustPass) {
     const spec = probeOf(criterion);
     const observed = await observe(spec, subject, org, { meter, identity });
     const { verdict } = await judge({ question: criterion.question, probe: spec }, observed.observation, subject, { meter, identity });
+    await recordCheck({ criterion, subject: who, domain: subject.domain, verdictId: verdict.id, reason: verdict.reason, runId: identity.runId });
     if (verdict.verdict === "no") return `criterion_failed:${criterion.id}`;
     if (verdict.verdict === "unavailable") {
       console.log(`[lead-service] must-pass ${criterion.id} could not answer for ${subject.domain} (${verdict.reason}): not declined on it`);
@@ -190,9 +197,10 @@ async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[
 /**
  * The next person of this audience worth paying for, revealed and recorded as served by
  * human-service, in serve-next's own result shape. Returns null when human-service does not
- * serve this audience through candidates (the caller uses serve-next).
+ * serve this audience through candidates (the caller uses serve-next). `offerId` is the
+ * campaign's offer: its must-pass checks apply (null only when the campaign could not say it).
  */
-export async function serveThroughCandidates(audienceId: string, ctx: ServiceContext, signal?: AbortSignal): Promise<ServeNextResult | null> {
+export async function serveThroughCandidates(audienceId: string, ctx: ServiceContext, offerId: string | null, signal?: AbortSignal): Promise<ServeNextResult | null> {
   if (!ctx.runId) throw new Error("[lead-service] serving through candidates needs the serve's run id");
   const identity: SpendIdentity = {
     orgId: ctx.orgId,
@@ -220,7 +228,7 @@ export async function serveThroughCandidates(audienceId: string, ctx: ServiceCon
     const candidate = next.candidate;
 
     if (mustPass === null) {
-      mustPass = ctx.brandId ? (await listCriteria(ctx.orgId, ctx.brandId)).filter((c) => c.mode === "must_pass") : [];
+      mustPass = ctx.brandId ? await mustPassCriteria(ctx.orgId, ctx.brandId, offerId) : [];
     }
     const basis = decisionBasis(mustPass);
 

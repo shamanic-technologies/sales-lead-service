@@ -31,13 +31,24 @@ vi.mock("../../src/lib/qualification-judge.js", async (orig) => {
 });
 vi.mock("../../src/lib/chat-complete-client.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, complete: async () => ({ content: "The homepage invites visitors to a weekly newsletter.", json: null, model: "flash-lite", tokensInput: 1, tokensOutput: 1 }) };
+  return {
+    ...actual,
+    complete: async () => ({ content: "The homepage invites visitors to a weekly newsletter.", json: draftJson, model: "flash-lite", tokensInput: 1, tokensOutput: 1 }),
+  };
 });
+let draftJson: Record<string, unknown> | null = null;
+vi.mock("../../src/lib/brand-client.js", async (orig) => ({
+  ...((await orig()) as object),
+  getOfferText: async (_o: string, _b: string, offerId: string) => ({ offerId, name: "Site speed audit", description: "We make slow sites fast.", fields: {} }),
+}));
 vi.mock("../../src/lib/price-client.js", () => ({ priceCentsPerUnit: async () => 0.0005 }));
 
 const { db } = await import("../../src/db/index.js");
-const { leads, leadsCampaigns, organizations, leadsOrganizations } = await import("../../src/db/schema.js");
-const { runCriterionOnLeads, readLeadQualification, recentServedLeadIds, leadsOfBrand } = await import("../../src/lib/qualification-run.js");
+const { leads, leadsCampaigns, organizations, leadsOrganizations, qualificationCriteria } = await import("../../src/db/schema.js");
+const { mustPassCriteria, passRates, OfferUnresolvedError } = await import("../../src/lib/qualification.js");
+const { sql } = await import("drizzle-orm");
+const { runCriterionOnLeads, readLeadQualification, recentServedLeadIds, leadsOfBrand, generateSuggestions } = await import("../../src/lib/qualification-run.js");
+const { listCriteria } = await import("../../src/lib/qualification.js");
 const { buildFullLeadsBatch } = await import("../../src/lib/lead-shape.js");
 const { BUILTIN_PROBES } = await import("../../src/lib/qualification-probes.js");
 
@@ -52,17 +63,17 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
   const otherDomain = `other-${tag}.com`;
   const ids: string[] = [];
   const identity = { orgId, userId: randomUUID(), runId: randomUUID(), brandId };
-  const criterion = {
-    id: randomUUID(),
-    orgId,
-    brandId,
-    question: `Does the company run a newsletter? ${tag}`,
-    probe: BUILTIN_PROBES.homepage_text.spec,
-    mode: "mention",
-    createdByUserId: null,
-    createdAt: new Date(),
-    archivedAt: null,
-  };
+  const offerA = randomUUID();
+  const offerB = randomUUID();
+  let criterion: Awaited<ReturnType<typeof insertCriterion>>;
+
+  async function insertCriterion(values: Partial<typeof qualificationCriteria.$inferInsert>) {
+    const [row] = await db
+      .insert(qualificationCriteria)
+      .values({ orgId, brandId, offerId: offerA, question: `Does the company run a newsletter? ${tag}`, probe: BUILTIN_PROBES.homepage_text.spec, mode: "mention", enabled: true, ...values })
+      .returning();
+    return row;
+  }
 
   async function seedLead(domain: string, servedAt: Date): Promise<string> {
     const [lead] = await db.insert(leads).values({ firstName: `L-${tag}` }).returning({ id: leads.id });
@@ -73,6 +84,7 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
   }
 
   beforeAll(async () => {
+    criterion = await insertCriterion({});
     ids.push(await seedLead(sharedDomain, new Date(Date.now() - 3000)));
     ids.push(await seedLead(sharedDomain, new Date(Date.now() - 2000)));
     ids.push(await seedLead(otherDomain, new Date(Date.now() - 1000)));
@@ -118,5 +130,57 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     expect(read.domain).toBe(sharedDomain);
     expect(read.checks.map((c) => c.verdict)).toEqual(["yes", "not_checked"]);
     expect(read.checks[0].evidence).toContain("newsletter");
+  });
+
+  it("pass rate per criterion equals a direct count of the stored verdicts (one row per lead checked)", async () => {
+    const rate = (await passRates([criterion.id])).get(criterion.id)!;
+    const [direct] = (await db.execute(sql`
+      SELECT count(*)::int AS checked, count(*) FILTER (WHERE v.verdict = 'yes')::int AS yes
+      FROM qualification_checks c JOIN qualification_verdicts v ON v.id = c.verdict_id
+      WHERE c.criterion_id = ${criterion.id}
+    `)) as unknown as Array<{ checked: number; yes: number }>;
+    expect(rate).toEqual({ checked: 3, yes: 3, no: 0, unavailable: 0, passRate: 1 });
+    expect([rate.checked, rate.yes]).toEqual([Number(direct.checked), Number(direct.yes)]);
+  });
+
+  it("a must-pass check on offer A never applies to offer B of the same brand; off checks never apply", async () => {
+    const onA = await insertCriterion({ mode: "must_pass", question: `Must A ${tag}` });
+    await insertCriterion({ mode: "must_pass", enabled: false, question: `Off A ${tag}` });
+    expect((await mustPassCriteria(orgId, brandId, offerA)).map((c) => c.id)).toEqual([onA.id]);
+    expect(await mustPassCriteria(orgId, brandId, offerB)).toEqual([]);
+    // The campaign's offer unknown while the brand holds must-pass checks: refuse, never serve unchecked.
+    await expect(mustPassCriteria(orgId, brandId, null)).rejects.toBeInstanceOf(OfferUnresolvedError);
+    expect(await mustPassCriteria(orgId, randomUUID(), null)).toEqual([]);
+  });
+
+  it("suggestions are written OFF on the offer; firmographics dropped; a rerun replaces only untouched ones", async () => {
+    const offer = randomUUID();
+    const scope = { orgId, brandId, offerId: offer };
+    draftJson = {
+      checks: [
+        { question: `Is the homepage slow on mobile? ${tag}`, why: "Slow sites lose buyers.", kind: "need", source: "homepage_text" },
+        { question: `Is the company in retail? ${tag}`, why: "x", kind: "firmographic", universal: false, source: "company_data" },
+      ],
+    };
+    const first = await generateSuggestions({ ...scope, identity });
+    expect(first.map((r) => [r.offerId, r.enabled, r.origin, r.why])).toEqual([[offer, false, "suggested", "Slow sites lose buyers."]]);
+
+    // A person turns one on: it survives the next run; the same question is not suggested twice.
+    await db.update(qualificationCriteria).set({ enabled: true, updatedAt: new Date() }).where(sql`id = ${first[0].id}`);
+    draftJson = {
+      checks: [
+        { question: `Is the homepage slow on mobile? ${tag}`, why: "dup", kind: "need", source: "homepage_text" },
+        { question: `Does the homepage lack a newsletter form? ${tag}`, why: "No list to sell to.", kind: "need", source: "homepage_text" },
+      ],
+    };
+    await generateSuggestions({ ...scope, identity });
+    draftJson = { checks: [{ question: `Is the site missing a blog? ${tag}`, why: "No content.", kind: "need", source: "homepage_text" }] };
+    await generateSuggestions({ ...scope, identity });
+    const live = await listCriteria(scope);
+    expect(live.map((r) => [r.question.replace(` ${tag}`, ""), r.enabled])).toEqual([
+      ["Is the homepage slow on mobile?", true],
+      ["Is the site missing a blog?", false],
+    ]);
+    draftJson = null;
   });
 });
