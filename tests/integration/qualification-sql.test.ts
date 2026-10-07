@@ -33,10 +33,17 @@ vi.mock("../../src/lib/chat-complete-client.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    complete: async () => ({ content: "The homepage invites visitors to a weekly newsletter.", json: draftJson, model: "flash-lite", tokensInput: 1, tokensOutput: 1 }),
+    complete: async () => {
+      if (invalidJsonAnswers > 0) {
+        invalidJsonAnswers--;
+        throw new (actual.ModelInvalidJsonError as new (d: string) => Error)("Expected ',' or ']'");
+      }
+      return { content: "The homepage invites visitors to a weekly newsletter.", json: draftJson, model: "flash-lite", tokensInput: 1, tokensOutput: 1 };
+    },
   };
 });
 let draftJson: Record<string, unknown> | null = null;
+let invalidJsonAnswers = 0;
 vi.mock("../../src/lib/brand-client.js", async (orig) => ({
   ...((await orig()) as object),
   getOfferText: async (_o: string, _b: string, offerId: string) => ({ offerId, name: "Site speed audit", description: "We make slow sites fast.", fields: {} }),
@@ -183,6 +190,18 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
       ["Is the homepage slow on mobile?", true],
       ["Is the site missing a blog?", false],
     ]);
+    draftJson = null;
+  });
+
+  it("invalid JSON from the model is asked once more; twice in a row is named suggestion_draft_unreadable", async () => {
+    const { SuggestionDraftUnreadableError } = await import("../../src/lib/qualification-run.js");
+    const scope = { orgId, brandId, offerId: randomUUID() };
+    draftJson = { checks: [{ question: `Is the homepage slow? ${tag}`, why: "w", kind: "need", source: "homepage_text" }] };
+    invalidJsonAnswers = 1;
+    expect((await generateSuggestions({ ...scope, identity })).rows).toHaveLength(1);
+    invalidJsonAnswers = 2;
+    await expect(generateSuggestions({ ...scope, identity })).rejects.toBeInstanceOf(SuggestionDraftUnreadableError);
+    invalidJsonAnswers = 0;
     draftJson = null;
   });
 });
