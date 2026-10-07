@@ -23,7 +23,13 @@ vi.mock("../../src/lib/qualification-judge.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    judgeYesNo: async (state: unknown) => {
+    judgeYesNo: async (state: unknown, questions: Record<string, { instructions: string }>) => {
+      if ("q0" in questions) {
+        // The same-condition test between a draft and a kept criterion.
+        const probabilities: Record<string, number> = {};
+        for (const [k, q] of Object.entries(questions)) probabilities[k] = /A: "[^"]*LinkedIn/.test(q.instructions) ? 0.92 : 0.05;
+        return { probabilities, model: "jev-1.13.0" };
+      }
       judgeCalls.push(state);
       return { probabilities: { answerable: 0.95, holds: 0.9 }, model: "jev-1.13.0" };
     },
@@ -202,6 +208,22 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     invalidJsonAnswers = 2;
     await expect(generateSuggestions({ ...scope, identity })).rejects.toBeInstanceOf(SuggestionDraftUnreadableError);
     invalidJsonAnswers = 0;
+    draftJson = null;
+  });
+
+  it("a re-run never suggests what a kept criterion already asks, even reworded; a different check on the same source is kept", async () => {
+    const scope = { orgId, brandId, offerId: randomUUID() };
+    const linkedin = BUILTIN_PROBES.linkedin_company_posts.spec;
+    await insertCriterion({ offerId: scope.offerId, question: `Has the company posted on LinkedIn less than twice in the last month? ${tag}`, probe: linkedin, enabled: false, origin: "suggested", updatedAt: new Date() });
+    draftJson = {
+      checks: [
+        { question: `Has the company posted on its LinkedIn page less than twice in the last thirty days? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
+        { question: `Do the company's posts get fewer than ten reactions? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
+      ],
+    };
+    const { rows, dropped } = await generateSuggestions({ ...scope, identity });
+    expect(rows.map((r) => r.question.replace(` ${tag}`, ""))).toEqual(["Do the company's posts get fewer than ten reactions?"]);
+    expect(dropped).toEqual([{ question: `Has the company posted on its LinkedIn page less than twice in the last thirty days? ${tag}`, reason: "already_asked" }]);
     draftJson = null;
   });
 });

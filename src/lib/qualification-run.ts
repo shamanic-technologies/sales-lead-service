@@ -12,6 +12,7 @@ import { priceCentsPerUnit } from "./price-client.js";
 import {
   criterionKey,
   judge,
+  listCriteria,
   observe,
   probeLabel,
   probeOf,
@@ -21,8 +22,8 @@ import {
   type QualificationDeps,
   type QualificationMode,
 } from "./qualification.js";
-import { judgeChoice } from "./qualification-judge.js";
-import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, catalogEntryToCall, type ProbeSpec } from "./qualification-probes.js";
+import { judgeChoice, judgeYesNo } from "./qualification-judge.js";
+import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, catalogEntryToCall, probeKey, type ProbeSpec } from "./qualification-probes.js";
 import { searchCatalog } from "./treg-catalog-client.js";
 import { TREG_COST_NAME, TregMeter, type SpendIdentity } from "./treg-client.js";
 import type { QualificationCriterionRow } from "../db/schema.js";
@@ -235,7 +236,7 @@ export interface DraftCheck {
 
 export interface DroppedSuggestion {
   question: string;
-  /** firmographic_not_universal | unclassified_kind:<x> | no_usable_source */
+  /** firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked */
   reason: string;
 }
 
@@ -256,6 +257,30 @@ export function readDraftChecks(json: unknown, content: string): DraftCheck[] {
   const inner = json && typeof json === "object" ? (json as Record<string, unknown>).checks : undefined;
   if (Array.isArray(inner)) return inner as DraftCheck[];
   throw new SuggestionDraftUnreadableError(content.slice(0, 1_500));
+}
+
+/**
+ * The kept criterion this draft asks again in other words, or null. Only a criterion reading the
+ * SAME probe can be the same check (one Jev call per draft, only when one exists); the exact-text
+ * key is the free first test.
+ */
+async function sameConditionAs(question: string, spec: ProbeSpec, kept: QualificationCriterionRow[], identity: SpendIdentity): Promise<string | null> {
+  const k = probeKey(spec);
+  const sameProbe = kept.filter((r) => probeKey(probeOf(r)) === k);
+  if (sameProbe.length === 0) return null;
+  const exact = sameProbe.find((r) => criterionKey(r.question, probeOf(r)) === criterionKey(question, spec));
+  if (exact) return exact.question;
+  const questions: Record<string, { instructions: string; whenTrue: string; whenFalse: string }> = {};
+  sameProbe.forEach((r, i) => {
+    questions[`q${i}`] = {
+      instructions: `Do these two yes/no questions about a company check the same condition? A: "${question}" B: "${r.question}"`,
+      whenTrue: "A client would read them as the same check: same fact, at most a reworded threshold, period or phrasing.",
+      whenFalse: "They check different facts about the company.",
+    };
+  });
+  const { probabilities } = await judgeYesNo({ draft: question, existing: sameProbe.map((r) => r.question) }, questions, identity);
+  const hit = sameProbe.find((_, i) => probabilities[`q${i}`] > 0.5);
+  return hit?.question ?? null;
 }
 
 /** A check kept as an offer criterion: a need signal, or a firmographic the draft states is universal. */
@@ -292,11 +317,15 @@ async function pickCatalogProbe(question: string, phrase: string, identity: Spen
  */
 export async function generateSuggestions(params: OfferScope & { identity: SpendIdentity }): Promise<{ rows: QualificationCriterionRow[]; dropped: DroppedSuggestion[] }> {
   const offer = await getOfferText(params.orgId, params.brandId, params.offerId);
+  // What the offer already asks and keeps: a person's criteria and any suggestion a person touched
+  // (untouched suggestions are replaced by this run). Never suggested again, even reworded.
+  const keptCriteria = (await listCriteria(params)).filter((r) => !(r.origin === "suggested" && !r.enabled && r.updatedAt === null));
+  const alreadyAsked = keptCriteria.length ? `\nAlready checked for this offer (never propose these again, nor a rewording of them):\n${keptCriteria.map((r) => `- ${r.question}`).join("\n")}` : "";
   const ask = () =>
     complete(
       {
         systemPrompt: SUGGEST_PROMPT,
-        message: `Offer: ${offer.name}\nDescription: ${offer.description ?? "(none)"}\nStated fields: ${JSON.stringify(offer.fields).slice(0, 12_000)}`,
+        message: `Offer: ${offer.name}\nDescription: ${offer.description ?? "(none)"}\nStated fields: ${JSON.stringify(offer.fields).slice(0, 12_000)}${alreadyAsked}`,
         json: true,
         maxTokens: 2_500,
         model: "flash",
@@ -339,6 +368,12 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
     if (!spec) {
       console.log(`[lead-service] qualification suggestion dropped, no usable source: ${c.question}`);
       dropped.push({ question: stripDashes(c.question), reason: "no_usable_source" });
+      continue;
+    }
+    const twin = await sameConditionAs(stripDashes(c.question), spec, keptCriteria, params.identity);
+    if (twin) {
+      console.log(`[lead-service] qualification suggestion dropped (already_asked as "${twin}") for offer ${params.offerId}: ${c.question}`);
+      dropped.push({ question: stripDashes(c.question), reason: "already_asked" });
       continue;
     }
     drafts.push({ question: stripDashes(c.question), why: stripDashes(String(c.why ?? "")), spec });
