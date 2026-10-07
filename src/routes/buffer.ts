@@ -12,8 +12,17 @@ import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
+import { resolveServeSource, type ServeSource } from "../lib/source-campaign.js";
 
 const router = Router();
+
+/**
+ * Outreach campaigns with a buffer/next in flight IN THIS PROCESS. The runs-service guard below finds
+ * a concurrent serve by its run's campaign, and a serve filed under a SOURCE campaign
+ * (src/lib/source-campaign.ts) no longer carries the outreach campaign's id on its run, so the same
+ * serial invariant is also held here, keyed on the outreach campaign.
+ */
+const inFlightOutreach = new Set<string>();
 
 const IDEMPOTENCY_TTL_DAYS = 60;
 
@@ -64,6 +73,11 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // origin the channel's spend reads do not count is logged as an error and left where they count it.
   let runFeatureSlug: string = featureSlug;
 
+  // The SOURCE campaign the serve is filed under (src/lib/source-campaign.ts): once the offer's lead
+  // sources are campaigns, the serve run and every downstream call carry the ON source campaign's id
+  // (the lead row keeps the outreach campaign that works it). `legacy` = today's serve, unchanged.
+  let serveSource: ServeSource = { kind: "legacy", why: "channel_not_sourced" };
+
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
   // unreachable through its Neon cold-start window) must return a clean 500 —
@@ -100,6 +114,14 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail: concurrentCheck.detail }, req.headers).catch(() => {});
       return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail: concurrentCheck.detail });
     }
+    if (inFlightOutreach.has(campaignId)) {
+      const detail = `Concurrent buffer/next call for orgId=${req.orgId} campaignId=${campaignId} (in flight in this process). campaign-service is supposed to serialize workflow runs per campaign — this is an upstream serial-invariant violation. Rejected: parentRunId=${runId}.`;
+      console.error(`[lead-service] ${detail}`);
+      traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail }, req.headers).catch(() => {});
+      return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail });
+    }
+    inFlightOutreach.add(campaignId);
+    res.on("close", () => inFlightOutreach.delete(campaignId));
 
     if (req.audienceId) {
       try {
@@ -118,6 +140,23 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       }
     }
 
+    if (runFeatureSlug !== featureSlug) {
+      try {
+        serveSource = await resolveServeSource({
+          orgId: req.orgId!,
+          brandId,
+          outreachCampaignId: campaignId,
+          originSlug: runFeatureSlug,
+        });
+      } catch (err) {
+        console.error(
+          `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,
+          err,
+        );
+        throw err;
+      }
+    }
+
     // Create child run for traceability (x-run-id from caller becomes our parentRunId)
     const childRun = await createRun({
       orgId: req.orgId!,
@@ -126,7 +165,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       parentRunId: runId,
       userId: req.userId,
       brandId: req.brandId,
-      campaignId,
+      campaignId: serveSource.kind === "source" ? serveSource.campaignId : campaignId,
       workflowSlug,
       featureSlug: runFeatureSlug,
       goal: req.goal,
@@ -140,10 +179,13 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.status(500).json({ error: "Lead serve setup failed", detail: err instanceof Error ? err.message : String(err) });
   }
 
+  // The campaign the serve RUN (and every call under it) is filed under: the ON source campaign, else
+  // the outreach campaign as before.
+  const runCampaignId = serveSource.kind === "source" ? serveSource.campaignId : campaignId;
   const runMeta = {
     orgId: req.orgId,
     userId: req.userId,
-    campaignId,
+    campaignId: runCampaignId,
     brandId: req.brandId,
     workflowSlug,
     featureSlug: runFeatureSlug,
@@ -152,7 +194,31 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     audienceId: req.audienceId,
   };
 
-  traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}` }, req.headers).catch(() => {});
+  traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}, source=${serveSource.kind === "source" ? serveSource.campaignId : serveSource.kind}` }, req.headers).catch(() => {});
+
+  // The audience's origin is a source campaign that is OFF, or over its daily budget: nothing is
+  // bought, the empty answer names why (never exhaustion).
+  if (serveSource.kind === "refused") {
+    const refused = serveSource;
+    console.log(
+      `[lead-service] buffer/next found=false reason=${refused.reason} campaign=${campaignId} audience=${req.audienceId ?? "-"} origin=${runFeatureSlug}: ${refused.detail}`,
+    );
+    const result = { found: false, reason: refused.reason };
+    try {
+      await db.insert(idempotencyCache).values({ idempotencyKey: runId, orgId: req.orgId!, response: result });
+      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-done", detail: `found=false reason=${refused.reason}`, data: { found: false, reason: refused.reason, detail: refused.detail } }, req.headers).catch(() => {});
+      await updateRun(serveRunId, "completed", runMeta);
+    } catch (err) {
+      console.error(`[lead-service] buffer/next failed to close a refused serve runId=${runId}:`, err);
+      try {
+        await updateRun(serveRunId, "failed", runMeta);
+      } catch (runErr) {
+        console.error("[lead-service] Failed to close run after refused-serve error:", runErr);
+      }
+      return res.status(500).json({ error: "Internal server error" });
+    }
+    return res.json(result);
+  }
 
   const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
 
@@ -165,6 +231,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         brandId,
         featureSlug,
         runFeatureSlug,
+        runCampaignId,
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,
