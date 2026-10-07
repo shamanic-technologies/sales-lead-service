@@ -85,6 +85,7 @@ const baseParams = {
   brandIds: ["brand-1"],
   brandId: "brand-1",
   featureSlug: "lead-finder-v1",
+  runFeatureSlug: "sourcing-apollo-cold-filters",
   runId: "run-1",
   userId: "user-1",
   // Audience is selected by campaign-service and arrives as x-audience-id.
@@ -116,6 +117,13 @@ describe("pullNext (audience serve-next flow)", () => {
 
     // serve-next consumed for the campaign-selected audience, attributed to it
     expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1" }));
+    // what the serve buys downstream is labelled with the SOURCING origin...
+    expect(serveNext).toHaveBeenCalledWith(
+      "aud-1",
+      expect.objectContaining({ featureSlug: "sourcing-apollo-cold-filters" }),
+    );
+    // ...while the lead row keeps the OUTREACH channel it was served for
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
     // person persisted into silver
     expect(upsertLeadFromPerson).toHaveBeenCalledWith(person, { enriched: true });
     expect(insertValues).toHaveBeenCalledWith(

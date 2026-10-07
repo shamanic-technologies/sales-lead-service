@@ -11,6 +11,7 @@ import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
+import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 
 const router = Router();
 
@@ -56,17 +57,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   const workflowSlug = req.workflowSlug;
   const runId = req.runId as string;
 
-  const runMeta = {
-    orgId: req.orgId,
-    userId: req.userId,
-    campaignId,
-    brandId: req.brandId,
-    workflowSlug,
-    featureSlug: req.featureSlug,
-    goal: req.goal,
-    brandProfileId: req.brandProfileId,
-    audienceId: req.audienceId,
-  };
+  // The serve run and everything bought under it is SOURCING: it carries the audience's sourcing
+  // origin slug (src/lib/sourcing-origin.ts), resolved below. The outreach slug (`featureSlug`) stays
+  // on the lead row only. The run keeps the outreach slug when there is nothing to relabel: no
+  // audience (no_audience) or one serving from no list (audience_not_serveable) buys nothing, and an
+  // origin the channel's spend reads do not count is logged as an error and left where they count it.
+  let runFeatureSlug: string = featureSlug;
 
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
@@ -105,6 +101,23 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail: concurrentCheck.detail });
     }
 
+    if (req.audienceId) {
+      try {
+        const origin = await resolveSourcingOriginSlug({
+          audienceId: req.audienceId,
+          orgId: req.orgId!,
+          outreachFeatureSlug: featureSlug,
+        });
+        if (origin) runFeatureSlug = origin;
+      } catch (err) {
+        console.error(
+          `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
+          err,
+        );
+        throw err;
+      }
+    }
+
     // Create child run for traceability (x-run-id from caller becomes our parentRunId)
     const childRun = await createRun({
       orgId: req.orgId!,
@@ -115,7 +128,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       brandId: req.brandId,
       campaignId,
       workflowSlug,
-      featureSlug: req.featureSlug,
+      featureSlug: runFeatureSlug,
       goal: req.goal,
       brandProfileId: req.brandProfileId,
       audienceId: req.audienceId,
@@ -126,6 +139,18 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     traceEvent(runId, { service: "lead-service", event: "buffer-next-setup-failed", level: "error", detail: err instanceof Error ? err.message : String(err) }, req.headers).catch(() => {});
     return res.status(500).json({ error: "Lead serve setup failed", detail: err instanceof Error ? err.message : String(err) });
   }
+
+  const runMeta = {
+    orgId: req.orgId,
+    userId: req.userId,
+    campaignId,
+    brandId: req.brandId,
+    workflowSlug,
+    featureSlug: runFeatureSlug,
+    goal: req.goal,
+    brandProfileId: req.brandProfileId,
+    audienceId: req.audienceId,
+  };
 
   traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}` }, req.headers).catch(() => {});
 
@@ -139,6 +164,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         brandIds,
         brandId,
         featureSlug,
+        runFeatureSlug,
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,

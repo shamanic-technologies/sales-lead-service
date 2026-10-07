@@ -27,7 +27,13 @@ interface PullNextParams {
   brandIds: string[];
   /** Primary brand the audience is resolved for (per-brand audiences). */
   brandId: string;
+  /** The OUTREACH channel the lead is served for: written on the lead row, never on a run. */
   featureSlug: string;
+  /**
+   * The feature slug every downstream call of this serve carries (x-feature-slug): the audience's
+   * SOURCING origin (src/lib/sourcing-origin.ts), so what the serve buys is labelled as sourcing.
+   */
+  runFeatureSlug: string;
   parentRunId?: string | null;
   runId?: string | null;
   userId?: string | null;
@@ -117,7 +123,7 @@ export async function pullNext(
     brandId: params.brandId,
     campaignId: params.campaignId,
     workflowSlug: params.workflowSlug,
-    featureSlug: params.featureSlug,
+    featureSlug: params.runFeatureSlug,
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId,

@@ -49,6 +49,11 @@ vi.mock("../../src/lib/people-client.js", () => ({
   isAudienceNotServeableError: () => false,
 }));
 
+const resolveSourcingOriginSlug = vi.fn();
+vi.mock("../../src/lib/sourcing-origin.js", () => ({
+  resolveSourcingOriginSlug: (...a: unknown[]) => resolveSourcingOriginSlug(...a),
+}));
+
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
   PULL_NEXT_TIMEOUT_MS: 60_000,
@@ -59,16 +64,19 @@ const BRAND = "20000000-0000-0000-0000-000000000001";
 const RUN = "10000000-0000-0000-0000-000000000001";
 const CAMPAIGN = "40000000-0000-0000-0000-000000000001";
 
-function post(app: express.Express) {
-  return request(app)
+const AUDIENCE = "50000000-0000-0000-0000-000000000001";
+
+function post(app: express.Express, audienceId?: string) {
+  const r = request(app)
     .post("/orgs/buffer/next")
     .set("x-api-key", "test-api-key")
     .set("x-org-id", ORG)
     .set("x-run-id", RUN)
     .set("x-campaign-id", CAMPAIGN)
     .set("x-brand-id", BRAND)
-    .set("x-feature-slug", "lead-finder-v1")
-    .send({});
+    .set("x-feature-slug", "lead-finder-v1");
+  if (audienceId) r.set("x-audience-id", audienceId);
+  return r.send({});
 }
 
 describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
@@ -154,5 +162,74 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(res.body.lead.leadId).toBe("cached-1");
     expect(checkConcurrentBufferNext).not.toHaveBeenCalled();
     expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("labels the serve run with the audience's SOURCING origin, keeps the outreach slug for the lead row", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-buying-signals");
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(resolveSourcingOriginSlug).toHaveBeenCalledWith({
+      audienceId: AUDIENCE,
+      orgId: ORG,
+      outreachFeatureSlug: "lead-finder-v1",
+    });
+    // Parent link, campaign, audience unchanged; only the slug moves.
+    expect(createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskName: "lead-serve",
+        parentRunId: RUN,
+        campaignId: CAMPAIGN,
+        audienceId: AUDIENCE,
+        featureSlug: "sourcing-apollo-buying-signals",
+      }),
+    );
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ featureSlug: "lead-finder-v1", runFeatureSlug: "sourcing-apollo-buying-signals" }),
+      expect.anything(),
+    );
+    expect(updateRun).toHaveBeenCalledWith(
+      "serve-run-1",
+      "completed",
+      expect.objectContaining({ featureSlug: "sourcing-apollo-buying-signals" }),
+    );
+  });
+
+  it("fails loud (500, no run, no serve) when the sourcing origin cannot be resolved", async () => {
+    resolveSourcingOriginSlug.mockRejectedValueOnce(new Error("audience=x states no list kind"));
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Lead serve setup failed");
+    expect(res.body.detail).toContain("no list kind");
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("asks for no origin when no audience is named (nothing is bought)", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "no_audience" });
+
+    await post(app);
+
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
+  });
+
+  it("keeps the outreach slug when the audience serves from no list (nothing is bought)", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce(null);
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_not_serveable" });
+
+    await post(app, AUDIENCE);
+
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
   });
 });
