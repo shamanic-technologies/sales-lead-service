@@ -59,9 +59,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // The serve run and everything bought under it is SOURCING: it carries the audience's sourcing
   // origin slug (src/lib/sourcing-origin.ts), resolved below. The outreach slug (`featureSlug`) stays
-  // on the lead row only. With no audience (found:false no_audience) or an audience that serves from
-  // no list (audience_not_serveable) nothing is bought, so there is no origin and the run keeps the
-  // outreach slug.
+  // on the lead row only. The run keeps the outreach slug when there is nothing to relabel: no
+  // audience (no_audience) or one serving from no list (audience_not_serveable) buys nothing, and an
+  // origin the channel's spend reads do not count is logged as an error and left where they count it.
   let runFeatureSlug: string = featureSlug;
 
   // The idempotency lookup, in-flight guard, and child-run creation all run

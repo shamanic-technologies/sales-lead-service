@@ -42,7 +42,10 @@ describe("resolveSourcingOriginSlug", () => {
     const { resetSourcingOriginsCache } = await import("../../src/lib/sourcing-origin.js");
     resetSourcingOriginsCache();
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it("returns human-service's origin, asked with the org and the OUTREACH slug", async () => {
     const seen: Record<string, string>[] = [];
@@ -67,9 +70,11 @@ describe("resolveSourcingOriginSlug", () => {
     await expect(resolve()).rejects.toThrow(/no sourcingFeatureSlug/);
   });
 
-  it("refuses an origin the outreach channel does not count", async () => {
+  it("keeps the outreach label (null) and logs an error for an origin the channel does not count", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-crm-contacts" }));
-    await expect(resolve()).rejects.toThrow(/origin=sourcing-crm-contacts is not one the outreach channel counts/);
+    await expect(resolve()).resolves.toBeNull();
+    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/origin=sourcing-crm-contacts is not one the outreach channel counts/);
   });
 
   it("accepts the CRM origin under the CRM channel", async () => {
@@ -79,9 +84,11 @@ describe("resolveSourcingOriginSlug", () => {
     );
   });
 
-  it("refuses a channel the catalogue does not list as a sourcing channel", async () => {
+  it("keeps the outreach label (null) and logs an error for a channel that is not a sourcing channel", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-apollo-cold-filters" }));
-    await expect(resolve({ ...COLD, outreachFeatureSlug: "some-other-channel" })).rejects.toThrow(/not a sourcing channel/);
+    await expect(resolve({ ...COLD, outreachFeatureSlug: "some-other-channel" })).resolves.toBeNull();
+    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/not a sourcing channel/);
   });
 
   it("refuses a catalogue that states no originsByChannel", async () => {

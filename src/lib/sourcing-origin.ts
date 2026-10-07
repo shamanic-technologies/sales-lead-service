@@ -18,8 +18,10 @@ import { fetchWithRetry } from "./fetch-retry.js";
  * (`GET /orgs/audiences/{id}/sourcing-origin`, asked with the outreach slug, because the CRM channel
  * serves from the CRM whatever the audience's provider). features-service's catalogue states which
  * origins each outreach channel counts (`originsByChannel`): an origin its channel does not list would
- * drop that sourcing cost from the channel's spend figures, so it is refused. Anything that cannot be
- * resolved THROWS: a serve must never silently keep the outreach label.
+ * drop that sourcing cost from the channel's spend figures, so that serve keeps the OUTREACH label
+ * (where every spend read still counts it) and the mismatch is logged as an error, never silent and
+ * never a blocked campaign. Anything that cannot be READ throws: a serve must never silently keep the
+ * outreach label.
  */
 
 const ORIGINS_TTL_MS = 10 * 60 * 1000;
@@ -88,8 +90,9 @@ async function fetchAudienceOriginSlug(audienceId: string, orgId: string, outrea
 
 /**
  * The origin feature slug of the audience a serve draws from, checked against the outreach channel
- * the lead is served for. Null = the audience serves from no list: serve-next answers it
- * `audience_not_serveable` and buys nothing, so there is no sourcing spend to label. Throws
+ * the lead is served for. Null = keep the outreach label: the audience serves from no list
+ * (serve-next answers it `audience_not_serveable` and buys nothing), or its origin is one the
+ * channel's spend reads do not count (logged as an error). Throws
  * SourcingOriginUnresolvedError (audience, org, channel and cause in the message) on any failure.
  */
 export async function resolveSourcingOriginSlug(params: {
@@ -104,11 +107,12 @@ export async function resolveSourcingOriginSlug(params: {
   if (slug === null) return null;
   const where = `audience=${params.audienceId} org=${params.orgId} channel=${params.outreachFeatureSlug}`;
   const listed = byChannel.get(params.outreachFeatureSlug);
-  if (!listed) {
-    throw new SourcingOriginUnresolvedError(`outreach channel is not a sourcing channel in the features-service catalogue (${where})`);
-  }
-  if (!listed.has(slug)) {
-    throw new SourcingOriginUnresolvedError(`origin=${slug} is not one the outreach channel counts (${where})`);
+  if (!listed || !listed.has(slug)) {
+    console.error(
+      `[lead-service] sourcing origin NOT COUNTED by its channel, serve keeps the outreach label: origin=${slug} ` +
+        `${listed ? "is not one the outreach channel counts" : "channel is not a sourcing channel in the features-service catalogue"} (${where})`,
+    );
+    return null;
   }
   return slug;
 }
