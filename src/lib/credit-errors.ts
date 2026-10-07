@@ -14,6 +14,8 @@ function hasCreditInsufficientShape(value: unknown): boolean {
 
 export function isCreditInsufficientError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
+  // A qualification probe the org's balance cannot cover (src/lib/treg-client.ts).
+  if ((error as { name?: unknown }).name === "InsufficientCreditError") return true;
 
   const maybeStructured = error as {
     status?: unknown;

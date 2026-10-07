@@ -280,3 +280,85 @@ export async function serveNext(audienceId: string, ctx: ServiceContext): Promis
     { method: "POST", body: {}, ctx },
   );
 }
+
+// --- Candidates: the next person BEFORE the paid reveal (human-service#370) ---
+// lead-service qualifies a person before paying for them (owner 2026-10-07): human-service hands
+// out a free candidate (who, and their company), lead-service screens and checks it, then asks
+// human-service to REVEAL (billed, recorded as served exactly like serve-next) or DECLINE (never
+// offered again for that audience). Apollo audiences only: anything else answers 422 and keeps
+// serve-next.
+
+export interface CandidateCompany {
+  name: string | null;
+  domain: string | null;
+  industry: string | null;
+  employees: number | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  keywords: string[] | null;
+}
+
+export interface Candidate {
+  candidateId: string;
+  audienceId: string;
+  providerPersonId: string;
+  linkedinUrl: string | null;
+  offeredAt: string;
+  person: {
+    name: string | null;
+    title: string | null;
+    headline: string | null;
+    seniority: string | null;
+    city: string | null;
+    state: string | null;
+    country: string | null;
+  };
+  company: CandidateCompany;
+}
+
+export interface NextCandidateResult {
+  status: "candidate" | "exhausted" | "pending";
+  candidate: Candidate | null;
+  reason?: "pool_exhausted" | "yield_exhausted";
+  /** The audience text the screen judges against; null when the audience states none. */
+  target: { text: string; field: string } | null;
+}
+
+/** Thrown when human-service says this audience is not served through candidates (422). */
+export class CandidatesUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CandidatesUnsupportedError";
+  }
+}
+
+export async function nextCandidate(audienceId: string, ctx: ServiceContext): Promise<NextCandidateResult> {
+  try {
+    return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: {}, ctx });
+  } catch (error) {
+    if (error instanceof PeopleServiceError && error.status === 422) throw new CandidatesUnsupportedError(error.message);
+    throw error;
+  }
+}
+
+export interface RevealResult {
+  status: "served" | "not_served";
+  person: Person | null;
+  personId?: unknown;
+  replayed: boolean;
+}
+
+export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext): Promise<RevealResult> {
+  return callHuman<RevealResult>(
+    `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/reveal`,
+    { method: "POST", body: { basis }, ctx },
+  );
+}
+
+export async function declineCandidate(audienceId: string, candidateId: string, reason: string, basis: string, ctx: ServiceContext): Promise<void> {
+  await callHuman<{ declined: boolean }>(
+    `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/decline`,
+    { method: "POST", body: { reason, basis }, ctx },
+  );
+}

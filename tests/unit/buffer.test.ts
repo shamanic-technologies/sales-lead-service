@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Person } from "../../src/lib/people-client.js";
 
 const serveNext = vi.fn();
+// The candidate path (qualify before paying) has its own suite: tests/unit/candidate-serve.test.ts.
+// Here every audience answers "not served through candidates", so pullNext uses serve-next.
+vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: vi.fn(async () => null) }));
+
 vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
 }));
@@ -124,6 +128,22 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(result.lead?.audienceId).toBe("aud-1");
     expect(result.lead?.apolloPersonId).toBe("apollo-person-1");
     expect(result.lead?.data).toEqual({ leadId: "lead-1", firstName: "Sara" });
+  });
+
+  it("a person qualified and revealed through candidates is recorded the same way, and serve-next is never asked", async () => {
+    const { serveThroughCandidates } = await import("../../src/lib/candidate-serve.js");
+    vi.mocked(serveThroughCandidates).mockResolvedValueOnce({ status: "served", person, personId: "8d2f6c1e-3b4a-4f5e-9a7b-1c2d3e4f5a6b" });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    const result = await pullNext(baseParams);
+
+    expect(serveThroughCandidates).toHaveBeenCalledWith("aud-1", expect.objectContaining({ audienceId: "aud-1", orgId: "org-1" }), undefined);
+    expect(serveNext).not.toHaveBeenCalled();
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", status: "served", personId: "8d2f6c1e-3b4a-4f5e-9a7b-1c2d3e4f5a6b" }));
+    expect(result.found).toBe(true);
   });
 
   it("fetches the brand goal and uses it for attribution/storage (NOT for selection)", async () => {
