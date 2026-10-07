@@ -379,6 +379,13 @@
       "when": 1784419200000,
       "tag": "0053_qualification_offer",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "7",
+      "when": 1784505600000,
+      "tag": "0054_instant_call_followup_actions",
+      "breakpoints": true
     }
   ]
 }
