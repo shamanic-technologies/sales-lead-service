@@ -6,33 +6,35 @@ vi.mock("../../src/config.js", () => ({
   HUMAN_SERVICE_API_KEY: "human-key",
 }));
 
-const ORIGINS = {
-  origins: [
-    { slug: "sourcing-apollo-cold-filters", audienceLists: ["apollo_search"] },
-    { slug: "sourcing-apollo-buying-signals", audienceLists: ["apollo_buying_signal"] },
-    { slug: "sourcing-crm-contacts", audienceLists: ["crm_contacts"] },
-  ],
+const CATALOGUE = {
+  origins: [],
   sourcingChannels: ["sales-cold-email-outreach", "sales-crm-email-outreach"],
   originsByChannel: {
     "sales-cold-email-outreach": ["sourcing-apollo-cold-filters", "sourcing-apollo-buying-signals"],
     "sales-crm-email-outreach": ["sourcing-crm-contacts"],
   },
 };
-const COLD = { orgId: "org-1", outreachFeatureSlug: "sales-cold-email-outreach" };
+const COLD = { audienceId: "aud-1", orgId: "org-1", outreachFeatureSlug: "sales-cold-email-outreach" };
 
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-function route(audience: unknown, origins: unknown = ORIGINS, audienceStatus = 200) {
+/** human-service answers `origin` (or `status`), features-service answers `catalogue`. */
+function route(origin: unknown, opts: { status?: number; catalogue?: unknown; seen?: Record<string, string>[] } = {}) {
   return vi.fn(async (url: string, init?: RequestInit) => {
-    if (url === "http://features/public/sourcing-origins") return json(origins);
-    if (url.startsWith("http://human/orgs/audiences/")) {
-      expect((init?.headers as Record<string, string>)["x-org-id"]).toBe("org-1");
-      return json(audience, audienceStatus);
+    if (url === "http://features/public/sourcing-origins") return json(opts.catalogue ?? CATALOGUE);
+    if (url === "http://human/orgs/audiences/aud-1/sourcing-origin") {
+      opts.seen?.push(init?.headers as Record<string, string>);
+      return json(origin, opts.status ?? 200);
     }
     throw new Error(`unexpected ${url}`);
   });
+}
+
+async function resolve(params = COLD) {
+  const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
+  return resolveSourcingOriginSlug(params);
 }
 
 describe("resolveSourcingOriginSlug", () => {
@@ -42,67 +44,48 @@ describe("resolveSourcingOriginSlug", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("maps the audience's list kind to its origin slug through the catalogue", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "apollo_buying_signal" }] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).resolves.toBe(
-      "sourcing-apollo-buying-signals",
-    );
+  it("returns human-service's origin, asked with the org and the OUTREACH slug", async () => {
+    const seen: Record<string, string>[] = [];
+    vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-apollo-buying-signals" }, { seen }));
+    await expect(resolve()).resolves.toBe("sourcing-apollo-buying-signals");
+    expect(seen[0]["x-org-id"]).toBe("org-1");
+    expect(seen[0]["x-feature-slug"]).toBe("sales-cold-email-outreach");
   });
 
-  it("throws when the audience states no list kind", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(/no list kind/);
+  it("returns null when the audience serves from no list (422): nothing will be bought", async () => {
+    vi.stubGlobal("fetch", route({ error: "no committed provider" }, { status: 422 }));
+    await expect(resolve()).resolves.toBeNull();
   });
 
-  it("throws when the catalogue has no origin for the list kind", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "linkedin_engagement" }] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(
-      /no sourcing origin.*linkedin_engagement/,
-    );
+  it("throws when human-service cannot answer", async () => {
+    vi.stubGlobal("fetch", route({ error: "features-service down" }, { status: 502 }));
+    await expect(resolve()).rejects.toThrow(/502/);
   });
 
-  it("throws when human-service cannot read the audience", async () => {
-    vi.stubGlobal("fetch", route({ error: "Audience not found" }, ORIGINS, 404));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(/404/);
+  it("throws when human-service answers no slug", async () => {
+    vi.stubGlobal("fetch", route({ audienceId: "aud-1", list: "apollo_search" }));
+    await expect(resolve()).rejects.toThrow(/no sourcingFeatureSlug/);
   });
 
-  it("throws when the catalogue read is unreadable", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "apollo_search" }] } }, { nope: true }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(/origins list/);
-  });
-
-  it("refuses an origin the outreach channel does not count (a CRM audience under cold email)", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "crm_contacts" }] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(
-      /origin=sourcing-crm-contacts is not one the outreach channel counts/,
-    );
+  it("refuses an origin the outreach channel does not count", async () => {
+    vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-crm-contacts" }));
+    await expect(resolve()).rejects.toThrow(/origin=sourcing-crm-contacts is not one the outreach channel counts/);
   });
 
   it("accepts the CRM origin under the CRM channel", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "crm_contacts" }] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(
-      resolveSourcingOriginSlug({ audienceId: "aud-1", orgId: "org-1", outreachFeatureSlug: "sales-crm-email-outreach" }),
-    ).resolves.toBe("sourcing-crm-contacts");
+    vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-crm-contacts" }));
+    await expect(resolve({ ...COLD, outreachFeatureSlug: "sales-crm-email-outreach" })).resolves.toBe(
+      "sourcing-crm-contacts",
+    );
   });
 
   it("refuses a channel the catalogue does not list as a sourcing channel", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "apollo_search" }] } }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(
-      resolveSourcingOriginSlug({ audienceId: "aud-1", orgId: "org-1", outreachFeatureSlug: "some-other-channel" }),
-    ).rejects.toThrow(/not a sourcing channel/);
+    vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-apollo-cold-filters" }));
+    await expect(resolve({ ...COLD, outreachFeatureSlug: "some-other-channel" })).rejects.toThrow(/not a sourcing channel/);
   });
 
   it("refuses a catalogue that states no originsByChannel", async () => {
-    vi.stubGlobal("fetch", route({ audience: { channels: [{ list: "apollo_search" }] } }, { origins: ORIGINS.origins }));
-    const { resolveSourcingOriginSlug } = await import("../../src/lib/sourcing-origin.js");
-    await expect(resolveSourcingOriginSlug({ audienceId: "aud-1", ...COLD })).rejects.toThrow(/originsByChannel/);
+    vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-apollo-cold-filters" }, { catalogue: { origins: [] } }));
+    await expect(resolve()).rejects.toThrow(/originsByChannel/);
   });
 });

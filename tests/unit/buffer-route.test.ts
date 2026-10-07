@@ -221,4 +221,15 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
     expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
   });
+
+  it("keeps the outreach slug when the audience serves from no list (nothing is bought)", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce(null);
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_not_serveable" });
+
+    await post(app, AUDIENCE);
+
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
+  });
 });

@@ -59,8 +59,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // The serve run and everything bought under it is SOURCING: it carries the audience's sourcing
   // origin slug (src/lib/sourcing-origin.ts), resolved below. The outreach slug (`featureSlug`) stays
-  // on the lead row only. With no audience nothing is looked at or bought (found:false no_audience),
-  // so there is no origin to name and the run keeps the outreach slug.
+  // on the lead row only. With no audience (found:false no_audience) or an audience that serves from
+  // no list (audience_not_serveable) nothing is bought, so there is no origin and the run keeps the
+  // outreach slug.
   let runFeatureSlug: string = featureSlug;
 
   // The idempotency lookup, in-flight guard, and child-run creation all run
@@ -102,11 +103,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     if (req.audienceId) {
       try {
-        runFeatureSlug = await resolveSourcingOriginSlug({
+        const origin = await resolveSourcingOriginSlug({
           audienceId: req.audienceId,
           orgId: req.orgId!,
           outreachFeatureSlug: featureSlug,
         });
+        if (origin) runFeatureSlug = origin;
       } catch (err) {
         console.error(
           `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
