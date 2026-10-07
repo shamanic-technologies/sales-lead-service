@@ -20,7 +20,7 @@ import {
   readFollowupState,
   writeFollowupStatement,
 } from "../lib/followup-queue.js";
-import { readFollowupActions } from "../lib/followup-actions.js";
+import { readFollowupActions, recordActedByEmail } from "../lib/followup-actions.js";
 
 const router = Router();
 
@@ -42,6 +42,10 @@ const FollowupStatementBodySchema = z.object({
   dueAt: z.string().optional(),
   nextDueAt: z.string().optional(),
   reason: z.string().optional(),
+});
+
+const ActedByEmailBodySchema = z.object({
+  email: z.string().trim().min(3).max(320),
 });
 
 const ScheduleByEmailBodySchema = z.object({
@@ -239,6 +243,83 @@ router.post(
     );
 
     res.json({ followup: state, leadId: lookup.leadId, email: lookup.email });
+  }),
+);
+
+/**
+ * An acting campaign acted on a person OUTSIDE the queue: record it in the follow-up ledger.
+ *
+ * AI Instant Call rings the brand's rep about a sales-interest reply under its own campaign and
+ * never claims anybody here, so without this door its conversation counts read zero while it was
+ * placing calls. The path campaign is the one that HOLDS the person (the campaign that sent the
+ * email they replied to); `x-campaign-id` is the campaign that acted; `x-run-id` is the act's run
+ * and makes a retry a no-op. Identified exactly like schedule-by-email. Nothing about the queue
+ * moves: this is a record of the act, not a follow-up statement.
+ */
+router.post(
+  "/orgs/campaigns/:campaignId/followup-actions/by-email",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const campaignId = req.params.campaignId;
+    if (!campaignId) {
+      res.status(400).json({ error: "campaignId required" });
+      return;
+    }
+    if (!req.campaignId) {
+      res.status(400).json({ error: "x-campaign-id (the campaign that acted) is required", code: "acting_campaign_required" });
+      return;
+    }
+    if (!req.runId) {
+      res.status(400).json({ error: "x-run-id (the run of the act) is required", code: "run_required" });
+      return;
+    }
+
+    const parsed = ActedByEmailBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+
+    const lookup = await lookupFollowupRowByEmail({
+      orgId: req.orgId as string,
+      campaignId,
+      email: parsed.data.email,
+    });
+    if (!lookup.ok) {
+      if (lookup.code === "ambiguous_lead") {
+        res.status(409).json({
+          error: "That address matches more than one lead row on this campaign, so who was acted on cannot be decided here",
+          code: "ambiguous_lead",
+          matches: lookup.matches,
+        });
+        return;
+      }
+      res.status(404).json({ error: "No lead on this campaign holds that email address", code: "lead_not_found" });
+      return;
+    }
+
+    const outcome = await recordActedByEmail({
+      orgId: req.orgId as string,
+      leadCampaignId: lookup.id,
+      actingCampaignId: req.campaignId,
+      runId: req.runId,
+      nowIso: new Date().toISOString(),
+    });
+    if (outcome === "row_gone") {
+      res.status(404).json({ error: "No lead on this campaign holds that email address", code: "lead_not_found" });
+      return;
+    }
+
+    console.log(
+      `[lead-service] followup action by email ${outcome} held=${campaignId} acting=${req.campaignId} leadCampaignId=${lookup.id} run=${req.runId}`,
+    );
+    res.status(outcome === "recorded" ? 201 : 200).json({
+      outcome,
+      leadCampaignId: lookup.id,
+      leadId: lookup.leadId,
+      email: lookup.email,
+    });
   }),
 );
 
