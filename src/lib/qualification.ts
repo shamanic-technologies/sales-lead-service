@@ -121,8 +121,17 @@ export function companyDataContent(org: OrganizationView): string {
 /** Two criteria asking the same question through the same probe share their verdicts. */
 export function criterionKey(question: string, spec: ProbeSpec): string {
   const q = question.trim().replace(/\s+/g, " ").toLowerCase();
-  return createHash("sha256").update(`${q}\n${probeKey(spec)}`).digest("hex");
+  return createHash("sha256").update(`${JUDGE_VERSION}\n${q}\n${probeKey(spec)}`).digest("hex");
 }
+
+/**
+ * Bumped whenever what the judge is asked changes, so verdicts frozen under the old wording are
+ * re-judged on their stored observation (no probe is paid again). v2: the readability gate asks
+ * whether the observation is a usable reading of THIS company's source, never whether it "contains
+ * enough to answer" (a full homepage with no newsletter form IS the answer no; v1 read it as
+ * unavailable on 5 of 12 prod leads).
+ */
+export const JUDGE_VERSION = "v2";
 
 export function probeLabel(spec: ProbeSpec): string {
   return spec.kind === "company_data" ? "Company data we hold" : spec.label;
@@ -137,6 +146,10 @@ export function contentOfAnswer(body: unknown): string {
   let v = body;
   if (v && typeof v === "object" && "output" in (v as Record<string, unknown>) && "_treg" in (v as Record<string, unknown>)) {
     v = (v as Record<string, unknown>).output;
+  }
+  // A scraper's page text, without its envelope (bytes, cache, ladder...): what the judge should read.
+  if (v && typeof v === "object" && typeof (v as Record<string, unknown>).markdown === "string") {
+    v = (v as Record<string, unknown>).markdown;
   }
   const s = typeof v === "string" ? v : JSON.stringify(v);
   return s.length > MAX_STATE_CHARS ? s.slice(0, MAX_STATE_CHARS) : s;
@@ -325,9 +338,10 @@ export async function judge(criterion: { question: string; probe: ProbeSpec }, o
       state,
       {
         answerable: {
-          instructions: `Does the observation contain enough information to answer this question about the company: "${criterion.question}"?`,
-          whenTrue: "The observation is about this company and shows the facts the question needs, either way.",
-          whenFalse: "The observation is empty, blocked (cookie wall, error page, login), about another company, or silent on what the question needs.",
+          instructions: `Is this observation a usable reading of the company's ${probeLabel(criterion.probe).toLowerCase()}?`,
+          whenTrue:
+            "It is a real reading of this company's source, so whatever it shows or does not show is a fact about the company. The absence of something in a complete reading counts as an answer.",
+          whenFalse: "It is empty, an error page, a cookie or login wall, a bot challenge, or clearly about another company.",
         },
         holds: {
           instructions: criterion.question,

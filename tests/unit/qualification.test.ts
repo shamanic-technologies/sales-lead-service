@@ -28,6 +28,7 @@ describe("qualification helpers", () => {
   it("reads the routed output, and truncates a huge answer", () => {
     expect(contentOfAnswer({ output: { jobs: [1] }, _treg: { served_by: "x" }, raw: {} })).toBe('{"jobs":[1]}');
     expect(contentOfAnswer("x".repeat(200_000)).length).toBe(100_000);
+    expect(contentOfAnswer({ bytes: 1, ladder: [], markdown: "# Acme\nSubscribe" })).toBe("# Acme\nSubscribe");
   });
 
   it("the same question through the same probe is one judgment identity, whatever the case and spacing", () => {
