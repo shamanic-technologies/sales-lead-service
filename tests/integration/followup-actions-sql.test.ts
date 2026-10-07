@@ -21,7 +21,9 @@ const { leads, leadContactMethods, leadsCampaigns, followupActions } = await imp
 const { claimFollowup, pickFollowupCandidate, writeFollowupStatement } = await import(
   "../../src/lib/followup-queue.js"
 );
-const { readFollowupActions } = await import("../../src/lib/followup-actions.js");
+const { readFollowupActions, recordActedByEmail, readConversationCounts } = await import(
+  "../../src/lib/followup-actions.js"
+);
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -173,5 +175,35 @@ describe.skipIf(!hasRealDatabase)("follow-up actions ledger against a real datab
     await insert();
     const ledger = await db.select().from(followupActions).where(eq(followupActions.leadCampaignId, row.id));
     expect(ledger).toHaveLength(1);
+  });
+  it("an act outside the queue (AI Instant Call) is recorded once per run and counted for the acting campaign", async () => {
+    const row = await seedDueRow();
+    const nowIso = new Date().toISOString();
+    const rec = (runId: string, org = orgId) =>
+      recordActedByEmail({ orgId: org, leadCampaignId: row.id, actingCampaignId: acting, runId, nowIso });
+
+    expect(await rec("ring-1")).toBe("recorded");
+    expect(await rec("ring-1")).toBe("already_recorded");
+    expect(await rec("ring-1", randomUUID())).toBe("row_gone");
+
+    const ledger = await db.select().from(followupActions).where(eq(followupActions.leadCampaignId, row.id));
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]).toMatchObject({
+      action: "acted",
+      actingCampaignId: acting,
+      heldByCampaignId: heldBy,
+      leadId: row.leadId,
+      runId: "ring-1",
+      source: "acted_by_email",
+      sourceRef: "run:ring-1",
+    });
+
+    // The seeded row still owes a follow-up, so the person is ongoing; the partition holds.
+    const counts = await readConversationCounts({ orgId, campaignId: acting, nowMs: Date.now() });
+    expect(counts).toEqual({ handed: 1, ongoing: 1, meetingsBooked: 0, dropped: 0 });
+    // A sibling acting campaign is untouched.
+    expect(await readConversationCounts({ orgId, campaignId: otherActing, nowMs: Date.now() })).toEqual({
+      handed: 0, ongoing: 0, meetingsBooked: 0, dropped: 0,
+    });
   });
 });

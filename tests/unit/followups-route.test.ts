@@ -6,8 +6,14 @@ const pickFollowupCandidate = vi.fn();
 const readFollowupState = vi.fn();
 const writeFollowupStatement = vi.fn();
 const lookupFollowupRowByEmail = vi.fn();
+const recordActedByEmail = vi.fn();
 
 vi.mock("../../src/config.js", () => ({ LEAD_SERVICE_API_KEY: "test-api-key" }));
+
+vi.mock("../../src/lib/followup-actions.js", async (orig) => ({
+  ...((await orig()) as Record<string, unknown>),
+  recordActedByEmail: (...a: unknown[]) => recordActedByEmail(...a),
+}));
 
 vi.mock("../../src/lib/followup-queue.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
@@ -395,6 +401,64 @@ describe("POST /orgs/campaigns/:campaignId/followups/schedule-by-email", () => {
   it("500 on an unexpected failure — the socket is answered, never hung", async () => {
     lookupFollowupRowByEmail.mockRejectedValue(new Error("boom"));
     const res = await request(app).post(url).set(auth).send({ email: "a@b.com", dueAt: dueNow() });
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("POST /orgs/campaigns/:campaignId/followup-actions/by-email", () => {
+  const url = "/orgs/campaigns/camp-held/followup-actions/by-email";
+  const headers = { ...auth, "x-campaign-id": "camp-aic", "x-run-id": "ring-run-1" };
+
+  beforeEach(() => {
+    recordActedByEmail.mockReset();
+    lookupFollowupRowByEmail.mockReset();
+  });
+
+  it("records the act for the acting campaign on the holding campaign's row (201)", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "P@x.com" });
+    recordActedByEmail.mockResolvedValue("recorded");
+    const res = await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ outcome: "recorded", leadCampaignId: ROW, leadId: "lead-1", email: "P@x.com" });
+    expect(lookupFollowupRowByEmail).toHaveBeenCalledWith({ orgId: "org-1", campaignId: "camp-held", email: "p@x.com" });
+    expect(recordActedByEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-1", leadCampaignId: ROW, actingCampaignId: "camp-aic", runId: "ring-run-1" }),
+    );
+  });
+
+  it("a retry of the same run answers 200 already_recorded", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "p@x.com" });
+    recordActedByEmail.mockResolvedValue("already_recorded");
+    const res = await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(res.status).toBe(200);
+    expect(res.body.outcome).toBe("already_recorded");
+  });
+
+  it("400 without x-campaign-id or x-run-id, nothing written", async () => {
+    const noActing = await request(app).post(url).set({ ...auth, "x-run-id": "r" }).send({ email: "p@x.com" });
+    expect(noActing.status).toBe(400);
+    expect(noActing.body.code).toBe("acting_campaign_required");
+    const noRun = await request(app).post(url).set({ ...auth, "x-campaign-id": "c" }).send({ email: "p@x.com" });
+    expect(noRun.status).toBe(400);
+    expect(noRun.body.code).toBe("run_required");
+    expect(recordActedByEmail).not.toHaveBeenCalled();
+  });
+
+  it("404 lead_not_found and 409 ambiguous_lead are named refusals", async () => {
+    lookupFollowupRowByEmail.mockResolvedValueOnce({ ok: false, code: "lead_not_found" });
+    const nf = await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(nf.status).toBe(404);
+    expect(nf.body.code).toBe("lead_not_found");
+    lookupFollowupRowByEmail.mockResolvedValueOnce({ ok: false, code: "ambiguous_lead", matches: [] });
+    const amb = await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(amb.status).toBe(409);
+    expect(recordActedByEmail).not.toHaveBeenCalled();
+  });
+
+  it("500 when the write throws (never a hung socket)", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "p@x.com" });
+    recordActedByEmail.mockRejectedValue(new Error("db down"));
+    const res = await request(app).post(url).set(headers).send({ email: "p@x.com" });
     expect(res.status).toBe(500);
   });
 });

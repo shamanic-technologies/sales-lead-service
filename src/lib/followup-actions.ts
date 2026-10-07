@@ -53,6 +53,54 @@ export function followupActionInsert(
   `;
 }
 
+/** The `source` of a ledger row recorded through the by-email door (an act outside the queue). */
+export const ACTED_BY_EMAIL_SOURCE = "acted_by_email";
+
+/**
+ * Record that an acting campaign acted on one person WITHOUT going through the queue.
+ *
+ * AI Instant Call (leg conversation_to_booking_call) is the case: instantly-service rings the
+ * brand's rep the moment a reply is qualified as a sales interest, under the AI Instant Call
+ * campaign, and never claims anybody here. So the ledger never heard of that campaign and its
+ * conversation counts read zero while it was placing calls. This writes the same `acted` row a
+ * queue worker's statement writes, on the lifecycle row of the campaign that HOLDS the person.
+ *
+ * Idempotent per act: `source_ref` is `run:<the act's run id>` (one ring = one root run), so a
+ * retried request writes nothing new. The row is located with `org_id` in the predicate: a foreign
+ * row records nothing.
+ */
+export async function recordActedByEmail(params: {
+  orgId: string;
+  leadCampaignId: string;
+  actingCampaignId: string;
+  runId: string;
+  nowIso: string;
+}): Promise<"recorded" | "already_recorded" | "row_gone"> {
+  const sourceRef = `run:${params.runId}`;
+  const rows = (await db.execute(sql`
+    WITH target AS (
+      SELECT id, org_id, brand_ids, lead_id, campaign_id
+      FROM leads_campaigns
+      WHERE id = ${params.leadCampaignId}::uuid AND org_id = ${params.orgId}
+    ),
+    ins AS (
+      INSERT INTO followup_actions
+        (org_id, brand_ids, lead_campaign_id, lead_id, held_by_campaign_id,
+         acting_campaign_id, run_id, action, occurred_at, source, source_ref)
+      SELECT org_id, brand_ids, id, lead_id, campaign_id,
+             ${params.actingCampaignId}, ${params.runId}, 'acted', ${params.nowIso}::timestamptz,
+             ${ACTED_BY_EMAIL_SOURCE}, ${sourceRef}
+      FROM target
+      ON CONFLICT (source_ref) WHERE source_ref IS NOT NULL DO NOTHING
+      RETURNING id
+    )
+    SELECT (SELECT count(*) FROM target) AS targets, (SELECT count(*) FROM ins) AS inserted
+  `)) as unknown as Array<{ targets: number | string; inserted: number | string }>;
+  if (Number(rows[0].inserted) > 0) return "recorded";
+  if (Number(rows[0].targets) === 0) return "row_gone";
+  return "already_recorded";
+}
+
 /** One person one acting campaign acted on, with both facts and their dates. */
 export interface FollowupActedLead {
   actingCampaignId: string;

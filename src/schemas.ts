@@ -4849,6 +4849,88 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/orgs/campaigns/{campaignId}/followup-actions/by-email",
+  summary: "Record that a campaign acted on a person outside the follow-up queue",
+  description:
+    "For an acting campaign that never claims through the queue — AI Instant Call rings the " +
+    "brand's rep about a sales-interest reply under its own campaign. Writes one 'acted' row in the " +
+    "follow-up ledger on the lifecycle row of the campaign that HOLDS the person (the path " +
+    "campaign: the one that sent the email they replied to), with the campaign that ACTED taken " +
+    "from x-campaign-id (required). That is what GET /orgs/leads/conversation-counts?campaignId=<acting> " +
+    "and /internal/brands/{brandId}/followup-actions read. x-run-id (required) is the act's run: " +
+    "a retry with the same run records nothing new (200 already_recorded). Identification is the " +
+    "same EXACT case-folded email match as schedule-by-email (404 lead_not_found, 409 " +
+    "ambiguous_lead). The queue itself does not move.",
+  request: {
+    params: z.object({
+      campaignId: z.string().openapi({
+        param: { name: "campaignId", in: "path" },
+        description: "The campaign that HOLDS the person (sent the email they replied to).",
+        example: "camp-1",
+      }),
+    }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              email: z.string().openapi({
+                description: "The person's email address, matched exactly (case-folded).",
+                example: "prospect@example.com",
+              }),
+            })
+            .openapi("FollowupActedByEmailRequest"),
+        },
+      },
+    },
+  },
+  parameters: [
+    ...FollowupOrgHeaders.filter((h) => h.name !== "x-run-id"),
+    {
+      in: "header" as const,
+      name: "x-campaign-id",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The campaign that ACTED (e.g. the AI Instant Call campaign).",
+    },
+    {
+      in: "header" as const,
+      name: "x-run-id",
+      required: true,
+      schema: { type: "string" as const },
+      description: "The act's run (one ring = one root run); a retry with the same run records nothing new.",
+    },
+  ],
+  responses: {
+    201: {
+      description: "Recorded",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              outcome: z.enum(["recorded", "already_recorded"]),
+              leadCampaignId: z.string(),
+              leadId: z.string(),
+              email: z.string().openapi({ description: "The registered address, as stored." }),
+            })
+            .openapi("FollowupActedByEmailResponse"),
+        },
+      },
+    },
+    200: { description: "Already recorded for this run (same body, outcome already_recorded)" },
+    400: {
+      description:
+        "Missing campaignId or x-org-id, missing x-campaign-id (code acting_campaign_required), missing x-run-id (code run_required), or a missing/invalid email",
+    },
+    401: { description: "Unauthorized" },
+    404: { description: "No lead on this campaign holds that email address (code lead_not_found)" },
+    409: { description: "That address matches more than one lead row on this campaign (code ambiguous_lead)" },
+    500: { description: "Internal server error" },
+  },
+});
+
 const ScheduleFollowupByEmailRequestSchema = z
   .object({
     email: z.string().openapi({
