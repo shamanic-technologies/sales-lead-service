@@ -11,6 +11,7 @@ import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
+import qualificationRoutes from "./routes/qualification.js";
 import wonLeadsRoutes from "./routes/won-leads.js";
 import statsRoutes from "./routes/stats.js";
 import transferBrandRoutes from "./routes/transfer-brand.js";
@@ -60,6 +61,7 @@ app.use(bufferRoutes);
 app.use(crmPairingsRoutes);
 // Literal `/orgs/leads/crm-evidence/*` paths — registered before `/orgs/leads/:id`.
 app.use(crmEvidenceRoutes);
+app.use(qualificationRoutes);
 app.use(leadsRoutes);
 app.use(wonLeadsRoutes);
 app.use(statsRoutes);
