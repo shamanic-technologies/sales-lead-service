@@ -24,6 +24,10 @@
  *   audience_not_serveable — the named audience has no committed provider, so it cannot be
  *                            walked yet. Its population is unknown, not empty.
  *   credit_insufficient    — the org has no platform credit, so no paid search/enrichment ran.
+ *   source_campaign_off    — the audience's origin is a SOURCE campaign of the offer that is OFF
+ *                            (src/lib/source-campaign.ts): nothing is bought from a source the
+ *                            customer did not turn on. Says nothing about the audience's people.
+ *   source_budget_reached  — that source campaign already spent its daily budget today.
  *
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
@@ -35,6 +39,8 @@ export const NO_AUDIENCE_REASON = "no_audience" as const;
 export const SERVE_TIMED_OUT_REASON = "serve_timed_out" as const;
 export const AUDIENCE_NOT_SERVEABLE_REASON = "audience_not_serveable" as const;
 export const CREDIT_INSUFFICIENT_REASON = "credit_insufficient" as const;
+export const SOURCE_CAMPAIGN_OFF_REASON = "source_campaign_off" as const;
+export const SOURCE_BUDGET_REACHED_REASON = "source_budget_reached" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -43,6 +49,8 @@ export const SERVE_EMPTY_REASONS = [
   SERVE_TIMED_OUT_REASON,
   AUDIENCE_NOT_SERVEABLE_REASON,
   CREDIT_INSUFFICIENT_REASON,
+  SOURCE_CAMPAIGN_OFF_REASON,
+  SOURCE_BUDGET_REACHED_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];

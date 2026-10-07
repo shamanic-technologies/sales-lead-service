@@ -36,6 +36,12 @@ interface PullNextParams {
    * SOURCING origin (src/lib/sourcing-origin.ts), so what the serve buys is labelled as sourcing.
    */
   runFeatureSlug: string;
+  /**
+   * The campaign every downstream call of this serve carries (x-campaign-id): the ON SOURCE campaign
+   * that finds the lead (src/lib/source-campaign.ts), else the outreach campaign. Lead rows, the
+   * retry pool and the offer read stay on `campaignId` (the outreach campaign that works the lead).
+   */
+  runCampaignId?: string;
   parentRunId?: string | null;
   runId?: string | null;
   userId?: string | null;
@@ -128,7 +134,7 @@ export async function pullNext(
     userId: params.userId ?? null,
     runId: params.runId ?? null,
     brandId: params.brandId,
-    campaignId: params.campaignId,
+    campaignId: params.runCampaignId ?? params.campaignId,
     workflowSlug: params.workflowSlug,
     featureSlug: params.runFeatureSlug,
     activeGoalId: params.activeGoalId ?? undefined,
@@ -171,7 +177,7 @@ export async function pullNext(
           userId: params.userId ?? null,
           runId: params.runId,
           brandId: params.brandId,
-          campaignId: params.campaignId,
+          campaignId: params.runCampaignId ?? params.campaignId,
           workflowSlug: params.workflowSlug ?? null,
           featureSlug: params.runFeatureSlug,
         }
