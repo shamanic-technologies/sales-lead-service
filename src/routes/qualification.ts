@@ -33,6 +33,7 @@ import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, probeSpecProblems } from "../lib/qu
 import {
   MAX_SAMPLE,
   generateSuggestions,
+  SuggestionDraftUnreadableError,
   leadsOfBrand,
   readLeadQualification,
   recentServedLeadIds,
@@ -154,11 +155,16 @@ router.post(
     try {
       identity = await openRun(req, res, req.params.brandId, "qualification-suggestions");
       if (!identity) return;
-      const rows = await generateSuggestions({ ...offerScope(req), identity });
+      const { rows, dropped } = await generateSuggestions({ ...offerScope(req), identity });
       await closeRun(identity, true);
-      res.json({ criteria: await serializeCriteria(rows), runId: identity.runId });
+      res.json({ criteria: await serializeCriteria(rows), dropped, runId: identity.runId });
     } catch (error) {
       if (identity) await closeRun(identity, false).catch((e) => console.error("[lead-service] closing run failed:", e));
+      if (error instanceof SuggestionDraftUnreadableError) {
+        console.error(`[lead-service] qualification suggestions failed: ${error.message}`);
+        res.status(502).json({ error: "The AI answered in a shape we could not read; asking again usually works", code: "suggestion_draft_unreadable", runId: identity?.runId ?? null });
+        return;
+      }
       fail(res, error, "qualification suggestions");
     }
   }),

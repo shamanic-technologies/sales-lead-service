@@ -218,11 +218,26 @@ describe("PATCH / DELETE criterion", () => {
 
 describe("POST suggestions", () => {
   it("writes them as criteria of the offer and returns them with pass rates", async () => {
-    generateSuggestions.mockResolvedValue([{ ...criterion, enabled: false, origin: "suggested", why: "Slow sites lose buyers." }]);
+    generateSuggestions.mockResolvedValue({
+      rows: [{ ...criterion, enabled: false, origin: "suggested", why: "Slow sites lose buyers." }],
+      dropped: [{ question: "Is it in retail?", reason: "firmographic_not_universal" }],
+    });
     const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
     expect(res.status).toBe(200);
+    expect(res.body.dropped).toEqual([{ question: "Is it in retail?", reason: "firmographic_not_universal" }]);
     expect(generateSuggestions.mock.calls[0][0]).toMatchObject({ orgId: "org-1", brandId: "b1", offerId: "offer-a", identity: { runId: "run-child" } });
     expect(res.body.criteria[0]).toMatchObject({ enabled: false, origin: "suggested", why: "Slow sites lose buyers." });
+  });
+});
+
+describe("POST suggestions, unreadable draft", () => {
+  it("is a 502 with a code the dashboard can name, and the run is closed failed", async () => {
+    const { SuggestionDraftUnreadableError } = await import("../../src/lib/qualification-run.js");
+    generateSuggestions.mockRejectedValue(new SuggestionDraftUnreadableError("hello"));
+    const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
+    expect(res.status).toBe(502);
+    expect(res.body).toMatchObject({ code: "suggestion_draft_unreadable", runId: "run-child" });
+    expect(updateRun).toHaveBeenCalledWith("run-child", "failed", expect.anything());
   });
 });
 
