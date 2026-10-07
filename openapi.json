@@ -345,6 +345,9 @@
             "format": "uuid",
             "description": "Which human-service person this lead is: the id of the canonical person human-service resolved when it served this lead from the audience (human-service `people.id`, the same `personId` its audience-members read returns). Use it as the durable identity of the person contacted. It is a different concept from `leadId` (lead-service's lead / provenance id): the two may differ and are never derived from each other. OMITTED when the serve stated no person (a lead served before this field existed, or a producer that did not state one). A retried serve hands out the value stored on the original serve.",
             "example": "60000000-0000-0000-0000-000000000001"
+          },
+          "qualification": {
+            "$ref": "#/components/schemas/LeadQualification"
           }
         },
         "required": [
@@ -353,7 +356,8 @@
           "data",
           "brandIds",
           "orgId",
-          "userId"
+          "userId",
+          "qualification"
         ],
         "description": "A single lead served from the campaign buffer. The full lead payload lives under `data` (FullLead shape)."
       },
@@ -1225,6 +1229,99 @@
           "current": true,
           "description": "Leads strategy and operations."
         }
+      },
+      "LeadQualification": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string",
+            "nullable": true,
+            "description": "The company domain the checks are keyed on; null when the lead has none (every check then reads unavailable)."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeadQualificationCheck"
+            }
+          }
+        },
+        "required": [
+          "domain",
+          "checks"
+        ],
+        "description": "Every ENABLED check of the campaign's offer on this lead's company, whatever it found (pass, fail, could not check), with its evidence sentence and screenshot link: context for the email writer, never an instruction to cite it. Hard filters (`must_pass`) ran before the reveal was paid and are read back; Bonus checks (`mention`) ran on this serve, after the person was served with a verified email, their spend declared on the serve's run. `checks` is empty when the offer has no enabled check."
+      },
+      "LeadQualificationCheck": {
+        "type": "object",
+        "properties": {
+          "criterionId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string",
+            "description": "The yes/no question about the company; yes means it needs the offer."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "mention",
+              "must_pass"
+            ],
+            "description": "must_pass = Hard filter (a company failing it is declined before its reveal is paid); mention = Bonus (run once the lead is served, never drops anyone)."
+          },
+          "source": {
+            "type": "string",
+            "description": "The probe in plain words."
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no",
+              "unavailable",
+              "not_checked"
+            ],
+            "description": "yes = pass, no = fail, unavailable = could not check (see reason), not_checked = never run on this company (a Hard filter on a serve that did not go through candidates)."
+          },
+          "yesProbability": {
+            "type": "number",
+            "nullable": true
+          },
+          "evidence": {
+            "type": "string",
+            "nullable": true,
+            "description": "One plain sentence with the measured fact supporting the verdict."
+          },
+          "screenshotUrl": {
+            "type": "string",
+            "nullable": true,
+            "description": "Stored screenshot of what was observed, when the probe reads one."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "checkedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "criterionId",
+          "offerId",
+          "question",
+          "mode",
+          "source",
+          "verdict",
+          "yesProbability",
+          "evidence",
+          "screenshotUrl",
+          "reason",
+          "checkedAt"
+        ]
       },
       "ErrorResponse": {
         "type": "object",
@@ -12596,86 +12693,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "object",
-                  "properties": {
-                    "domain": {
-                      "type": "string",
-                      "nullable": true
-                    },
-                    "checks": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "criterionId": {
-                            "type": "string"
-                          },
-                          "offerId": {
-                            "type": "string"
-                          },
-                          "question": {
-                            "type": "string"
-                          },
-                          "mode": {
-                            "type": "string",
-                            "enum": [
-                              "mention",
-                              "must_pass"
-                            ]
-                          },
-                          "source": {
-                            "type": "string"
-                          },
-                          "verdict": {
-                            "type": "string",
-                            "enum": [
-                              "yes",
-                              "no",
-                              "unavailable",
-                              "not_checked"
-                            ]
-                          },
-                          "yesProbability": {
-                            "type": "number",
-                            "nullable": true
-                          },
-                          "evidence": {
-                            "type": "string",
-                            "nullable": true
-                          },
-                          "screenshotUrl": {
-                            "type": "string",
-                            "nullable": true
-                          },
-                          "reason": {
-                            "type": "string",
-                            "nullable": true
-                          },
-                          "checkedAt": {
-                            "type": "string",
-                            "nullable": true
-                          }
-                        },
-                        "required": [
-                          "criterionId",
-                          "offerId",
-                          "question",
-                          "mode",
-                          "source",
-                          "verdict",
-                          "yesProbability",
-                          "evidence",
-                          "screenshotUrl",
-                          "reason",
-                          "checkedAt"
-                        ]
-                      }
-                    }
-                  },
-                  "required": [
-                    "domain",
-                    "checks"
-                  ]
+                  "$ref": "#/components/schemas/LeadQualification"
                 }
               }
             }

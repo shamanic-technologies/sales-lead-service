@@ -296,9 +296,29 @@ describe("BufferNextResponseSchema", () => {
         orgId: "org-1",
         userId: "user-1",
         apolloPersonId: null,
+        qualification: { domain: "cascobay.com", checks: [] },
       },
     });
     expect(result.success).toBe(true);
+  });
+
+  it("states every served lead's check results for the writer", () => {
+    const lead = { leadId: LEAD_UUID, email: "sara@cascobay.com", data: minimalLead, brandIds: ["brand-1"], orgId: "org-1", userId: "user-1", apolloPersonId: null };
+    expect(BufferNextResponseSchema.safeParse({ found: true, lead }).success).toBe(false);
+    const check = {
+      criterionId: "c1",
+      offerId: "o1",
+      question: "Has the company posted on LinkedIn less than twice in the last month?",
+      mode: "mention",
+      source: "LinkedIn company posts",
+      verdict: "yes",
+      yesProbability: 0.92,
+      evidence: "Last LinkedIn post 5 months ago.",
+      screenshotUrl: null,
+      reason: null,
+      checkedAt: "2026-10-07T10:00:00.000Z",
+    };
+    expect(BufferNextResponseSchema.safeParse({ found: true, lead: { ...lead, qualification: { domain: "cascobay.com", checks: [check] } } }).success).toBe(true);
   });
 
   it("accepts found:false without lead", () => {
