@@ -75,6 +75,17 @@ export const GOOGLE_SERVICE_API_KEY = required("GOOGLE_SERVICE_API_KEY");
 export const CONTENT_GENERATION_SERVICE_URL = required("CONTENT_GENERATION_SERVICE_URL");
 export const CONTENT_GENERATION_SERVICE_API_KEY = required("CONTENT_GENERATION_SERVICE_API_KEY");
 
+// --- Qualification checks (src/lib/qualification.ts) ---
+// treg calls are metered here (provision -> authorize -> execute -> actualize), so billing-service
+// authorizes platform-key spend; costs-service states the client price shown before activation;
+// cloudflare-service keeps the screenshots a probe produced, at a URL the email writer can cite.
+export const BILLING_SERVICE_URL = required("BILLING_SERVICE_URL");
+export const BILLING_SERVICE_API_KEY = required("BILLING_SERVICE_API_KEY");
+export const COSTS_SERVICE_URL = required("COSTS_SERVICE_URL");
+export const CLOUDFLARE_SERVICE_URL = required("CLOUDFLARE_SERVICE_URL");
+export const CLOUDFLARE_SERVICE_API_KEY = required("CLOUDFLARE_SERVICE_API_KEY");
+export const TREG_BASE_URL = "https://treg.to";
+
 // --- Conversion tracking (beta) ---
 // Public URL of the api-service gateway a client's website hits for
 // POST /public/conversions. This is the PUBLIC gateway host, NOT the internal

@@ -1,6 +1,7 @@
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { serveNext, type Person, type ServiceContext } from "./people-client.js";
+import { serveThroughCandidates } from "./candidate-serve.js";
 import {
   upsertLeadFromPerson,
   recordEmploymentHistory,
@@ -204,8 +205,11 @@ export async function pullNext(
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
 
-  // 4. Next unserved person of that audience (human-service owns filters/provider/dedup).
-  const served = await serveNext(audienceId, ctx);
+  // 4. Next person of that audience worth paying for. Apollo audiences are served through
+  // CANDIDATES: the audience screen and the brand's must-pass checks are decided HERE before the
+  // reveal is paid (src/lib/candidate-serve.ts). An audience human-service does not serve that
+  // way (crm, apify, CRM outreach) answers null and keeps serve-next, screen and all.
+  const served = (await serveThroughCandidates(audienceId, ctx, signal)) ?? (await serveNext(audienceId, ctx));
 
   // human-service bounds each serve-next call: when its budget runs out mid-walk it
   // answers `pending` with no person, and the next call resumes the walk. That is an

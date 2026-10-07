@@ -6687,6 +6687,190 @@
         "required": [
           "email"
         ]
+      },
+      "QualificationCostEstimate": {
+        "type": "object",
+        "properties": {
+          "perRowUsd": {
+            "type": "number",
+            "description": "Estimated client cost to check ONE row (probe + AI + storage), from catalogue prices. A company already checked in the last 30 days costs nothing."
+          },
+          "probeUsd": {
+            "type": "number"
+          },
+          "aiUsd": {
+            "type": "number"
+          },
+          "storageUsd": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "perRowUsd",
+          "probeUsd",
+          "aiUsd",
+          "storageUsd"
+        ]
+      },
+      "QualificationSuggestion": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "why": {
+            "type": "string"
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "in_our_data",
+              "custom_check"
+            ],
+            "description": "in_our_data = answered from firmographics we already hold (no paid call); custom_check = a paid probe on the company."
+          },
+          "probe": {
+            "$ref": "#/components/schemas/QualificationProbeSpec"
+          },
+          "source": {
+            "type": "string"
+          },
+          "estimate": {
+            "$ref": "#/components/schemas/QualificationCostEstimate"
+          }
+        },
+        "required": [
+          "question",
+          "why",
+          "availability",
+          "probe",
+          "source",
+          "estimate"
+        ]
+      },
+      "QualificationProbeSpec": {
+        "type": "object",
+        "additionalProperties": {
+          "nullable": true
+        },
+        "description": "`{kind:\"company_data\"}` or `{kind:\"treg\", label, reading:\"text\"|\"screenshot\", calls:[{endpointId, method, params, maxMicro}]}`."
+      },
+      "QualificationCriterion": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "mention",
+              "must_pass"
+            ],
+            "description": "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is not worth its reveal."
+          },
+          "availability": {
+            "type": "string",
+            "enum": [
+              "in_our_data",
+              "custom_check"
+            ],
+            "description": "in_our_data = answered from firmographics we already hold (no paid call); custom_check = a paid probe on the company."
+          },
+          "source": {
+            "type": "string",
+            "description": "The probe in plain words."
+          },
+          "probe": {
+            "$ref": "#/components/schemas/QualificationProbeSpec"
+          },
+          "estimate": {
+            "$ref": "#/components/schemas/QualificationCostEstimate"
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "mode",
+          "availability",
+          "source",
+          "probe",
+          "estimate",
+          "createdAt"
+        ]
+      },
+      "QualificationSampleRow": {
+        "type": "object",
+        "properties": {
+          "leadId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "company": {
+            "type": "string",
+            "nullable": true
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true
+          },
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "yes",
+              "no",
+              "unavailable"
+            ],
+            "description": "unavailable = the probe could not produce a result, or what it saw cannot answer the question (see reason). Never a silent no."
+          },
+          "yesProbability": {
+            "type": "number",
+            "nullable": true
+          },
+          "evidence": {
+            "type": "string",
+            "nullable": true,
+            "description": "The measured fact in plain words, citable in an email."
+          },
+          "screenshotUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true
+          },
+          "reused": {
+            "type": "boolean",
+            "description": "The company had already been checked: nothing was paid for this row."
+          },
+          "probeCostUsd": {
+            "type": "number",
+            "description": "Probe charge for this row (0 when reused). AI cost is on the run total."
+          }
+        },
+        "required": [
+          "leadId",
+          "name",
+          "company",
+          "domain",
+          "verdict",
+          "yesProbability",
+          "evidence",
+          "screenshotUrl",
+          "reason",
+          "reused",
+          "probeCostUsd"
+        ]
       }
     },
     "parameters": {},
@@ -11475,6 +11659,774 @@
           },
           "500": {
             "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/qualification/catalog": {
+      "get": {
+        "summary": "The built-in probes a qualification check can use, each with its estimated cost per row",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Catalogue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "probes": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string",
+                            "enum": [
+                              "company_data",
+                              "homepage_text",
+                              "homepage_screenshot",
+                              "job_postings",
+                              "linkedin_company_posts"
+                            ]
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "description": {
+                            "type": "string"
+                          },
+                          "availability": {
+                            "type": "string",
+                            "enum": [
+                              "in_our_data",
+                              "custom_check"
+                            ],
+                            "description": "in_our_data = answered from firmographics we already hold (no paid call); custom_check = a paid probe on the company."
+                          },
+                          "estimate": {
+                            "$ref": "#/components/schemas/QualificationCostEstimate"
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "source",
+                          "description",
+                          "availability",
+                          "estimate"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "probes"
+                  ]
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "A price source could not answer"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/qualification/suggestions": {
+      "post": {
+        "summary": "Suggest qualification checks from one of the brand's offers (spends: AI)",
+        "description": "Reads the offer from brand-service and proposes 5 to 8 yes/no checks on a prospect's company, each with its source (data we hold, or a priced treg probe) and its estimated cost per row. Stored; GET reads the last list back without spending.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user the spend is attributed to."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Parent run: the spend hangs on a child run of it."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "offerId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "offerId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Suggestions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "suggestions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QualificationSuggestion"
+                      }
+                    },
+                    "runId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "suggestions",
+                    "runId"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing offerId, x-user-id or x-run-id"
+          },
+          "402": {
+            "description": "Insufficient credit"
+          },
+          "502": {
+            "description": "A sibling (brand-service, chat-service, treg catalogue) could not answer"
+          }
+        }
+      },
+      "get": {
+        "summary": "The last suggested checks for the brand (no spend)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Last list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "suggestions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QualificationSuggestion"
+                      }
+                    },
+                    "generatedAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "suggestions",
+                    "generatedAt"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Nothing generated yet (code no_suggestions)"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/qualification/criteria": {
+      "post": {
+        "summary": "Turn a qualification check on for the brand",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "question": {
+                    "type": "string",
+                    "description": "One yes/no question about the prospect's company."
+                  },
+                  "probe": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "builtin": {
+                            "type": "string",
+                            "enum": [
+                              "company_data",
+                              "homepage_text",
+                              "homepage_screenshot",
+                              "job_postings",
+                              "linkedin_company_posts"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "builtin"
+                        ]
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "tregEndpointIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "treg catalogue ids, tried in order. Each must be priced per call, on the platform key, and take only company facts as required input."
+                          }
+                        },
+                        "required": [
+                          "tregEndpointIds"
+                        ]
+                      }
+                    ]
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "mention",
+                      "must_pass"
+                    ]
+                  }
+                },
+                "required": [
+                  "question",
+                  "probe",
+                  "mode"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "criterion": {
+                      "$ref": "#/components/schemas/QualificationCriterion"
+                    }
+                  },
+                  "required": [
+                    "criterion"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, or an unusable probe (code unusable_probe, with reason)"
+          }
+        }
+      },
+      "get": {
+        "summary": "The brand's active qualification checks, each with its estimated cost per row",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Criteria",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "criteria": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QualificationCriterion"
+                      }
+                    }
+                  },
+                  "required": [
+                    "criteria"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/qualification/criteria/{criterionId}": {
+      "delete": {
+        "summary": "Turn a qualification check off (archived, its stored answers kept)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "criterionId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archived"
+          },
+          "404": {
+            "description": "No active criterion (code criterion_not_found)"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/qualification/criteria/{criterionId}/sample": {
+      "post": {
+        "summary": "Run a check on real leads of the brand (spends: probe + AI), with the measured cost",
+        "description": "Body is either {limit} (the brand's most recently served leads) or {leadIds}, at most 25. Leads at the same company are checked once: the first pays, the others are `reused`. A company checked in the last 30 days is not re-checked. The run total covers every cent spent (probe, AI, storage), read back from runs-service.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user the spend is attributed to."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Parent run: the spend hangs on a child run of it."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "criterionId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "limit": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "limit"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "leadIds": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "required": [
+                      "leadIds"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Per lead verdict, evidence, screenshot, cost; and the run total",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "criterionId": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QualificationSampleRow"
+                      }
+                    },
+                    "run": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "rows": {
+                          "type": "number"
+                        },
+                        "totalCostUsd": {
+                          "type": "number"
+                        },
+                        "costPerRowUsd": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "rows",
+                        "totalCostUsd",
+                        "costPerRowUsd"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "criterionId",
+                    "rows",
+                    "run"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body, missing x-user-id or x-run-id"
+          },
+          "402": {
+            "description": "Insufficient credit"
+          },
+          "404": {
+            "description": "Unknown criterion, or a lead that is not the brand's"
+          },
+          "502": {
+            "description": "A sibling could not answer"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/qualification": {
+      "get": {
+        "summary": "What the brand's checks say about this lead's company, with the evidence an email writer can cite (no spend)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored answers; a company nobody checked yet reads not_checked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "domain": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "checks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterionId": {
+                            "type": "string"
+                          },
+                          "question": {
+                            "type": "string"
+                          },
+                          "mode": {
+                            "type": "string",
+                            "enum": [
+                              "mention",
+                              "must_pass"
+                            ]
+                          },
+                          "source": {
+                            "type": "string"
+                          },
+                          "verdict": {
+                            "type": "string",
+                            "enum": [
+                              "yes",
+                              "no",
+                              "unavailable",
+                              "not_checked"
+                            ]
+                          },
+                          "yesProbability": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "evidence": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "screenshotUrl": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "reason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "checkedAt": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "criterionId",
+                          "question",
+                          "mode",
+                          "source",
+                          "verdict",
+                          "yesProbability",
+                          "evidence",
+                          "screenshotUrl",
+                          "reason",
+                          "checkedAt"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "domain",
+                    "checks"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing brandId or a non-uuid lead id"
+          },
+          "404": {
+            "description": "Lead not on this brand"
           }
         }
       }

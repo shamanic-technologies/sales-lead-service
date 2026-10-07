@@ -7,6 +7,7 @@ import {
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
+import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
 import {
   LEAD_STANDING_SIGNALS,
   LEAD_STANDING_STATES,
@@ -6162,5 +6163,235 @@ registry.registerPath({
         "ambiguous_lead / lead_has_no_brand as on the POST, or nothing_recorded: nothing was ever read off a reply for this person.",
     },
     500: { description: "Internal server error" },
+  },
+});
+
+
+// --- Qualification checks: does a lead's COMPANY meet a business condition? -----------------
+
+const QualificationSpendHeaders = [
+  ...FollowupOrgHeaders.filter((h) => h.name !== "x-run-id"),
+  { in: "header" as const, name: "x-user-id", required: true, schema: { type: "string" as const }, description: "The user the spend is attributed to." },
+  { in: "header" as const, name: "x-run-id", required: true, schema: { type: "string" as const }, description: "Parent run: the spend hangs on a child run of it." },
+];
+const QualificationReadHeaders = FollowupOrgHeaders.filter((h) => h.name !== "x-run-id");
+
+const QualificationCostEstimateSchema = z
+  .object({
+    perRowUsd: z.number().openapi({ description: "Estimated client cost to check ONE row (probe + AI + storage), from catalogue prices. A company already checked in the last 30 days costs nothing." }),
+    probeUsd: z.number(),
+    aiUsd: z.number(),
+    storageUsd: z.number(),
+  })
+  .openapi("QualificationCostEstimate");
+
+const QualificationProbeSpecSchema = z
+  .record(z.string(), z.unknown())
+  .openapi("QualificationProbeSpec", { description: "`{kind:\"company_data\"}` or `{kind:\"treg\", label, reading:\"text\"|\"screenshot\", calls:[{endpointId, method, params, maxMicro}]}`." });
+
+const QualificationAvailability = z.enum(["in_our_data", "custom_check"]).openapi({
+  description: "in_our_data = answered from firmographics we already hold (no paid call); custom_check = a paid probe on the company.",
+});
+
+const QualificationCriterionSchema = z
+  .object({
+    id: z.string(),
+    question: z.string(),
+    mode: z.enum(QUALIFICATION_MODES).openapi({ description: "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is not worth its reveal." }),
+    availability: QualificationAvailability,
+    source: z.string().openapi({ description: "The probe in plain words." }),
+    probe: QualificationProbeSpecSchema,
+    estimate: QualificationCostEstimateSchema,
+    createdAt: z.string(),
+  })
+  .openapi("QualificationCriterion");
+
+const QualificationSuggestionSchema = z
+  .object({
+    question: z.string(),
+    why: z.string(),
+    availability: QualificationAvailability,
+    probe: QualificationProbeSpecSchema,
+    source: z.string(),
+    estimate: QualificationCostEstimateSchema,
+  })
+  .openapi("QualificationSuggestion");
+
+const QualificationVerdictEnum = z.enum(["yes", "no", "unavailable"]).openapi({
+  description: "unavailable = the probe could not produce a result, or what it saw cannot answer the question (see reason). Never a silent no.",
+});
+
+const QualificationSampleRowSchema = z
+  .object({
+    leadId: z.string(),
+    name: z.string().nullable(),
+    company: z.string().nullable(),
+    domain: z.string().nullable(),
+    verdict: QualificationVerdictEnum,
+    yesProbability: z.number().nullable(),
+    evidence: z.string().nullable().openapi({ description: "The measured fact in plain words, citable in an email." }),
+    screenshotUrl: z.string().nullable(),
+    reason: z.string().nullable(),
+    reused: z.boolean().openapi({ description: "The company had already been checked: nothing was paid for this row." }),
+    probeCostUsd: z.number().openapi({ description: "Probe charge for this row (0 when reused). AI cost is on the run total." }),
+  })
+  .openapi("QualificationSampleRow");
+
+const BrandIdParam = z.object({ brandId: z.string() });
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/qualification/catalog",
+  summary: "The built-in probes a qualification check can use, each with its estimated cost per row",
+  parameters: QualificationReadHeaders,
+  responses: {
+    200: {
+      description: "Catalogue",
+      content: {
+        "application/json": {
+          schema: z.object({
+            probes: z.array(z.object({ key: z.enum(BUILTIN_PROBE_KEYS), source: z.string(), description: z.string(), availability: QualificationAvailability, estimate: QualificationCostEstimateSchema })),
+          }),
+        },
+      },
+    },
+    502: { description: "A price source could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/qualification/suggestions",
+  summary: "Suggest qualification checks from one of the brand's offers (spends: AI)",
+  description:
+    "Reads the offer from brand-service and proposes 5 to 8 yes/no checks on a prospect's company, each with its source (data we hold, or a priced treg probe) and its estimated cost per row. Stored; GET reads the last list back without spending.",
+  request: { params: BrandIdParam, body: { content: { "application/json": { schema: z.object({ offerId: z.string() }) } } } },
+  parameters: QualificationSpendHeaders,
+  responses: {
+    200: { description: "Suggestions", content: { "application/json": { schema: z.object({ suggestions: z.array(QualificationSuggestionSchema), runId: z.string() }) } } },
+    400: { description: "Missing offerId, x-user-id or x-run-id" },
+    402: { description: "Insufficient credit" },
+    502: { description: "A sibling (brand-service, chat-service, treg catalogue) could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/qualification/suggestions",
+  summary: "The last suggested checks for the brand (no spend)",
+  request: { params: BrandIdParam },
+  parameters: QualificationReadHeaders,
+  responses: {
+    200: { description: "Last list", content: { "application/json": { schema: z.object({ suggestions: z.array(QualificationSuggestionSchema), generatedAt: z.string() }) } } },
+    404: { description: "Nothing generated yet (code no_suggestions)" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/qualification/criteria",
+  summary: "Turn a qualification check on for the brand",
+  request: {
+    params: BrandIdParam,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            question: z.string().openapi({ description: "One yes/no question about the prospect's company." }),
+            probe: z.union([z.object({ builtin: z.enum(BUILTIN_PROBE_KEYS) }), z.object({ tregEndpointIds: z.array(z.string()).openapi({ description: "treg catalogue ids, tried in order. Each must be priced per call, on the platform key, and take only company facts as required input." }) })]),
+            mode: z.enum(QUALIFICATION_MODES),
+          }),
+        },
+      },
+    },
+  },
+  parameters: QualificationReadHeaders,
+  responses: {
+    201: { description: "Created", content: { "application/json": { schema: z.object({ criterion: QualificationCriterionSchema }) } } },
+    400: { description: "Invalid body, or an unusable probe (code unusable_probe, with reason)" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/qualification/criteria",
+  summary: "The brand's active qualification checks, each with its estimated cost per row",
+  request: { params: BrandIdParam },
+  parameters: QualificationReadHeaders,
+  responses: { 200: { description: "Criteria", content: { "application/json": { schema: z.object({ criteria: z.array(QualificationCriterionSchema) }) } } } },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/brands/{brandId}/qualification/criteria/{criterionId}",
+  summary: "Turn a qualification check off (archived, its stored answers kept)",
+  request: { params: z.object({ brandId: z.string(), criterionId: z.string() }) },
+  parameters: QualificationReadHeaders,
+  responses: { 200: { description: "Archived" }, 404: { description: "No active criterion (code criterion_not_found)" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/qualification/criteria/{criterionId}/sample",
+  summary: "Run a check on real leads of the brand (spends: probe + AI), with the measured cost",
+  description: `Body is either {limit} (the brand's most recently served leads) or {leadIds}, at most ${MAX_SAMPLE}. Leads at the same company are checked once: the first pays, the others are \`reused\`. A company checked in the last 30 days is not re-checked. The run total covers every cent spent (probe, AI, storage), read back from runs-service.`,
+  request: {
+    params: z.object({ brandId: z.string(), criterionId: z.string() }),
+    body: { content: { "application/json": { schema: z.union([z.object({ limit: z.number().int() }), z.object({ leadIds: z.array(z.string()) })]) } } },
+  },
+  parameters: QualificationSpendHeaders,
+  responses: {
+    200: {
+      description: "Per lead verdict, evidence, screenshot, cost; and the run total",
+      content: {
+        "application/json": {
+          schema: z.object({
+            criterionId: z.string(),
+            rows: z.array(QualificationSampleRowSchema),
+            run: z.object({ id: z.string(), rows: z.number(), totalCostUsd: z.number(), costPerRowUsd: z.number() }),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid body, missing x-user-id or x-run-id" },
+    402: { description: "Insufficient credit" },
+    404: { description: "Unknown criterion, or a lead that is not the brand's" },
+    502: { description: "A sibling could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/qualification",
+  summary: "What the brand's checks say about this lead's company, with the evidence an email writer can cite (no spend)",
+  request: { params: z.object({ id: z.string() }), query: z.object({ brandId: z.string() }) },
+  parameters: QualificationReadHeaders,
+  responses: {
+    200: {
+      description: "Stored answers; a company nobody checked yet reads not_checked",
+      content: {
+        "application/json": {
+          schema: z.object({
+            domain: z.string().nullable(),
+            checks: z.array(
+              z.object({
+                criterionId: z.string(),
+                question: z.string(),
+                mode: z.enum(QUALIFICATION_MODES),
+                source: z.string(),
+                verdict: z.enum(["yes", "no", "unavailable", "not_checked"]),
+                yesProbability: z.number().nullable(),
+                evidence: z.string().nullable(),
+                screenshotUrl: z.string().nullable(),
+                reason: z.string().nullable(),
+                checkedAt: z.string().nullable(),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+    400: { description: "Missing brandId or a non-uuid lead id" },
+    404: { description: "Lead not on this brand" },
   },
 });
