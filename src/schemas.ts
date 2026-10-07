@@ -6362,7 +6362,7 @@ registry.registerPath({
         "application/json": {
           schema: z.object({
             criteria: z.array(QualificationCriterionSchema),
-            dropped: z.array(z.object({ question: z.string(), reason: z.string().openapi({ description: "firmographic_not_universal | unclassified_kind:<x> | no_usable_source" }) })),
+            dropped: z.array(z.object({ question: z.string(), reason: z.string().openapi({ description: "firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)" }) })),
             runId: z.string(),
           }),
         },

@@ -11995,7 +11995,7 @@
                           },
                           "reason": {
                             "type": "string",
-                            "description": "firmographic_not_universal | unclassified_kind:<x> | no_usable_source"
+                            "description": "firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)"
                           }
                         },
                         "required": [
