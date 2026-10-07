@@ -30,6 +30,13 @@ export interface CompleteResult {
   tokensOutput: number;
 }
 
+export class ModelInvalidJsonError extends Error {
+  constructor(detail: string) {
+    super(`[lead-service] chat-service /complete: the model answered invalid JSON: ${detail}`);
+    this.name = "ModelInvalidJsonError";
+  }
+}
+
 export async function complete(req: CompleteRequest, id: SpendIdentity): Promise<CompleteResult> {
   const res = await fetchWithRetry(`${CHAT_SERVICE_URL}/complete`, {
     method: "POST",
@@ -49,7 +56,13 @@ export async function complete(req: CompleteRequest, id: SpendIdentity): Promise
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`[lead-service] chat-service /complete failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const text = await res.text();
+    // chat-service refuses a model answer that is not valid JSON: an intermittent model fault (the
+    // same request succeeded on retry in prod 2026-10-07), named so a caller can ask once more.
+    if (res.status === 502 && req.json && text.includes("LLM returned invalid JSON")) throw new ModelInvalidJsonError(text.slice(0, 300));
+    throw new Error(`[lead-service] chat-service /complete failed: ${res.status} ${text.slice(0, 300)}`);
+  }
   const body = (await res.json()) as { content?: unknown; json?: unknown; model?: unknown; tokensInput?: unknown; tokensOutput?: unknown };
   if (typeof body.content !== "string" || typeof body.model !== "string") {
     throw new Error("[lead-service] chat-service /complete answered without content/model");
