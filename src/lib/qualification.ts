@@ -129,9 +129,9 @@ export function criterionKey(question: string, spec: ProbeSpec): string {
  * re-judged on their stored observation (no probe is paid again). v2: the readability gate asks
  * whether the observation is a usable reading of THIS company's source, never whether it "contains
  * enough to answer" (a full homepage with no newsletter form IS the answer no; v1 read it as
- * unavailable on 5 of 12 prod leads).
+ * unavailable on 5 of 12 prod leads). v3: evidence written with thinking off (v2 sentences were cut).
  */
-export const JUDGE_VERSION = "v2";
+export const JUDGE_VERSION = "v3";
 
 export function probeLabel(spec: ProbeSpec): string {
   return spec.kind === "company_data" ? "Company data we hold" : spec.label;
@@ -359,7 +359,7 @@ export async function judge(criterion: { question: string; probe: ProbeSpec }, o
         {
           systemPrompt: EVIDENCE_PROMPT,
           message: `Company: ${subject.companyName ?? subject.domain} (${subject.domain})\nQuestion: ${criterion.question}\nAnswer: ${verdict}\nSource: ${probeLabel(criterion.probe)}\nObservation:\n${observation.content.slice(0, 60_000)}`,
-          maxTokens: 120,
+          maxTokens: 300,
         },
         deps.identity,
       );
