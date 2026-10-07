@@ -54,6 +54,11 @@ vi.mock("../../src/lib/sourcing-origin.js", () => ({
   resolveSourcingOriginSlug: (...a: unknown[]) => resolveSourcingOriginSlug(...a),
 }));
 
+const resolveServeSource = vi.fn();
+vi.mock("../../src/lib/source-campaign.js", () => ({
+  resolveServeSource: (...a: unknown[]) => resolveServeSource(...a),
+}));
+
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
   PULL_NEXT_TIMEOUT_MS: 60_000,
@@ -93,6 +98,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     vi.clearAllMocks();
     findFirst.mockResolvedValue(undefined);
     checkConcurrentBufferNext.mockResolvedValue({ blocked: false });
+    resolveServeSource.mockResolvedValue({ kind: "legacy", why: "offer_not_on_source_campaigns" });
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -231,5 +237,120 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     await post(app, AUDIENCE);
 
     expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
+  });
+
+  // ── SOURCE CAMPAIGNS (src/lib/source-campaign.ts) ──────────────────────────────
+  const SOURCE_CAMPAIGN = "60000000-0000-0000-0000-000000000001";
+
+  it("files the serve under the ON source campaign of the audience's origin; the lead stays the outreach campaign's", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({
+      kind: "source",
+      campaignId: SOURCE_CAMPAIGN,
+      originSlug: "sourcing-apollo-cold-filters",
+      offerId: "70000000-0000-0000-0000-000000000001",
+    });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(resolveServeSource).toHaveBeenCalledWith({
+      orgId: ORG,
+      brandId: BRAND,
+      outreachCampaignId: CAMPAIGN,
+      originSlug: "sourcing-apollo-cold-filters",
+    });
+    expect(createRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskName: "lead-serve",
+        parentRunId: RUN,
+        campaignId: SOURCE_CAMPAIGN,
+        featureSlug: "sourcing-apollo-cold-filters",
+      }),
+    );
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: CAMPAIGN, runCampaignId: SOURCE_CAMPAIGN }),
+      expect.anything(),
+    );
+    expect(updateRun).toHaveBeenCalledWith("serve-run-1", "completed", expect.objectContaining({ campaignId: SOURCE_CAMPAIGN }));
+  });
+
+  it("a source campaign that is OFF buys nothing: found:false source_campaign_off, run closed, no serve", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-linkedin-engagement-signals");
+    resolveServeSource.mockResolvedValueOnce({
+      kind: "refused",
+      reason: "source_campaign_off",
+      campaignId: SOURCE_CAMPAIGN,
+      detail: "off",
+    });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ found: false, reason: "source_campaign_off" });
+    expect(pullNext).not.toHaveBeenCalled();
+    // Nothing filed under the off source: the run stays the outreach campaign's.
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ campaignId: CAMPAIGN }));
+    expect(updateRun).toHaveBeenCalledWith("serve-run-1", "completed", expect.anything());
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: RUN, response: { found: false, reason: "source_campaign_off" } }));
+  });
+
+  it("a source over its daily budget answers source_budget_reached", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: SOURCE_CAMPAIGN, detail: "spent" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.body).toEqual({ found: false, reason: "source_budget_reached" });
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("fails loud (500, no run, no serve) when the source campaign cannot be read", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockRejectedValueOnce(new Error("campaign-service source-campaigns read failed: 502"));
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(500);
+    expect(res.body.detail).toContain("source-campaigns read failed");
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("asks no source campaign when the serve has no origin (no audience): today's serve", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "no_audience" });
+
+    await post(app);
+
+    expect(resolveServeSource).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ campaignId: CAMPAIGN }));
+  });
+
+  it("holds the per-outreach-campaign serial invariant in-process (a serve filed under a source is invisible to the runs guard)", async () => {
+    resolveSourcingOriginSlug.mockResolvedValue("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValue({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", offerId: "o" });
+    createRun.mockResolvedValue({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    let release: (v: unknown) => void = () => {};
+    pullNext.mockImplementationOnce(() => new Promise((r) => (release = r)));
+
+    // supertest sends on .then(): start the first serve, leave it in flight.
+    const first = post(app, AUDIENCE).then((r) => r);
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await post(app, AUDIENCE);
+    expect(second.status).toBe(409);
+
+    release({ found: false, reason: "audience_exhausted" });
+    expect((await first).status).toBe(200);
+    resolveSourcingOriginSlug.mockReset();
   });
 });
