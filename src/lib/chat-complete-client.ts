@@ -42,6 +42,9 @@ export async function complete(req: CompleteRequest, id: SpendIdentity): Promise
       ...(req.imageUrl ? { imageUrl: req.imageUrl } : {}),
       ...(req.json ? { responseFormat: "json" } : {}),
       ...(req.maxTokens ? { maxTokens: req.maxTokens } : {}),
+      // Thinking tokens count against maxTokens: a one-sentence job with thinking on came back cut
+      // mid-word ("The", "There is no") on 5 of 12 prod leads.
+      disableThinking: true,
       temperature: 0,
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
