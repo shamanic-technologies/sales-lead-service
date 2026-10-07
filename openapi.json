@@ -11838,7 +11838,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The criteria just written",
+            "description": "The criteria just written, and what the draft proposed that was not kept (with why). Both empty = nothing new to suggest.",
             "content": {
               "application/json": {
                 "schema": {
@@ -11850,12 +11850,32 @@
                         "$ref": "#/components/schemas/QualificationCriterion"
                       }
                     },
+                    "dropped": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "question": {
+                            "type": "string"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "description": "firmographic_not_universal | unclassified_kind:<x> | no_usable_source"
+                          }
+                        },
+                        "required": [
+                          "question",
+                          "reason"
+                        ]
+                      }
+                    },
                     "runId": {
                       "type": "string"
                     }
                   },
                   "required": [
                     "criteria",
+                    "dropped",
                     "runId"
                   ]
                 }
@@ -11869,7 +11889,7 @@
             "description": "Insufficient credit"
           },
           "502": {
-            "description": "A sibling (brand-service, chat-service, treg catalogue) could not answer"
+            "description": "code suggestion_draft_unreadable: the AI answer could not be read (retry); otherwise a sibling (brand-service, chat-service, treg catalogue) could not answer"
           }
         }
       }

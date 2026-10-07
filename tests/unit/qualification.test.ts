@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { contentOfAnswer, criterionKey, findImageUrl, normalizeDomain, subjectFromOrganization } from "../../src/lib/qualification.js";
 import { BUILTIN_PROBES } from "../../src/lib/qualification-probes.js";
 import type { OrganizationView } from "../../src/lib/lead-shape.js";
-import { keepsDraft } from "../../src/lib/qualification-run.js";
+import { keepsDraft, readDraftChecks, SuggestionDraftUnreadableError } from "../../src/lib/qualification-run.js";
 
 describe("qualification helpers", () => {
   it("normalizes a domain from any spelling, refuses garbage", () => {
@@ -51,5 +51,17 @@ describe("suggestions keep need signals, drop firmographics unless universal for
   });
   it("drops an unclassified check", () => {
     expect(keepsDraft({ ...base })).toEqual({ keep: false, reason: "unclassified_kind:undefined" });
+  });
+});
+
+describe("the suggestion draft is read in both shapes the model answers", () => {
+  const check = { question: "q", why: "w", kind: "need", source: "homepage_text" };
+  it("reads {checks: [...]} and the bare list (prod 2026-10-07, chiropractic offer)", () => {
+    expect(readDraftChecks({ checks: [check] }, "")).toEqual([check]);
+    expect(readDraftChecks([check], "")).toEqual([check]);
+  });
+  it("anything else throws with the raw answer", () => {
+    expect(() => readDraftChecks({ suggestions: [] }, '{"suggestions":[]}')).toThrow(SuggestionDraftUnreadableError);
+    expect(() => readDraftChecks(null, "not json")).toThrow(/not json/);
   });
 });

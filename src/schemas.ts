@@ -6274,10 +6274,21 @@ registry.registerPath({
   request: { params: OfferParams },
   parameters: QualificationSpendHeaders,
   responses: {
-    200: { description: "The criteria just written", content: { "application/json": { schema: z.object({ criteria: z.array(QualificationCriterionSchema), runId: z.string() }) } } },
+    200: {
+      description: "The criteria just written, and what the draft proposed that was not kept (with why). Both empty = nothing new to suggest.",
+      content: {
+        "application/json": {
+          schema: z.object({
+            criteria: z.array(QualificationCriterionSchema),
+            dropped: z.array(z.object({ question: z.string(), reason: z.string().openapi({ description: "firmographic_not_universal | unclassified_kind:<x> | no_usable_source" }) })),
+            runId: z.string(),
+          }),
+        },
+      },
+    },
     400: { description: "Missing x-user-id or x-run-id" },
     402: { description: "Insufficient credit" },
-    502: { description: "A sibling (brand-service, chat-service, treg catalogue) could not answer" },
+    502: { description: "code suggestion_draft_unreadable: the AI answer could not be read (retry); otherwise a sibling (brand-service, chat-service, treg catalogue) could not answer" },
   },
 });
 

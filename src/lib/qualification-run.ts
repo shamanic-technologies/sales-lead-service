@@ -223,7 +223,7 @@ ${BUILTIN_PROBE_KEYS.map((k) => `- "${k}": ${BUILTIN_PROBES[k].description}`).jo
 Questions are short and concrete ("Has the company posted on LinkedIn less than twice in the last month?"). No dashes.
 Answer JSON: {"checks":[{"question":"...","why":"one short sentence on why it shows a need for this offer","kind":"need|firmographic","universal":true|false,"universalWhy":"only for a firmographic check","source":"company_data|homepage_text|homepage_screenshot|job_postings|linkedin_company_posts|search","search":"only when source is search"}]}`;
 
-interface DraftCheck {
+export interface DraftCheck {
   question: string;
   why: string;
   kind?: string;
@@ -231,6 +231,31 @@ interface DraftCheck {
   universalWhy?: string;
   source: string;
   search?: string;
+}
+
+export interface DroppedSuggestion {
+  question: string;
+  /** firmographic_not_universal | unclassified_kind:<x> | no_usable_source */
+  reason: string;
+}
+
+export class SuggestionDraftUnreadableError extends Error {
+  constructor(excerpt: string) {
+    super(`[lead-service] suggestion draft is neither a list of checks nor {checks: [...]}: ${excerpt}`);
+    this.name = "SuggestionDraftUnreadableError";
+  }
+}
+
+/**
+ * The draft's checks. The model answers either `{"checks":[...]}` (what the prompt asks) or the
+ * bare list (seen in prod 2026-10-07, every run on a chiropractic offer): both are read. Anything
+ * else throws with the raw answer, so the failure names what came back.
+ */
+export function readDraftChecks(json: unknown, content: string): DraftCheck[] {
+  if (Array.isArray(json)) return json as DraftCheck[];
+  const inner = json && typeof json === "object" ? (json as Record<string, unknown>).checks : undefined;
+  if (Array.isArray(inner)) return inner as DraftCheck[];
+  throw new SuggestionDraftUnreadableError(content.slice(0, 1_500));
 }
 
 /** A check kept as an offer criterion: a need signal, or a firmographic the draft states is universal. */
@@ -265,7 +290,7 @@ async function pickCatalogProbe(question: string, phrase: string, identity: Spen
  * changed by a person) from an earlier run are archived; a suggestion asking what a live criterion
  * of the offer already asks is skipped.
  */
-export async function generateSuggestions(params: OfferScope & { identity: SpendIdentity }): Promise<QualificationCriterionRow[]> {
+export async function generateSuggestions(params: OfferScope & { identity: SpendIdentity }): Promise<{ rows: QualificationCriterionRow[]; dropped: DroppedSuggestion[] }> {
   const offer = await getOfferText(params.orgId, params.brandId, params.offerId);
   const drafted = await complete(
     {
@@ -277,15 +302,16 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
     },
     params.identity,
   );
-  const checks = Array.isArray(drafted.json?.checks) ? (drafted.json!.checks as DraftCheck[]) : null;
-  if (!checks) throw new Error("[lead-service] suggestion draft answered without checks");
+  const checks = readDraftChecks(drafted.json, drafted.content);
 
   const drafts: Array<{ question: string; why: string; spec: ProbeSpec }> = [];
+  const dropped: DroppedSuggestion[] = [];
   for (const c of checks.slice(0, 8)) {
     if (typeof c.question !== "string" || !c.question.trim()) continue;
     const kept = keepsDraft(c);
     if (!kept.keep) {
       console.log(`[lead-service] qualification suggestion dropped (${kept.reason}) for offer ${params.offerId}: ${c.question}`);
+      dropped.push({ question: stripDashes(c.question), reason: kept.reason });
       continue;
     }
     let spec: ProbeSpec | null = null;
@@ -296,12 +322,13 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
     }
     if (!spec) {
       console.log(`[lead-service] qualification suggestion dropped, no usable source: ${c.question}`);
+      dropped.push({ question: stripDashes(c.question), reason: "no_usable_source" });
       continue;
     }
     drafts.push({ question: stripDashes(c.question), why: stripDashes(String(c.why ?? "")), spec });
   }
 
-  return db.transaction(async (tx) => {
+  const rows = await db.transaction(async (tx) => {
     const scope = and(
       eq(qualificationCriteria.orgId, params.orgId),
       eq(qualificationCriteria.brandId, params.brandId),
@@ -339,4 +366,5 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
       )
       .returning();
   });
+  return { rows, dropped };
 }
