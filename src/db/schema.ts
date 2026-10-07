@@ -833,3 +833,29 @@ export const qualificationSuggestions = pgTable(
 export type QualificationCriterionRow = typeof qualificationCriteria.$inferSelect;
 export type QualificationObservationRow = typeof qualificationObservations.$inferSelect;
 export type QualificationVerdictRow = typeof qualificationVerdicts.$inferSelect;
+
+// --- The pre-pay audience screen, decided here (migration 0052; src/lib/candidate-serve.ts) ---
+export const candidateScreenings = pgTable(
+  "candidate_screenings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    audienceId: text("audience_id").notNull(),
+    providerPersonId: text("provider_person_id").notNull(),
+    candidateId: text("candidate_id").notNull(),
+    targetHash: text("target_hash").notNull(),
+    targetText: text("target_text"),
+    promptVersion: text("prompt_version").notNull(),
+    verdict: text("verdict").notNull(),
+    yesProbability: doublePrecision("yes_probability"),
+    reason: text("reason"),
+    model: text("model"),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_cs_audience_person_target").on(table.audienceId, table.providerPersonId, table.targetHash, table.promptVersion),
+    index("idx_cs_org_brand").on(table.orgId, table.brandId, table.createdAt),
+  ],
+);

@@ -35,7 +35,8 @@ const SIBLING_TIMEOUT_MS = 30_000;
 /** The org request the spend is billed to (its identity headers). */
 export interface SpendIdentity {
   orgId: string;
-  userId: string;
+  /** Required by every PAID probe (billing authorizes per user); a judgment alone can go without. */
+  userId: string | null;
   /** The run the costs hang on. */
   runId: string;
   brandId?: string | null;
@@ -45,7 +46,8 @@ export interface SpendIdentity {
 }
 
 export function identityHeaders(id: SpendIdentity): Record<string, string> {
-  const h: Record<string, string> = { "x-org-id": id.orgId, "x-user-id": id.userId, "x-run-id": id.runId };
+  const h: Record<string, string> = { "x-org-id": id.orgId, "x-run-id": id.runId };
+  if (id.userId) h["x-user-id"] = id.userId;
   if (id.brandId) h["x-brand-id"] = id.brandId;
   if (id.campaignId) h["x-campaign-id"] = id.campaignId;
   if (id.workflowSlug) h["x-workflow-slug"] = id.workflowSlug;
@@ -82,9 +84,7 @@ async function decrypt(provider: string, id: SpendIdentity): Promise<{ key: stri
       "X-Caller-Service": "lead",
       "X-Caller-Method": "POST",
       "X-Caller-Path": "/orgs/brands/:brandId/qualification",
-      "x-org-id": id.orgId,
-      "x-user-id": id.userId,
-      "x-run-id": id.runId,
+      ...identityHeaders(id),
     },
     signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
   });
@@ -161,6 +161,9 @@ export class TregMeter {
   constructor(private readonly identity: SpendIdentity) {}
 
   private resolve(): Promise<TregKeys> {
+    if (!this.identity.userId) {
+      throw new Error("[lead-service] a paid qualification probe needs the request's user (x-user-id): billing authorizes per user");
+    }
     if (!this.keys) this.keys = resolveKeys(this.identity);
     return this.keys;
   }

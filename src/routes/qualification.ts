@@ -84,7 +84,7 @@ async function openRun(req: AuthenticatedRequest, res: Response, brandId: string
 }
 
 async function closeRun(identity: SpendIdentity, ok: boolean): Promise<void> {
-  await updateRun(identity.runId, ok ? "completed" : "failed", { orgId: identity.orgId, userId: identity.userId, brandId: identity.brandId ?? undefined });
+  await updateRun(identity.runId, ok ? "completed" : "failed", { orgId: identity.orgId, userId: identity.userId ?? undefined, brandId: identity.brandId ?? undefined });
 }
 
 async function serializeCriterion(row: QualificationCriterionRow) {
