@@ -6693,7 +6693,7 @@
         "properties": {
           "perRowUsd": {
             "type": "number",
-            "description": "Estimated client cost to check ONE row (probe + AI + storage), from catalogue prices. A company already checked in the last 30 days costs nothing."
+            "description": "Estimated client cost to check ONE lead (probe + AI + storage), from catalogue prices. A company already checked in the last 30 days costs nothing."
           },
           "probeUsd": {
             "type": "number"
@@ -6712,57 +6712,23 @@
           "storageUsd"
         ]
       },
-      "QualificationSuggestion": {
-        "type": "object",
-        "properties": {
-          "question": {
-            "type": "string"
-          },
-          "why": {
-            "type": "string"
-          },
-          "availability": {
-            "type": "string",
-            "enum": [
-              "in_our_data",
-              "custom_check"
-            ],
-            "description": "in_our_data = answered from firmographics we already hold (no paid call); custom_check = a paid probe on the company."
-          },
-          "probe": {
-            "$ref": "#/components/schemas/QualificationProbeSpec"
-          },
-          "source": {
-            "type": "string"
-          },
-          "estimate": {
-            "$ref": "#/components/schemas/QualificationCostEstimate"
-          }
-        },
-        "required": [
-          "question",
-          "why",
-          "availability",
-          "probe",
-          "source",
-          "estimate"
-        ]
-      },
-      "QualificationProbeSpec": {
-        "type": "object",
-        "additionalProperties": {
-          "nullable": true
-        },
-        "description": "`{kind:\"company_data\"}` or `{kind:\"treg\", label, reading:\"text\"|\"screenshot\", calls:[{endpointId, method, params, maxMicro}]}`."
-      },
       "QualificationCriterion": {
         "type": "object",
         "properties": {
           "id": {
             "type": "string"
           },
+          "offerId": {
+            "type": "string",
+            "description": "The offer the criterion belongs to. It applies to every audience of that offer, never to another offer of the brand."
+          },
           "question": {
             "type": "string"
+          },
+          "why": {
+            "type": "string",
+            "nullable": true,
+            "description": "Why it shows a company needs the offer (suggested criteria); null on a hand-made one."
           },
           "mode": {
             "type": "string",
@@ -6770,7 +6736,18 @@
               "mention",
               "must_pass"
             ],
-            "description": "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is not worth its reveal."
+            "description": "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is declined before its reveal is paid, on every audience of the offer."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "The client's on/off switch. Suggestions are written off. Only enabled criteria apply at serve and show on a lead."
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "suggested",
+              "custom"
+            ]
           },
           "availability": {
             "type": "string",
@@ -6790,19 +6767,70 @@
           "estimate": {
             "$ref": "#/components/schemas/QualificationCostEstimate"
           },
+          "passRate": {
+            "$ref": "#/components/schemas/QualificationPassRate"
+          },
           "createdAt": {
             "type": "string"
+          },
+          "updatedAt": {
+            "type": "string",
+            "nullable": true
           }
         },
         "required": [
           "id",
+          "offerId",
           "question",
+          "why",
           "mode",
+          "enabled",
+          "origin",
           "availability",
           "source",
           "probe",
           "estimate",
-          "createdAt"
+          "passRate",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "QualificationProbeSpec": {
+        "type": "object",
+        "additionalProperties": {
+          "nullable": true
+        },
+        "description": "`{kind:\"company_data\"}` or `{kind:\"treg\", label, reading:\"text\"|\"screenshot\", calls:[{endpointId, method, params, maxMicro}]}`."
+      },
+      "QualificationPassRate": {
+        "type": "object",
+        "properties": {
+          "checked": {
+            "type": "integer",
+            "description": "People this criterion was applied to (sample runs on leads, must-pass checks on serve candidates)."
+          },
+          "yes": {
+            "type": "integer"
+          },
+          "no": {
+            "type": "integer"
+          },
+          "unavailable": {
+            "type": "integer",
+            "description": "Nothing could be judged (probe failed, observation cannot answer, no company domain). Never counted as a pass."
+          },
+          "passRate": {
+            "type": "number",
+            "nullable": true,
+            "description": "yes / checked, 4 decimals (unavailable stays in the denominator). null when nobody was checked yet."
+          }
+        },
+        "required": [
+          "checked",
+          "yes",
+          "no",
+          "unavailable",
+          "passRate"
         ]
       },
       "QualificationSampleRow": {
@@ -11750,10 +11778,10 @@
         }
       }
     },
-    "/orgs/brands/{brandId}/qualification/suggestions": {
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/suggestions": {
       "post": {
-        "summary": "Suggest qualification checks from one of the brand's offers (spends: AI)",
-        "description": "Reads the offer from brand-service and proposes 5 to 8 yes/no checks on a prospect's company, each with its source (data we hold, or a priced treg probe) and its estimated cost per row. Stored; GET reads the last list back without spending.",
+        "summary": "Suggest qualification checks for an offer, written as criteria turned OFF (spends: AI)",
+        "description": "Reads the offer from brand-service and proposes up to 8 yes/no NEED signals on a prospect's company (why it needs this offer), valid for every audience of the offer. Firmographic checks (industry, size, geography, roles) are the audience's job and are dropped unless universal for the offer. Each is written as a criterion of the offer with enabled=false, origin=suggested; suggestions from an earlier run that nobody touched are archived, and one asking what a live criterion already asks is skipped. Read them back with GET .../criteria (no spend).",
         "parameters": [
           {
             "in": "header",
@@ -11798,37 +11826,28 @@
             "required": true,
             "name": "brandId",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
+            "in": "path"
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "offerId": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "offerId"
-                ]
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
-            "description": "Suggestions",
+            "description": "The criteria just written",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
                   "properties": {
-                    "suggestions": {
+                    "criteria": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/QualificationSuggestion"
+                        "$ref": "#/components/schemas/QualificationCriterion"
                       }
                     },
                     "runId": {
@@ -11836,7 +11855,7 @@
                     }
                   },
                   "required": [
-                    "suggestions",
+                    "criteria",
                     "runId"
                   ]
                 }
@@ -11844,7 +11863,7 @@
             }
           },
           "400": {
-            "description": "Missing offerId, x-user-id or x-run-id"
+            "description": "Missing x-user-id or x-run-id"
           },
           "402": {
             "description": "Insufficient credit"
@@ -11853,9 +11872,11 @@
             "description": "A sibling (brand-service, chat-service, treg catalogue) could not answer"
           }
         }
-      },
-      "get": {
-        "summary": "The last suggested checks for the brand (no spend)",
+      }
+    },
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/criteria": {
+      "post": {
+        "summary": "Create a qualification check on the offer",
         "parameters": [
           {
             "in": "header",
@@ -11882,68 +11903,13 @@
             "required": true,
             "name": "brandId",
             "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Last list",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "suggestions": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/QualificationSuggestion"
-                      }
-                    },
-                    "generatedAt": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "suggestions",
-                    "generatedAt"
-                  ]
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Nothing generated yet (code no_suggestions)"
-          }
-        }
-      }
-    },
-    "/orgs/brands/{brandId}/qualification/criteria": {
-      "post": {
-        "summary": "Turn a qualification check on for the brand",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "x-api-key",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "API key for authenticating requests"
-          },
-          {
-            "in": "header",
-            "name": "x-org-id",
-            "required": true,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Internal organization UUID from client-service"
           },
           {
             "schema": {
               "type": "string"
             },
             "required": true,
-            "name": "brandId",
+            "name": "offerId",
             "in": "path"
           }
         ],
@@ -12000,12 +11966,16 @@
                       "mention",
                       "must_pass"
                     ]
+                  },
+                  "enabled": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
                   "question",
                   "probe",
-                  "mode"
+                  "mode",
+                  "enabled"
                 ]
               }
             }
@@ -12036,7 +12006,7 @@
         }
       },
       "get": {
-        "summary": "The brand's active qualification checks, each with its estimated cost per row",
+        "summary": "Every live check of the offer, on or off, with its estimated cost per lead and its pass rate so far (no spend)",
         "parameters": [
           {
             "in": "header",
@@ -12062,6 +12032,14 @@
             },
             "required": true,
             "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
             "in": "path"
           }
         ],
@@ -12090,9 +12068,9 @@
         }
       }
     },
-    "/orgs/brands/{brandId}/qualification/criteria/{criterionId}": {
-      "delete": {
-        "summary": "Turn a qualification check off (archived, its stored answers kept)",
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/criteria/{criterionId}": {
+      "patch": {
+        "summary": "Turn a check on or off, and/or change its mode",
         "parameters": [
           {
             "in": "header",
@@ -12125,6 +12103,109 @@
               "type": "string"
             },
             "required": true,
+            "name": "offerId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "criterionId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean"
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "mention",
+                      "must_pass"
+                    ]
+                  }
+                },
+                "description": "At least one of the two."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "criterion": {
+                      "$ref": "#/components/schemas/QualificationCriterion"
+                    }
+                  },
+                  "required": [
+                    "criterion"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither field, an unknown field or mode"
+          },
+          "404": {
+            "description": "No live criterion with that id on this offer (code criterion_not_found)"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Archive a check (gone from the list; its stored answers kept)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
             "name": "criterionId",
             "in": "path"
           }
@@ -12134,12 +12215,12 @@
             "description": "Archived"
           },
           "404": {
-            "description": "No active criterion (code criterion_not_found)"
+            "description": "No live criterion with that id on this offer (code criterion_not_found)"
           }
         }
       }
     },
-    "/orgs/brands/{brandId}/qualification/criteria/{criterionId}/sample": {
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/criteria/{criterionId}/sample": {
       "post": {
         "summary": "Run a check on real leads of the brand (spends: probe + AI), with the measured cost",
         "description": "Body is either {limit} (the brand's most recently served leads) or {leadIds}, at most 25. Leads at the same company are checked once: the first pays, the others are `reused`. A company checked in the last 30 days is not re-checked. The run total covers every cent spent (probe, AI, storage), read back from runs-service.",
@@ -12186,6 +12267,14 @@
             },
             "required": true,
             "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
             "in": "path"
           },
           {
@@ -12299,7 +12388,7 @@
     },
     "/orgs/leads/{id}/qualification": {
       "get": {
-        "summary": "What the brand's checks say about this lead's company, with the evidence an email writer can cite (no spend)",
+        "summary": "What the enabled checks of the offer (or of every offer of the brand) say about this lead's company, with the evidence an email writer can cite (no spend)",
         "parameters": [
           {
             "in": "header",
@@ -12334,6 +12423,16 @@
             "required": true,
             "name": "brandId",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Only this offer's checks. Absent = the enabled checks of every offer of the brand, each naming its offerId."
+            },
+            "required": false,
+            "description": "Only this offer's checks. Absent = the enabled checks of every offer of the brand, each naming its offerId.",
+            "name": "offerId",
+            "in": "query"
           }
         ],
         "responses": {
@@ -12354,6 +12453,9 @@
                         "type": "object",
                         "properties": {
                           "criterionId": {
+                            "type": "string"
+                          },
+                          "offerId": {
                             "type": "string"
                           },
                           "question": {
@@ -12401,6 +12503,7 @@
                         },
                         "required": [
                           "criterionId",
+                          "offerId",
                           "question",
                           "mode",
                           "source",

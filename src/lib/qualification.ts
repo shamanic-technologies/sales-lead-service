@@ -23,9 +23,10 @@
  *     all on one run, so every cent is in runs under a seeded cost name.
  */
 import { createHash } from "node:crypto";
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
+  qualificationChecks,
   qualificationCriteria,
   qualificationObservations,
   qualificationVerdicts,
@@ -388,21 +389,142 @@ export function probeOf(row: QualificationCriterionRow): ProbeSpec {
   return row.probe as ProbeSpec;
 }
 
-export async function listCriteria(orgId: string, brandId: string): Promise<QualificationCriterionRow[]> {
+/** Where a criterion lives: the brand AND the offer (owner 2026-10-07: criteria are the offer's). */
+export interface OfferScope {
+  orgId: string;
+  brandId: string;
+  offerId: string;
+}
+
+/** Every live (not archived) criterion of the offer, on or off. */
+export async function listCriteria(scope: OfferScope): Promise<QualificationCriterionRow[]> {
   return db
     .select()
     .from(qualificationCriteria)
-    .where(and(eq(qualificationCriteria.orgId, orgId), eq(qualificationCriteria.brandId, brandId), isNull(qualificationCriteria.archivedAt)))
+    .where(
+      and(
+        eq(qualificationCriteria.orgId, scope.orgId),
+        eq(qualificationCriteria.brandId, scope.brandId),
+        eq(qualificationCriteria.offerId, scope.offerId),
+        isNull(qualificationCriteria.archivedAt),
+      ),
+    )
     .orderBy(qualificationCriteria.createdAt);
 }
 
-export async function getCriterion(orgId: string, brandId: string, id: string): Promise<QualificationCriterionRow | null> {
+/** Every live criterion of the brand, every offer, on or off (the lead read names each one's offer). */
+export async function listBrandCriteria(orgId: string, brandId: string): Promise<QualificationCriterionRow[]> {
+  return db
+    .select()
+    .from(qualificationCriteria)
+    .where(and(eq(qualificationCriteria.orgId, orgId), eq(qualificationCriteria.brandId, brandId), sql`${qualificationCriteria.offerId} IS NOT NULL`, isNull(qualificationCriteria.archivedAt)))
+    .orderBy(qualificationCriteria.createdAt);
+}
+
+export async function getCriterion(scope: OfferScope, id: string): Promise<QualificationCriterionRow | null> {
   const [row] = await db
     .select()
     .from(qualificationCriteria)
-    .where(and(eq(qualificationCriteria.id, id), eq(qualificationCriteria.orgId, orgId), eq(qualificationCriteria.brandId, brandId), isNull(qualificationCriteria.archivedAt)))
+    .where(
+      and(
+        eq(qualificationCriteria.id, id),
+        eq(qualificationCriteria.orgId, scope.orgId),
+        eq(qualificationCriteria.brandId, scope.brandId),
+        eq(qualificationCriteria.offerId, scope.offerId),
+        isNull(qualificationCriteria.archivedAt),
+      ),
+    )
     .limit(1);
   return row ?? null;
+}
+
+export class OfferUnresolvedError extends Error {
+  constructor(brandId: string, offers: string[]) {
+    super(`[lead-service] the campaign's offer could not be resolved and brand ${brandId} has must-pass checks on offer(s) ${offers.join(", ")}: refusing to serve unchecked`);
+    this.name = "OfferUnresolvedError";
+  }
+}
+
+/**
+ * The must-pass checks a serve applies: the ENABLED must_pass criteria of the campaign's offer,
+ * for every audience of that offer. An unresolved offer is only harmless when no offer of the
+ * brand has one; otherwise serving would skip checks the client turned on, so it THROWS.
+ */
+export async function mustPassCriteria(orgId: string, brandId: string, offerId: string | null): Promise<QualificationCriterionRow[]> {
+  if (offerId) return (await listCriteria({ orgId, brandId, offerId })).filter((c) => c.enabled && c.mode === "must_pass");
+  const anywhere = (await listBrandCriteria(orgId, brandId)).filter((c) => c.enabled && c.mode === "must_pass");
+  if (anywhere.length) throw new OfferUnresolvedError(brandId, [...new Set(anywhere.map((c) => c.offerId as string))]);
+  return [];
+}
+
+/**
+ * Record that a criterion was applied to a person. One row per (criterion, subject): a re-check
+ * (new observation after OBSERVATION_FRESH_DAYS) points the row at the new verdict.
+ */
+export async function recordCheck(row: {
+  criterion: QualificationCriterionRow;
+  subject: string;
+  domain: string | null;
+  verdictId: string | null;
+  reason: string | null;
+  runId: string | null;
+}): Promise<void> {
+  if (!row.criterion.offerId) throw new Error(`[lead-service] criterion ${row.criterion.id} has no offer: retired rows are never applied`);
+  await db
+    .insert(qualificationChecks)
+    .values({
+      criterionId: row.criterion.id,
+      orgId: row.criterion.orgId,
+      brandId: row.criterion.brandId,
+      offerId: row.criterion.offerId,
+      subject: row.subject,
+      domain: row.domain,
+      verdictId: row.verdictId,
+      reason: row.reason,
+      runId: row.runId,
+    })
+    .onConflictDoUpdate({
+      target: [qualificationChecks.criterionId, qualificationChecks.subject],
+      set: { domain: row.domain, verdictId: row.verdictId, reason: row.reason, runId: row.runId, checkedAt: new Date() },
+    });
+}
+
+export interface PassRate {
+  /** People this criterion was applied to. */
+  checked: number;
+  yes: number;
+  no: number;
+  /** Nothing could be judged (probe failed, observation cannot answer, no company domain). Never a pass. */
+  unavailable: number;
+  /** yes / checked (unavailable is in the denominator, never counted as a pass); null when nobody was checked. */
+  passRate: number | null;
+}
+
+/** Pass rate per criterion, counted on stored checks, the verdict read through verdict_id. */
+export async function passRates(criterionIds: string[]): Promise<Map<string, PassRate>> {
+  const out = new Map<string, PassRate>();
+  for (const id of criterionIds) out.set(id, { checked: 0, yes: 0, no: 0, unavailable: 0, passRate: null });
+  if (criterionIds.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT c.criterion_id::text AS criterion_id,
+           count(*)::int AS checked,
+           count(*) FILTER (WHERE v.verdict = 'yes')::int AS yes,
+           count(*) FILTER (WHERE v.verdict = 'no')::int AS no,
+           count(*) FILTER (WHERE v.verdict IS NULL OR v.verdict = 'unavailable')::int AS unavailable
+    FROM qualification_checks c
+    LEFT JOIN qualification_verdicts v ON v.id = c.verdict_id
+    WHERE c.criterion_id::text = ANY(${sql.param(criterionIds)}::text[])
+    GROUP BY c.criterion_id
+  `)) as unknown as Array<{ criterion_id: string; checked: number; yes: number; no: number; unavailable: number }>;
+  for (const r of rows) {
+    const checked = Number(r.checked);
+    const yes = Number(r.yes);
+    const no = Number(r.no);
+    const unavailable = Number(r.unavailable);
+    if (yes + no + unavailable !== checked) throw new Error(`[lead-service] criterion ${r.criterion_id} pass counts do not add up (${yes}+${no}+${unavailable} != ${checked})`);
+    out.set(r.criterion_id, { checked, yes, no, unavailable, passRate: checked ? Math.round((yes / checked) * 10_000) / 10_000 : null });
+  }
+  return out;
 }
 
 /**

@@ -1,23 +1,23 @@
 /**
- * Running a criterion on leads, reading the stored answers back, and suggesting criteria from a
- * brand's offer. The model lives in src/lib/qualification.ts.
+ * Running a criterion on leads, reading the stored answers back, and suggesting criteria for an
+ * OFFER. The model lives in src/lib/qualification.ts.
  */
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { leadsCampaigns, qualificationSuggestions, qualificationObservations, qualificationVerdicts } from "../db/schema.js";
+import { leadsCampaigns, qualificationCriteria, qualificationObservations, qualificationVerdicts } from "../db/schema.js";
 import { getOfferText } from "./brand-client.js";
 import { complete, stripDashes } from "./chat-complete-client.js";
 import { buildFullLeadsBatch, type FullLead } from "./lead-shape.js";
 import { priceCentsPerUnit } from "./price-client.js";
 import {
   criterionKey,
-  estimateCostPerRow,
   judge,
   observe,
   probeLabel,
   probeOf,
+  recordCheck,
   subjectFromOrganization,
-  type CostEstimate,
+  type OfferScope,
   type QualificationDeps,
   type QualificationMode,
 } from "./qualification.js";
@@ -111,6 +111,7 @@ export async function runCriterionOnLeads(criterion: QualificationCriterionRow, 
         reused: false,
         probeCostUsd: 0,
       });
+      if (lead) await recordCheck({ criterion, subject: `lead:${id}`, domain: null, verdictId: null, reason: "no_company_domain", runId: identity.runId });
       continue;
     }
     const group = byDomain.get(subject.domain) ?? [];
@@ -124,6 +125,9 @@ export async function runCriterionOnLeads(criterion: QualificationCriterionRow, 
     const subject = subjectFromOrganization(org)!;
     const observed = await observe(spec, subject, org, deps);
     const judged = await judge({ question: criterion.question, probe: spec }, observed.observation, subject, deps);
+    for (const lead of group) {
+      await recordCheck({ criterion, subject: `lead:${lead.leadId}`, domain: subject.domain, verdictId: judged.verdict.id, reason: judged.verdict.reason, runId: identity.runId });
+    }
     group.forEach((lead, i) => {
       const v = judged.verdict;
       rows.set(lead.leadId, {
@@ -147,6 +151,7 @@ export async function runCriterionOnLeads(criterion: QualificationCriterionRow, 
 
 export interface LeadQualification {
   criterionId: string;
+  offerId: string;
   question: string;
   mode: QualificationMode;
   source: string;
@@ -159,15 +164,16 @@ export interface LeadQualification {
 }
 
 /**
- * What the brand's active checks say about this lead's company, read from what is stored. A read
- * never spends: a company nobody checked yet reads `not_checked`.
+ * What the given checks (the ENABLED criteria of the offer(s) asked about) say about this lead's
+ * company, read from what is stored. A read never spends: a company nobody checked yet reads
+ * `not_checked`.
  */
 export async function readLeadQualification(lead: FullLead, criteria: QualificationCriterionRow[]): Promise<{ domain: string | null; checks: LeadQualification[] }> {
   const subject = subjectFromOrganization(lead.organization);
   const checks: LeadQualification[] = [];
   for (const c of criteria) {
     const spec = probeOf(c);
-    const base = { criterionId: c.id, question: c.question, mode: c.mode as QualificationMode, source: probeLabel(spec) };
+    const base = { criterionId: c.id, offerId: c.offerId as string, question: c.question, mode: c.mode as QualificationMode, source: probeLabel(spec) };
     if (!subject) {
       checks.push({ ...base, verdict: "unavailable", yesProbability: null, evidence: null, screenshotUrl: null, reason: "no_company_domain", checkedAt: null });
       continue;
@@ -200,30 +206,39 @@ export async function readLeadQualification(lead: FullLead, criteria: Qualificat
 // Suggestions
 // ---------------------------------------------------------------------------------------------
 
-export interface Suggestion {
-  question: string;
-  why: string;
-  availability: "in_our_data" | "custom_check";
-  probe: ProbeSpec;
-  source: string;
-  estimate: CostEstimate;
-}
-
-const SUGGEST_PROMPT = `You help a B2B company choose which business conditions to check on the companies of its sales prospects, so its cold emails can cite a real fact about each prospect.
-From the offer below, propose between 5 and 8 checks that make a prospect a better fit or give the email a concrete hook. Each check is ONE yes/no question about the prospect's COMPANY, answerable from ONE source.
+/**
+ * The suggestion rule (owner 2026-10-07): criteria belong to the OFFER and apply to every audience
+ * of it, so a suggestion says why a company NEEDS this offer (site slow on mobile, no active
+ * newsletter, not posting on LinkedIn, hiring support). Firmographics (industry, size, geography,
+ * roles, funding stage) are the AUDIENCE's job: the draft classifies each check and a firmographic
+ * one is DROPPED unless the draft states it holds for every audience of the offer.
+ */
+const SUGGEST_PROMPT = `You help a B2B company choose which conditions to check on the companies of its sales prospects, so its cold emails can cite a real fact about each prospect.
+The checks belong to ONE offer and apply to EVERY audience that offer is sold to (different industries, sizes, countries, roles). So a check must be a NEED SIGNAL: an observable fact showing the company needs THIS offer (for example its site is slow on mobile, it has no active newsletter, it stopped posting on LinkedIn, it is hiring support staff), never who the company is.
+Firmographic conditions (industry, company size, headcount, revenue, geography, job roles, funding stage, company age) are chosen per audience, not here. Propose one ONLY if it holds for every possible audience of this offer (for example the offer only makes sense for companies that sell online), and say why in "universalWhy".
+From the offer below, propose between 5 and 8 checks. Each check is ONE yes/no question about the prospect's COMPANY, answerable from ONE source, where "yes" means the company needs the offer.
 Sources you may use:
 ${BUILTIN_PROBE_KEYS.map((k) => `- "${k}": ${BUILTIN_PROBES[k].description}`).join("\n")}
 - "search": any other public web data about a company (reviews, traffic, ads running, tech stack, press...). Give a short search phrase describing the data needed, e.g. "google reviews of a business".
-Prefer "company_data" whenever it can answer, since it is free. Questions are short and concrete ("Does the company post on LinkedIn at least twice a month?"). No dashes.
-Answer JSON: {"checks":[{"question":"...","why":"one short sentence on why it matters for this offer","source":"company_data|homepage_text|homepage_screenshot|job_postings|linkedin_company_posts|search","search":"only when source is search"}]}`;
+Questions are short and concrete ("Has the company posted on LinkedIn less than twice in the last month?"). No dashes.
+Answer JSON: {"checks":[{"question":"...","why":"one short sentence on why it shows a need for this offer","kind":"need|firmographic","universal":true|false,"universalWhy":"only for a firmographic check","source":"company_data|homepage_text|homepage_screenshot|job_postings|linkedin_company_posts|search","search":"only when source is search"}]}`;
 
 interface DraftCheck {
   question: string;
   why: string;
+  kind?: string;
+  universal?: boolean;
+  universalWhy?: string;
   source: string;
   search?: string;
 }
 
+/** A check kept as an offer criterion: a need signal, or a firmographic the draft states is universal. */
+export function keepsDraft(c: DraftCheck): { keep: true } | { keep: false; reason: string } {
+  if (c.kind === "need") return { keep: true };
+  if (c.kind === "firmographic") return c.universal === true && typeof c.universalWhy === "string" && c.universalWhy.trim() ? { keep: true } : { keep: false, reason: "firmographic_not_universal" };
+  return { keep: false, reason: `unclassified_kind:${String(c.kind)}` };
+}
 /** Pick the treg endpoint that best answers a question, among usable ones from a catalogue search. */
 async function pickCatalogProbe(question: string, phrase: string, identity: SpendIdentity): Promise<ProbeSpec | null> {
   const results = await searchCatalog(phrase, 25);
@@ -244,14 +259,20 @@ async function pickCatalogProbe(question: string, phrase: string, identity: Spen
   return { kind: "treg", label: picked.e.name ?? picked.e.id, reading: /screenshot/i.test(picked.e.id) ? "screenshot" : "text", calls: [picked.r.call] };
 }
 
-export async function generateSuggestions(params: { orgId: string; brandId: string; offerId: string; identity: SpendIdentity }): Promise<Suggestion[]> {
+/**
+ * Suggest criteria for an offer and WRITE them as criteria rows, OFF (`origin: suggested`), so the
+ * dashboard reads one list and flips one switch. Suggestions nobody touched (still off, never
+ * changed by a person) from an earlier run are archived; a suggestion asking what a live criterion
+ * of the offer already asks is skipped.
+ */
+export async function generateSuggestions(params: OfferScope & { identity: SpendIdentity }): Promise<QualificationCriterionRow[]> {
   const offer = await getOfferText(params.orgId, params.brandId, params.offerId);
   const drafted = await complete(
     {
       systemPrompt: SUGGEST_PROMPT,
       message: `Offer: ${offer.name}\nDescription: ${offer.description ?? "(none)"}\nStated fields: ${JSON.stringify(offer.fields).slice(0, 12_000)}`,
       json: true,
-      maxTokens: 2_000,
+      maxTokens: 2_500,
       model: "flash",
     },
     params.identity,
@@ -259,9 +280,14 @@ export async function generateSuggestions(params: { orgId: string; brandId: stri
   const checks = Array.isArray(drafted.json?.checks) ? (drafted.json!.checks as DraftCheck[]) : null;
   if (!checks) throw new Error("[lead-service] suggestion draft answered without checks");
 
-  const out: Suggestion[] = [];
+  const drafts: Array<{ question: string; why: string; spec: ProbeSpec }> = [];
   for (const c of checks.slice(0, 8)) {
     if (typeof c.question !== "string" || !c.question.trim()) continue;
+    const kept = keepsDraft(c);
+    if (!kept.keep) {
+      console.log(`[lead-service] qualification suggestion dropped (${kept.reason}) for offer ${params.offerId}: ${c.question}`);
+      continue;
+    }
     let spec: ProbeSpec | null = null;
     if (c.source === "search") {
       if (typeof c.search === "string" && c.search.trim()) spec = await pickCatalogProbe(c.question, c.search, params.identity);
@@ -272,25 +298,45 @@ export async function generateSuggestions(params: { orgId: string; brandId: stri
       console.log(`[lead-service] qualification suggestion dropped, no usable source: ${c.question}`);
       continue;
     }
-    out.push({
-      question: stripDashes(c.question),
-      why: stripDashes(String(c.why ?? "")),
-      availability: spec.kind === "company_data" ? "in_our_data" : "custom_check",
-      probe: spec,
-      source: probeLabel(spec),
-      estimate: await estimateCostPerRow(spec),
-    });
+    drafts.push({ question: stripDashes(c.question), why: stripDashes(String(c.why ?? "")), spec });
   }
-  await db.insert(qualificationSuggestions).values({ orgId: params.orgId, brandId: params.brandId, suggestions: out, runId: params.identity.runId });
-  return out;
-}
 
-export async function latestSuggestions(orgId: string, brandId: string): Promise<{ suggestions: Suggestion[]; generatedAt: string } | null> {
-  const [row] = await db
-    .select()
-    .from(qualificationSuggestions)
-    .where(and(eq(qualificationSuggestions.orgId, orgId), eq(qualificationSuggestions.brandId, brandId)))
-    .orderBy(desc(qualificationSuggestions.generatedAt))
-    .limit(1);
-  return row ? { suggestions: row.suggestions as Suggestion[], generatedAt: row.generatedAt.toISOString() } : null;
+  return db.transaction(async (tx) => {
+    const scope = and(
+      eq(qualificationCriteria.orgId, params.orgId),
+      eq(qualificationCriteria.brandId, params.brandId),
+      eq(qualificationCriteria.offerId, params.offerId),
+      isNull(qualificationCriteria.archivedAt),
+    );
+    await tx
+      .update(qualificationCriteria)
+      .set({ archivedAt: new Date() })
+      .where(and(scope, eq(qualificationCriteria.origin, "suggested"), eq(qualificationCriteria.enabled, false), isNull(qualificationCriteria.updatedAt)));
+    const live = await tx.select().from(qualificationCriteria).where(scope);
+    const asked = new Set(live.map((r) => criterionKey(r.question, probeOf(r))));
+    const fresh = drafts.filter((d) => {
+      const k = criterionKey(d.question, d.spec);
+      if (asked.has(k)) return false;
+      asked.add(k);
+      return true;
+    });
+    if (fresh.length === 0) return [];
+    return tx
+      .insert(qualificationCriteria)
+      .values(
+        fresh.map((d) => ({
+          orgId: params.orgId,
+          brandId: params.brandId,
+          offerId: params.offerId,
+          question: d.question,
+          why: d.why,
+          probe: d.spec,
+          mode: "mention",
+          enabled: false,
+          origin: "suggested",
+          createdByUserId: params.identity.userId ?? null,
+        })),
+      )
+      .returning();
+  });
 }

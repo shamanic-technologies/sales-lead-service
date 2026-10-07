@@ -1,7 +1,8 @@
 /**
- * Qualification checks on the wire: the catalogue with estimated cost per row, suggested criteria
- * from a brand's offer, the brand's chosen criteria, a run on a sample of real leads, and what the
- * checks say about one lead. Model: src/lib/qualification.ts.
+ * Qualification checks on the wire: the catalogue with estimated cost per lead, an OFFER's criteria
+ * (suggested by AI or created by hand, each with its on/off switch, mode and pass rate), a run on a
+ * sample of real leads, and what the checks say about one lead. Criteria belong to the offer and
+ * apply to every audience of it (owner 2026-10-07). Model: src/lib/qualification.ts.
  *
  * Routes that SPEND (suggestions, sample) need the caller's full identity (org, user, run): the
  * spend hangs on a child run of the caller's run, so every cent is attributed. Reads never spend.
@@ -12,23 +13,26 @@ import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/au
 import { db } from "../db/index.js";
 import { qualificationCriteria } from "../db/schema.js";
 import { and, eq, isNull } from "drizzle-orm";
+import type { PassRate } from "../lib/qualification.js";
 import { buildFullLeadsBatch } from "../lib/lead-shape.js";
 import { createRun, getRunTotalCents, updateRun } from "../lib/runs-client.js";
 import {
   InsufficientCreditError,
   estimateCostPerRow,
   getCriterion,
+  listBrandCriteria,
   listCriteria,
+  passRates,
   probeLabel,
   probeOf,
   resolveProbe,
   QUALIFICATION_MODES,
+  type OfferScope,
 } from "../lib/qualification.js";
 import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, probeSpecProblems } from "../lib/qualification-probes.js";
 import {
   MAX_SAMPLE,
   generateSuggestions,
-  latestSuggestions,
   leadsOfBrand,
   readLeadQualification,
   recentServedLeadIds,
@@ -87,19 +91,36 @@ async function closeRun(identity: SpendIdentity, ok: boolean): Promise<void> {
   await updateRun(identity.runId, ok ? "completed" : "failed", { orgId: identity.orgId, userId: identity.userId ?? undefined, brandId: identity.brandId ?? undefined });
 }
 
-async function serializeCriterion(row: QualificationCriterionRow) {
+function offerScope(req: AuthenticatedRequest): OfferScope {
+  return { orgId: req.orgId as string, brandId: req.params.brandId, offerId: req.params.offerId };
+}
+
+async function serializeCriterion(row: QualificationCriterionRow, passRate: PassRate) {
   const spec = probeOf(row);
   return {
     id: row.id,
+    offerId: row.offerId as string,
     question: row.question,
+    why: row.why,
     mode: row.mode,
+    enabled: row.enabled,
+    origin: row.origin,
     availability: spec.kind === "company_data" ? "in_our_data" : "custom_check",
     source: probeLabel(spec),
     probe: spec,
     estimate: await estimateCostPerRow(spec),
+    passRate,
     createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt ? row.updatedAt.toISOString() : null,
   };
 }
+
+async function serializeCriteria(rows: QualificationCriterionRow[]) {
+  const rates = await passRates(rows.map((r) => r.id));
+  return Promise.all(rows.map((r) => serializeCriterion(r, rates.get(r.id)!)));
+}
+
+const NOT_FOUND = { error: "No live criterion with that id on this offer", code: "criterion_not_found" };
 
 // --- Catalogue -------------------------------------------------------------------------------
 
@@ -122,48 +143,23 @@ router.get(
   }),
 );
 
-// --- Suggestions -----------------------------------------------------------------------------
-
-const SuggestBody = z.object({ offerId: z.string().trim().min(1) });
+// --- Suggestions: written as criteria rows, OFF --------------------------------------------
 
 router.post(
-  "/orgs/brands/:brandId/qualification/suggestions",
+  "/orgs/brands/:brandId/offers/:offerId/qualification/suggestions",
   apiKeyAuth,
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
-    const parsed = SuggestBody.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-      return;
-    }
     let identity: SpendIdentity | null = null;
     try {
       identity = await openRun(req, res, req.params.brandId, "qualification-suggestions");
       if (!identity) return;
-      const suggestions = await generateSuggestions({ orgId: req.orgId as string, brandId: req.params.brandId, offerId: parsed.data.offerId, identity });
+      const rows = await generateSuggestions({ ...offerScope(req), identity });
       await closeRun(identity, true);
-      res.json({ suggestions, runId: identity.runId });
+      res.json({ criteria: await serializeCriteria(rows), runId: identity.runId });
     } catch (error) {
       if (identity) await closeRun(identity, false).catch((e) => console.error("[lead-service] closing run failed:", e));
       fail(res, error, "qualification suggestions");
-    }
-  }),
-);
-
-router.get(
-  "/orgs/brands/:brandId/qualification/suggestions",
-  apiKeyAuth,
-  requireOrgId,
-  wrap<AuthenticatedRequest>(async (req, res) => {
-    try {
-      const latest = await latestSuggestions(req.orgId as string, req.params.brandId);
-      if (!latest) {
-        res.status(404).json({ error: "No suggestions generated for this brand yet", code: "no_suggestions" });
-        return;
-      }
-      res.json(latest);
-    } catch (error) {
-      fail(res, error, "qualification suggestions read");
     }
   }),
 );
@@ -179,10 +175,16 @@ const CreateCriterionBody = z.object({
   question: z.string().trim().min(5).max(500),
   probe: ProbeInput,
   mode: z.enum(QUALIFICATION_MODES),
+  enabled: z.boolean(),
 });
 
+const PatchCriterionBody = z
+  .object({ enabled: z.boolean().optional(), mode: z.enum(QUALIFICATION_MODES).optional() })
+  .strict()
+  .refine((b) => b.enabled !== undefined || b.mode !== undefined, { message: "name enabled, mode, or both" });
+
 router.post(
-  "/orgs/brands/:brandId/qualification/criteria",
+  "/orgs/brands/:brandId/offers/:offerId/qualification/criteria",
   apiKeyAuth,
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
@@ -204,9 +206,18 @@ router.post(
       }
       const [row] = await db
         .insert(qualificationCriteria)
-        .values({ orgId: req.orgId as string, brandId: req.params.brandId, question: parsed.data.question, probe: resolved.spec, mode: parsed.data.mode, createdByUserId: req.userId ?? null })
+        .values({
+          ...offerScope(req),
+          question: parsed.data.question,
+          probe: resolved.spec,
+          mode: parsed.data.mode,
+          enabled: parsed.data.enabled,
+          origin: "custom",
+          createdByUserId: req.userId ?? null,
+        })
         .returning();
-      res.status(201).json({ criterion: await serializeCriterion(row) });
+      const [criterion] = await serializeCriteria([row]);
+      res.status(201).json({ criterion });
     } catch (error) {
       if (error instanceof TregEndpointUnknownError) {
         res.status(400).json({ error: "Unusable probe", code: "unusable_probe", reason: error.message });
@@ -218,32 +229,77 @@ router.post(
 );
 
 router.get(
-  "/orgs/brands/:brandId/qualification/criteria",
+  "/orgs/brands/:brandId/offers/:offerId/qualification/criteria",
   apiKeyAuth,
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
     try {
-      const rows = await listCriteria(req.orgId as string, req.params.brandId);
-      res.json({ criteria: await Promise.all(rows.map(serializeCriterion)) });
+      res.json({ criteria: await serializeCriteria(await listCriteria(offerScope(req))) });
     } catch (error) {
       fail(res, error, "qualification criteria read");
     }
   }),
 );
 
+router.patch(
+  "/orgs/brands/:brandId/offers/:offerId/qualification/criteria/:criterionId",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const parsed = PatchCriterionBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      return;
+    }
+    try {
+      const scope = offerScope(req);
+      const [row] = await db
+        .update(qualificationCriteria)
+        .set({ ...parsed.data, updatedAt: new Date() })
+        .where(
+          and(
+            eq(qualificationCriteria.id, req.params.criterionId),
+            eq(qualificationCriteria.orgId, scope.orgId),
+            eq(qualificationCriteria.brandId, scope.brandId),
+            eq(qualificationCriteria.offerId, scope.offerId),
+            isNull(qualificationCriteria.archivedAt),
+          ),
+        )
+        .returning();
+      if (!row) {
+        res.status(404).json(NOT_FOUND);
+        return;
+      }
+      const [criterion] = await serializeCriteria([row]);
+      res.json({ criterion });
+    } catch (error) {
+      fail(res, error, "qualification criterion update");
+    }
+  }),
+);
+
 router.delete(
-  "/orgs/brands/:brandId/qualification/criteria/:criterionId",
+  "/orgs/brands/:brandId/offers/:offerId/qualification/criteria/:criterionId",
   apiKeyAuth,
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
     try {
+      const scope = offerScope(req);
       const archived = await db
         .update(qualificationCriteria)
         .set({ archivedAt: new Date() })
-        .where(and(eq(qualificationCriteria.id, req.params.criterionId), eq(qualificationCriteria.orgId, req.orgId as string), eq(qualificationCriteria.brandId, req.params.brandId), isNull(qualificationCriteria.archivedAt)))
+        .where(
+          and(
+            eq(qualificationCriteria.id, req.params.criterionId),
+            eq(qualificationCriteria.orgId, scope.orgId),
+            eq(qualificationCriteria.brandId, scope.brandId),
+            eq(qualificationCriteria.offerId, scope.offerId),
+            isNull(qualificationCriteria.archivedAt),
+          ),
+        )
         .returning({ id: qualificationCriteria.id });
       if (archived.length === 0) {
-        res.status(404).json({ error: "No active criterion with that id on this brand", code: "criterion_not_found" });
+        res.status(404).json(NOT_FOUND);
         return;
       }
       res.json({ archived: true });
@@ -261,7 +317,7 @@ const SampleBody = z.union([
 ]);
 
 router.post(
-  "/orgs/brands/:brandId/qualification/criteria/:criterionId/sample",
+  "/orgs/brands/:brandId/offers/:offerId/qualification/criteria/:criterionId/sample",
   apiKeyAuth,
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
@@ -274,9 +330,9 @@ router.post(
     const brandId = req.params.brandId;
     let identity: SpendIdentity | null = null;
     try {
-      const criterion = await getCriterion(orgId, brandId, req.params.criterionId);
+      const criterion = await getCriterion(offerScope(req), req.params.criterionId);
       if (!criterion) {
-        res.status(404).json({ error: "No active criterion with that id on this brand", code: "criterion_not_found" });
+        res.status(404).json(NOT_FOUND);
         return;
       }
       let leadIds: string[];
@@ -321,8 +377,9 @@ router.get(
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId : null;
-    if (!brandId || !z.string().uuid().safeParse(req.params.id).success) {
-      res.status(400).json({ error: "A lead uuid and the brandId query parameter are required" });
+    const offerId = req.query.offerId === undefined ? null : typeof req.query.offerId === "string" && req.query.offerId.trim() ? req.query.offerId : undefined;
+    if (!brandId || offerId === undefined || !z.string().uuid().safeParse(req.params.id).success) {
+      res.status(400).json({ error: "A lead uuid and the brandId query parameter are required; offerId, when named, is one non-empty id" });
       return;
     }
     try {
@@ -336,8 +393,9 @@ router.get(
         res.status(404).json({ error: "Lead not found", code: "lead_not_found" });
         return;
       }
-      const criteria = await listCriteria(req.orgId as string, brandId);
-      res.json(await readLeadQualification(lead, criteria));
+      // The ENABLED criteria of the offer named, or of every offer of the brand; each check names its offer.
+      const all = offerId ? await listCriteria({ orgId: req.orgId as string, brandId, offerId }) : await listBrandCriteria(req.orgId as string, brandId);
+      res.json(await readLeadQualification(lead, all.filter((c) => c.enabled)));
     } catch (error) {
       fail(res, error, "lead qualification read");
     }

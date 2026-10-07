@@ -206,10 +206,10 @@ export async function pullNext(
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
 
   // 4. Next person of that audience worth paying for. Apollo audiences are served through
-  // CANDIDATES: the audience screen and the brand's must-pass checks are decided HERE before the
+  // CANDIDATES: the audience screen and the OFFER's must-pass checks are decided HERE before the
   // reveal is paid (src/lib/candidate-serve.ts). An audience human-service does not serve that
   // way (crm, apify, CRM outreach) answers null and keeps serve-next, screen and all.
-  const served = (await serveThroughCandidates(audienceId, ctx, signal)) ?? (await serveNext(audienceId, ctx));
+  const served = (await serveThroughCandidates(audienceId, ctx, offerId, signal)) ?? (await serveNext(audienceId, ctx));
 
   // human-service bounds each serve-next call: when its budget runs out mid-walk it
   // answers `pending` with no person, and the next call resumes the walk. That is an
