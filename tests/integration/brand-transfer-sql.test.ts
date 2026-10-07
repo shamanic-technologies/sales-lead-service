@@ -25,6 +25,8 @@ const BRAND_SCALAR_TABLES = [
   "crm_pairing_matches",
   "crm_pairing_judgments",
   "crm_pairing_rulings",
+  "qualification_criteria",
+  "qualification_suggestions",
   "lead_delivery_evidence",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves"] as const;
@@ -110,6 +112,10 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.insert(schema.crmPairingRulings).values({
       orgId: org, brandId: brand, crmContactId: contact, leadId, ruling: "paired",
     });
+    await db.insert(schema.qualificationCriteria).values({
+      orgId: org, brandId: brand, question: "Is the site slow on mobile?", probe: { kind: "company_data" }, mode: "mention",
+    });
+    await db.insert(schema.qualificationSuggestions).values({ orgId: org, brandId: brand, suggestions: [] });
     await db.execute(sql`
       INSERT INTO lead_delivery_evidence (org_id, brand_id, campaign_id, email, result, fetched_at)
       VALUES (${org}, ${brand}, '', ${`${randomUUID()}@example.test`}, NULL, now())`);
