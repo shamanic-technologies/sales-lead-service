@@ -39,6 +39,15 @@ vi.mock("../../src/lib/lead-shape.js", () => ({
   buildFullLead: (...args: unknown[]) => buildFullLead(...args),
 }));
 
+// The writer's check results (src/lib/writer-checks.ts) have their own suite; here they are
+// observed only for WHEN they run and that the serve hands them out.
+const offerChecks = vi.fn();
+const checksForWriter = vi.fn();
+vi.mock("../../src/lib/writer-checks.js", () => ({
+  offerChecks: (...args: unknown[]) => offerChecks(...args),
+  checksForWriter: (...args: unknown[]) => checksForWriter(...args),
+}));
+
 const insertValues = vi.fn();
 vi.mock("../../src/db/index.js", () => ({
   db: {
@@ -102,6 +111,8 @@ describe("pullNext (audience serve-next flow)", () => {
     pickRetryCandidate.mockResolvedValue(null);
     // Default: an offer-less campaign — the goal read stays brand-scoped, byte-identically.
     fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: null });
+    offerChecks.mockResolvedValue([]);
+    checksForWriter.mockResolvedValue({ domain: null, checks: [] });
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
@@ -555,5 +566,59 @@ describe("pullNext (audience serve-next flow)", () => {
 
     expect(result).toEqual({ found: false, reason: "no_audience" });
     expect(pickRetryCandidate).not.toHaveBeenCalled();
+  });
+  describe("check results for the email writer", () => {
+    const bonus = { id: "crit-bonus", mode: "mention", enabled: true };
+    const filter = { id: "crit-filter", mode: "must_pass", enabled: true };
+    const qualification = {
+      domain: "cascobay.com",
+      checks: [{ criterionId: "crit-bonus", mode: "mention", verdict: "no", evidence: "Last LinkedIn post 5 months ago." }],
+    };
+
+    it("runs the offer's checks only AFTER the person is served and recorded, and hands every result out", async () => {
+      fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: "offer-1" });
+      offerChecks.mockResolvedValue([filter, bonus]);
+      checksForWriter.mockResolvedValue(qualification);
+      serveNext.mockResolvedValueOnce({ status: "served", person });
+      upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+      registerServedEmail.mockResolvedValueOnce("lead-1");
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-1", organization: { primaryDomain: "cascobay.com" } });
+
+      const result = await pullNext(baseParams);
+
+      expect(offerChecks).toHaveBeenCalledWith("org-1", "brand-1", "offer-1");
+      expect(checksForWriter).toHaveBeenCalledWith(
+        { leadId: "lead-1", organization: { primaryDomain: "cascobay.com" } },
+        [filter, bonus],
+        // Spend rides the serve's run, labelled like the must-pass spend.
+        expect.objectContaining({ orgId: "org-1", runId: "run-1", userId: "user-1", campaignId: "campaign-1", featureSlug: "sourcing-apollo-cold-filters" }),
+      );
+      // Bonus spend only once someone was actually served and recorded.
+      expect(serveNext.mock.invocationCallOrder[0]).toBeLessThan(checksForWriter.mock.invocationCallOrder[0]);
+      expect(insertValues.mock.invocationCallOrder[0]).toBeLessThan(checksForWriter.mock.invocationCallOrder[0]);
+      expect(result.lead?.qualification).toEqual(qualification);
+    });
+
+    it("never runs a check for nobody: an empty serve pays for no Bonus check", async () => {
+      offerChecks.mockResolvedValue([bonus]);
+      serveNext.mockResolvedValueOnce({ status: "exhausted", person: null });
+
+      const result = await pullNext(baseParams);
+
+      expect(result.found).toBe(false);
+      expect(checksForWriter).not.toHaveBeenCalled();
+    });
+
+    it("hands the check results out on a re-served paid lead too", async () => {
+      offerChecks.mockResolvedValue([bonus]);
+      checksForWriter.mockResolvedValue(qualification);
+      pickRetryCandidate.mockResolvedValueOnce({ id: "lc-1", leadId: "lead-paid", email: "stranded@cascobay.com", audienceId: "aud-1", goal: "signup", retryCount: 0 });
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-paid" });
+
+      const result = await pullNext(baseParams);
+
+      expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-paid" }, [bonus], expect.objectContaining({ runId: "run-1" }));
+      expect(result.lead?.qualification).toEqual(qualification);
+    });
   });
 });

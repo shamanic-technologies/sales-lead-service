@@ -1007,6 +1007,33 @@ export const ServedBuyingSignalSchema = z
   })
   .openapi("ServedBuyingSignal");
 
+const LeadQualificationCheckSchema = z
+  .object({
+    criterionId: z.string(),
+    offerId: z.string(),
+    question: z.string().openapi({ description: "The yes/no question about the company; yes means it needs the offer." }),
+    mode: z.enum(QUALIFICATION_MODES).openapi({
+      description: "must_pass = Hard filter (a company failing it is declined before its reveal is paid); mention = Bonus (run once the lead is served, never drops anyone).",
+    }),
+    source: z.string().openapi({ description: "The probe in plain words." }),
+    verdict: z.enum(["yes", "no", "unavailable", "not_checked"]).openapi({
+      description: "yes = pass, no = fail, unavailable = could not check (see reason), not_checked = never run on this company (a Hard filter on a serve that did not go through candidates).",
+    }),
+    yesProbability: z.number().nullable(),
+    evidence: z.string().nullable().openapi({ description: "One plain sentence with the measured fact supporting the verdict." }),
+    screenshotUrl: z.string().nullable().openapi({ description: "Stored screenshot of what was observed, when the probe reads one." }),
+    reason: z.string().nullable(),
+    checkedAt: z.string().nullable(),
+  })
+  .openapi("LeadQualificationCheck");
+
+const LeadQualificationSchema = z
+  .object({
+    domain: z.string().nullable().openapi({ description: "The company domain the checks are keyed on; null when the lead has none (every check then reads unavailable)." }),
+    checks: z.array(LeadQualificationCheckSchema),
+  })
+  .openapi("LeadQualification");
+
 const ServedLeadSchema = z
   .object({
     leadId: z
@@ -1109,6 +1136,14 @@ const ServedLeadSchema = z
           "not state one). A retried serve hands out the value stored on the original serve.",
         example: "60000000-0000-0000-0000-000000000001",
       }),
+    qualification: LeadQualificationSchema.openapi({
+      description:
+        "Every ENABLED check of the campaign's offer on this lead's company, whatever it found (pass, fail, could not " +
+        "check), with its evidence sentence and screenshot link: context for the email writer, never an instruction " +
+        "to cite it. Hard filters (`must_pass`) ran before the reveal was paid and are read back; Bonus checks " +
+        "(`mention`) ran on this serve, after the person was served with a verified email, their spend declared on " +
+        "the serve's run. `checks` is empty when the offer has no enabled check.",
+    }),
   })
   .openapi("ServedLead", {
     description:
@@ -6478,24 +6513,7 @@ registry.registerPath({
       description: "Stored answers; a company nobody checked yet reads not_checked",
       content: {
         "application/json": {
-          schema: z.object({
-            domain: z.string().nullable(),
-            checks: z.array(
-              z.object({
-                criterionId: z.string(),
-                offerId: z.string(),
-                question: z.string(),
-                mode: z.enum(QUALIFICATION_MODES),
-                source: z.string(),
-                verdict: z.enum(["yes", "no", "unavailable", "not_checked"]),
-                yesProbability: z.number().nullable(),
-                evidence: z.string().nullable(),
-                screenshotUrl: z.string().nullable(),
-                reason: z.string().nullable(),
-                checkedAt: z.string().nullable(),
-              }),
-            ),
-          }),
+          schema: LeadQualificationSchema,
         },
       },
     },

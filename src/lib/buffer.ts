@@ -13,6 +13,8 @@ import { readServedPersonId } from "./served-person-id.js";
 import { getCurrentGoal } from "./brand-client.js";
 import { fetchCampaign } from "./campaign-client.js";
 import { pickRetryCandidate } from "./retry-pool.js";
+import { checksForWriter, offerChecks, type WriterChecks } from "./writer-checks.js";
+import type { SpendIdentity } from "./treg-client.js";
 import {
   AUDIENCE_EXHAUSTED_REASON,
   NO_AUDIENCE_REASON,
@@ -69,6 +71,11 @@ interface PullNextResult {
      * stated one. OMITTED otherwise, never null-filled, never derived from leadId.
      */
     personId?: string;
+    /**
+     * Every enabled check of the campaign's offer on this lead's company, as the email writer
+     * reads it (src/lib/writer-checks.ts): Hard filters read back, Bonus checks run on this serve.
+     */
+    qualification: WriterChecks;
   };
 }
 
@@ -154,6 +161,23 @@ export async function pullNext(
   }
   const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx, offerId);
   const ctx: ServiceContext = { ...baseCtx, goal };
+  // The offer's enabled checks, read before anything is bought: the Bonus ones run once a person
+  // is served (email verified, handed to the writer next), every one is read back for the writer.
+  const checks = await offerChecks(params.orgId, params.brandId, offerId);
+  const writerChecks = async (fullLead: Awaited<ReturnType<typeof buildFullLead>>): Promise<WriterChecks> => {
+    const identity: SpendIdentity | null = params.runId
+      ? {
+          orgId: params.orgId,
+          userId: params.userId ?? null,
+          runId: params.runId,
+          brandId: params.brandId,
+          campaignId: params.campaignId,
+          workflowSlug: params.workflowSlug ?? null,
+          featureSlug: params.runFeatureSlug,
+        }
+      : null;
+    return checksForWriter(fullLead, checks, identity);
+  };
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
 
@@ -177,6 +201,7 @@ export async function pullNext(
 
   if (retry) {
     const retryLead = await buildFullLead(retry.leadId);
+    const qualification = await writerChecks(retryLead);
     console.log(
       `[lead-service] pullNext found=true source=retry-pool campaign=${params.campaignId} email=${retry.email} leadId=${retry.leadId} attempt=${retry.retryCount + 1}`,
     );
@@ -199,6 +224,7 @@ export async function pullNext(
         buyingSignal: retry.buyingSignal,
         // The person stored on the original serve, when it carried one.
         ...(retry.personId ? { personId: retry.personId } : {}),
+        qualification,
       },
     };
   }
@@ -289,6 +315,7 @@ export async function pullNext(
     .onConflictDoNothing();
 
   const fullLead = await buildFullLead(leadId);
+  const qualification = await writerChecks(fullLead);
 
   console.log(
     `[lead-service] pullNext found=true campaign=${params.campaignId} audienceId=${audienceId} email=${person.email} leadId=${leadId}`,
@@ -310,6 +337,7 @@ export async function pullNext(
       audienceId: audienceId,
       buyingSignal,
       ...(personId ? { personId } : {}),
+      qualification,
     },
   };
 }
