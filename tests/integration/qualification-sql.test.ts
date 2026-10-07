@@ -162,7 +162,8 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
         { question: `Is the company in retail? ${tag}`, why: "x", kind: "firmographic", universal: false, source: "company_data" },
       ],
     };
-    const first = await generateSuggestions({ ...scope, identity });
+    const { rows: first, dropped } = await generateSuggestions({ ...scope, identity });
+    expect(dropped.map((d) => d.reason)).toEqual(["firmographic_not_universal"]);
     expect(first.map((r) => [r.offerId, r.enabled, r.origin, r.why])).toEqual([[offer, false, "suggested", "Slow sites lose buyers."]]);
 
     // A person turns one on: it survives the next run; the same question is not suggested twice.
@@ -174,7 +175,8 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
       ],
     };
     await generateSuggestions({ ...scope, identity });
-    draftJson = { checks: [{ question: `Is the site missing a blog? ${tag}`, why: "No content.", kind: "need", source: "homepage_text" }] };
+    // The bare list the model also answers with.
+    draftJson = [{ question: `Is the site missing a blog? ${tag}`, why: "No content.", kind: "need", source: "homepage_text" }] as unknown as Record<string, unknown>;
     await generateSuggestions({ ...scope, identity });
     const live = await listCriteria(scope);
     expect(live.map((r) => [r.question.replace(` ${tag}`, ""), r.enabled])).toEqual([
