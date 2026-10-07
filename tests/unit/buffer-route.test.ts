@@ -173,7 +173,11 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     const res = await post(app, AUDIENCE);
 
     expect(res.status).toBe(200);
-    expect(resolveSourcingOriginSlug).toHaveBeenCalledWith({ audienceId: AUDIENCE, orgId: ORG });
+    expect(resolveSourcingOriginSlug).toHaveBeenCalledWith({
+      audienceId: AUDIENCE,
+      orgId: ORG,
+      outreachFeatureSlug: "lead-finder-v1",
+    });
     // Parent link, campaign, audience unchanged; only the slug moves.
     expect(createRun).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -15,8 +15,10 @@ import { fetchWithRetry } from "./fetch-retry.js";
  * itself (`leads_campaigns.feature_slug`) keeps the outreach channel it was served for.
  *
  * Two reads, no guess: human-service states the audience's list kind (`channels[].list`), and
- * features-service's sourcing-origins catalogue maps each list kind to its origin slug. Anything
- * that cannot be resolved THROWS: a serve must never silently keep the outreach label.
+ * features-service's sourcing-origins catalogue maps each list kind to its origin slug. The catalogue
+ * also states which origins each outreach channel counts (`originsByChannel`): an origin its channel
+ * does not list would drop that sourcing cost from the channel's spend figures, so it is refused.
+ * Anything that cannot be resolved THROWS: a serve must never silently keep the outreach label.
  */
 
 const ORIGINS_TTL_MS = 10 * 60 * 1000;
@@ -34,15 +36,20 @@ interface SourcingOriginEntry {
   audienceLists: string[];
 }
 
-let originsCache: { at: number; byList: Map<string, string> } | null = null;
+interface OriginsCatalogue {
+  byList: Map<string, string>;
+  byChannel: Map<string, Set<string>>;
+}
+
+let originsCache: { at: number; catalogue: OriginsCatalogue } | null = null;
 
 /** Test hook: forget the cached catalogue. */
 export function resetSourcingOriginsCache(): void {
   originsCache = null;
 }
 
-async function loadOriginByList(): Promise<Map<string, string>> {
-  if (originsCache && Date.now() - originsCache.at < ORIGINS_TTL_MS) return originsCache.byList;
+async function loadCatalogue(): Promise<OriginsCatalogue> {
+  if (originsCache && Date.now() - originsCache.at < ORIGINS_TTL_MS) return originsCache.catalogue;
 
   const url = `${FEATURES_SERVICE_URL}/public/sourcing-origins`;
   const response = await fetchWithRetry(url, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
@@ -51,7 +58,7 @@ async function loadOriginByList(): Promise<Map<string, string>> {
       `features-service sourcing-origins read failed: ${response.status} ${await response.text()}`,
     );
   }
-  const body = (await response.json()) as { origins?: unknown };
+  const body = (await response.json()) as { origins?: unknown; originsByChannel?: unknown };
   if (!Array.isArray(body.origins)) {
     throw new SourcingOriginUnresolvedError("features-service sourcing-origins answered without an origins list");
   }
@@ -62,8 +69,20 @@ async function loadOriginByList(): Promise<Map<string, string>> {
     }
     for (const list of raw.audienceLists) byList.set(list, raw.slug);
   }
-  originsCache = { at: Date.now(), byList: byList };
-  return byList;
+  const rawByChannel = body.originsByChannel;
+  if (!rawByChannel || typeof rawByChannel !== "object" || Array.isArray(rawByChannel)) {
+    throw new SourcingOriginUnresolvedError("features-service sourcing-origins answered without originsByChannel");
+  }
+  const byChannel = new Map<string, Set<string>>();
+  for (const [channel, origins] of Object.entries(rawByChannel as Record<string, unknown>)) {
+    if (!Array.isArray(origins) || origins.some((o) => typeof o !== "string")) {
+      throw new SourcingOriginUnresolvedError(`features-service originsByChannel entry unreadable for channel=${channel}`);
+    }
+    byChannel.set(channel, new Set(origins as string[]));
+  }
+  const catalogue = { byList, byChannel };
+  originsCache = { at: Date.now(), catalogue };
+  return catalogue;
 }
 
 async function fetchAudienceListKind(audienceId: string, orgId: string): Promise<string> {
@@ -91,19 +110,30 @@ async function fetchAudienceListKind(audienceId: string, orgId: string): Promise
 }
 
 /**
- * The origin feature slug of the audience a serve draws from. Throws SourcingOriginUnresolvedError
- * (with the audience, org and cause in the message) on any failure.
+ * The origin feature slug of the audience a serve draws from, checked against the outreach channel
+ * the lead is served for. Throws SourcingOriginUnresolvedError (with the audience, org, channel and
+ * cause in the message) on any failure.
  */
-export async function resolveSourcingOriginSlug(params: { audienceId: string; orgId: string }): Promise<string> {
-  const [list, byList] = await Promise.all([
+export async function resolveSourcingOriginSlug(params: {
+  audienceId: string;
+  orgId: string;
+  outreachFeatureSlug: string;
+}): Promise<string> {
+  const [list, catalogue] = await Promise.all([
     fetchAudienceListKind(params.audienceId, params.orgId),
-    loadOriginByList(),
+    loadCatalogue(),
   ]);
-  const slug = byList.get(list);
+  const where = `audience=${params.audienceId} org=${params.orgId} channel=${params.outreachFeatureSlug}`;
+  const slug = catalogue.byList.get(list);
   if (!slug) {
-    throw new SourcingOriginUnresolvedError(
-      `no sourcing origin in the features-service catalogue for list kind=${list} (audience=${params.audienceId} org=${params.orgId})`,
-    );
+    throw new SourcingOriginUnresolvedError(`no sourcing origin in the features-service catalogue for list kind=${list} (${where})`);
+  }
+  const listed = catalogue.byChannel.get(params.outreachFeatureSlug);
+  if (!listed) {
+    throw new SourcingOriginUnresolvedError(`outreach channel is not a sourcing channel in the features-service catalogue (${where})`);
+  }
+  if (!listed.has(slug)) {
+    throw new SourcingOriginUnresolvedError(`origin=${slug} is not one the outreach channel counts (${where})`);
   }
   return slug;
 }

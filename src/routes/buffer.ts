@@ -102,7 +102,11 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     if (req.audienceId) {
       try {
-        runFeatureSlug = await resolveSourcingOriginSlug({ audienceId: req.audienceId, orgId: req.orgId! });
+        runFeatureSlug = await resolveSourcingOriginSlug({
+          audienceId: req.audienceId,
+          orgId: req.orgId!,
+          outreachFeatureSlug: featureSlug,
+        });
       } catch (err) {
         console.error(
           `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
