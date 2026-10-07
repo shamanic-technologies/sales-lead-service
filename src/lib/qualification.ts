@@ -129,9 +129,10 @@ export function criterionKey(question: string, spec: ProbeSpec): string {
  * re-judged on their stored observation (no probe is paid again). v2: the readability gate asks
  * whether the observation is a usable reading of THIS company's source, never whether it "contains
  * enough to answer" (a full homepage with no newsletter form IS the answer no; v1 read it as
- * unavailable on 5 of 12 prod leads). v3: evidence written with thinking off (v2 sentences were cut).
+ * unavailable on 5 of 12 prod leads). v3: evidence written with thinking off (v2 sentences were cut). v4: the
+ * evidence supports the given answer (v3 wrote "No, ..." under a yes).
  */
-export const JUDGE_VERSION = "v3";
+export const JUDGE_VERSION = "v4";
 
 export function probeLabel(spec: ProbeSpec): string {
   return spec.kind === "company_data" ? "Company data we hold" : spec.label;
@@ -306,9 +307,11 @@ export async function observe(spec: ProbeSpec, subject: CompanySubject, org: Org
 // ---------------------------------------------------------------------------------------------
 
 const EVIDENCE_PROMPT =
-  "You state ONE measured fact that answers a yes/no question about a company, for a salesperson who will cite it " +
-  "in an email. One sentence, under 30 words, plain words, concrete figures and dates taken from the observation " +
-  "(\"last LinkedIn post 5 months ago\", \"no sign-up form on the homepage\"). Never invent a figure. No dashes.";
+  "A yes/no question about a company has already been answered. Write the ONE measured fact from the observation " +
+  "that supports THAT answer, for a salesperson who will cite it in an email. One sentence, under 30 words, plain " +
+  "words, concrete figures, dates or quoted text taken from the observation (\"last LinkedIn post 5 months ago\", " +
+  "\"no sign-up form on the homepage\"). Never contradict the answer, never start with yes or no, never invent a " +
+  "figure. No dashes.";
 
 export interface JudgeResult {
   verdict: QualificationVerdictRow;
