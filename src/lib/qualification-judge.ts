@@ -38,8 +38,9 @@ async function ask(
 
 export interface YesNoQuestion {
   instructions: string;
-  whenTrue: string;
-  whenFalse: string;
+  /** What yes and no mean, when the question alone leaves the boundary open. */
+  whenTrue?: string;
+  whenFalse?: string;
 }
 
 /** Several yes/no questions about ONE state, in one call. Each answer is a yes-probability. */
@@ -50,7 +51,7 @@ export async function judgeYesNo<K extends string>(
 ): Promise<{ probabilities: Record<K, number>; model: string }> {
   const wire: Record<string, Record<string, unknown>> = {};
   for (const [k, q] of Object.entries(questions) as Array<[K, YesNoQuestion]>) {
-    wire[k] = { type: "noul", instructions: q.instructions, criteria: { true: q.whenTrue, false: q.whenFalse } };
+    wire[k] = { type: "noul", instructions: q.instructions, ...(q.whenTrue && q.whenFalse ? { criteria: { true: q.whenTrue, false: q.whenFalse } } : {}) };
   }
   const { answers, model } = await ask(state, wire, id);
   const probabilities = {} as Record<K, number>;
