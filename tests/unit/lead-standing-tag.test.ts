@@ -94,8 +94,33 @@ describe("the tag a conversation carries", () => {
     expect(stand({ leg: "start_to_conversation", outcomes: { sale: "manual" } }).tag).toBe("customer");
   });
 
-  it("serves a closed vocabulary: every state plus website_visit", () => {
-    expect([...LEAD_STANDING_TAGS].sort()).toEqual([...LEAD_STANDING_STATES, "website_visit"].sort());
+  // Owner 2026-10-08 (Christina Kennedy, "We are good, thanks."): `engaged` means the person
+  // REACTED, whichever way, so a "no" stays engaged in every count and board. The conversation's
+  // label names it for what it is.
+  it("tags a person whose latest real reply is a no not_interested, while the state stays engaged", () => {
+    const s = stand({ leg: "start_to_conversation", delivery: { replied: true, replyClassification: "negative", disqualified: false } });
+    expect(s.state).toBe("engaged");
+    expect(s.signal).toBe("negative_reply");
+    expect(s.tag).toBe("not_interested");
+  });
+
+  it("leaves a plain or neutral reply tagged engaged", () => {
+    expect(stand({ leg: "start_to_conversation", delivery: { replied: true, replyClassification: "neutral", disqualified: false } }).tag).toBe("engaged");
+    expect(stand({ leg: "start_to_conversation", delivery: { opened: true } }).tag).toBe("engaged");
+  });
+
+  it("does not tag a no not_interested when something stronger decided the state", () => {
+    const visited = stand({
+      leg: "start_to_conversation",
+      delivery: { clicked: true, replied: true, replyClassification: "negative", disqualified: false },
+    });
+    expect(visited.tag).toBe("website_visit");
+    const wrong = stand({ leg: "start_to_conversation", delivery: { replied: true, replyClassification: "negative", disqualified: true } });
+    expect(wrong.tag).toBe("disqualified");
+  });
+
+  it("serves a closed vocabulary: every state plus website_visit and not_interested", () => {
+    expect([...LEAD_STANDING_TAGS].sort()).toEqual([...LEAD_STANDING_STATES, "website_visit", "not_interested"].sort());
     const s = stand({ leg: "start_to_website_visit", delivery: { clicked: true, firstClickedAt: CLICKED_AT } });
     expect(LeadStandingSchema.parse({ ...s, wentCold: null, replies: null }).tag).toBe("website_visit");
   });

@@ -127,8 +127,11 @@ export type LeadStandingState = (typeof LEAD_STANDING_STATES)[number];
  * only interest is a website visit (a click on our email, or a visit stated by hand) stays
  * `sales_interest` in every count and board — a visit IS a degree of sales interest there — and
  * is tagged `website_visit`, because a click alone is not somebody telling us they want to buy.
+ * Likewise a lead whose latest real reply is a NO stays `engaged` (owner 2026-10-08: engaged means
+ * the person reacted, whichever way) and is tagged `not_interested`, so a clear "no" never reads
+ * like an open on the conversation.
  */
-export const LEAD_STANDING_TAGS = [...LEAD_STANDING_STATES, "website_visit"] as const;
+export const LEAD_STANDING_TAGS = [...LEAD_STANDING_STATES, "website_visit", "not_interested"] as const;
 export type LeadStandingTag = (typeof LEAD_STANDING_TAGS)[number];
 
 export const LEAD_STANDING_SIGNALS = [
@@ -296,9 +299,13 @@ function positiveReached(delivery: LeadStandingDelivery): boolean {
 
 export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
   const standing = resolveStandingState(input);
-  const tag: LeadStandingTag =
-    salesInterestStage(standing) === WEBSITE_VISIT_STEP ? WEBSITE_VISIT_STEP : standing.state;
-  return { ...standing, tag };
+  return { ...standing, tag: tagOf(standing) };
+}
+
+function tagOf(standing: Omit<LeadStanding, "tag">): LeadStandingTag {
+  if (salesInterestStage(standing) === WEBSITE_VISIT_STEP) return WEBSITE_VISIT_STEP;
+  if (standing.state === "engaged" && standing.signal === "negative_reply") return "not_interested";
+  return standing.state;
 }
 
 function resolveStandingState(input: LeadStandingInput): Omit<LeadStanding, "tag"> {

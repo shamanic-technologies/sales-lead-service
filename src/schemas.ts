@@ -1463,7 +1463,9 @@ export const LeadStandingSchema = z
         "except a `sales_interest` lead whose only interest is a website visit (a click on our " +
         "email, or a visit stated by hand): that lead stays `sales_interest` in every count and " +
         "board and is tagged `website_visit`, because a click alone is not somebody saying they " +
-        "want to buy. A positive reply or any deeper step keeps `sales_interest`.",
+        "want to buy. A positive reply or any deeper step keeps `sales_interest`. A lead whose " +
+        "latest real reply is a no stays `engaged` (engaged = the person reacted, whichever way) " +
+        "and is tagged `not_interested`.",
       example: "website_visit",
     }),
     signal: z.enum(LEAD_STANDING_SIGNALS as unknown as [string, ...string[]]).openapi({
