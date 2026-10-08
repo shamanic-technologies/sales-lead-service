@@ -19,32 +19,42 @@ import type { ServerResponse } from "node:http";
 const BATCH_BYTES = 64 * 1024;
 
 /**
- * Wait for the socket to drain, or for it to end.
+ * Waiting for the socket to drain, or for it to end.
  *
  * A destroyed socket never emits `drain`, so waiting on that alone would hang the request forever
  * and hold its database connection with it — the exact shape of the 2026-09-07 pool exhaustion.
  * `close` and `error` therefore resolve it too: the writes that follow are no-ops on a dead socket,
  * and the walk's own abandonment check (see client-abort.ts) is what ends the read.
+ *
+ * The writer subscribes ONCE, for the life of the response, rather than once per wait. The
+ * `compression` middleware hands `drain` subscriptions to its gzip stream but never forwards their
+ * removal, so a per-wait `once`/`off` pair left one listener behind on that stream per wait
+ * (`MaxListenersExceededWarning: 11 drain listeners added to [Gzip]` on every large compact walk).
  */
-function drained(res: ServerResponse): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const done = () => {
-      res.off("drain", done);
-      res.off("close", done);
-      res.off("error", done);
-      resolve();
-    };
-    res.once("drain", done);
-    res.once("close", done);
-    res.once("error", done);
-  });
-}
-
 export class ResponseWriter {
   private pending: string[] = [];
   private pendingBytes = 0;
 
-  constructor(private readonly res: ServerResponse) {}
+  /** Resolves the wait in progress, if any. */
+  private wake: (() => void) | null = null;
+
+  constructor(private readonly res: ServerResponse) {
+    const wake = () => {
+      const resolve = this.wake;
+      this.wake = null;
+      resolve?.();
+    };
+    res.on("drain", wake);
+    res.once("close", wake);
+    res.once("error", wake);
+  }
+
+  private drained(): Promise<void> {
+    if (this.res.destroyed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.wake = resolve;
+    });
+  }
 
   /** Queue a piece of the response, flushing (and waiting on the socket) once a batch is full. */
   async write(text: string): Promise<void> {
@@ -60,7 +70,7 @@ export class ResponseWriter {
     this.pending = [];
     this.pendingBytes = 0;
     if (this.res.writableEnded || this.res.destroyed) return;
-    if (!this.res.write(payload)) await drained(this.res);
+    if (!this.res.write(payload)) await this.drained();
   }
 
   /** Flush the tail and close the response. */

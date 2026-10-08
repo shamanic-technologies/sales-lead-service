@@ -28,6 +28,7 @@ import {
 } from "../lib/step-states.js";
 import { readBrandColdLeads, readLeadRowCold } from "../lib/lead-cold-read.js";
 import { EvidenceUnavailableError } from "../lib/lead-delivery-evidence.js";
+import { ReplyVerdictsUnavailableError } from "../lib/reply-verdicts-client.js";
 import { COLD_AFTER_DAYS, type ColdStep } from "../lib/lead-cold.js";
 
 const router = Router();
@@ -1116,6 +1117,16 @@ router.get(
     try {
       coldRead = await readBrandColdLeads(brandId);
     } catch (error) {
+      if (error instanceof ReplyVerdictsUnavailableError) {
+        console.error(`[step-disqualifications] ${error.message}`);
+        res.status(502).json({
+          error:
+            "instantly-service could not say how these leads replied, so who went cold is unknown. " +
+            "No answer is returned rather than one that misses cold leads.",
+          code: "reply_verdicts_unreadable",
+        });
+        return;
+      }
       if (!(error instanceof EvidenceUnavailableError)) throw error;
       console.error(`[step-disqualifications] ${error.message}`);
       res.status(502).json({

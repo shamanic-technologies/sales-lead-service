@@ -28,6 +28,22 @@ class FakeSocket extends EventEmitter {
 
 const writerFor = (socket: FakeSocket) => new ResponseWriter(socket as unknown as ServerResponse);
 
+/**
+ * The `compression` middleware hands `drain` listeners to its gzip stream on `on`/`once`, but does
+ * not forward `off`/`removeListener` for them: a writer that subscribes per wait leaks one listener
+ * per wait onto that stream (`MaxListenersExceededWarning: 11 drain listeners added to [Gzip]`).
+ */
+class CompressedSocket extends FakeSocket {
+  readonly gzip = new EventEmitter();
+  on(event: string | symbol, listener: (...args: unknown[]) => void): this {
+    if (event === "drain") {
+      this.gzip.on(event, listener);
+      return this;
+    }
+    return super.on(event, listener);
+  }
+}
+
 describe("writing a long response", () => {
   it("batches small pieces rather than one write per row", async () => {
     const socket = new FakeSocket();
@@ -88,5 +104,19 @@ describe("writing a long response", () => {
     for (const piece of pieces) await writer.write(piece);
     await writer.end();
     expect(socket.writes.join("")).toBe(pieces.join(""));
+  });
+
+  it("holds ONE drain listener however many times it waits (the compressed stream never sees an off)", async () => {
+    const socket = new CompressedSocket();
+    socket.full = true;
+    const writer = writerFor(socket);
+    for (let i = 0; i < 20; i += 1) {
+      const pending = writer.write("x".repeat(64 * 1024 + 1));
+      await Promise.resolve();
+      socket.gzip.emit("drain");
+      await pending;
+    }
+    expect(socket.writes).toHaveLength(20);
+    expect(socket.gzip.listenerCount("drain")).toBeLessThanOrEqual(1);
   });
 });

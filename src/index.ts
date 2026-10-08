@@ -17,7 +17,6 @@
 import * as Sentry from "@sentry/node";
 import express from "express";
 import cors from "cors";
-import http from "node:http";
 import { readFileSync, existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, extname, join } from "path";
@@ -31,6 +30,7 @@ import { withConnectRetry } from "./lib/db-retry.js";
 import { registerProviders } from "./lib/register-providers.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { isInteractiveRead } from "./request-routing.js";
+import { forward } from "./thread-forward.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const EXT = extname(__filename);
@@ -139,67 +139,6 @@ function startBackgroundThread(): void {
 }
 
 // ── the router ───────────────────────────────────────────────────────────────────────────────
-
-/** Connection-scoped headers: each hop sets its own. */
-const HOP_BY_HOP = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-connection",
-  "transfer-encoding",
-  "upgrade",
-  "te",
-  "trailer",
-]);
-
-const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: Infinity });
-
-function forwardableRequestHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
-  const out: http.OutgoingHttpHeaders = {};
-  for (const [key, value] of Object.entries(headers)) {
-    if (value !== undefined && !HOP_BY_HOP.has(key)) out[key] = value;
-  }
-  return out;
-}
-
-function forwardableResponseHeaders(raw: string[]): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < raw.length; i += 2) {
-    if (!HOP_BY_HOP.has(raw[i].toLowerCase())) out.push(raw[i], raw[i + 1]);
-  }
-  return out;
-}
-
-/** Hand the request to a thread and its answer back, untouched; a caller who leaves cancels it. */
-function forward(req: express.Request, res: express.Response, thread: HttpThread): void {
-  const upstream = http.request(
-    {
-      host: "127.0.0.1",
-      port: thread.port,
-      method: req.method,
-      path: req.originalUrl,
-      headers: forwardableRequestHeaders(req.headers),
-      agent: upstreamAgent,
-    },
-    (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, forwardableResponseHeaders(upstreamRes.rawHeaders));
-      upstreamRes.pipe(res);
-      upstreamRes.on("error", (err) => res.destroy(err));
-    },
-  );
-  upstream.on("error", (err) => {
-    if (res.headersSent) {
-      res.destroy(err);
-      return;
-    }
-    console.error(`[lead-service] ${thread.name} HTTP thread did not answer ${req.method} ${req.originalUrl}:`, err);
-    res.status(502).json({ error: `lead-service ${thread.name} HTTP thread unavailable` });
-  });
-  // The caller left: stop the work it asked for (the thread's own client-abort checks see it).
-  res.on("close", () => {
-    if (!res.writableFinished) upstream.destroy();
-  });
-  req.pipe(upstream);
-}
 
 const router = express();
 router.disable("x-powered-by");
