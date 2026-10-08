@@ -10,6 +10,7 @@ import {
   uniqueIndex,
   index,
   jsonb,
+  bigint,
   doublePrecision,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
@@ -875,3 +876,42 @@ export const candidateScreenings = pgTable(
     index("idx_cs_org_brand").on(table.orgId, table.brandId, table.createdAt),
   ],
 );
+
+/**
+ * Bronze copy of crm-service's people fact feed (crm-service#61): what happened in the customer's
+ * own accounts, verbatim in `raw`, append-only. A correction is a new fact, never an update.
+ */
+export const crmFacts = pgTable(
+  "crm_facts",
+  {
+    factId: text("fact_id").primaryKey(),
+    seq: bigint("seq", { mode: "bigint" }).notNull(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    personKey: text("person_key").notNull(),
+    sourceContactId: text("source_contact_id"),
+    fullName: text("full_name"),
+    emails: text("emails").array().notNull(),
+    phones: text("phones").array().notNull(),
+    type: text("type").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    dateBasis: text("date_basis").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    payload: jsonb("payload").notNull(),
+    withdrawnOf: text("withdrawn_of"),
+    raw: jsonb("raw").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_crm_facts_seq").on(table.seq),
+    index("idx_crm_facts_brand_contact").on(table.orgId, table.brandId, table.sourceContactId),
+  ],
+);
+
+/** Where each feed pull stopped (crm-service's opaque cursor), moved with the page it read. */
+export const crmFeedCursors = pgTable("crm_feed_cursors", {
+  feed: text("feed").primaryKey(),
+  cursor: text("cursor").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
