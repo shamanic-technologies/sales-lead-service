@@ -562,6 +562,18 @@ describe("GET /internal/brands/:brandId/step-disqualifications", () => {
     readLeadRowCold.mockReset().mockResolvedValue({ wentCold: null, eligibility: NO_CRM });
   });
 
+  it("502 naming the cause when instantly-service cannot say how leads replied (never a bare 500)", async () => {
+    const { ReplyVerdictsUnavailableError } = await import("../../src/lib/reply-verdicts-client.js");
+    readBrandColdLeads.mockReset().mockRejectedValue(
+      new ReplyVerdictsUnavailableError("[reply-verdicts-client] instantly-service unreachable: fetch failed"),
+    );
+    const res = await request(app)
+      .get("/internal/brands/brand-1/step-disqualifications")
+      .set("x-api-key", "test-api-key");
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("reply_verdicts_unreadable");
+  });
+
   it("answers all-zero for a brand nobody disqualified anyone for", async () => {
     const res = await request(app)
       .get("/internal/brands/brand-1/step-disqualifications")
