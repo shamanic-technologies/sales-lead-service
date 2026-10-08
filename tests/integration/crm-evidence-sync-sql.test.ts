@@ -29,11 +29,16 @@ const state = vi.hoisted(() => ({
   legByCampaign: new Map<string, string>(),
 }));
 
+// The funnel events the sync reads (off the fact-feed copy since crm-fact-events.ts).
+vi.mock("../../src/lib/crm-fact-events.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/crm-fact-events.js")>()),
+  loadCrmFunnelEvents: vi.fn(async () => state.contacts),
+}));
+
 vi.mock("../../src/lib/crm-client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/lib/crm-client.js")>();
   return {
     ...actual,
-    fetchCrmFunnelEvents: vi.fn(async () => state.contacts),
     // eslint-disable-next-line require-yield
     streamCrmContacts: vi.fn(async function* () {
       return;

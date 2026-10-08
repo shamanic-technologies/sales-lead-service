@@ -22,7 +22,6 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
-  fetchCrmFunnelEvents,
   fetchCrmOpportunitiesByContact,
   streamCrmContacts,
   type CrmContact,
@@ -56,6 +55,7 @@ import {
   withdrawStaleCrmOutcomes,
 } from "./crm-evidence-store.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
+import { loadCrmFunnelEvents } from "./crm-fact-events.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
 
 /**
@@ -175,7 +175,9 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
   const judging = await judgeEveryCandidate(orgId, brandId, ctx);
 
-  const contacts = (await fetchCrmFunnelEvents(brandId, ctx)).filter((c) => c.events.length > 0);
+  // Off the bronze copy of crm-service's people fact feed (crm-fact-events.ts); throws, setting
+  // nothing aside, while that copy is still filling.
+  const contacts = (await loadCrmFunnelEvents(orgId, brandId)).filter((c) => c.events.length > 0);
   const contactIds = contacts.map((c) => c.contactId);
 
   // The frozen pairing for each contact with evidence; match (and freeze) any never matched yet,

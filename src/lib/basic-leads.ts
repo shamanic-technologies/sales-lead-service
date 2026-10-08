@@ -100,7 +100,7 @@ export type BasicLeadFilters = LeadListScope;
 // cursor is built straight off a raw row. See LeadListCursor.
 export type BasicLeadCursor = LeadListCursor;
 
-type RawTimestamp = Date | string | null;
+export type RawTimestamp = Date | string | null;
 
 interface RawBasicRow {
   id: string;

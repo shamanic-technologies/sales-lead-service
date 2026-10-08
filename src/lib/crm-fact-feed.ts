@@ -182,10 +182,16 @@ export async function ingestFactsPage(
       inserted = rows.length;
     }
     if (page.nextCursor !== null) {
+      // Reaching the end of the feed is what makes the copy whole; a page short of it keeps any
+      // earlier `caught_up_at` (routine pulls only ever ADD facts to a whole copy).
+      const caughtUp = page.hasMore ? {} : { caughtUpAt: new Date() };
       await tx
         .insert(crmFeedCursors)
-        .values({ feed, cursor: page.nextCursor })
-        .onConflictDoUpdate({ target: crmFeedCursors.feed, set: { cursor: page.nextCursor, updatedAt: new Date() } });
+        .values({ feed, cursor: page.nextCursor, ...caughtUp })
+        .onConflictDoUpdate({
+          target: crmFeedCursors.feed,
+          set: { cursor: page.nextCursor, updatedAt: new Date(), ...caughtUp },
+        });
     }
     return inserted;
   });
