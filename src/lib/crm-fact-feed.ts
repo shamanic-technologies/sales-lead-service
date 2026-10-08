@@ -39,6 +39,8 @@ export interface CrmFact {
   brandId: string;
   personKey: string;
   sourceContactId: string | null;
+  /** crm-service's own contact row id (the key CRM pairings are frozen on), null when none. */
+  crmContactId: string | null;
   fullName: string | null;
   emails: string[];
   phones: string[];
@@ -101,6 +103,7 @@ export function parseCrmFact(raw: unknown): CrmFact {
   }
   if (!("sourceContactId" in r)) throw new CrmFactParseError(`${where}: \`sourceContactId\` is missing`);
   if (!("fullName" in r)) throw new CrmFactParseError(`${where}: \`fullName\` is missing`);
+  if (!("crmContactId" in r)) throw new CrmFactParseError(`${where}: \`crmContactId\` is missing`);
   const payload = r.payload;
   if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
     throw new CrmFactParseError(`${where}: \`payload\` must be an object`);
@@ -117,6 +120,7 @@ export function parseCrmFact(raw: unknown): CrmFact {
     brandId: str(r, "brandId", where),
     personKey: str(r, "personKey", where),
     sourceContactId: nullableStr(r, "sourceContactId", where),
+    crmContactId: nullableStr(r, "crmContactId", where),
     fullName: nullableStr(r, "fullName", where),
     emails: strArray(r, "emails", where),
     phones: strArray(r, "phones", where),
@@ -159,6 +163,7 @@ export async function ingestFactsPage(
             brandId: f.brandId,
             personKey: f.personKey,
             sourceContactId: f.sourceContactId,
+            crmContactId: f.crmContactId,
             fullName: f.fullName,
             emails: f.emails,
             phones: f.phones,

@@ -46,6 +46,7 @@ function fact(over: Record<string, unknown> = {}) {
     brandId: "brand-1",
     personKey: "a@example.com",
     sourceContactId: "ghl-1",
+    crmContactId: "0b6c8d0e-1111-4222-8333-944455556666",
     fullName: "Ann Example",
     emails: ["a@example.com"],
     phones: [],
@@ -82,6 +83,7 @@ describe("reading one fact off the wire", () => {
   it.each([
     ["no sourceContactId", { sourceContactId: undefined }],
     ["no fullName", { fullName: undefined }],
+    ["no crmContactId", { crmContactId: undefined }],
     ["a seq that is not an integer", { seq: "1.5" }],
     ["an occurredAt that is not a date", { occurredAt: "yesterday" }],
     ["emails that are not strings", { emails: [1] }],

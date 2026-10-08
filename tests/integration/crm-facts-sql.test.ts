@@ -25,6 +25,7 @@ describe.skipIf(!hasRealDatabase)("crm fact feed bronze against a real database"
       brandId: "brand-itest",
       personKey: "a@example.com",
       sourceContactId: "ghl-1",
+      crmContactId: "0b6c8d0e-1111-4222-8333-944455556666",
       fullName: "Ann Example",
       emails: ["a@example.com"],
       phones: ["+33600000000"],
@@ -50,12 +51,13 @@ describe.skipIf(!hasRealDatabase)("crm fact feed bronze against a real database"
     expect(await ingestFactsPage(page, feed)).toBe(0);
 
     const rows = (await db.execute(sql`
-      SELECT seq::text AS seq, occurred_at, source_contact_id, emails, phones, payload, raw
+      SELECT seq::text AS seq, occurred_at, source_contact_id, crm_contact_id, emails, phones, payload, raw
       FROM crm_facts WHERE org_id = ${org} ORDER BY seq`)) as unknown as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(2);
     expect(rows[0].seq).toBe(String(base + 1));
     expect(new Date(rows[0].occurred_at as string).toISOString()).toBe("2026-10-01T10:00:00.123Z");
     expect(rows[0].emails).toEqual(["a@example.com"]);
+    expect(rows[0].crm_contact_id).toBe("0b6c8d0e-1111-4222-8333-944455556666");
     expect(rows[0].payload).toEqual({ amountMinor: 120000, currency: "USD", via: "status" });
     expect((rows[0].raw as Record<string, unknown>).sourceRef).toBe("opp-1");
     expect(rows[1].occurred_at).toBeNull();
