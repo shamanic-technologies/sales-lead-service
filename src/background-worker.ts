@@ -41,3 +41,7 @@ startOutcomeCauseWorker();
 setInterval(() => undefined, 60 * 60_000);
 
 console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause");
+
+process.on("unhandledRejection", (err) => {
+  console.error("[lead-service] background thread unhandled rejection:", err);
+});
