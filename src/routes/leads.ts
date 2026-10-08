@@ -1018,7 +1018,9 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           continue;
         }
 
-        const audienceMap = await buildAudienceMapForRows(
+        // The audience, the offer and the standing of a chunk are independent reads of three
+        // different services: asked at once, not one after the other.
+        const audiencePending = buildAudienceMapForRows(
           basicRows.map((r) => ({
             leadId: r.leadId,
             email: r.email?.value ?? null,
@@ -1028,8 +1030,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           brandIdStr,
           audienceCtx,
         );
-
-        const offerMap = await offerResolver.resolve(basicRows.map((r) => r.campaignId));
+        const offerPending = offerResolver.resolve(basicRows.map((r) => r.campaignId));
 
         // The overlay is resolved for the whole chunk BEFORE the standing, because the standing
         // reads it: the click that means "reached the step this campaign sells" is the same click
@@ -1044,7 +1045,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
               : DEFAULT_STATUS,
           );
         }
-        const standingMap = await resolveStandings(
+        const standingPending = resolveStandings(
           standingResolver,
           basicRows.map((r) => ({
             id: r.id,
@@ -1056,6 +1057,11 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             delivery: standingDelivery(deliveryByRow.get(r.id)!),
           })),
         );
+        const [audienceMap, offerMap, standingMap] = await Promise.all([
+          audiencePending,
+          offerPending,
+          standingPending,
+        ]);
 
         const breakdownMap = breakdownResolver
           ? await breakdownResolver.resolve(
