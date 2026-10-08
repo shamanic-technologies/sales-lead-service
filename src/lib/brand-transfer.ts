@@ -232,6 +232,20 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       ),
     });
 
+    // --- the outreach fact copy (bronze): facts naming this brand alone ---------------------
+    moved.push({
+      tableName: "outreach_facts",
+      count: await count(
+        tx,
+        sql`WITH m AS (
+              UPDATE outreach_facts
+              SET org_id = ${toOrg}, brand_ids = ARRAY[${finalBrand}]::text[]
+              WHERE ${brandArrayPending}
+              RETURNING 1)
+            SELECT count(*)::int AS n FROM m`,
+      ),
+    });
+
     // --- the labelled timeline (silver): one row per source fact, its id unique fleet-wide ------
     moved.push({
       tableName: "lead_timeline_facts",

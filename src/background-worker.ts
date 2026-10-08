@@ -19,6 +19,7 @@ import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
 import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
+import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -36,6 +37,8 @@ startReadModelWorker();
 startChangeFeedWorker();
 // Answers WHOSE WIN every outcome nobody answered was, by the owner's date rule (see outcome-cause.ts).
 startOutcomeCauseWorker();
+// Copies instantly-service's outreach fact feed into bronze (outreach-fact-feed.ts). Copy only.
+startOutreachFactFeedWorker();
 // Keeps every brand's labelled timeline (silver lead_timeline_facts) current (see timeline-facts.ts).
 startTimelineFactsWorker();
 
@@ -43,7 +46,7 @@ startTimelineFactsWorker();
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, timeline");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);
