@@ -14,6 +14,7 @@
  */
 import { enableCrossThreadLocks } from "./lib/scope-lock.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
+import { startCrmFactFeedWorker } from "./lib/crm-fact-feed.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
@@ -25,6 +26,9 @@ enableCrossThreadLocks(connectionString, 2);
 
 // What each paired customer's CRM evidences, reflected onto their leads.
 startCrmEvidenceWorker();
+// Copies crm-service's people fact feed into bronze (crm-fact-feed.ts). Copy only. Its one-at-a-time
+// flag is enough: this thread is the only caller, no route starts a pull.
+startCrmFactFeedWorker();
 // Keeps the Leads page's read models inside their freshness bound (see lead-read-model.ts).
 startReadModelWorker();
 // Keeps every lead change feed a consumer follows current (see lead-change-feed.ts).
@@ -36,4 +40,4 @@ startOutcomeCauseWorker();
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, read-model, change-feed, outcome-cause");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause");
