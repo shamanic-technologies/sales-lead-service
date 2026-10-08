@@ -12,6 +12,7 @@
  * reason to leave every other customer's stale.
  */
 import { listCrmBrands, syncCrmEvidence, type CrmEvidenceSyncResult } from "./crm-evidence-sync.js";
+import { withScopeLock } from "./scope-lock.js";
 
 export const CRM_EVIDENCE_SYNC_INTERVAL_MS = 10 * 60_000;
 const FIRST_SWEEP_DELAY_MS = 60_000;
@@ -23,7 +24,11 @@ export function syncBrandOnce(orgId: string, brandId: string): Promise<CrmEviden
   const key = `${orgId}:${brandId}`;
   const running = inFlight.get(key);
   if (running) return running;
-  const run = syncCrmEvidence(orgId, brandId).finally(() => inFlight.delete(key));
+  // The background thread's sweep and this thread's on-demand route never sync one brand at once
+  // (see scope-lock.ts); within a thread, a second caller joins the running sync.
+  const run = withScopeLock("crm-evidence", key, () => syncCrmEvidence(orgId, brandId)).finally(() =>
+    inFlight.delete(key),
+  );
   inFlight.set(key, run);
   return run;
 }

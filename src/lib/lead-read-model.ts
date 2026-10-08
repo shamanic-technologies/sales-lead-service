@@ -73,6 +73,7 @@ import {
 import type { LeadSortOrder } from "./lead-page-plan.js";
 import { leadSearchPattern } from "./lead-search.js";
 import { attachLeadStandings } from "./lead-standing-index.js";
+import { withScopeLock } from "./scope-lock.js";
 import { createLeadStandingResolver } from "./lead-standing-resolver.js";
 import {
   LEAD_STANDING_STATES,
@@ -467,31 +468,48 @@ async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
   const resolver = resolverFor(scope);
   const seen: string[] = [];
   for await (const chunk of streamLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
-    const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
-    const ids = derived.map((r) => r.id);
-    await sql.begin(async (rawTx) => {
-      const tx = asSql(rawTx);
-      // A person whose winning row is now a different one keeps exactly one row.
-      await tx`
-        DELETE FROM lead_read_model_rows
-        WHERE model_id = ${model.id}
-          AND lead_id = ANY(${derived.map((r) => r.leadId)}::uuid[])
-          AND NOT (id = ANY(${ids}::uuid[]))
-      `;
-      await writeRows(tx, model.id, derived);
+    // The scope lock is held per CHUNK, never across the whole refresh: a read's catch-up waits for
+    // at most one chunk rather than a whole-scope pass (tens of seconds on the largest brands). A
+    // chunk is derived AND written under the lock, so a catch-up never lands between a chunk's
+    // derivation and its write (which would overwrite a person's fresh row with an older one).
+    const ids = await withScopeLock(SCOPE_LOCK, model.scopeKey, async () => {
+      const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
+      const chunkIds = derived.map((r) => r.id);
+      await sql.begin(async (rawTx) => {
+        const tx = asSql(rawTx);
+        // A person whose winning row is now a different one keeps exactly one row.
+        await tx`
+          DELETE FROM lead_read_model_rows
+          WHERE model_id = ${model.id}
+            AND lead_id = ANY(${derived.map((r) => r.leadId)}::uuid[])
+            AND NOT (id = ANY(${chunkIds}::uuid[]))
+        `;
+        await writeRows(tx, model.id, derived);
+      });
+      return chunkIds;
     });
     for (const id of ids) seen.push(id);
   }
-  // Whoever is still held and was not re-derived has left the scope.
-  await sql`
-    DELETE FROM lead_read_model_rows
-    WHERE model_id = ${model.id} AND NOT (id = ANY(${seen}::uuid[]))
-  `;
-  await sql`
-    UPDATE lead_read_models
-    SET evidence_at = ${evidenceAt.toISOString()}::timestamptz, built_at = now(), applied_xmin = ${xmin}::xid8
-    WHERE id = ${model.id}
-  `;
+  await withScopeLock(SCOPE_LOCK, model.scopeKey, async () => {
+    // Whoever is still held and was not re-derived has left the scope — except a person a catch-up
+    // recomputed while this pass ran (a change at or after `xmin`): that row is fresher than the
+    // population this pass walked, and the next refresh decides it.
+    await sql`
+      DELETE FROM lead_read_model_rows r
+      WHERE r.model_id = ${model.id} AND NOT (r.id = ANY(${seen}::uuid[]))
+        AND NOT EXISTS (
+          SELECT 1 FROM lead_read_changes c
+          WHERE c.org_id = ${model.orgId} AND c.txid >= ${xmin}::xid8
+            AND c.kind IN ('statement', 'evidence')
+            AND (c.lead_id = r.lead_id OR (c.email IS NOT NULL AND lower(c.email) = lower(r.email)))
+        )
+    `;
+    await sql`
+      UPDATE lead_read_models
+      SET evidence_at = ${evidenceAt.toISOString()}::timestamptz, built_at = now(), applied_xmin = ${xmin}::xid8
+      WHERE id = ${model.id}
+    `;
+  });
   console.log(
     `[lead-read-model] refreshed org=${scope.orgId} brand=${scope.brandId ?? "-"} ` +
       `campaigns=${scope.campaignIds?.length ?? 0} people=${seen.length} in ${Date.now() - startedAt}ms`,
@@ -534,7 +552,7 @@ async function buildModel(
         await writeRows(sql, modelId, derived);
         people += derived.length;
       }
-      await sql.begin(async (rawTx) => {
+      await withScopeLock(SCOPE_LOCK, key, () => sql.begin(async (rawTx) => {
         const tx = asSql(rawTx);
         await tx`
           UPDATE lead_read_models n
@@ -553,7 +571,7 @@ async function buildModel(
           SET scope_key = ${key}, evidence_at = ${evidenceAt.toISOString()}::timestamptz, built_at = now()
           WHERE id = ${modelId}
         `;
-      });
+      }));
     } catch (error) {
       await sql`DELETE FROM lead_read_models WHERE id = ${modelId}`.catch((cleanup) =>
         console.error(`[lead-read-model] could not drop a failed build ${modelId}:`, cleanup),
@@ -628,14 +646,7 @@ interface RawChange {
 async function catchUp(model: ReadModel): Promise<number> {
   const xmin = await currentXmin();
   const seen = appliedChanges.get(model.id) ?? new Set<string>();
-  const changes = (
-    await sql<RawChange[]>`
-      SELECT seq::text AS seq, lead_id::text AS lead_id, email, kind, created_at
-      FROM lead_read_changes
-      WHERE org_id = ${model.orgId} AND txid >= ${model.appliedXmin}::xid8
-        AND kind IN ('statement', 'evidence')
-    `
-  ).filter((change) => !seen.has(change.seq));
+  const changes = await unseenChanges(model, seen);
   if (changes.length > 0) {
     const leadIds = new Set<string>();
     const changedAt = new Map<string, Date>();
@@ -664,31 +675,62 @@ async function catchUp(model: ReadModel): Promise<number> {
     for (const change of changes) seen.add(change.seq);
     appliedChanges.set(model.id, seen);
   }
+  await advanceAppliedXmin(model, xmin);
+  return changes.length;
+}
+
+/** The changes at or after the model's `applied_xmin` this thread has not applied yet. */
+async function unseenChanges(model: ReadModel, seen: ReadonlySet<string>): Promise<RawChange[]> {
+  return (
+    await sql<RawChange[]>`
+      SELECT seq::text AS seq, lead_id::text AS lead_id, email, kind, created_at
+      FROM lead_read_changes
+      WHERE org_id = ${model.orgId} AND txid >= ${model.appliedXmin}::xid8
+        AND kind IN ('statement', 'evidence')
+    `
+  ).filter((change) => !seen.has(change.seq));
+}
+
+/**
+ * Move `applied_xmin` forward. Safe without the scope lock: every change older than `xmin` was
+ * committed before it was taken and has been read, and the column only ever moves forward here.
+ */
+async function advanceAppliedXmin(model: ReadModel, xmin: string): Promise<void> {
   await sql`
     UPDATE lead_read_models SET applied_xmin = ${xmin}::xid8
     WHERE id = ${model.id} AND applied_xmin < ${xmin}::xid8
   `;
   model.appliedXmin = xmin;
-  return changes.length;
+}
+
+/**
+ * Bring a model up to date with every change it has not seen, taking the scope lock only when there
+ * IS something to apply. Nothing new (the common case on a polled page) is two cheap reads and no
+ * wait behind a refresh; something new is applied under the lock, so it never interleaves with a
+ * refresh chunk of the same scope.
+ */
+async function catchUpModel(model: ReadModel): Promise<void> {
+  const xmin = await currentXmin();
+  const pending = await unseenChanges(model, appliedChanges.get(model.id) ?? new Set<string>());
+  if (pending.length === 0) {
+    await advanceAppliedXmin(model, xmin);
+    return;
+  }
+  await withScopeLock(SCOPE_LOCK, model.scopeKey, () => catchUp(model));
 }
 
 /** Change seqs each model has already applied, within its re-read window. In-process only. */
 const appliedChanges = new Map<string, Set<string>>();
 const MAX_REMEMBERED_CHANGES = 20_000;
 
-/** Per-scope serialization: a build, a catch-up and a swap of one scope never overlap. */
-const keyLocks = new Map<string, Promise<unknown>>();
-
-function withKeyLock<T>(key: string, task: () => Promise<T>): Promise<T> {
-  const prior = keyLocks.get(key) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(task);
-  const tail = run.catch(() => undefined);
-  keyLocks.set(key, tail);
-  tail.then(() => {
-    if (keyLocks.get(key) === tail) keyLocks.delete(key);
-  });
-  return run;
-}
+/**
+ * Per-scope serialization, held across the request thread and the background thread (see
+ * scope-lock.ts). SCOPE_LOCK is short: one catch-up, one refresh chunk, one swap. REFRESH_LOCK spans
+ * a whole refresh or build, so two of them never run for one scope; a read only queues on it when
+ * the model is past its bound, which is exactly when it must wait.
+ */
+const SCOPE_LOCK = "read-model";
+const REFRESH_LOCK = "read-model-refresh";
 
 function isWithinBound(model: ReadModel, now: number): boolean {
   return model.evidenceAt.getTime() >= now - READ_MODEL_MAX_EVIDENCE_AGE_MS;
@@ -700,35 +742,48 @@ function isWithinBound(model: ReadModel, now: number): boolean {
  */
 export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel> {
   const key = readModelKey(scope);
-  return withKeyLock(key, async () => {
-    let model = await loadModel(key);
-    if (!model || !isWithinBound(model, Date.now())) {
-      model = await buildModel(scope, key, model);
-    } else {
-      await catchUp(model);
-    }
-    await sql`
-      UPDATE lead_read_models SET last_read_at = now()
-      WHERE id = ${model.id} AND last_read_at < now() - interval '30 seconds'
-    `;
-    return model;
-  });
+  let model = await loadModel(key);
+  if (model && isWithinBound(model, Date.now())) {
+    await catchUpModel(model);
+  } else {
+    model = await withScopeLock(REFRESH_LOCK, key, async () => {
+      // Somebody may have refreshed it while this read queued.
+      const current = await loadModel(key);
+      if (current && isWithinBound(current, Date.now())) {
+        await catchUpModel(current);
+        return current;
+      }
+      return buildModel(scope, key, current);
+    });
+  }
+  await sql`
+    UPDATE lead_read_models SET last_read_at = now()
+    WHERE id = ${model.id} AND last_read_at < now() - interval '30 seconds'
+  `;
+  return model;
 }
 
 /**
  * What the worker does to a model: rebuild it once it is `READ_MODEL_REFRESH_AFTER_MS` old,
- * otherwise apply what it has not seen. Under the same per-scope lock a read takes.
+ * otherwise apply what it has not seen.
  */
 export async function refreshReadModel(scope: ReadModelScope): Promise<"built" | "caught-up"> {
   const key = readModelKey(scope);
-  return withKeyLock(key, async () => {
-    const model = await loadModel(key);
-    if (!model || model.evidenceAt.getTime() < Date.now() - READ_MODEL_REFRESH_AFTER_MS) {
-      await buildModel(scope, key, model);
-      return "built" as const;
+  const due = (model: ReadModel | null) =>
+    !model || model.evidenceAt.getTime() < Date.now() - READ_MODEL_REFRESH_AFTER_MS;
+  const model = await loadModel(key);
+  if (!due(model)) {
+    await catchUpModel(model!);
+    return "caught-up";
+  }
+  return withScopeLock(REFRESH_LOCK, key, async () => {
+    const current = await loadModel(key);
+    if (!due(current)) {
+      await catchUpModel(current!);
+      return "caught-up" as const;
     }
-    await catchUp(model);
-    return "caught-up" as const;
+    await buildModel(scope, key, current);
+    return "built" as const;
   });
 }
 

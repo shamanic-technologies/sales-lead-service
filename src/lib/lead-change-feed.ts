@@ -64,6 +64,7 @@ import {
   type ReadModelScope,
 } from "./lead-read-model.js";
 import { prefetchOne } from "./prefetch.js";
+import { scopeLockBusy, withScopeLock } from "./scope-lock.js";
 
 /** A feed somebody reads is fully reconciled this often by the worker. */
 export const FEED_RECONCILE_AFTER_MS = READ_MODEL_REFRESH_AFTER_MS;
@@ -465,18 +466,14 @@ export async function catchUpFeed(feed: ChangeFeed): Promise<number> {
   return changed;
 }
 
-/** Per-feed serialization: a reconcile, a catch-up and a creation of one scope never overlap. */
-const keyLocks = new Map<string, Promise<unknown>>();
+/**
+ * Per-feed serialization: a reconcile, a catch-up and a creation of one scope never overlap — in
+ * this thread or the background one (see scope-lock.ts).
+ */
+const FEED_LOCK = "change-feed";
 
 function withKeyLock<T>(key: string, task: () => Promise<T>): Promise<T> {
-  const prior = keyLocks.get(key) ?? Promise.resolve();
-  const run = prior.catch(() => undefined).then(task);
-  const tail = run.catch(() => undefined);
-  keyLocks.set(key, tail);
-  tail.then(() => {
-    if (keyLocks.get(key) === tail) keyLocks.delete(key);
-  });
-  return run;
+  return withScopeLock(FEED_LOCK, key, task);
 }
 
 function withinBound(feed: ChangeFeed, now: number): boolean {
@@ -508,7 +505,7 @@ async function createFeed(scope: ReadModelScope, key: string): Promise<ChangeFee
 export async function openChangeFeed(scope: ReadModelScope): Promise<ChangeFeed> {
   const key = changeFeedKey(scope);
   const current = await loadFeedBy("scope_key", key);
-  if (current && withinBound(current, Date.now()) && keyLocks.has(key)) {
+  if (current && withinBound(current, Date.now()) && (await scopeLockBusy(FEED_LOCK, key))) {
     await touch(current);
     return current;
   }
