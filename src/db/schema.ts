@@ -890,6 +890,8 @@ export const crmFacts = pgTable(
     brandId: text("brand_id").notNull(),
     personKey: text("person_key").notNull(),
     sourceContactId: text("source_contact_id"),
+    /** crm-service's own contact row id: the key CRM pairings here are frozen on. */
+    crmContactId: text("crm_contact_id"),
     fullName: text("full_name"),
     emails: text("emails").array().notNull(),
     phones: text("phones").array().notNull(),
@@ -906,6 +908,7 @@ export const crmFacts = pgTable(
   (table) => [
     uniqueIndex("idx_crm_facts_seq").on(table.seq),
     index("idx_crm_facts_brand_contact").on(table.orgId, table.brandId, table.sourceContactId),
+    index("idx_crm_facts_brand_crm_contact").on(table.orgId, table.brandId, table.crmContactId),
   ],
 );
 
