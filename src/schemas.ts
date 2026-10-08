@@ -11,6 +11,7 @@ import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/quali
 import {
   LEAD_STANDING_SIGNALS,
   LEAD_STANDING_STATES,
+  LEAD_STANDING_TAGS,
   LEAD_STANDING_UNRESOLVED_REASONS,
 } from "./lib/lead-standing.js";
 // The published pairing vocabulary IS the policy's own vocabulary — read from the one module that
@@ -1427,7 +1428,7 @@ const LeadReplyOutcomeSchema = z
       "What this person's replies mean, rolled up by lead-service from every reply's own verdict (instantly-service). Two readings kept apart: `latest` (what do we do now) and `reached` (what has this lead reached).",
   });
 
-const LeadStandingSchema = z
+export const LeadStandingSchema = z
   .object({
     state: z.enum(LEAD_STANDING_STATES as unknown as [string, ...string[]]).openapi({
       description:
@@ -1454,6 +1455,16 @@ const LeadStandingSchema = z
         "and is stated as such rather than defaulted — read `reason`. A consumer needs to know " +
         "none of the reply kinds or step names to use this.",
       example: "sales_interest",
+    }),
+    tag: z.enum(LEAD_STANDING_TAGS as unknown as [string, ...string[]]).openapi({
+      description:
+        "The label this conversation carries, for a surface that shows a person what the lead " +
+        "did (the Unibox). This service owns it; relay it, never re-derive it. It is `state`, " +
+        "except a `sales_interest` lead whose only interest is a website visit (a click on our " +
+        "email, or a visit stated by hand): that lead stays `sales_interest` in every count and " +
+        "board and is tagged `website_visit`, because a click alone is not somebody saying they " +
+        "want to buy. A positive reply or any deeper step keeps `sales_interest`.",
+      example: "website_visit",
     }),
     signal: z.enum(LEAD_STANDING_SIGNALS as unknown as [string, ...string[]]).openapi({
       description:
@@ -1550,7 +1561,9 @@ const LeadStandingSchema = z
       .string()
       .nullable()
       .openapi({
-        description: "When the deciding statement was made, when a statement decided the state.",
+        description:
+          "When the deciding statement was made, when a statement decided the state; the first " +
+          "click on our email when a measured visit decided it.",
         example: null,
       }),
     wentCold: WentColdSchema.nullable().openapi({

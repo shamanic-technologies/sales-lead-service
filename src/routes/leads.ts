@@ -556,6 +556,7 @@ function unresolvedFacts(
   return {
     standing: {
       state: "unresolved",
+      tag: "unresolved",
       signal: "none",
       origin: null,
       reason,
