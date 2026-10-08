@@ -48,10 +48,17 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 }));
 
 const resolveAudiencesForBrandMock = vi.fn();
+const resolveBrandMembershipsByEmailMock = vi.hoisted(() => vi.fn().mockResolvedValue(new Map()));
 vi.mock("../../src/lib/audience-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/audience-client.js")>()),
   resolveAudiencesForBrand: (...args: unknown[]) => resolveAudiencesForBrandMock(...args),
+  resolveBrandMembershipsByEmail: (...args: unknown[]) => resolveBrandMembershipsByEmailMock(...args),
 }));
+vi.mock("../../src/lib/sourcing-origin.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/sourcing-origin.js")>()),
+  loadOriginNamesByList: () => loadOriginNamesByListMock(),
+}));
+const loadOriginNamesByListMock = vi.hoisted(() => vi.fn().mockResolvedValue(new Map()));
 
 const resolveCampaignFamilyMock = vi.fn();
 vi.mock("../../src/lib/campaign-identity-client.js", () => ({
@@ -223,10 +230,51 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
         "featureSlug", "firstBouncedAt", "firstClickedAt", "firstContactedAt", "firstDeliveredAt",
         "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal",
         "id", "lastDeliveredAt", "lead", "leadId", "namespace", "offer", "opened", "orgId", "parentRunId",
-        "replied", "replyClassification", "runId", "sent", "sentCount", "servedAt", "standing", "status",
+        "replied", "replyClassification", "runId", "sent", "sentCount", "servedAt", "sources", "standing", "status",
         "statusDetails", "statusReason", "unsubscribed", "userId", "workflowSlug",
       ].sort(),
     );
+  });
+
+  it("carries EVERY source that found the person, the serving one flagged, named by the catalogue", async () => {
+    loadOriginNamesByListMock.mockResolvedValue(
+      new Map([
+        ["apollo_search", { slug: "sourcing-apollo-cold-filters", name: "Apollo Cold Filters" }],
+        ["linkedin_engagement", { slug: "sourcing-linkedin-engagement-signals", name: "LinkedIn Engagement Signals" }],
+      ]),
+    );
+    resolveBrandMembershipsByEmailMock.mockResolvedValue(
+      new Map([
+        [
+          "person@example.com",
+          [
+            { audienceId: "aud-signal", offerId: null, list: "linkedin_engagement", provenance: "found_taken" },
+            { audienceId: "audience-1", offerId: "offer-1", list: "apollo_search", provenance: "served" },
+          ],
+        ],
+      ]),
+    );
+    resolveAudiencesForBrandMock.mockResolvedValue({
+      byAudienceId: { "audience-1": { id: "audience-1", name: "Founders", avatarUrl: null } },
+      byEmail: {},
+    });
+
+    const res = await get(`/orgs/leads/${ROW_ID}?brandId=${BRAND}`);
+    expect(res.status).toBe(200);
+    // Asked once, for the lead's brand, by the lead's email.
+    expect(resolveBrandMembershipsByEmailMock).toHaveBeenLastCalledWith(BRAND, ["person@example.com"], expect.objectContaining({ orgId: ORG }));
+    // The serving audience stays THE audience; the sources sit beside it.
+    expect(res.body.leadDetail.audience).toEqual({ id: "audience-1", name: "Founders", avatarUrl: null });
+    expect(res.body.leadDetail.sources).toEqual([
+      { audienceId: "audience-1", offerId: "offer-1", list: "apollo_search", origin: { slug: "sourcing-apollo-cold-filters", name: "Apollo Cold Filters" }, servedLead: true },
+      { audienceId: "aud-signal", offerId: null, list: "linkedin_engagement", origin: { slug: "sourcing-linkedin-engagement-signals", name: "LinkedIn Engagement Signals" }, servedLead: false },
+    ]);
+  });
+
+  it("fails loud when the memberships cannot be read, never an empty source list", async () => {
+    resolveBrandMembershipsByEmailMock.mockRejectedValueOnce(new Error("human-service down"));
+    const res = await get(`/orgs/leads/${ROW_ID}?brandId=${BRAND}`);
+    expect(res.status).toBe(500);
   });
 
   it("cannot be used to read a lead in another org", async () => {

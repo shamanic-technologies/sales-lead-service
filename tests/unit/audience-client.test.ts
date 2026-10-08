@@ -92,3 +92,51 @@ describe("audience-client resolveAudiencesForBrand", () => {
     ).rejects.toBeInstanceOf(AudienceServiceError);
   });
 });
+
+describe("audience-client resolveBrandMembershipsByEmail", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("asks nothing when there is no email", async () => {
+    const { calls } = mockFetch({ brandId: "brand-1", byEmail: {} });
+    const { resolveBrandMembershipsByEmail } = await import("../../src/lib/audience-client.js");
+    expect((await resolveBrandMembershipsByEmail("brand-1", [], ctx)).size).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("posts orgId + emails to the brand's memberships/by-email read and keys every membership by email", async () => {
+    const { calls } = mockFetch({
+      brandId: "brand-1",
+      byEmail: {
+        "a@x.com": {
+          personId: "p1",
+          memberships: [
+            { audienceId: "aud-1", offerId: null, list: "apollo_search", status: "active", provenance: "served", joinedAt: "2026-10-01T00:00:00Z" },
+            { audienceId: "aud-2", offerId: "o", list: "linkedin_engagement", status: "active", provenance: "found_taken", joinedAt: "2026-10-02T00:00:00Z" },
+          ],
+        },
+        "b@x.com": null,
+      },
+    });
+    const { resolveBrandMembershipsByEmail } = await import("../../src/lib/audience-client.js");
+    const out = await resolveBrandMembershipsByEmail("brand-1", ["a@x.com", "b@x.com"], ctx);
+    expect(calls[0].url).toBe("http://human.test/internal/brands/brand-1/memberships/by-email");
+    expect(calls[0].init.method).toBe("POST");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ orgId: "org-1", emails: ["a@x.com", "b@x.com"] });
+    expect((calls[0].init.headers as Record<string, string>)["X-API-Key"]).toBe("human-key");
+    expect(out.get("a@x.com")).toEqual([
+      { audienceId: "aud-1", offerId: null, list: "apollo_search", provenance: "served" },
+      { audienceId: "aud-2", offerId: "o", list: "linkedin_engagement", provenance: "found_taken" },
+    ]);
+    expect(out.get("b@x.com")).toEqual([]);
+  });
+
+  it("throws on a non-2xx and on a membership without provenance", async () => {
+    const { resolveBrandMembershipsByEmail, AudienceServiceError: Err } = await import("../../src/lib/audience-client.js");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 503 })));
+    await expect(resolveBrandMembershipsByEmail("brand-1", ["a@x.com"], ctx)).rejects.toBeInstanceOf(Err);
+    mockFetch({ brandId: "brand-1", byEmail: { "a@x.com": { personId: "p", memberships: [{ audienceId: "aud-1" }] } } });
+    await expect(resolveBrandMembershipsByEmail("brand-1", ["a@x.com"], ctx)).rejects.toBeInstanceOf(Err);
+  });
+});

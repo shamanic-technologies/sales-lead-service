@@ -916,5 +916,7 @@ export const crmFacts = pgTable(
 export const crmFeedCursors = pgTable("crm_feed_cursors", {
   feed: text("feed").primaryKey(),
   cursor: text("cursor").notNull(),
+  /** When a pull last reached the END of the feed. Null while the copy is still filling. */
+  caughtUpAt: timestamp("caught_up_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
