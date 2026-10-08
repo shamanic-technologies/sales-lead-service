@@ -114,3 +114,75 @@ export async function resolveAudiencesForBrand(
     byEmail: parsed.byEmail ?? {},
   };
 }
+
+// Every audience of the brand that found each person, keyed by email (human-service #384):
+//
+//   POST {HUMAN_SERVICE_URL}/internal/brands/{brandId}/memberships/by-email
+//   Headers: X-API-Key: <internal>     Body: { "orgId": "<uuid>", "emails": string[] (min 1) }
+//   200:     { "brandId", "byEmail": { "<rawEmail>": { personId, memberships: Membership[] } | null } }
+//   Membership = { audienceId, offerId|null, list|null, status, provenance: "served"|"found_taken", joinedAt }
+//
+// RAW membership (a retired audience stays credited to itself), unlike the served-only card above.
+export interface BrandMembership {
+  audienceId: string;
+  offerId: string | null;
+  list: string | null;
+  provenance: "served" | "found_taken";
+}
+
+/**
+ * Per email, every membership of the brand human-service records (`[]` for an email it holds no
+ * person or no membership for). Throws AudienceServiceError on any non-2xx, and on a payload that
+ * states a membership without its audience or provenance (fail loud: never "no other source").
+ */
+export async function resolveBrandMembershipsByEmail(
+  brandId: string,
+  emails: string[],
+  ctx: AudienceResolveContext,
+): Promise<Map<string, BrandMembership[]>> {
+  const out = new Map<string, BrandMembership[]>();
+  if (emails.length === 0) return out;
+
+  const response = await fetchWithRetry(
+    `${HUMAN_SERVICE_URL}/internal/brands/${encodeURIComponent(brandId)}/memberships/by-email`,
+    {
+      method: "POST",
+      headers: buildHeaders(ctx),
+      body: JSON.stringify({ orgId: ctx.orgId, emails }),
+      signal: AbortSignal.timeout(120_000),
+    },
+  );
+  if (!response.ok) {
+    throw new AudienceServiceError(response.status, await response.text());
+  }
+
+  const parsed = (await response.json()) as { byEmail?: Record<string, unknown> };
+  if (!parsed.byEmail || typeof parsed.byEmail !== "object") {
+    throw new AudienceServiceError(response.status, "memberships/by-email answered without byEmail");
+  }
+  for (const [email, entry] of Object.entries(parsed.byEmail)) {
+    if (entry === null) {
+      out.set(email, []);
+      continue;
+    }
+    const memberships = (entry as { memberships?: unknown }).memberships;
+    if (!Array.isArray(memberships)) {
+      throw new AudienceServiceError(response.status, `memberships/by-email entry unreadable for one email`);
+    }
+    out.set(
+      email,
+      memberships.map((m: Record<string, unknown>) => {
+        if (typeof m.audienceId !== "string" || (m.provenance !== "served" && m.provenance !== "found_taken")) {
+          throw new AudienceServiceError(response.status, "memberships/by-email membership without audienceId/provenance");
+        }
+        return {
+          audienceId: m.audienceId,
+          offerId: typeof m.offerId === "string" ? m.offerId : null,
+          list: typeof m.list === "string" ? m.list : null,
+          provenance: m.provenance,
+        };
+      }),
+    );
+  }
+  return out;
+}

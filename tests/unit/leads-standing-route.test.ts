@@ -107,9 +107,15 @@ vi.mock("../../src/lib/offer-card-client.js", () => ({
   createOfferCardResolver: () => ({ resolve: () => Promise.resolve(new Map()) }),
 }));
 
+const resolveBrandMembershipsByEmailMock = vi.hoisted(() => vi.fn().mockResolvedValue(new Map()));
 vi.mock("../../src/lib/audience-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/audience-client.js")>()),
   resolveAudiencesForBrand: () => Promise.resolve({ byAudienceId: {}, byEmail: {} }),
+  resolveBrandMembershipsByEmail: (...args: unknown[]) => resolveBrandMembershipsByEmailMock(...args),
+}));
+vi.mock("../../src/lib/sourcing-origin.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/sourcing-origin.js")>()),
+  loadOriginNamesByList: () => Promise.resolve(new Map()),
 }));
 
 vi.mock("../../src/lib/trace-event.js", () => ({
