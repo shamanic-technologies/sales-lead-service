@@ -64,7 +64,14 @@ import {
   type FeedPosition,
 } from "../lib/lead-change-feed.js";
 import { LeadEvidenceChangedRequestSchema } from "../schemas.js";
-import { resolveAudiencesForBrand, type AudienceCard, type AudienceResolveContext } from "../lib/audience-client.js";
+import {
+  resolveAudiencesForBrand,
+  resolveBrandMembershipsByEmail,
+  type AudienceCard,
+  type AudienceResolveContext,
+} from "../lib/audience-client.js";
+import { toLeadSources, type LeadSource } from "../lib/lead-sources.js";
+import { loadOriginNamesByList } from "../lib/sourcing-origin.js";
 import { createOfferCardResolver, type OfferCard } from "../lib/offer-card-client.js";
 import {
   createCampaignBreakdownResolver,
@@ -272,15 +279,22 @@ interface AudienceRowDescriptor {
   brandIds: string[];
 }
 
+interface AudienceMaps {
+  /** The serving audience's card per leadId (unchanged `audience`). */
+  cards: Map<string, AudienceCard>;
+  /** Every source of the brand that found the person, per leadId (`sources`; [] when none). */
+  sources: Map<string, LeadSource[]>;
+}
+
 async function buildAudienceMapForRows(
   descriptors: AudienceRowDescriptor[],
   scopeBrandId: string | undefined,
   ctx: AudienceResolveContext,
-): Promise<Map<string, AudienceCard>> {
+): Promise<AudienceMaps> {
   // Group rows by the brand the audience must be correct for: the explicitly-
   // scoped brandId when present, else the row's primary brand. human-service
   // resolves by DISTINCT audienceId + email arrays, so per group we send the
-  // deduped key sets and correlate the two returned maps back onto each lead.
+  // deduped key sets and correlate the returned maps back onto each lead.
   const groups = new Map<string, AudienceRowDescriptor[]>();
   for (const d of descriptors) {
     const brandId = scopeBrandId ?? d.brandIds[0];
@@ -289,7 +303,10 @@ async function buildAudienceMapForRows(
     groups.get(brandId)!.push(d);
   }
 
-  const merged = new Map<string, AudienceCard>();
+  const cards = new Map<string, AudienceCard>();
+  const sources = new Map<string, LeadSource[]>();
+  // One catalogue read (cached) names every list kind; asked only when there is a row to tag.
+  const originsByList = groups.size > 0 ? await loadOriginNamesByList() : new Map();
   await Promise.all(
     Array.from(groups.entries()).map(async ([brandId, rows]) => {
       const audienceIds = Array.from(
@@ -299,11 +316,12 @@ async function buildAudienceMapForRows(
         new Set(rows.map((r) => r.email).filter((x): x is string => !!x)),
       );
 
-      const { byAudienceId, byEmail } = await resolveAudiencesForBrand(
-        brandId,
-        { audienceIds, emails },
-        ctx,
-      );
+      // The served card and every membership come from two human-service reads asked together:
+      // one bulk call each per chunk and brand, never one per lead.
+      const [{ byAudienceId, byEmail }, membershipsByEmail] = await Promise.all([
+        resolveAudiencesForBrand(brandId, { audienceIds, emails }, ctx),
+        resolveBrandMembershipsByEmail(brandId, emails, ctx),
+      ]);
 
       for (const r of rows) {
         // Prefer the tagged audience's card; fall back to the email membership
@@ -311,11 +329,13 @@ async function buildAudienceMapForRows(
         const byTag = r.audienceId ? byAudienceId[r.audienceId] : null;
         const byMail = r.email ? byEmail[r.email] : null;
         const card = byTag ?? byMail ?? null;
-        if (card) merged.set(r.leadId, card);
+        if (card) cards.set(r.leadId, card);
+        const memberships = r.email ? membershipsByEmail.get(r.email) ?? [] : [];
+        sources.set(r.leadId, toLeadSources(memberships, originsByList));
       }
     }),
   );
-  return merged;
+  return { cards, sources };
 }
 
 /**
@@ -370,6 +390,7 @@ function serializeLeadItem(
   fullLead: FullLead | null,
   email: { value: string; status: string | null } | null,
   audience: AudienceCard | null,
+  sources: LeadSource[],
   offer: OfferCard | null,
   deliveryStatus: FlattenedStatus,
   facts: ResolvedLeadFacts,
@@ -398,6 +419,9 @@ function serializeLeadItem(
     offer: offer ?? null,
     audienceId: row.audienceId ?? null,
     audience: audience ?? null,
+    // EVERY source of the brand that found this person (the serving one flagged `servedLead`), so a
+    // person found by several signals carries every tag. See lib/lead-sources.ts.
+    sources,
     servedAt: row.servedAt,
     status: row.status as "buffered" | "skipped" | "claimed" | "served",
     emailStatus: email?.status ?? null,
@@ -1081,7 +1105,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             // slim row must not be missing the offer the full row names.
             offer: offerMap.get(r.campaignId) ?? null,
             audienceId: r.audienceId ?? null,
-            audience: audienceMap.get(r.leadId) ?? null,
+            audience: audienceMap.cards.get(r.leadId) ?? null,
+            sources: audienceMap.sources.get(r.leadId) ?? [],
             servedAt: r.servedAt,
             status: r.status as "buffered" | "skipped" | "claimed" | "served",
             emailStatus,
@@ -1246,7 +1271,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           row,
           fullLead,
           email,
-          audienceMap.get(row.leadId) ?? null,
+          audienceMap.cards.get(row.leadId) ?? null,
+          audienceMap.sources.get(row.leadId) ?? [],
           offerMap.get(row.campaignId) ?? null,
           deliveryStatus,
           standingMap.get(row.id) ?? unresolvedFacts(),
@@ -1825,7 +1851,8 @@ router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: Authenticate
         row,
         fullLead,
         email,
-        audienceMap.get(row.leadId) ?? null,
+        audienceMap.cards.get(row.leadId) ?? null,
+        audienceMap.sources.get(row.leadId) ?? [],
         offerMap.get(row.campaignId) ?? null,
         deliveryStatus,
         standingMap.get(row.id) ?? unresolvedFacts(),

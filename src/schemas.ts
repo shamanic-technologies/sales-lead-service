@@ -1866,6 +1866,31 @@ const LeadDetailSchema = z
           "(by tagged audience_id and/or by email → active-audience membership, brand-correct). " +
           "null when the lead belongs to no active audience for the brand. Present on every lead in both views.",
       }),
+    sources: z
+      .array(
+        z.object({
+          audienceId: z.string().openapi({ description: "Audience UUID (human-service audience.id, raw: a retired audience stays credited to itself)." }),
+          offerId: z.string().nullable().openapi({ description: "Offer the audience belongs to; null when it belongs to none." }),
+          list: z
+            .string()
+            .nullable()
+            .openapi({ description: "human-service audience list kind (apollo_search, apollo_buying_signal, linkedin_engagement, crm_contacts, apify_search); null when the audience states none.", example: "linkedin_engagement" }),
+          origin: z
+            .object({
+              slug: z.string().openapi({ example: "sourcing-linkedin-engagement-signals" }),
+              name: z.string().openapi({ description: "Customer-facing source name (features-service catalogue).", example: "LinkedIn Engagement Signals" }),
+            })
+            .nullable()
+            .openapi({ description: "The sourcing origin this list kind is, named by features-service. null when the catalogue names none (never guessed)." }),
+          servedLead: z.boolean().openapi({ description: "True for the source whose serve handed this person out; false for one that found the person while already taken." }),
+        }),
+      )
+      .openapi({
+        description:
+          "EVERY audience of the brand that found this person (human-service memberships, served AND found-while-taken), " +
+          "serving source first. A person found by several sources carries each one. Additive: `audience` stays the serving " +
+          "audience's card. [] when no audience of the brand found the person. Present on every lead in both views (not compact).",
+      }),
     servedAt: z
       .string()
       .nullable()

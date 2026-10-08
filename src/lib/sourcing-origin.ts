@@ -34,7 +34,17 @@ export class SourcingOriginUnresolvedError extends Error {
   }
 }
 
-let originsCache: { at: number; byChannel: Map<string, Set<string>> } | null = null;
+/** The customer-facing origin a human-service audience LIST KIND is (features-service names it). */
+export interface SourcingOriginName {
+  slug: string;
+  name: string;
+}
+
+let originsCache: {
+  at: number;
+  byChannel: Map<string, Set<string>>;
+  byList: Map<string, SourcingOriginName>;
+} | null = null;
 
 /** Test hook: forget the cached catalogue. */
 export function resetSourcingOriginsCache(): void {
@@ -42,7 +52,21 @@ export function resetSourcingOriginsCache(): void {
 }
 
 async function loadOriginsByChannel(): Promise<Map<string, Set<string>>> {
-  if (originsCache && Date.now() - originsCache.at < ORIGINS_TTL_MS) return originsCache.byChannel;
+  return (await loadOriginsCatalogue()).byChannel;
+}
+
+/**
+ * Origin (slug + customer name) by human-service audience list kind, read off features-service's
+ * catalogue (`origins[].audienceLists`): the name a customer reads for "where this person was found".
+ * Never derived from an audience name or a cost name. Throws SourcingOriginUnresolvedError when the
+ * catalogue cannot be read.
+ */
+export async function loadOriginNamesByList(): Promise<Map<string, SourcingOriginName>> {
+  return (await loadOriginsCatalogue()).byList;
+}
+
+async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>> {
+  if (originsCache && Date.now() - originsCache.at < ORIGINS_TTL_MS) return originsCache;
 
   const url = `${FEATURES_SERVICE_URL}/public/sourcing-origins`;
   const response = await fetchWithRetry(url, { signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
@@ -51,7 +75,7 @@ async function loadOriginsByChannel(): Promise<Map<string, Set<string>>> {
       `features-service sourcing-origins read failed: ${response.status} ${await response.text()}`,
     );
   }
-  const body = (await response.json()) as { originsByChannel?: unknown };
+  const body = (await response.json()) as { originsByChannel?: unknown; origins?: unknown };
   const raw = body.originsByChannel;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new SourcingOriginUnresolvedError("features-service sourcing-origins answered without originsByChannel");
@@ -63,8 +87,24 @@ async function loadOriginsByChannel(): Promise<Map<string, Set<string>>> {
     }
     byChannel.set(channel, new Set(origins as string[]));
   }
-  originsCache = { at: Date.now(), byChannel };
-  return byChannel;
+  if (!Array.isArray(body.origins)) {
+    throw new SourcingOriginUnresolvedError("features-service sourcing-origins answered without origins");
+  }
+  const byList = new Map<string, SourcingOriginName>();
+  for (const origin of body.origins as Array<Record<string, unknown>>) {
+    const { slug, name, audienceLists } = origin ?? {};
+    if (typeof slug !== "string" || typeof name !== "string" || !Array.isArray(audienceLists)) {
+      throw new SourcingOriginUnresolvedError("features-service sourcing-origins entry unreadable (slug, name, audienceLists)");
+    }
+    for (const list of audienceLists) {
+      if (typeof list !== "string") {
+        throw new SourcingOriginUnresolvedError(`features-service sourcing-origins audienceLists unreadable for origin=${slug}`);
+      }
+      byList.set(list, { slug, name });
+    }
+  }
+  originsCache = { at: Date.now(), byChannel, byList };
+  return originsCache;
 }
 
 /** human-service's answer; null = the audience serves from no list (no committed provider). */
