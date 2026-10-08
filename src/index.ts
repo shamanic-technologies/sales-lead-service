@@ -22,10 +22,9 @@ import followupsRoutes from "./routes/followups.js";
 import existingCustomersRoutes from "./routes/existing-customers.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
-import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
-import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
-import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
-import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
+import { Worker } from "node:worker_threads";
+import { extname } from "path";
+import { enableCrossThreadLocks } from "./lib/scope-lock.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { withConnectRetry } from "./lib/db-retry.js";
@@ -117,19 +116,16 @@ async function boot(): Promise<void> {
   // Provider registration is metadata published to key-service, not schema. It
   // must not gate readiness: a key-service outage would otherwise hold the whole
   // service at 503 over something no request depends on.
+  // Per-scope locks must hold across this thread and the background one BEFORE either can take
+  // one: requests are still gated here, and the background thread starts below.
+  enableCrossThreadLocks(process.env.LEAD_SERVICE_DATABASE_URL!, 4);
   markBootReady();
   console.log("[lead-service] ready — serving traffic");
 
-  // What each paired customer's CRM evidences, reflected onto their leads. Armed only once the
-  // schema it writes is there.
-  startCrmEvidenceWorker();
-  // Keeps the Leads page's read models inside their freshness bound (see lead-read-model.ts).
-  startReadModelWorker();
-  // Keeps every lead change feed a consumer follows current (see lead-change-feed.ts).
-  startChangeFeedWorker();
-  // Answers WHOSE WIN every outcome nobody answered was, by the owner's date rule
-  // (see outcome-cause.ts).
-  startOutcomeCauseWorker();
+  // The interval sweeps (CRM evidence, read models, change feeds, outcome causes) run on their own
+  // thread, so their CPU never stands between a request and its answer (see background-worker.ts).
+  // Armed only once the schema they write is there.
+  startBackgroundThread();
 
   try {
     await registerProviders();
@@ -137,6 +133,34 @@ async function boot(): Promise<void> {
     console.error("[lead-service] provider registration failed (continuing):", err);
     Sentry.captureException(err);
   }
+}
+
+/** Background thread pool size: its own connections, beside the request thread's `POOL_MAX`. */
+const BACKGROUND_DB_POOL_MAX = process.env.LEAD_BACKGROUND_DB_POOL_MAX ?? "8";
+const BACKGROUND_RESTART_DELAY_MS = 10_000;
+
+/**
+ * Start the background thread, and start it again if it ever stops. A thread that died is a
+ * freshness bound nobody keeps (reads would then rebuild their own models), so its end is logged
+ * loudly and reported, never swallowed.
+ */
+function startBackgroundThread(): void {
+  const ext = extname(__filename);
+  const worker = new Worker(new URL(`./background-worker${ext}`, import.meta.url), {
+    env: { ...process.env, LEAD_DB_POOL_MAX: BACKGROUND_DB_POOL_MAX },
+    resourceLimits: { maxOldGenerationSizeMb: 1024 },
+    ...(ext === ".ts" ? { execArgv: ["--import", "tsx"] } : {}),
+  });
+  worker.on("error", (err) => {
+    console.error("[lead-service] background thread crashed:", err);
+    Sentry.captureException(err);
+  });
+  worker.on("exit", (code) => {
+    console.error(
+      `[lead-service] background thread exited with code ${code}; restarting in ${BACKGROUND_RESTART_DELAY_MS}ms`,
+    );
+    setTimeout(startBackgroundThread, BACKGROUND_RESTART_DELAY_MS).unref();
+  });
 }
 
 if (process.env.NODE_ENV !== "test") {
