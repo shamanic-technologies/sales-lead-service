@@ -23,6 +23,7 @@ import followupsRoutes from "./routes/followups.js";
 import existingCustomersRoutes from "./routes/existing-customers.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
+import serveRecordsRoutes from "./routes/serve-records.js";
 import { requireBootReady } from "./middleware/readiness.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -66,6 +67,7 @@ app.use(stepStatementsRoutes);
 app.use(followupsRoutes);
 app.use(existingCustomersRoutes);
 app.use(leadHistoryRoutes);
+app.use(serveRecordsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });

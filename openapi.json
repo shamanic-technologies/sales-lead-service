@@ -7319,6 +7319,103 @@
           "reused",
           "probeCostUsd"
         ]
+      },
+      "ServeRecordsResponse": {
+        "type": "object",
+        "properties": {
+          "serves": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ServeRecord"
+            }
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "serves",
+          "count"
+        ]
+      },
+      "ServeRecord": {
+        "type": "object",
+        "properties": {
+          "runId": {
+            "type": "string",
+            "description": "The `lead-service:lead-serve` run that handed this person out (`leads_campaigns.run_id`)."
+          },
+          "leadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "The campaign the lead row is filed under (the OUTREACH campaign that works the lead)."
+          },
+          "audienceId": {
+            "type": "string",
+            "nullable": true
+          },
+          "servedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When the serve happened, ISO-8601; null when the lifecycle never stamped it."
+          },
+          "apolloPersonId": {
+            "type": "string",
+            "nullable": true
+          },
+          "email": {
+            "type": "string",
+            "nullable": true,
+            "description": "The person's primary email (same pick as `view=basic`); null when none."
+          },
+          "firstName": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastName": {
+            "type": "string",
+            "nullable": true
+          },
+          "company": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "primaryDomain": {
+                "type": "string",
+                "nullable": true
+              },
+              "websiteUrl": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "name",
+              "primaryDomain",
+              "websiteUrl"
+            ],
+            "description": "Current employer, same pick as `view=basic` `lead.organization`; null when none."
+          }
+        },
+        "required": [
+          "runId",
+          "leadId",
+          "campaignId",
+          "audienceId",
+          "servedAt",
+          "apolloPersonId",
+          "email",
+          "firstName",
+          "lastName",
+          "company"
+        ]
       }
     },
     "parameters": {},
@@ -13073,6 +13170,61 @@
           },
           "404": {
             "description": "Lead not on this brand"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/serve-records": {
+      "get": {
+        "summary": "Every serve of a brand: which serve run handed out which person (internal, service-auth)",
+        "description": "One row per `leads_campaigns` row of the (x-org-id, brand) carrying a serve run, EVERY campaign and every lifecycle status, never collapsed per person (a person served under three campaigns = three rows). The person's identity uses the same projections as `GET /orgs/leads?view=basic` (an unknown first/last name is null here). The whole brand in ONE streamed read (no paging, one statement), ordered by the row's creation; `count` closes the body. Failure before the first byte = 500, after it the socket is destroyed (never a short body that parses).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every serve record of the brand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServeRecordsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
           }
         }
       }

@@ -6674,3 +6674,57 @@ registry.registerPath({
     404: { description: "Lead not on this brand" },
   },
 });
+
+const ServeRecordSchema = z
+  .object({
+    runId: z.string().openapi({ description: "The `lead-service:lead-serve` run that handed this person out (`leads_campaigns.run_id`)." }),
+    leadId: z.string().uuid(),
+    campaignId: z.string().openapi({ description: "The campaign the lead row is filed under (the OUTREACH campaign that works the lead)." }),
+    audienceId: z.string().nullable(),
+    servedAt: z.string().nullable().openapi({ description: "When the serve happened, ISO-8601; null when the lifecycle never stamped it." }),
+    apolloPersonId: z.string().nullable(),
+    email: z.string().nullable().openapi({ description: "The person's primary email (same pick as `view=basic`); null when none." }),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    company: z
+      .object({
+        name: z.string().nullable(),
+        primaryDomain: z.string().nullable(),
+        websiteUrl: z.string().nullable(),
+      })
+      .nullable()
+      .openapi({ description: "Current employer, same pick as `view=basic` `lead.organization`; null when none." }),
+  })
+  .openapi("ServeRecord");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/serve-records",
+  summary: "Every serve of a brand: which serve run handed out which person (internal, service-auth)",
+  description:
+    "One row per `leads_campaigns` row of the (x-org-id, brand) carrying a serve run, EVERY campaign and every lifecycle status, " +
+    "never collapsed per person (a person served under three campaigns = three rows). The person's identity uses the same " +
+    "projections as `GET /orgs/leads?view=basic` (an unknown first/last name is null here). The whole brand in ONE streamed read " +
+    "(no paging, one statement), ordered by the row's creation; `count` closes the body. Failure before the first byte = 500, " +
+    "after it the socket is destroyed (never a short body that parses).",
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "Every serve record of the brand",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ serves: z.array(ServeRecordSchema), count: z.number().int() })
+            .openapi("ServeRecordsResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id missing" },
+    401: { description: "Unauthorized" },
+    500: { description: "Internal server error" },
+  },
+});
