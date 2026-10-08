@@ -120,6 +120,17 @@ export const LEAD_STANDING_STATES = [
 ] as const;
 export type LeadStandingState = (typeof LEAD_STANDING_STATES)[number];
 
+/**
+ * The TAG a conversation carries: the label a person-facing surface (the Unibox) shows for what
+ * the person actually did. lead-service owns it (owner 2026-10-08); a consumer relays it and never
+ * re-derives it. It is the state, except where the state is broader than the act: a lead whose
+ * only interest is a website visit (a click on our email, or a visit stated by hand) stays
+ * `sales_interest` in every count and board — a visit IS a degree of sales interest there — and
+ * is tagged `website_visit`, because a click alone is not somebody telling us they want to buy.
+ */
+export const LEAD_STANDING_TAGS = [...LEAD_STANDING_STATES, "website_visit"] as const;
+export type LeadStandingTag = (typeof LEAD_STANDING_TAGS)[number];
+
 export const LEAD_STANDING_SIGNALS = [
   "none",
   "not_served",
@@ -155,6 +166,8 @@ export type LeadStandingOrigin = "stated" | "implied" | "measured";
 
 export interface LeadStanding {
   state: LeadStandingState;
+  /** The conversation's tag (see `LEAD_STANDING_TAGS`): the state, or `website_visit`. */
+  tag: LeadStandingTag;
   signal: LeadStandingSignal;
   origin: LeadStandingOrigin | null;
   /** Why the standing is `unresolved`, and null for every other state. */
@@ -168,7 +181,7 @@ export interface LeadStanding {
   reachedEntryStep: boolean | null;
   /** The deepest step reachable from the entry known to have been reached, or null. */
   deepestStep: LeadStepOutcomeName | null;
-  /** When the deciding statement was made, when a statement decided it. */
+  /** When the deciding statement was made, or the first click when a measured visit decided it. */
   at: string | null;
   /**
    * Whether the lead WENT COLD at a step, and since when (lead-cold.ts) — or null.
@@ -193,6 +206,8 @@ export interface LeadStandingDelivery {
   replyClassification: "positive" | "negative" | "neutral" | null;
   /** When the delivery layer first saw a reply. Only read by the went-cold rule. */
   firstRepliedAt?: string | null;
+  /** When the delivery layer first saw a click: the date of a measured visit. */
+  firstClickedAt?: string | null;
   /**
    * Whether the delivery layer reports this person as PERMANENTLY out — the wrong contact, or
    * gone from the role. Derived by the provider from its own reply vocabulary and forwarded here;
@@ -241,7 +256,7 @@ export interface LeadStandingInput {
   replies?: LeadReplyOutcome | null;
 }
 
-function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "signal" | "origin" | "reason"> {
+function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "tag" | "signal" | "origin" | "reason"> {
   return {
     legKey: input.entry?.legKey ?? null,
     entryStep: input.entry?.step ?? null,
@@ -280,6 +295,13 @@ function positiveReached(delivery: LeadStandingDelivery): boolean {
 }
 
 export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
+  const standing = resolveStandingState(input);
+  const tag: LeadStandingTag =
+    salesInterestStage(standing) === WEBSITE_VISIT_STEP ? WEBSITE_VISIT_STEP : standing.state;
+  return { ...standing, tag };
+}
+
+function resolveStandingState(input: LeadStandingInput): Omit<LeadStanding, "tag"> {
   const { delivery, entry } = input;
   // The steps reachable from where this campaign's leads enter, shallowest first. A step off it (a
   // site visit on a campaign working replies) is not the thing this campaign moves leads toward.
@@ -406,6 +428,7 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
       signal: entry.measure === "delivery_click" ? "measured_visit" : "positive_reply",
       origin: "measured",
       reason: null,
+      at: entry.measure === "delivery_click" ? (delivery.firstClickedAt ?? null) : null,
     };
   }
 
@@ -444,7 +467,14 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
     };
   }
   if (input.deliveryQueried && delivery.clicked) {
-    return { ...shared, state: "sales_interest", signal: "measured_visit", origin: "measured", reason: null };
+    return {
+      ...shared,
+      state: "sales_interest",
+      signal: "measured_visit",
+      origin: "measured",
+      reason: null,
+      at: delivery.firstClickedAt ?? null,
+    };
   }
 
   // 11. They said no, in a message, and the campaign's own entry step was not reached.
@@ -532,7 +562,7 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
  *
  * Null for every state other than `sales_interest`.
  */
-export function salesInterestStage(standing: LeadStanding): string | null {
+export function salesInterestStage(standing: Omit<LeadStanding, "tag">): string | null {
   if (standing.state !== "sales_interest") return null;
   // A lead at `sales_interest` without a reachable step reached either reached the campaign's
   // entry (`reachedEntryStep`) or VISITED the site on a leg that does not enter there (9a) — the
