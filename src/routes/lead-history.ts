@@ -46,6 +46,7 @@ import {
 } from "../lib/mailbox-client.js";
 import { fetchGeneratedEmail } from "../lib/generated-email-client.js";
 import { fetchAnswerers } from "../lib/answerer-client.js";
+import { readTimeline } from "../lib/timeline-facts.js";
 import {
   assembleLeadHistory,
   type HistoryCampaignInput,
@@ -470,6 +471,46 @@ router.get(
       sources: assembled.sources,
       events: assembled.events,
     });
+  }),
+);
+
+/**
+ * GET /orgs/leads/:id/timeline — the STORED timeline of one conversation (silver
+ * `lead_timeline_facts`), each item labelled, with the conversation's tags derived from it.
+ *
+ * A conversation is the person at a brand (`brandId`, required) and, when named, one offer
+ * (`offerId`): that offer's facts plus the brand-level ones, which belong to every offer page.
+ * `:id` is the list row's id, as on `/history`; `org_id` sits in the lookup predicate. A brand the
+ * row is not part of answers 404, exactly as if the row did not exist.
+ */
+router.get(
+  "/orgs/leads/:id/timeline",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const id = req.params.id;
+    if (!UUID_RE.test(id)) {
+      res.status(400).json({ error: "id must be the `id` of a lead row, a uuid" });
+      return;
+    }
+    const brandId = typeof req.query.brandId === "string" ? req.query.brandId : "";
+    if (brandId.length === 0) {
+      res.status(400).json({ error: "brandId is required: a timeline is a person at a brand" });
+      return;
+    }
+    const offerId = typeof req.query.offerId === "string" && req.query.offerId.length > 0 ? req.query.offerId : null;
+    try {
+      const row = await fetchLeadRow(req.orgId!, id);
+      if (!row || !row.brand_ids.includes(brandId)) {
+        res.status(404).json({ error: "Lead not found" });
+        return;
+      }
+      const timeline = await readTimeline({ orgId: req.orgId!, brandId, leadId: row.lead_id, offerId });
+      res.json({ leadId: row.lead_id, brandId, offerId, ...timeline });
+    } catch (error) {
+      console.error(`[lead-service] timeline read failed for row ${id}:`, error);
+      res.status(500).json({ error: "Timeline could not be read" });
+    }
   }),
 );
 
