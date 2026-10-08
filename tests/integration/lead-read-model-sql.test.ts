@@ -431,4 +431,89 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect((await model.readModelBucketCounts(m, null)).total).toBe(3);
     await db.update(leadsCampaigns).set({ status: "served" }).where(eq(leadsCampaigns.id, people[1].rowId));
   });
+
+  describe("held across threads: a catch-up and a refresh of one scope never interleave", () => {
+    const scopeLock = () => import("../../src/lib/scope-lock.js");
+    let other: ReturnType<typeof import("postgres").default> | null = null;
+
+    beforeAll(async () => {
+      const locks = await scopeLock();
+      locks.enableCrossThreadLocks(process.env.LEAD_SERVICE_DATABASE_URL!, 2);
+      const postgres = (await import("postgres")).default;
+      // Another thread, as far as Postgres can tell: its own session.
+      other = postgres(process.env.LEAD_SERVICE_DATABASE_URL!, { max: 4, prepare: false });
+    });
+
+    afterAll(async () => {
+      await other?.end();
+    });
+
+    async function holdElsewhere(namespace: string) {
+      const locks = await scopeLock();
+      const key = locks.advisoryKey(namespace, model.readModelKey(scope));
+      const conn = await other!.reserve();
+      await conn`SELECT pg_advisory_lock(${key}::bigint)`;
+      return async () => {
+        await conn`SELECT pg_advisory_unlock(${key}::bigint)`;
+        conn.release();
+      };
+    }
+
+    const settledWithin = <T>(p: Promise<T>, ms: number) =>
+      Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
+
+    it("a read with nothing new to apply answers without waiting behind a refresh in progress", async () => {
+      await model.ensureReadModel(scope);
+      const release = await holdElsewhere("read-model");
+      const releaseRefresh = await holdElsewhere("read-model-refresh");
+      try {
+        expect(await settledWithin(model.ensureReadModel(scope), 2_000)).toBe(true);
+      } finally {
+        await release();
+        await releaseRefresh();
+      }
+    });
+
+    it("a read with a statement to apply waits for the other thread's chunk, then shows it", async () => {
+      await model.ensureReadModel(scope);
+      const release = await holdElsewhere("read-model");
+      const [won] = await db
+        .insert(conversionEvents)
+        .values({
+          brandId,
+          orgId,
+          event: "sale",
+          matchedLeadId: people[0].leadId,
+          leadCampaignId: people[0].rowId,
+          matchConfidence: "exact",
+          attributionStatus: "attributed",
+          source: "manual",
+          valueCents: 100_00,
+          costCents: 0,
+        })
+        .returning({ id: conversionEvents.id });
+      let read: Promise<Awaited<ReturnType<typeof model.ensureReadModel>>>;
+      try {
+        read = model.ensureReadModel(scope);
+        expect(await settledWithin(read, 500)).toBe(false);
+      } finally {
+        await release();
+      }
+      const m = await read!;
+      expect((await model.readModelStandingCounts(m, null)).counts.customer).toBe(1);
+      await db.update(conversionEvents).set({ withdrawnAt: new Date() }).where(eq(conversionEvents.id, won.id));
+      await model.ensureReadModel(scope);
+    });
+
+    it("sees a lock the other thread holds as busy (what lets a change feed read skip a reconcile in progress)", async () => {
+      const locks = await scopeLock();
+      expect(await locks.scopeLockBusy("read-model", model.readModelKey(scope))).toBe(false);
+      const release = await holdElsewhere("read-model");
+      try {
+        expect(await locks.scopeLockBusy("read-model", model.readModelKey(scope))).toBe(true);
+      } finally {
+        await release();
+      }
+    });
+  });
 });
