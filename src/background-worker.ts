@@ -18,6 +18,7 @@ import { startCrmFactFeedWorker } from "./lib/crm-fact-feed.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
+import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -35,12 +36,14 @@ startReadModelWorker();
 startChangeFeedWorker();
 // Answers WHOSE WIN every outcome nobody answered was, by the owner's date rule (see outcome-cause.ts).
 startOutcomeCauseWorker();
+// Keeps every brand's labelled timeline (silver lead_timeline_facts) current (see timeline-facts.ts).
+startTimelineFactsWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, timeline");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);

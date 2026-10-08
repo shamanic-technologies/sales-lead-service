@@ -67,6 +67,15 @@ One ordered answer to "what happened to this person" (previously assembled in th
 
 Env: `INSTANTLY_SERVICE_*`, `GOOGLE_SERVICE_*`, `CONTENT_GENERATION_SERVICE_*`, `CAMPAIGN_SERVICE_*`.
 
+## Labelled timeline: silver `lead_timeline_facts` (migration 0059), `GET /orgs/leads/{id}/timeline?brandId=[&offerId=]`
+
+Owner 2026-10-08: every fact about a person carries a LABEL that is a fact, independent of the campaign and of the channel it came by (outreach, CRM, by hand), stored with whether it is ATTRIBUTABLE to us; the conversation (lead x offer x brand) carries tag DIMENSIONS derived from its items. `timeline-labels.ts` (pure) owns the vocabulary and the gold derivation (`lastWord`, `furthestStep` + attributable); `timeline-facts.ts` writes and reads.
+
+1. **One row per source fact, `id` = `<source>:<source ref>`**: a re-sync rewrites the same row (`IS DISTINCT FROM`, unchanged = no write), a changed verdict RELABELS it. A fact its source takes back keeps its row with `withdrawn_at`; the tags ignore it.
+2. **Sources, re-read whole per brand every 15 min on the background thread**: `conversion_events` (attributed, matched; whose win = the EFFECTIVE `caused_by_outreach`, basis person/rule), `lead_step_disqualifications` (a never = `not_interested`), and every reply via instantly-service `/orgs/reply-verdicts/query`, placed from its per-verdict FLAGS (never a kind name). Sends, opens, clicks with URL, bounces and unsubscribes wait on instantly-service's outreach fact feed (requested 2026-10-08). A source that cannot be read fails that brand's sync and writes nothing.
+3. **`campaign_id` is attribution only; `offer_id` NULL = a fact about the person at the brand**, served on every offer page of it. Never key a read on the campaign.
+4. Do not re-derive a label or tag in a consumer, and do not add a second reply classifier: the provider's verdict is the one judgment per reply.
+
 ## Paid-pool retry: `pullNext` drains already-paid serves BEFORE asking human-service for anyone new (`retry-pool.ts`, #443)
 
 A serve is billed and suppressed 3 months in human-service immediately, so a failure after it (email generation, vendor push) strands a paid prospect; the suppression is a PRE-payment guard that must not be relaxed. Pool = this campaign's own `status='served'`, `sent_at IS NULL` rows, oldest serve first, `RETRY_CANDIDATE_BATCH_SIZE`, resolved by ONE batched campaign-scoped email-gateway `/orgs/status`.

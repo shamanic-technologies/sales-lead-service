@@ -16,7 +16,7 @@ const LEAD_SINGLE_SEGMENT_NOT_A_LEAD = new Set([
   "evidence-changed",
 ]);
 const LEAD_COUNT_READS = new Set(["bucket-counts", "standing-counts", "conversation-counts"]);
-const LEAD_SUB_READS = new Set(["history", "step-statements", "qualification", "crm-attribution"]);
+const LEAD_SUB_READS = new Set(["history", "timeline", "step-statements", "qualification", "crm-attribution"]);
 
 export function isInteractiveRead(method: string | undefined, url: string | undefined): boolean {
   if (method !== "GET" || !url) return false;

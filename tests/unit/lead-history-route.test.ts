@@ -80,6 +80,11 @@ vi.mock("../../src/lib/answerer-client.js", () => ({
   fetchAnswerers: (...a: unknown[]) => fetchAnswerers(...a),
 }));
 
+const readTimeline = vi.fn();
+vi.mock("../../src/lib/timeline-facts.js", () => ({
+  readTimeline: (...a: unknown[]) => readTimeline(...a),
+}));
+
 const { default: leadHistoryRoutes } = await import("../../src/routes/lead-history.js");
 
 const ORG = "11111111-1111-1111-1111-111111111111";
@@ -362,5 +367,46 @@ describe("GET /orgs/leads/:id/history", () => {
     expect(res.body.campaignIds).toHaveLength(8);
     expect(res.body.campaignsTruncated).toBe(true);
     expect(res.body.complete).toBe(false);
+  });
+});
+
+describe("GET /orgs/leads/:id/timeline", () => {
+  const TAGS = { lastWord: "not_interested", lastWordAt: "2026-10-07T22:13:00.000Z", furthestStep: "contacted", furthestStepAttributable: true };
+
+  beforeEach(() => {
+    readTimeline.mockReset();
+    readTimeline.mockResolvedValue({ items: [], tags: TAGS });
+  });
+
+  it("reads the PERSON's conversation at the brand and offer named, org boundary in the lookup", async () => {
+    const res = await get(`/orgs/leads/${ROW}/timeline?brandId=brand-1&offerId=offer-1`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ leadId: LEAD, brandId: "brand-1", offerId: "offer-1", items: [], tags: TAGS });
+    expect(readTimeline).toHaveBeenCalledWith({ orgId: ORG, brandId: "brand-1", leadId: LEAD, offerId: "offer-1" });
+    expect(queries.some((q) => q.values.includes(ORG))).toBe(true);
+  });
+
+  it("reads every offer of the brand when no offer is named", async () => {
+    await get(`/orgs/leads/${ROW}/timeline?brandId=brand-1`);
+    expect(readTimeline).toHaveBeenCalledWith({ orgId: ORG, brandId: "brand-1", leadId: LEAD, offerId: null });
+  });
+
+  it("refuses a missing brand and a non-uuid id", async () => {
+    expect((await get(`/orgs/leads/${ROW}/timeline`)).status).toBe(400);
+    expect((await get(`/orgs/leads/nope/timeline?brandId=brand-1`)).status).toBe(400);
+  });
+
+  it("answers 404 for a brand the row is not part of, and for a foreign row", async () => {
+    expect((await get(`/orgs/leads/${ROW}/timeline?brandId=brand-2`)).status).toBe(404);
+    leadRow = null;
+    expect((await get(`/orgs/leads/${ROW}/timeline?brandId=brand-1`)).status).toBe(404);
+    expect(readTimeline).not.toHaveBeenCalled();
+  });
+
+  it("is a 500 with a body, never a hung socket, when the store cannot be read", async () => {
+    readTimeline.mockRejectedValue(new Error("db down"));
+    const res = await get(`/orgs/leads/${ROW}/timeline?brandId=brand-1`);
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBeTruthy();
   });
 });
