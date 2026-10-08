@@ -462,6 +462,18 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const settledWithin = <T>(p: Promise<T>, ms: number) =>
       Promise.race([p.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), ms))]);
 
+    it("nested locks on as many scopes as the pool holds never deadlock (one pool per namespace)", async () => {
+      const locks = await scopeLock();
+      // Pool max is 2: two outer holders take two connections, then each takes an inner lock.
+      // With one shared pool the inner waits forever for a third connection.
+      const nested = (k: string) =>
+        locks.withScopeLock("deadlock-outer", k, async () => {
+          await new Promise((r) => setTimeout(r, 50));
+          return locks.withScopeLock("deadlock-inner", k, async () => k);
+        });
+      expect(await settledWithin(Promise.all([nested("a"), nested("b"), nested("c")]), 5_000)).toBe(true);
+    });
+
     it("a read with nothing new to apply answers without waiting behind a refresh in progress", async () => {
       await model.ensureReadModel(scope);
       const release = await holdElsewhere("read-model");

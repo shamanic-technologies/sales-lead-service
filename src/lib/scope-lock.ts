@@ -13,6 +13,14 @@
  *      advisory lock on a small dedicated pool. Waiting is a `pg_try_advisory_lock` poll that hands
  *      its connection back between tries, so a waiter never holds a connection the holder needs.
  *
+ * One pool PER NAMESPACE, never one shared pool. A held lock keeps its connection for the whole
+ * task, and locks nest (`read-model-refresh` holds while its build takes `read-model` for the
+ * swap). With one shared pool of N, N scopes refreshing at once held all N connections and each
+ * waited for an (N+1)th to take its inner lock: the thread deadlocked for good, and every read
+ * queued behind those scopes hung until its caller gave up (2026-10-08, interactive thread, N=2:
+ * every board and count read dropped). Per namespace, an inner lock never waits on a connection
+ * an outer holder of another namespace keeps. Never nest a namespace inside itself.
+ *
  * Tests never enable layer 2: they run one thread, and the in-process queue is the whole lock, as
  * it always was.
  */
@@ -21,15 +29,28 @@ import postgres from "postgres";
 
 const POLL_MS = 25;
 
-let lockSql: postgres.Sql | null = null;
+let lockConfig: { connectionString: string; max: number } | null = null;
+const lockPools = new Map<string, postgres.Sql>();
 
 /**
- * Turn on the cross-thread layer. Called once per thread at boot, by `src/index.ts` (request thread)
- * and `src/background-worker.ts` (background thread), never by a test.
+ * Turn on the cross-thread layer. Called once per thread at boot, by `src/http-worker.ts` (HTTP
+ * threads) and `src/background-worker.ts` (background thread). `max` bounds each namespace's pool.
  */
 export function enableCrossThreadLocks(connectionString: string, max: number): void {
-  if (lockSql) return;
-  lockSql = postgres(connectionString, { prepare: false, max });
+  if (lockConfig) return;
+  lockConfig = { connectionString, max };
+}
+
+/** The namespace's own lock pool, opened on first use; null when cross-thread locking is off. */
+function poolFor(namespace: string): postgres.Sql | null {
+  if (!lockConfig) return null;
+  let pool = lockPools.get(namespace);
+  if (!pool) {
+    // Idle connections close: a pool holds a connection only while a lock is held or polled.
+    pool = postgres(lockConfig.connectionString, { prepare: false, max: lockConfig.max, idle_timeout: 60 });
+    lockPools.set(namespace, pool);
+  }
+  return pool;
 }
 
 /** One signed 64-bit advisory key per (namespace, key). Exported for tests that hold it elsewhere. */
@@ -71,7 +92,7 @@ async function acquire(pool: postgres.Sql, lockKey: string): Promise<postgres.Re
 export function withScopeLock<T>(namespace: string, key: string, task: () => Promise<T>): Promise<T> {
   const id = `${namespace}\0${key}`;
   return inProcess(id, async () => {
-    const pool = lockSql;
+    const pool = poolFor(namespace);
     if (!pool) return task();
     const lockKey = advisoryKey(namespace, key);
     const conn = await acquire(pool, lockKey);
@@ -94,7 +115,7 @@ export function withScopeLock<T>(namespace: string, key: string, task: () => Pro
  */
 export async function scopeLockBusy(namespace: string, key: string): Promise<boolean> {
   if (queues.has(`${namespace}\0${key}`)) return true;
-  const pool = lockSql;
+  const pool = poolFor(namespace);
   if (!pool) return false;
   const lockKey = advisoryKey(namespace, key);
   const conn = await pool.reserve();
