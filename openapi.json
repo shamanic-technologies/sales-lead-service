@@ -1779,6 +1779,22 @@
             "description": "Where this person stands on THIS campaign, decided by lead-service and by nobody else. `sales_interest` = they reached the step this campaign's LEG puts leads on (a visit where the leg enters at the site, a positive reply where it enters at a conversation) or a step reachable from it on the leg graph — OR they visited the brand's website, on ANY leg (a visit is interest whatever the leg; off the leg it is not the entry, so `reachedEntryStep` stays false and the stage is `website_visit`). `customer` = the sale is reached. `opted_out` = the person asked not to be contacted (an unsubscribe, at this scope or globally); it is their own act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. `disqualified` = a commercial judgement of OURS: we realised they are not our target at all (the wrong contact, or gone from the role), or somebody stated they never will buy. The two are separate states, never folded together, because a board draws them as two columns with different copy and different moves and has to be able to count them apart. A prospect who simply DECLINES is not disqualified: that is a judgement about the moment, they stay reachable and the lead stays recyclable, so they read as `engaged` with `signal: \"negative_reply\"`. `engaged` = something happened that is not the step this campaign sells. `contacted` = written to, nothing since — INCLUDING a lead whose mail bounced, which is a failure of delivery rather than an opinion about the person, and is named by `signal: \"bounced\"` rather than used as a verdict. `not_contacted` = never written to. `unresolved` = a signal could not be resolved and is stated as such rather than defaulted — read `reason`. A consumer needs to know none of the reply kinds or step names to use this.",
             "example": "sales_interest"
           },
+          "tag": {
+            "type": "string",
+            "enum": [
+              "unresolved",
+              "not_contacted",
+              "contacted",
+              "engaged",
+              "sales_interest",
+              "customer",
+              "disqualified",
+              "opted_out",
+              "website_visit"
+            ],
+            "description": "The label this conversation carries, for a surface that shows a person what the lead did (the Unibox). This service owns it; relay it, never re-derive it. It is `state`, except a `sales_interest` lead whose only interest is a website visit (a click on our email, or a visit stated by hand): that lead stays `sales_interest` in every count and board and is tagged `website_visit`, because a click alone is not somebody saying they want to buy. A positive reply or any deeper step keeps `sales_interest`.",
+            "example": "website_visit"
+          },
           "signal": {
             "type": "string",
             "enum": [
@@ -1867,7 +1883,7 @@
           "at": {
             "type": "string",
             "nullable": true,
-            "description": "When the deciding statement was made, when a statement decided the state.",
+            "description": "When the deciding statement was made, when a statement decided the state; the first click on our email when a measured visit decided it.",
             "example": null
           },
           "wentCold": {
@@ -1879,6 +1895,7 @@
         },
         "required": [
           "state",
+          "tag",
           "signal",
           "origin",
           "reason",

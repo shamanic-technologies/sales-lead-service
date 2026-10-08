@@ -351,6 +351,7 @@ export function createCampaignBreakdownResolver(
 /** What a card reads as when its standing could not be resolved at all. Never a plausible default. */
 const UNRESOLVED_STANDING: LeadStanding = {
   state: "unresolved",
+  tag: "unresolved",
   signal: "none",
   origin: null,
   reason: "statements_unreadable",
