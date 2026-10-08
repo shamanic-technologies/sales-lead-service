@@ -435,3 +435,49 @@ export async function fetchCrmFunnelEvents(
     offset = next;
   }
 }
+
+// ---------------------------------------------------------------------------
+// People fact feed (crm-service#61)
+// ---------------------------------------------------------------------------
+
+/** One page of crm-service's people fact feed. Facts stay raw here; crm-fact-feed.ts reads them. */
+export interface CrmFactsPage {
+  facts: unknown[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
+/**
+ * One page of the feed after `cursor` (null = from the first fact). The feed is internal and spans
+ * every org, so it carries the service key alone: no org identity is ever stated on it.
+ */
+export async function fetchCrmFactsPage(cursor: string | null, limit: number): Promise<CrmFactsPage> {
+  const path =
+    `/internal/people/facts?limit=${limit}` + (cursor === null ? "" : `&since=${encodeURIComponent(cursor)}`);
+  let response: Response;
+  try {
+    response = await fetchWithRetry(`${CRM_SERVICE_URL}${path}`, {
+      method: "GET",
+      headers: { "X-API-Key": CRM_SERVICE_API_KEY },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new CrmServiceError(`crm-service unreachable for ${path}: ${(error as Error).message}`);
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new CrmServiceError(`crm-service ${response.status} for ${path}: ${body.slice(0, 300)}`);
+  }
+  let body: { facts?: unknown; nextCursor?: unknown; hasMore?: unknown };
+  try {
+    body = (await response.json()) as typeof body;
+  } catch (error) {
+    throw new CrmServiceError(`crm-service answer for ${path} was not readable JSON: ${(error as Error).message}`);
+  }
+  if (!Array.isArray(body.facts)) throw new CrmServiceError(`crm-service ${path} answered with no facts array`);
+  if (typeof body.hasMore !== "boolean") throw new CrmServiceError(`crm-service ${path} answered with no hasMore`);
+  if (body.nextCursor !== null && typeof body.nextCursor !== "string") {
+    throw new CrmServiceError(`crm-service ${path} answered with an unreadable nextCursor`);
+  }
+  return { facts: body.facts, nextCursor: body.nextCursor, hasMore: body.hasMore };
+}

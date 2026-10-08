@@ -28,6 +28,7 @@ const BRAND_SCALAR_TABLES = [
   "qualification_criteria",
   "qualification_checks",
   "candidate_screenings",
+  "crm_facts",
   "lead_delivery_evidence",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves"] as const;
@@ -122,6 +123,12 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.insert(schema.candidateScreenings).values({
       orgId: org, brandId: brand, audienceId: randomUUID(), providerPersonId: randomUUID(), candidateId: randomUUID(),
       targetHash: "h", promptVersion: "v1", verdict: "pass",
+    });
+    await db.insert(schema.crmFacts).values({
+      factId: randomUUID(), seq: BigInt(Math.floor(Math.random() * 1e15)), orgId: org, brandId: brand,
+      personKey: `p-${randomUUID()}`, sourceContactId: contact, fullName: null, emails: [], phones: [],
+      type: "added_to_crm", occurredAt: null, dateBasis: "created_at", source: "gohighlevel",
+      sourceRef: `ref-${randomUUID()}`, payload: { origin: "itest" }, raw: { itest: true },
     });
     await db.execute(sql`
       INSERT INTO lead_delivery_evidence (org_id, brand_id, campaign_id, email, result, fetched_at)

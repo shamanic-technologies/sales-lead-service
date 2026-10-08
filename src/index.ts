@@ -23,6 +23,7 @@ import existingCustomersRoutes from "./routes/existing-customers.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import { registerProviders } from "./lib/register-providers.js";
 import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
+import { startCrmFactFeedWorker } from "./lib/crm-fact-feed.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
@@ -123,6 +124,9 @@ async function boot(): Promise<void> {
   // What each paired customer's CRM evidences, reflected onto their leads. Armed only once the
   // schema it writes is there.
   startCrmEvidenceWorker();
+  // Copies crm-service's people fact feed into bronze (crm-fact-feed.ts). Copy only: nothing reads
+  // meaning off it yet.
+  startCrmFactFeedWorker();
   // Keeps the Leads page's read models inside their freshness bound (see lead-read-model.ts).
   startReadModelWorker();
   // Keeps every lead change feed a consumer follows current (see lead-change-feed.ts).
