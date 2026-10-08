@@ -18,12 +18,17 @@
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
-import { fetchReplyVerdicts } from "./reply-verdicts-client.js";
+import { getBrandSite } from "./brand-client.js";
+import { loadOutreachFeedState } from "./outreach-fact-feed.js";
 import {
+  clickLabel,
   conversationTags,
+  hostOf,
   outcomeLabel,
   replyLabel,
   type ConversationTags,
+  type PlaceableJudgments,
+  type PlaceableVerdict,
   type TimelineAttributionBasis,
   type TimelineItem,
   type TimelineItemLabel,
@@ -89,6 +94,9 @@ export function outcomeRows(
   const out: TimelineFactRow[] = [];
   let unplaced = 0;
   for (const r of rows) {
+    // An "already a client" sale is read off the prospect's reply; the reply item states it (as a
+    // paid client, not ours), so the same fact is not written twice.
+    if (r.source === "reply") continue;
     const label = outcomeLabel(r.event);
     if (!label) {
       unplaced++;
@@ -173,55 +181,162 @@ async function readNevers(orgId: string, brandId: string): Promise<NeverSourceRo
   `) as unknown as NeverSourceRow[];
 }
 
-/** Every email of a person this brand worked, case-folded, and whose lead it is. */
-async function readServedEmails(orgId: string, brandId: string): Promise<Map<string, string>> {
+/** Every email of a person this org knows, case-folded, and whose lead it is. */
+async function readLeadEmails(emails: readonly string[]): Promise<Map<string, string>> {
+  if (emails.length === 0) return new Map();
   const rows = (await sql`
-    SELECT DISTINCT lower(cm.value) AS email, cm.lead_id::text AS lead_id
-    FROM leads_campaigns lc
-    JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
-    WHERE lc.org_id = ${orgId} AND ${brandId} = ANY(lc.brand_ids) AND lc.status = 'served'
+    SELECT lower(value) AS email, lead_id::text AS lead_id
+    FROM lead_contact_methods
+    WHERE channel = 'email' AND lower(value) IN (SELECT jsonb_array_elements_text(${JSON.stringify(emails)}::jsonb))
   `) as unknown as Array<{ email: string; lead_id: string }>;
   return new Map(rows.map((r) => [r.email, r.lead_id]));
 }
 
-async function replyRows(
+interface OutreachFactRow {
+  seq: string;
+  subject_key: string;
+  type: string;
+  occurred_at: Date | string | null;
+  lead_email: string;
+  campaign_id: string | null;
+  raw: Record<string, unknown>;
+}
+
+/** The CURRENT fact per subject for one brand (a correction supersedes; a withdrawal ends it). */
+async function readOutreachFacts(orgId: string, brandId: string): Promise<OutreachFactRow[]> {
+  return (await sql`
+    SELECT DISTINCT ON (subject_key) seq::text AS seq, subject_key, type, occurred_at, lead_email,
+      campaign_id, raw
+    FROM outreach_facts
+    WHERE org_id = ${orgId} AND brand_ids @> ARRAY[${brandId}]::text[]
+    ORDER BY subject_key, seq DESC
+  `) as unknown as OutreachFactRow[];
+}
+
+function obj(v: unknown): Record<string, unknown> | null {
+  return typeof v === "object" && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+/** The hosts of the brand's own site, read once per brand and only when a click names a URL. */
+type SiteHosts = (offerId: string | null) => Promise<string[]>;
+
+/**
+ * One current outreach fact, labelled. A withdrawn subject keeps its row, marked. A reply nobody
+ * judged yet writes nothing (it is re-read next sweep). A fact type this vocabulary does not hold
+ * writes nothing and is counted.
+ */
+export async function outreachRow(
+  orgId: string,
+  brandId: string,
+  fact: OutreachFactRow,
+  leadId: string,
+  offers: ReadonlyMap<string, string | null>,
+  siteHosts: SiteHosts,
+): Promise<TimelineFactRow | "unjudged" | "unplaced"> {
+  const offerId = offerOf(offers, fact.campaign_id);
+  const base = {
+    id: fact.subject_key,
+    org_id: orgId,
+    brand_id: brandId,
+    offer_id: offerId,
+    lead_id: leadId,
+    campaign_id: fact.campaign_id,
+    occurred_at: toIsoTimestamp(fact.occurred_at),
+    source: "outreach" as TimelineSource,
+    source_ref: fact.subject_key,
+    url: null as string | null,
+    withdrawn_at: null as string | null,
+  };
+  const ours = { attributable: true, attribution_basis: "reaction_to_our_email" as TimelineAttributionBasis };
+  switch (fact.type) {
+    case "email_sent": {
+      const send = obj(fact.raw.send);
+      if (!send || (send.position !== "first" && send.position !== "followup")) return "unplaced";
+      return { ...base, label: send.position === "first" ? "initial_email" : "followup", attributable: true,
+        attribution_basis: "our_email", detail: { step: send.step ?? null } };
+    }
+    case "email_opened":
+      return { ...base, ...ours, label: "opened", detail: { step: obj(fact.raw.open)?.step ?? null } };
+    case "link_clicked": {
+      const click = obj(fact.raw.click);
+      const url = typeof click?.url === "string" && click.url.length > 0 ? click.url : null;
+      const label = clickLabel(url, url === null ? [] : await siteHosts(offerId));
+      return { ...base, ...ours, label, url, detail: { step: click?.step ?? null } };
+    }
+    case "email_bounced":
+      return { ...base, label: "bounced", attributable: true, attribution_basis: "our_email",
+        detail: { step: obj(fact.raw.bounce)?.step ?? null } };
+    case "unsubscribed":
+      return { ...base, ...ours, label: "unsubscribed", detail: { via: obj(fact.raw.unsubscribe)?.via ?? null } };
+    case "reply": {
+      const reply = obj(fact.raw.reply);
+      const verdict = obj(reply?.verdict);
+      if (!reply) return "unplaced";
+      const label = replyLabel(verdict as unknown as PlaceableVerdict | null, obj(reply.judgments) as PlaceableJudgments | null);
+      if (!label) return "unjudged";
+      const alreadyClient = label === "paid_client";
+      return {
+        ...base,
+        source: "reply",
+        source_ref: typeof reply.replyId === "string" ? reply.replyId : fact.subject_key,
+        label,
+        attributable: alreadyClient ? false : true,
+        attribution_basis: alreadyClient ? "prospect_said" : "reaction_to_our_email",
+        detail: {
+          subject: reply.subject ?? null,
+          classification: verdict?.classification ?? null,
+          proposalType: obj(obj(reply.judgments)?.proposalType)?.value ?? null,
+          escalation: reply.escalation ?? null,
+        },
+      };
+    }
+    default:
+      return "unplaced";
+  }
+}
+
+async function outreachRows(
   orgId: string,
   brandId: string,
   offers: ReadonlyMap<string, string | null>,
-): Promise<{ rows: TimelineFactRow[]; unjudged: number }> {
-  const leadByEmail = await readServedEmails(orgId, brandId);
-  if (leadByEmail.size === 0) return { rows: [], unjudged: 0 };
-  const replies = await fetchReplyVerdicts([...leadByEmail.keys()], { orgId });
+): Promise<{ rows: TimelineFactRow[]; unjudged: number; unplaced: number; withdrawn: string[] }> {
+  const facts = await readOutreachFacts(orgId, brandId);
+  const leadByEmail = await readLeadEmails([...new Set(facts.map((f) => f.lead_email))]);
+  let site: Promise<string[]> | null = null;
+  const siteHosts: SiteHosts = (offerId) => {
+    site ??= getBrandSite(brandId, orgId, offerId).then((b) =>
+      [b.domain, b.clickDestinationUrl].map((v) => (v ? hostOf(v) : null)).filter((h): h is string => h !== null),
+    );
+    return site;
+  };
   const rows: TimelineFactRow[] = [];
+  const withdrawn: string[] = [];
   let unjudged = 0;
-  for (const r of replies) {
-    if (!r.brandIds.includes(brandId)) continue;
-    const leadId = leadByEmail.get(r.leadEmail.toLowerCase());
-    if (!leadId) continue;
-    const label = replyLabel(r.verdict);
-    if (!label) {
-      unjudged++;
+  let unplaced = 0;
+  for (const fact of facts) {
+    if (fact.type === "withdrawn") {
+      withdrawn.push(fact.subject_key);
       continue;
     }
-    rows.push({
-      id: `reply:${r.replyId}`,
-      org_id: orgId,
-      brand_id: brandId,
-      offer_id: offerOf(offers, r.campaignId),
-      lead_id: leadId,
-      campaign_id: r.campaignId,
-      occurred_at: r.receivedAt,
-      label,
-      source: "reply",
-      source_ref: r.replyId,
-      attributable: true,
-      attribution_basis: "reaction_to_our_email",
-      url: null,
-      detail: { subject: r.subject, classification: r.verdict?.classification ?? null, judgedBy: r.verdict?.producerType ?? null },
-      withdrawn_at: null,
-    });
+    const leadId = leadByEmail.get(fact.lead_email);
+    if (!leadId) continue;
+    const row = await outreachRow(orgId, brandId, fact, leadId, offers, siteHosts);
+    if (row === "unjudged") unjudged++;
+    else if (row === "unplaced") unplaced++;
+    else rows.push(row);
   }
-  return { rows, unjudged };
+  return { rows, unjudged, unplaced, withdrawn };
+}
+
+/** Mark the rows of subjects the feed withdrew; their content stays as last stated. */
+async function markWithdrawn(orgId: string, brandId: string, subjectKeys: readonly string[]): Promise<number> {
+  if (subjectKeys.length === 0) return 0;
+  const result = await sql`
+    UPDATE lead_timeline_facts SET withdrawn_at = now(), updated_at = now()
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND withdrawn_at IS NULL
+      AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(subjectKeys)}::jsonb))
+  `;
+  return result.count;
 }
 
 /** Write rows idempotently: a row whose content did not change is not touched. */
@@ -258,9 +373,10 @@ export async function upsertTimelineFacts(rows: readonly TimelineFactRow[]): Pro
 export interface TimelineSyncResult {
   outcomes: number;
   nevers: number;
-  replies: number;
+  outreach: number;
   unjudgedReplies: number;
   unplacedOutcomes: number;
+  unplacedOutreach: number;
   written: number;
 }
 
@@ -269,14 +385,21 @@ export async function syncTimelineFacts(orgId: string, brandId: string): Promise
   const offers = await fetchOrgCampaignOffers({ orgId });
   const outcomes = outcomeRows(orgId, brandId, await readOutcomes(orgId, brandId), offers);
   const nevers = neverRows(orgId, brandId, await readNevers(orgId, brandId), offers);
-  const replies = await replyRows(orgId, brandId, offers);
-  const written = await upsertTimelineFacts([...outcomes.rows, ...nevers, ...replies.rows]);
+  const { caughtUp } = await loadOutreachFeedState();
+  if (!caughtUp) {
+    throw new Error("the outreach fact copy has not reached the end of the feed yet; refusing to read it partial");
+  }
+  const outreach = await outreachRows(orgId, brandId, offers);
+  const written =
+    (await upsertTimelineFacts([...outcomes.rows, ...nevers, ...outreach.rows])) +
+    (await markWithdrawn(orgId, brandId, outreach.withdrawn));
   return {
     outcomes: outcomes.rows.length,
     nevers: nevers.length,
-    replies: replies.rows.length,
-    unjudgedReplies: replies.unjudged,
+    outreach: outreach.rows.length,
+    unjudgedReplies: outreach.unjudged,
     unplacedOutcomes: outcomes.unplaced,
+    unplacedOutreach: outreach.unplaced,
     written,
   };
 }
@@ -301,10 +424,10 @@ export async function sweepTimelineFacts(): Promise<void> {
     for (const { org_id, brand_id } of await listTimelineBrands()) {
       try {
         const r = await syncTimelineFacts(org_id, brand_id);
-        if (r.written > 0 || r.unplacedOutcomes > 0) {
+        if (r.written > 0 || r.unplacedOutcomes > 0 || r.unplacedOutreach > 0) {
           console.log(
             `[lead-service] timeline brand=${brand_id} outcomes=${r.outcomes} nevers=${r.nevers} ` +
-              `replies=${r.replies} unjudged=${r.unjudgedReplies} unplaced=${r.unplacedOutcomes} written=${r.written}`,
+              `outreach=${r.outreach} unjudged=${r.unjudgedReplies} unplaced=${r.unplacedOutcomes}/${r.unplacedOutreach} written=${r.written}`,
           );
         }
       } catch (error) {

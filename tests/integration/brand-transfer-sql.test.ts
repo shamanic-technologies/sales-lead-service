@@ -32,7 +32,7 @@ const BRAND_SCALAR_TABLES = [
   "lead_delivery_evidence",
   "lead_timeline_facts",
 ] as const;
-const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves"] as const;
+const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
 async function n(query: ReturnType<typeof sql>): Promise<number> {
   const rows = (await db.execute(query)) as unknown as Array<{ n: number }>;
@@ -134,6 +134,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO lead_delivery_evidence (org_id, brand_id, campaign_id, email, result, fetched_at)
       VALUES (${org}, ${brand}, '', ${`${randomUUID()}@example.test`}, NULL, now())`);
+    await db.execute(sql`
+      INSERT INTO outreach_facts (seq, subject_key, type, lead_email, org_id, brand_ids, raw)
+      VALUES (${Math.floor(Math.random() * 1e15)}, ${`ievt:${randomUUID()}`}, 'email_sent', 'a@example.test', ${org}, ARRAY[${brand}]::text[], '{}'::jsonb)`);
     await db.execute(sql`
       INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, label, source, source_ref)
       VALUES (${`reply:${randomUUID()}`}, ${org}, ${brand}, ${leadId}, 'not_interested', 'reply', ${randomUUID()})`);

@@ -100,6 +100,35 @@ export async function getCurrentGoal(
   return data.currentGoal;
 }
 
+/** Where a brand lives on the web: its own domain and the page our outreach clicks land on. */
+export interface BrandSite {
+  domain: string | null;
+  clickDestinationUrl: string | null;
+}
+
+/**
+ * The brand's own site, from the same runtime-context read as `getCurrentGoal` (named offer, for
+ * the same SEVERAL_OFFERS reason). Fails loud on any non-2xx.
+ */
+export async function getBrandSite(brandId: string, orgId: string, offerId: string | null): Promise<BrandSite> {
+  let url = `${BRAND_SERVICE_URL}/internal/brands/${brandId}/runtime-context`;
+  if (offerId) url += `?offerId=${encodeURIComponent(offerId)}`;
+  const response = await fetchWithRetry(url, {
+    headers: buildHeaders(orgId),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`[brand-client] runtime-context failed for brand ${brandId}: ${response.status} ${text}`);
+  }
+  const data = (await response.json()) as { brand?: { domain?: unknown; clickDestinationUrl?: unknown } };
+  const domain = data.brand?.domain;
+  const click = data.brand?.clickDestinationUrl;
+  if (domain !== null && typeof domain !== "string") throw new Error(`[brand-client] brand ${brandId}: unreadable domain`);
+  if (click !== null && typeof click !== "string") throw new Error(`[brand-client] brand ${brandId}: unreadable clickDestinationUrl`);
+  return { domain, clickDestinationUrl: click };
+}
+
 /** What a brand's offer says about itself, in its own words: the input to suggested qualification criteria. */
 export interface OfferText {
   offerId: string;
