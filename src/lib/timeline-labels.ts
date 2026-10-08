@@ -14,7 +14,28 @@
  * outreach provider is NOT copied here: a reply is placed from the provider's own per-verdict flags,
  * never from a kind name.
  */
-import type { ReplyVerdict } from "./reply-verdicts-client.js";
+/**
+ * One reply's verdict as the outreach provider serves it: its coarse classification, its four
+ * flags, and the finer distinctions it derives itself (instantly-service#1022), all optional so a
+ * verdict older than them still places on the flags.
+ */
+export interface PlaceableVerdict {
+  classification: "positive" | "negative" | "neutral" | null;
+  automatedAnswer: boolean;
+  stopRequested: boolean;
+  notOurTarget: boolean;
+  handedToPerson: boolean;
+  positiveSignal?: string | null;
+  declinedOffer?: boolean;
+  notOurTargetReason?: string | null;
+  handoffReason?: string | null;
+}
+
+/** The provider's per-reply Jev judgments (instantly-service#1022), each `{value, confidence}` or null. */
+export interface PlaceableJudgments {
+  question?: { value: string } | null;
+  proposalType?: { value: string } | null;
+}
 
 /** What one timeline item is. Closed: a new label is added here and nowhere else. */
 export const TIMELINE_ITEM_LABELS = [
@@ -31,9 +52,14 @@ export const TIMELINE_ITEM_LABELS = [
   // What the person answered.
   "interested",
   "not_interested",
+  "question_answerable",
+  "question_to_escalate",
   "question",
+  "referral",
+  "other_proposal",
   "hand_over",
   "wrong_contact",
+  "changed_job",
   "opt_out",
   "auto_reply",
   "reply",
@@ -47,13 +73,17 @@ export const TIMELINE_ITEM_LABELS = [
 export type TimelineItemLabel = (typeof TIMELINE_ITEM_LABELS)[number];
 
 /** Where a timeline fact came from. */
-export const TIMELINE_SOURCES = ["reply", "tracker", "manual", "crm", "reply_statement", "never"] as const;
+export const TIMELINE_SOURCES = ["outreach", "reply", "tracker", "manual", "crm", "reply_statement", "never"] as const;
 export type TimelineSource = (typeof TIMELINE_SOURCES)[number];
 
 /** Why an item is (or is not) ours. */
 export const TIMELINE_ATTRIBUTION_BASES = [
-  /** A reaction to an email we sent (a reply): ours by construction. */
+  /** An email we sent: ours by construction. */
+  "our_email",
+  /** A reaction to an email we sent (a reply, an open, a click): ours by construction. */
   "reaction_to_our_email",
+  /** The prospect said so in their reply (already a client: not ours). */
+  "prospect_said",
   /** A person said whose win it was. */
   "person",
   /** The owner's date rule (outcome-cause.ts) answered. */
@@ -67,29 +97,78 @@ export type TimelineAttributionBasis = (typeof TIMELINE_ATTRIBUTION_BASES)[numbe
 const WORD_LABELS: ReadonlySet<TimelineItemLabel> = new Set([
   "interested",
   "not_interested",
+  "question_answerable",
+  "question_to_escalate",
   "question",
+  "referral",
+  "other_proposal",
   "hand_over",
   "wrong_contact",
+  "changed_job",
   "opt_out",
   "reply",
 ]);
 
+const QUESTION_LABELS: ReadonlySet<TimelineItemLabel> = new Set([
+  "question_answerable",
+  "question_to_escalate",
+  "question",
+]);
+
+/** A question, split by the provider's judgment: answerable now, or to escalate to the user. */
+function questionLabel(judgments: PlaceableJudgments | null | undefined): TimelineItemLabel {
+  const v = judgments?.question?.value;
+  if (v === "answerable") return "question_answerable";
+  if (v === "needs_sender_company") return "question_to_escalate";
+  return "question";
+}
+
 /**
- * A reply, placed from the provider's per-verdict flags. Precedence: a machine answer is not a
- * person's word; a stop request outranks everything a person wrote beside it; then "not who we sell
- * to"; then a hand-over to a person (referral or another proposal, not split yet by the provider);
- * then the coarse classification. Null = not judged yet, so no item is written until it is.
+ * A reply, placed from the provider's per-verdict flags and distinctions (never a kind name).
+ * Precedence: a machine answer is not a person's word; a stop request outranks everything a person
+ * wrote beside it; then "not who we sell to" (an existing client is a PAID CLIENT, not ours: owner
+ * 2026-10-08); then a hand-over to a person; then a plain no; then interest and questions. A
+ * distinction the provider did not serve falls back to its flag (`hand_over`, `question`).
+ * Null = not judged yet, so no item is written until it is.
  */
-export function replyLabel(verdict: ReplyVerdict | null): TimelineItemLabel | null {
+export function replyLabel(
+  verdict: PlaceableVerdict | null,
+  judgments?: PlaceableJudgments | null,
+): TimelineItemLabel | null {
   if (!verdict) return null;
   if (verdict.automatedAnswer) return "auto_reply";
   if (verdict.stopRequested) return "opt_out";
-  if (verdict.notOurTarget) return "wrong_contact";
+  if (verdict.notOurTargetReason === "already_customer") return "paid_client";
+  if (verdict.notOurTargetReason === "left_role") return "changed_job";
+  if (verdict.notOurTarget || verdict.notOurTargetReason) return "wrong_contact";
+  if (verdict.handoffReason === "referral") return "referral";
+  if (verdict.handoffReason === "unrelated_proposal") return "other_proposal";
   if (verdict.handedToPerson) return "hand_over";
-  if (verdict.classification === "positive") return "interested";
-  if (verdict.classification === "negative") return "not_interested";
-  if (verdict.classification === "neutral") return "question";
+  if (verdict.declinedOffer || verdict.classification === "negative") return "not_interested";
+  if (verdict.positiveSignal === "information_request") return questionLabel(judgments);
+  if (verdict.positiveSignal || verdict.classification === "positive") return "interested";
+  if (verdict.classification === "neutral") return questionLabel(judgments);
   return "reply";
+}
+
+/** A click: on the brand's own site it is a website visit, anywhere else a link click. */
+export function clickLabel(url: string | null, siteHosts: readonly string[]): TimelineItemLabel {
+  // The provider's click webhook carries no URL; a click on our email is the measured visit, as
+  // the standing reads it (lead-standing.ts), until a URL says otherwise.
+  if (url === null) return "website_visit";
+  const host = hostOf(url);
+  if (host === null) return "link_click";
+  return siteHosts.some((h) => host === h || host.endsWith(`.${h}`)) ? "website_visit" : "link_click";
+}
+
+/** A URL's or domain's host, lowercased, `www.` stripped; null when unreadable. */
+export function hostOf(value: string): string | null {
+  try {
+    const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(value) ? value : `https://${value}`);
+    return u.hostname.toLowerCase().replace(/^www\./, "") || null;
+  } catch {
+    return null;
+  }
 }
 
 /** A step outcome (conversion_events.event), placed. Null = a word this vocabulary does not hold. */
@@ -118,9 +197,14 @@ export const CONVERSATION_LAST_WORDS = [
   "no_reply",
   "interested",
   "not_interested",
+  "question_answerable",
+  "question_to_escalate",
   "question",
+  "referral",
+  "other_proposal",
   "hand_over",
   "wrong_contact",
+  "changed_job",
   "opted_out",
   "reply",
 ] as const;
@@ -144,7 +228,11 @@ function stepOf(label: TimelineItemLabel): ConversationStep | null {
     case "website_visit":
       return "website_visited";
     case "interested":
+    case "question_answerable":
+    case "question_to_escalate":
     case "question":
+    case "referral":
+    case "other_proposal":
     case "hand_over":
       return "conversation_ongoing";
     case "form_filled":
@@ -211,7 +299,7 @@ export function conversationTags(items: readonly TimelineItem[]): ConversationTa
       if (optedOutAt === undefined) optedOutAt = item.occurredAt;
       continue;
     }
-    if (lastWord === "interested" && item.label === "question") continue;
+    if (lastWord === "interested" && QUESTION_LABELS.has(item.label)) continue;
     lastWord = item.label as ConversationLastWord;
     lastWordAt = item.occurredAt;
   }

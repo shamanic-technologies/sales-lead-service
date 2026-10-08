@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  clickLabel,
   conversationTags,
+  hostOf,
   outcomeLabel,
   replyLabel,
   type TimelineItem,
@@ -57,6 +59,45 @@ describe("a reply is placed from the provider's flags, never a kind name", () =>
   });
   it("writes nothing for a reply nobody judged yet", () => {
     expect(replyLabel(null)).toBeNull();
+  });
+});
+
+describe("a reply is placed from the provider's finer distinctions (owner vocabulary 2026-10-08)", () => {
+  it("splits not-our-target: an existing client is a paid client, a role change is changed_job", () => {
+    expect(replyLabel(verdict({ notOurTarget: true, notOurTargetReason: "already_customer" }))).toBe("paid_client");
+    expect(replyLabel(verdict({ notOurTarget: true, notOurTargetReason: "left_role" }))).toBe("changed_job");
+    expect(replyLabel(verdict({ notOurTarget: true, notOurTargetReason: "wrong_contact" }))).toBe("wrong_contact");
+  });
+  it("splits a hand-over into referral and other proposal", () => {
+    expect(replyLabel(verdict({ handedToPerson: true, handoffReason: "referral" }))).toBe("referral");
+    expect(replyLabel(verdict({ handedToPerson: true, handoffReason: "unrelated_proposal" }))).toBe("other_proposal");
+    expect(replyLabel(verdict({ handedToPerson: true }))).toBe("hand_over");
+  });
+  it("reads a plain no off declinedOffer", () => {
+    expect(replyLabel(verdict({ classification: "neutral", declinedOffer: true }))).toBe("not_interested");
+  });
+  it("splits a question by the Jev judgment: answer now, or escalate to the user", () => {
+    expect(replyLabel(verdict({ classification: "positive", positiveSignal: "information_request" }), { question: { value: "answerable" } })).toBe("question_answerable");
+    expect(replyLabel(verdict({ classification: "neutral" }), { question: { value: "needs_sender_company" } })).toBe("question_to_escalate");
+    expect(replyLabel(verdict({ classification: "neutral" }), { question: { value: "none" } })).toBe("question");
+    expect(replyLabel(verdict({ classification: "positive", positiveSignal: "meeting_request" }))).toBe("interested");
+  });
+});
+
+describe("a click is placed by where it went", () => {
+  it("on the brand's site (or a subdomain) is a website visit, anywhere else a link click", () => {
+    const hosts = ["acme.com", "book.acme.io"];
+    expect(clickLabel("https://www.acme.com/pricing?utm=x", hosts)).toBe("website_visit");
+    expect(clickLabel("https://app.acme.com/", hosts)).toBe("website_visit");
+    expect(clickLabel("https://calendly.com/acme/30min", hosts)).toBe("link_click");
+    expect(clickLabel("not a url at all", hosts)).toBe("link_click");
+  });
+  it("with no URL recorded is the measured visit, as the standing reads it", () => {
+    expect(clickLabel(null, [])).toBe("website_visit");
+  });
+  it("normalizes hosts", () => {
+    expect(hostOf("WWW.Acme.com")).toBe("acme.com");
+    expect(hostOf("https://www.acme.com/x")).toBe("acme.com");
   });
 });
 

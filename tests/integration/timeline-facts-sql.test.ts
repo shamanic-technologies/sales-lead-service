@@ -6,19 +6,18 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
-import type { ReplyVerdictView } from "../../src/lib/reply-verdicts-client.js";
 
-const replies: ReplyVerdictView[] = [];
-vi.mock("../../src/lib/reply-verdicts-client.js", () => ({
-  fetchReplyVerdicts: vi.fn(async () => replies),
-}));
 const offers = new Map<string, string | null>();
 vi.mock("../../src/lib/campaign-leg-client.js", () => ({
   fetchOrgCampaignOffers: vi.fn(async () => offers),
 }));
+vi.mock("../../src/lib/brand-client.js", () => ({
+  getBrandSite: vi.fn(async () => ({ domain: "wellconnected.example", clickDestinationUrl: "https://book.wellconnected.example/x" })),
+}));
 
 const { db } = await import("../../src/db/index.js");
 const { syncTimelineFacts, readTimeline } = await import("../../src/lib/timeline-facts.js");
+const { ingestOutreachFactsPage } = await import("../../src/lib/outreach-fact-feed.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -34,25 +33,31 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
   let leadId = "";
   let rowId = "";
 
-  function reply(id: string, over: Partial<NonNullable<ReplyVerdictView["verdict"]>>, at: string, campaignId = campaign): ReplyVerdictView {
+  let seq = Math.floor(Math.random() * 1e12) * 100;
+  function fact(type: string, subjectKey: string, at: string, body: Record<string, unknown>, over: Record<string, unknown> = {}) {
+    seq += 1;
     return {
-      replyId: id,
-      leadEmail: email.toUpperCase(),
-      instantlyCampaignId: "ic",
-      campaignId,
-      brandIds: [brand],
-      transport: "instantly",
-      fromEmail: email,
-      subject: "Re: hello",
-      receivedAt: at,
-      verdict: {
-        kind: "k", classification: null, producerType: "model", producer: "p", attribution: "a",
-        confidence: null, decidedAt: null, automatedAnswer: false, stopRequested: false,
-        notOurTarget: false, handedToPerson: false, ...over,
-      },
-      verdictCount: 1,
+      seq: String(seq), type, subjectKey, supersedesSeq: null, occurredAt: at, recordedAt: at,
+      leadEmail: email.toUpperCase(), orgId: org, campaignId: campaign, instantlyCampaignId: "ic",
+      brandIds: [brand], transport: "instantly",
+      send: null, open: null, click: null, bounce: null, unsubscribe: null, reply: null, withdrawal: null,
+      ...body, ...over,
     };
   }
+  function replyFact(replyId: string, verdict: Record<string, unknown>, at: string, over: Record<string, unknown> = {}, judgments: Record<string, unknown> = {}) {
+    return fact("reply", `reply:${replyId}`, at, {
+      reply: {
+        replyId, subject: "Re: hello", receivedAt: at,
+        verdict: { kind: "k", classification: null, automatedAnswer: false, stopRequested: false, notOurTarget: false,
+          handedToPerson: false, positiveSignal: null, declinedOffer: false, notOurTargetReason: null, handoffReason: null, ...verdict },
+        judgments: { question: null, proposalType: null, ...judgments }, escalation: null,
+      },
+    }, over);
+  }
+  async function feed(...facts: unknown[]) {
+    await ingestOutreachFactsPage({ facts, nextCursor: String(seq), hasMore: false });
+  }
+  const replyId = `r-${randomUUID()}`;
 
   beforeEach(async () => {
     if (leadId) return;
@@ -69,19 +74,27 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
   });
 
   afterAll(async () => {
-    for (const t of ["lead_timeline_facts", "conversion_events", "lead_step_disqualifications", "leads_campaigns"]) {
+    for (const t of ["lead_timeline_facts", "conversion_events", "lead_step_disqualifications", "leads_campaigns", "outreach_facts"]) {
       await db.execute(sql`DELETE FROM ${sql.identifier(t)} WHERE org_id = ${org}`);
     }
     if (leadId) await db.execute(sql`DELETE FROM leads WHERE id = ${leadId}::uuid`);
   });
 
   it("stores Christina's no as not_interested and tags the conversation by its last word", async () => {
-    replies.push(reply(`r-${randomUUID()}`, { classification: "negative" }, "2026-10-07T22:13:00.000Z"));
+    await feed(
+      fact("email_sent", `ievt:s1-${replyId}`, "2026-09-30T10:00:00.000Z", { send: { step: 1, position: "first", positionBasis: "step", accountEmail: "bria@x" } }),
+      fact("email_sent", `ievt:s2-${replyId}`, "2026-10-03T10:00:00.000Z", { send: { step: 2, position: "followup", positionBasis: "step", accountEmail: "bria@x" } }),
+      fact("email_sent", `ievt:s3-${replyId}`, "2026-10-07T10:00:00.000Z", { send: { step: 3, position: "followup", positionBasis: "step", accountEmail: "bria@x" } }),
+      replyFact(replyId, { classification: "negative", declinedOffer: true }, "2026-10-07T22:13:00.000Z"),
+    );
     const first = await syncTimelineFacts(org, brand);
-    expect(first).toMatchObject({ replies: 1, written: 1 });
+    expect(first).toMatchObject({ outreach: 4, written: 4 });
 
     const t = await readTimeline({ orgId: org, brandId: brand, leadId, offerId: offer });
     expect(t.items.map((i) => [i.label, i.source, i.attributable, i.offerId])).toEqual([
+      ["initial_email", "outreach", true, offer],
+      ["followup", "outreach", true, offer],
+      ["followup", "outreach", true, offer],
       ["not_interested", "reply", true, offer],
     ]);
     expect(t.tags).toEqual({
@@ -95,14 +108,36 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
   });
 
   it("relabels the same row when the verdict changes, never a second row", async () => {
-    replies[0] = { ...replies[0], verdict: { ...replies[0].verdict!, classification: "positive" } };
+    const prev = seq;
+    await feed(replyFact(replyId, { classification: "positive", positiveSignal: "interest" }, "2026-10-07T22:13:00.000Z", { supersedesSeq: String(prev) }));
     expect((await syncTimelineFacts(org, brand)).written).toBe(1);
     const t = await readTimeline({ orgId: org, brandId: brand, leadId, offerId: offer });
-    expect(t.items.map((i) => i.label)).toEqual(["interested"]);
+    expect(t.items.filter((i) => i.source === "reply").map((i) => i.label)).toEqual(["interested"]);
     expect(t.tags.lastWord).toBe("interested");
   });
 
-  it("stores an already-a-client sale as paid_client not ours, at the brand, on every offer page", async () => {
+  it("labels clicks by where they went, and a withdrawn fact keeps its row, marked", async () => {
+    await feed(
+      fact("link_clicked", `ievt:c1-${replyId}`, "2026-10-01T10:00:00.000Z", { click: { step: 1, url: "https://www.wellconnected.example/about" } }),
+      fact("link_clicked", `ievt:c2-${replyId}`, "2026-10-01T10:01:00.000Z", { click: { step: 1, url: "https://calendly.com/x" } }),
+      fact("email_opened", `ievt:o1-${replyId}`, "2026-10-01T09:00:00.000Z", { open: { step: 1 } }),
+    );
+    await syncTimelineFacts(org, brand);
+    let t = await readTimeline({ orgId: org, brandId: brand, leadId, offerId: offer });
+    expect(t.items.filter((i) => i.url).map((i) => [i.label, i.url])).toEqual([
+      ["website_visit", "https://www.wellconnected.example/about"],
+      ["link_click", "https://calendly.com/x"],
+    ]);
+    await feed(fact("withdrawn", `ievt:o1-${replyId}`, "2026-10-02T00:00:00.000Z", {
+      withdrawal: { withdrawnSeq: "1", withdrawnType: "email_opened", reason: "source_removed" } }));
+    expect((await syncTimelineFacts(org, brand)).written).toBe(1);
+    t = await readTimeline({ orgId: org, brandId: brand, leadId, offerId: offer });
+    expect(t.items.find((i) => i.label === "opened")?.withdrawnAt).not.toBeNull();
+  });
+
+  it("stores an already-a-client reply as paid_client not ours, and the sale it wrote only once", async () => {
+    await feed(replyFact(`r-${randomUUID()}`, { notOurTarget: true, notOurTargetReason: "already_customer", classification: "negative" },
+      "2026-10-08T09:00:00.000Z", { campaignId: null }));
     await db.execute(sql`
       INSERT INTO conversion_events (brand_id, org_id, event, matched_lead_id, match_confidence, attribution_status,
         source, received_at, caused_by_outreach, stated_caused_by_outreach)
@@ -110,14 +145,15 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
     await syncTimelineFacts(org, brand);
     for (const offerId of [offer, otherOffer, null]) {
       const t = await readTimeline({ orgId: org, brandId: brand, leadId, offerId });
-      const sale = t.items.find((i) => i.label === "paid_client");
-      expect(sale).toMatchObject({ source: "reply_statement", attributable: false, attributionBasis: "person", offerId: null });
+      const sales = t.items.filter((i) => i.label === "paid_client");
+      expect(sales).toHaveLength(1);
+      expect(sales[0]).toMatchObject({ source: "reply", attributable: false, attributionBasis: "prospect_said", offerId: null });
       expect(t.tags).toMatchObject({ furthestStep: "paid_client", furthestStepAttributable: false });
     }
   });
 
   it("keeps a reply on another offer off this offer's page", async () => {
-    replies.push(reply(`r-${randomUUID()}`, { classification: "negative" }, "2026-10-08T10:00:00.000Z", otherCampaign));
+    await feed(replyFact(`r-${randomUUID()}`, { classification: "negative" }, "2026-10-08T10:00:00.000Z", { campaignId: otherCampaign }));
     await syncTimelineFacts(org, brand);
     const here = await readTimeline({ orgId: org, brandId: brand, leadId, offerId: offer });
     expect(here.tags.lastWord).toBe("interested");
