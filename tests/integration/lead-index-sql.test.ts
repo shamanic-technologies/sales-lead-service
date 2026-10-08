@@ -165,6 +165,29 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
     expect(rows[0].email?.value).toBe("john.doe@globex.test");
   });
 
+  it("hydrating by id still drops a row that is no longer its person's winner", async () => {
+    // A second, LESS advanced membership of the same person (buffered under another campaign):
+    // the brand-scope dedup keeps the served row, so asking for the buffered one by id is nothing.
+    const [loser] = await db
+      .insert(leadsCampaigns)
+      .values({
+        leadId: seeded[1].leadId,
+        campaignId: `${campaignId}-other`,
+        orgId,
+        brandIds: [brandId],
+        status: "buffered",
+      })
+      .returning({ id: leadsCampaigns.id });
+    try {
+      const both = [seeded[1].rowId, loser.id];
+      const rows = await fetchBasicLeadChunk({ ...scope, rowIds: both }, null, both.length);
+      expect(rows.map((r) => r.id)).toEqual([seeded[1].rowId]);
+      expect(await fetchBasicLeadChunk({ ...scope, rowIds: [loser.id] }, null, 1)).toEqual([]);
+    } finally {
+      await db.delete(leadsCampaigns).where(eq(leadsCampaigns.id, loser.id));
+    }
+  });
+
   it("answers no outcomes for leads that have none, without failing on the uuid array", async () => {
     const outcomes = await fetchOutcomesByLead(
       orgId,
