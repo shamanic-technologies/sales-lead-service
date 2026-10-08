@@ -34,7 +34,8 @@ export interface OutreachFact {
   type: string;
   occurredAt: string | null;
   leadEmail: string;
-  orgId: string;
+  /** null = no org owns it (an early send whose campaign was never linked): copied, never read. */
+  orgId: string | null;
   campaignId: string | null;
   brandIds: string[];
 }
@@ -82,7 +83,7 @@ export function parseOutreachFact(raw: unknown): OutreachFact {
     type: str(r, "type", where),
     occurredAt,
     leadEmail: str(r, "leadEmail", where).toLowerCase(),
-    orgId: str(r, "orgId", where),
+    orgId: nullableStr(r, "orgId", where),
     campaignId: nullableStr(r, "campaignId", where),
     brandIds: brandIds as string[],
   };

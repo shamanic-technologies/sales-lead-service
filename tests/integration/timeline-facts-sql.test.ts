@@ -86,6 +86,10 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
       fact("email_sent", `ievt:s2-${replyId}`, "2026-10-03T10:00:00.000Z", { send: { step: 2, position: "followup", positionBasis: "step", accountEmail: "bria@x" } }),
       fact("email_sent", `ievt:s3-${replyId}`, "2026-10-07T10:00:00.000Z", { send: { step: 3, position: "followup", positionBasis: "step", accountEmail: "bria@x" } }),
       replyFact(replyId, { classification: "negative", declinedOffer: true }, "2026-10-07T22:13:00.000Z"),
+      // A fact no org owns (an early send whose campaign was never linked) is copied, never read.
+      fact("email_sent", `ievt:orgless-${replyId}`, "2026-02-10T10:00:00.000Z",
+        { send: { step: 1, position: "first", positionBasis: "step", accountEmail: "x@x" } },
+        { orgId: null, brandIds: [], campaignId: null }),
     );
     const first = await syncTimelineFacts(org, brand);
     expect(first).toMatchObject({ outreach: 4, written: 4 });

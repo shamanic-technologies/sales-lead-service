@@ -11,6 +11,10 @@ describe("an outreach fact off the wire", () => {
     expect(parseOutreachFact(FACT)).toEqual({ ...FACT, leadEmail: "christina@wellconnectedchiro.com" });
   });
 
+  it("copies a fact no org owns (orgId null, no brand)", () => {
+    expect(parseOutreachFact({ ...FACT, orgId: null, brandIds: [], campaignId: null }).orgId).toBeNull();
+  });
+
   it("keeps a fact type it does not know: naming facts is the producer's", () => {
     expect(parseOutreachFact({ ...FACT, type: "something_new" }).type).toBe("something_new");
   });
@@ -20,6 +24,7 @@ describe("an outreach fact off the wire", () => {
     ["a non-digit seq", { seq: "x1" }],
     ["no subject", { subjectKey: "" }],
     ["campaignId missing (not null)", { campaignId: undefined }],
+    ["orgId missing (not null)", { orgId: undefined }],
     ["an unreadable date", { occurredAt: "yesterday" }],
     ["brandIds not a list", { brandIds: "b-1" }],
   ])("fails the page loud on %s", (_label, over) => {
