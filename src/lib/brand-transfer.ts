@@ -232,6 +232,20 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       ),
     });
 
+    // --- the labelled timeline (silver): one row per source fact, its id unique fleet-wide ------
+    moved.push({
+      tableName: "lead_timeline_facts",
+      count: await count(
+        tx,
+        sql`WITH m AS (
+              UPDATE lead_timeline_facts
+              SET org_id = ${toOrg}, brand_id = ${finalBrand}, updated_at = now()
+              WHERE ${brandScalarPending}
+              RETURNING 1)
+            SELECT count(*)::int AS n FROM m`,
+      ),
+    });
+
     // --- derived state: dropped, rebuilt by the next read under the new org ------------------
     // A model/feed is a projection of the rows above keyed on (org, scope). One scoped to this
     // brand — or to the whole org, which included it — describes rows that no longer live there.

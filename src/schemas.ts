@@ -9,6 +9,13 @@ import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
 import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
 import {
+  CONVERSATION_LAST_WORDS,
+  CONVERSATION_STEPS,
+  TIMELINE_ATTRIBUTION_BASES,
+  TIMELINE_ITEM_LABELS,
+  TIMELINE_SOURCES,
+} from "./lib/timeline-labels.js";
+import {
   LEAD_STANDING_SIGNALS,
   LEAD_STANDING_STATES,
   LEAD_STANDING_TAGS,
@@ -5427,6 +5434,112 @@ registry.registerPath({
     400: { description: "id is not a uuid, or scope is not one of campaign | brand" },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org (or for the requested brand scope)" },
+    500: { description: "Internal server error" },
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A CONVERSATION'S LABELLED TIMELINE — GET /orgs/leads/{id}/timeline
+//
+// The STORED timeline (silver lead_timeline_facts): every fact about a person at a brand, labelled
+// in one vocabulary whatever channel it came by, with whether it is ours, and the conversation's
+// tags derived from it (owner 2026-10-08).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TimelineItemSchema = z
+  .object({
+    id: z.string().openapi({ description: "Stable: `<source>:<source ref>`. Re-reading a source rewrites the same item." }),
+    label: z.enum(TIMELINE_ITEM_LABELS as unknown as [string, ...string[]]).openapi({
+      description:
+        "What this fact IS, independent of the campaign and the channel it came by. Sends " +
+        "(initial_email, followup, bounced), reactions (opened, website_visit, link_click, " +
+        "unsubscribed, tagged_as_spam), answers (interested, not_interested, question, hand_over = " +
+        "a referral or another proposal, wrong_contact, opt_out, auto_reply = a machine answered, " +
+        "reply = judged but placed nowhere else) and progress (signup, form_filled, meeting_booked, " +
+        "meeting_attended, paid_client). A person stating a step will never happen is not_interested.",
+      example: "not_interested",
+    }),
+    source: z.enum(TIMELINE_SOURCES as unknown as [string, ...string[]]).openapi({
+      description:
+        "reply: a reply and the verdict the outreach provider holds for it. tracker: the brand's " +
+        "website tag. manual: a person stated it. crm: the customer's own CRM. reply_statement: " +
+        "read off the prospect's reply (\"already a client\"). never: a person stated a step will never happen.",
+    }),
+    occurredAt: z.string().nullable().openapi({ description: "ISO 8601, or null when the source gave no date (sorts last)." }),
+    attributable: z.boolean().nullable().openapi({
+      description: "Whether this fact is OURS (caused by our outreach). null = nobody can say yet; never defaulted.",
+    }),
+    attributionBasis: z.enum(TIMELINE_ATTRIBUTION_BASES as unknown as [string, ...string[]]).nullable().openapi({
+      description:
+        "Why: reaction_to_our_email (a reply to our email), person (somebody said whose win it was), " +
+        "rule (the date rule: after our first delivered email = ours), stated_on_our_lead.",
+    }),
+    campaignId: z.string().nullable().openapi({ description: "The campaign it happened on, as attribution only. null when the fact names none." }),
+    offerId: z.string().nullable().openapi({
+      description: "The offer it is about. null = a fact about the person at the brand, shown on every offer page.",
+    }),
+    url: z.string().nullable().openapi({ description: "On a click: the URL clicked, when the provider recorded one." }),
+    withdrawnAt: z.string().nullable().openapi({
+      description: "Its source took it back (a statement withdrawn or contradicted). Kept, marked, and ignored by the tags.",
+    }),
+    detail: z.record(z.string(), z.unknown()).openapi({ description: "Source-specific detail, verbatim (the step, the reply subject, the value)." }),
+  })
+  .openapi("TimelineItem");
+
+const ConversationTagsSchema = z
+  .object({
+    lastWord: z.enum(CONVERSATION_LAST_WORDS as unknown as [string, ...string[]]).openapi({
+      description:
+        "The latest thing a PERSON said here: no_reply, interested, not_interested, question, " +
+        "hand_over, wrong_contact, opted_out (sticky: nothing said after undoes it), reply. A machine's " +
+        "answer is not a word; a question after an interest keeps the interest.",
+      example: "not_interested",
+    }),
+    lastWordAt: z.string().nullable(),
+    furthestStep: z.enum(CONVERSATION_STEPS as unknown as [string, ...string[]]).nullable().openapi({
+      description:
+        "How far the conversation went, on the owner's ladder: contacted < website_visited < " +
+        "conversation_ongoing < form_filled < meeting_booked < meeting_attended < paid_client. null = no fact at all.",
+      example: "contacted",
+    }),
+    furthestStepAttributable: z.boolean().nullable().openapi({
+      description: "Whether the fact that put the conversation on furthestStep is ours (an existing client reads paid_client, false).",
+    }),
+  })
+  .openapi("ConversationTags");
+
+const LeadTimelineResponseSchema = z
+  .object({
+    leadId: z.string(),
+    brandId: z.string(),
+    offerId: z.string().nullable(),
+    items: z.array(TimelineItemSchema),
+    tags: ConversationTagsSchema,
+  })
+  .openapi("LeadTimelineResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/timeline",
+  summary: "One conversation's stored timeline, every item labelled, and the conversation's tags",
+  description:
+    "A conversation is the person at a brand and, when `offerId` is named, one offer: that offer's " +
+    "facts plus the brand-level ones (offerId null), which belong to every offer page. Read from the " +
+    "stored timeline, kept current by a background sync (at most ~15 minutes behind its sources). " +
+    "This service owns the vocabulary: relay the labels and tags, never re-derive them.",
+  request: { params: LeadRowIdPathParam },
+  parameters: [
+    ...FollowupOrgHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const },
+      description: "The brand. A brand this row is not part of answers 404." },
+    { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const },
+      description: "Narrow to one offer (plus brand-level facts). Absent = every fact at the brand." },
+  ],
+  responses: {
+    200: { description: "The conversation", content: { "application/json": { schema: LeadTimelineResponseSchema } } },
+    400: { description: "id is not a uuid, or brandId is missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such lead row for this org, or not part of that brand" },
     500: { description: "Internal server error" },
   },
 });

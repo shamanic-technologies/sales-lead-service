@@ -12,6 +12,7 @@ describe("which HTTP thread answers a request", () => {
     "/orgs/leads/0c718f70-108b-46b7-9ec8-1e58c4dbabf5?brandId=b",
     "/orgs/leads/0c718f70-108b-46b7-9ec8-1e58c4dbabf5/history?brandId=b&scope=campaign",
     "/orgs/leads/0c718f70-108b-46b7-9ec8-1e58c4dbabf5/step-statements",
+    "/orgs/leads/0c718f70-108b-46b7-9ec8-1e58c4dbabf5/timeline?brandId=b&offerId=o",
   ])("a dashboard read goes to the interactive thread: %s", (url) => {
     expect(isInteractiveRead("GET", url)).toBe(true);
   });
