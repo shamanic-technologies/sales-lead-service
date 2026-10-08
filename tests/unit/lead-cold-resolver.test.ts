@@ -179,3 +179,27 @@ describe("standing.wentCold — resolved in the same pass as the standing", () =
     expect(loadCrmColdEligibility).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("standing.at on a measured visit — the click the resolver folds in", () => {
+  it("dates a click-only lead by its first click and tags it website_visit", async () => {
+    replies = [];
+    const facts = (
+      await resolver().resolve([
+        row({
+          delivery: {
+            ...row().delivery,
+            replied: false,
+            replyClassification: null,
+            firstRepliedAt: null,
+            clicked: true,
+            firstClickedAt: "2026-10-06T15:46:51.451Z",
+          },
+        }),
+      ])
+    ).get("row-1")!;
+    expect(facts.standing.state).toBe("sales_interest");
+    expect(facts.standing.tag).toBe("website_visit");
+    expect(facts.standing.signal).toBe("measured_visit");
+    expect(facts.standing.at).toBe("2026-10-06T15:46:51.451Z");
+  });
+});

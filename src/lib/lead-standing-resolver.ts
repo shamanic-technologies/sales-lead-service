@@ -323,7 +323,7 @@ export function createLeadStandingResolver(
             causedByOutreach: null,
             note: null,
             statedByUserId: null,
-            at: null,
+            at: row.delivery.firstClickedAt ?? null,
           });
         }
 
