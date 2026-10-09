@@ -45,6 +45,7 @@ const LEAD_STEP_OUTCOMES: readonly LeadStepOutcomeName[] = [
 
 /** A node of the leg graph, in the fleet's leg vocabulary. */
 export type GraphStep =
+  | "lead_found"
   | "conversation"
   | "website_visit"
   | "meeting_booked"
@@ -61,8 +62,20 @@ export interface Leg {
   to: GraphStep;
 }
 
-/** Every leg the fleet knows, keyed exactly as campaign-service stores `legKey`. */
+/**
+ * Every leg the fleet knows, keyed exactly as campaign-service stores `legKey`.
+ *
+ * `lead_found` is a normal step (owner 2026-10-09): a sourcing campaign works `start_to_lead_found`
+ * and an OUTBOUND campaign takes the lead from there, on `lead_found_to_conversation` /
+ * `lead_found_to_website_visit`. Until wave 2 migrates them, outbound campaign rows still carry the
+ * legacy `start_to_*` spelling, which is also the real key of a non-outbound channel (an ad putting
+ * people on the site), so both spellings are legs here and both enter where the lead first moves
+ * (see `entryOfLeg`). The two spellings of an outbound leg are one identity (`leg-identity.ts`).
+ */
 export const LEGS: readonly Leg[] = [
+  { legKey: "start_to_lead_found", from: null, to: "lead_found" },
+  { legKey: "lead_found_to_conversation", from: "lead_found", to: "conversation" },
+  { legKey: "lead_found_to_website_visit", from: "lead_found", to: "website_visit" },
   { legKey: "start_to_conversation", from: null, to: "conversation" },
   { legKey: "start_to_website_visit", from: null, to: "website_visit" },
   { legKey: "start_to_meeting_booked", from: null, to: "meeting_booked" },
@@ -204,8 +217,11 @@ export const TERMINAL_STEP: LeadStepOutcomeName = "sale";
  * Where a campaign's leads step ONTO the graph, and whether this service can observe it.
  *
  * It is the step the campaign's own LEG works from: the `to` of an entry leg (the campaign puts
- * leads there), the `from` of an internal leg (the campaign picks leads up there). What it means
- * for the lead's standing:
+ * leads there), the `from` of an internal leg (the campaign picks leads up there). A leg FROM
+ * `lead_found` is an entry leg: being found is what a source did, not something the lead did, so
+ * an outbound campaign's leads enter at the step it moves them to, exactly as under the legacy
+ * `start_to_*` spelling. Only the sourcing leg itself enters AT `lead_found`. What it means for the
+ * lead's standing:
  *
  *   - `conversation` is reached by REPLYING with interest, which the delivery layer classifies.
  *   - `website_visit` is reached by LANDING on the site, which the delivery layer measures as a
@@ -225,6 +241,7 @@ export interface LegEntry {
 }
 
 const ENTRY_STEP_NAME: Readonly<Record<GraphStep, string>> = {
+  lead_found: "lead_found",
   conversation: "conversation_reply",
   website_visit: "website_visit",
   meeting_booked: "meeting_booked",
@@ -237,7 +254,7 @@ const ENTRY_STEP_NAME: Readonly<Record<GraphStep, string>> = {
 
 /** How a campaign working `leg` enters the graph. */
 export function entryOfLeg(leg: Leg): LegEntry {
-  const node = leg.from ?? leg.to;
+  const node = leg.from === null || leg.from === "lead_found" ? leg.to : leg.from;
   const reachable = reachableFrom(node, null);
   return {
     legKey: leg.legKey,
