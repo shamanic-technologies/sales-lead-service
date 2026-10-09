@@ -920,3 +920,23 @@ export const crmFeedCursors = pgTable("crm_feed_cursors", {
   caughtUpAt: timestamp("caught_up_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * `lead_requested` trigger events campaign-service has not recorded yet (src/lib/lead-requested-events.ts).
+ * A row = one serve whose event delivery failed; redelivered by the background thread, deleted once
+ * recorded. `refused_at` = campaign-service refused it (400) or it cannot be sent: kept, never retried.
+ */
+export const triggerEventOutbox = pgTable(
+  "trigger_event_outbox",
+  {
+    idempotencyKey: text("idempotency_key").primaryKey(),
+    orgId: text("org_id").notNull(),
+    event: jsonb("event").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    refusedAt: timestamp("refused_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_trigger_event_outbox_due").on(table.nextAttemptAt)],
+);
