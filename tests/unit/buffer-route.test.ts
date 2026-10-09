@@ -59,6 +59,11 @@ vi.mock("../../src/lib/source-campaign.js", () => ({
   resolveServeSource: (...a: unknown[]) => resolveServeSource(...a),
 }));
 
+const recordLeadRequested = vi.fn();
+vi.mock("../../src/lib/lead-requested-events.js", () => ({
+  recordLeadRequested: (...a: unknown[]) => recordLeadRequested(...a),
+}));
+
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
   PULL_NEXT_TIMEOUT_MS: 60_000,
@@ -352,5 +357,74 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     release({ found: false, reason: "audience_exhausted" });
     expect((await first).status).toBe(200);
     resolveSourcingOriginSlug.mockReset();
+  });
+  // ── lead_requested trigger events (src/lib/lead-requested-events.ts) ───────────────────────
+  it("records ONE lead_requested event `ran` under the SOURCE campaign, naming the lead and the outreach campaign that asked", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(recordLeadRequested).toHaveBeenCalledTimes(1);
+    expect(recordLeadRequested).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orgId: ORG,
+        brandId: BRAND,
+        offerId: "offer-1",
+        requestedByCampaignId: CAMPAIGN,
+        callerRunId: RUN,
+        leadId: "lead-1",
+        performed: { outcome: "ran", campaignId: SOURCE_CAMPAIGN },
+      }),
+    );
+  });
+
+  it("records an empty serve as `skipped` with the serve's own reason (offer read at delivery)", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    await post(app);
+
+    expect(recordLeadRequested).toHaveBeenCalledTimes(1);
+    expect(recordLeadRequested).toHaveBeenCalledWith(
+      expect.objectContaining({ offerId: null, leadId: null, performed: { outcome: "skipped", reason: "audience_exhausted" } }),
+    );
+  });
+
+  it("records a refused source as `skipped` with its reason and detail", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: SOURCE_CAMPAIGN, detail: "spent 500c of 500c" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    await post(app, AUDIENCE);
+
+    expect(recordLeadRequested).toHaveBeenCalledWith(
+      expect.objectContaining({ performed: { outcome: "skipped", reason: "source_budget_reached", detail: "spent 500c of 500c" } }),
+    );
+  });
+
+  it("a retried serve answered from the idempotency cache records nothing (one ask, one event)", async () => {
+    findFirst.mockResolvedValueOnce({ response: { found: true, lead: { leadId: "cached-1" } } });
+
+    await post(app);
+
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a serve that fails (500) records nothing: the caller's retry under the same run is the ask", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockRejectedValueOnce(new Error("boom"));
+
+    const res = await post(app);
+
+    expect(res.status).toBe(500);
+    expect(recordLeadRequested).not.toHaveBeenCalled();
   });
 });

@@ -20,6 +20,7 @@ import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
 import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
 import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
+import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -41,12 +42,14 @@ startOutcomeCauseWorker();
 startOutreachFactFeedWorker();
 // Keeps every brand's labelled timeline (silver lead_timeline_facts) current (see timeline-facts.ts).
 startTimelineFactsWorker();
+// Redelivers every lead_requested trigger event campaign-service has not recorded yet (lead-requested-events.ts).
+startTriggerEventOutboxWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, trigger-event-outbox");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);
