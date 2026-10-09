@@ -11,8 +11,10 @@
  * campaign-scoped read totals one customer-visible campaign.
  *
  * EVERY PART IS READ FROM campaign-service, never re-derived: the offer and the leg are what the
- * campaign states, and a campaign stating neither is exactly that.
+ * campaign states, and a campaign stating neither is exactly that. The two spellings of an OUTBOUND
+ * leg (`start_to_*` / `lead_found_to_*`, rename wave 1) are one leg: `legIdentity`.
  */
+import { legIdentity } from "./leg-identity.js";
 
 /** A campaign row as campaign-service serves it, trimmed to the identity. */
 export interface CampaignIdentityRow {
@@ -28,6 +30,8 @@ export interface CampaignIdentityRow {
   legKey?: string | null;
   /** Stored since migration 0044; null on a row predating it. */
   acquisitionChannel?: string | null;
+  /** The channel's feature: decides whether the leg's two outbound spellings are one (`leg-identity.ts`). */
+  featureSlug?: string | null;
   status?: string | null;
   createdAt?: string | null;
 }
@@ -75,7 +79,8 @@ export function identityKeyOf(row: CampaignIdentityRow): string | null {
   const channel = row.acquisitionChannel ?? null;
   if (!brandId || !channel) return null;
   const orgId = row.orgId ?? "";
-  return `${orgId}|${brandId}|${row.offerId ?? UNSTATED}|${row.legKey ?? UNSTATED}|${channel}`;
+  const leg = legIdentity(row.featureSlug, row.legKey) ?? UNSTATED;
+  return `${orgId}|${brandId}|${row.offerId ?? UNSTATED}|${leg}|${channel}`;
 }
 
 /** Group campaign rows into identities. Pure — the network read lives in the client module. */
