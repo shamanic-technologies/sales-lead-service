@@ -15,6 +15,7 @@
  */
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { servedLegKey } from "./leg-identity.js";
 import type { SourceRead } from "./outreach-client.js";
 
 export interface AnsweringCampaign {
@@ -27,7 +28,7 @@ export interface AnsweringCampaign {
   workflowSlug: string | null;
 }
 
-/** One campaign's answer, exactly as campaign-service serves it. */
+/** One campaign's answer, as campaign-service serves it (an outbound leg in its new spelling). */
 export type AnswererEntry =
   | {
       ok: true;
@@ -85,7 +86,16 @@ export async function fetchAnswerers(
 
   const byId = new Map<string, AnswererEntry>();
   for (const entry of parsed.campaigns) {
-    if (entry && typeof entry.campaignId === "string") byId.set(entry.campaignId, entry);
+    if (entry && typeof entry.campaignId === "string") byId.set(entry.campaignId, servedEntry(entry));
   }
   return { ok: true, data: byId };
+}
+
+function servedCampaign(c: AnsweringCampaign | null): AnsweringCampaign | null {
+  return c && typeof c.legKey === "string" ? { ...c, legKey: servedLegKey(c.featureSlug, c.legKey) } : c;
+}
+
+function servedEntry(entry: AnswererEntry): AnswererEntry {
+  if (!entry.ok) return entry;
+  return { ...entry, answeredBy: servedCampaign(entry.answeredBy), candidate: servedCampaign(entry.candidate) };
 }

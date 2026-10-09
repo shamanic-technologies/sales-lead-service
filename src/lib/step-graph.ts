@@ -67,9 +67,9 @@ export interface Leg {
  *
  * `lead_found` is a normal step (owner 2026-10-09): a sourcing campaign works `start_to_lead_found`
  * and an OUTBOUND campaign takes the lead from there, on `lead_found_to_conversation` /
- * `lead_found_to_website_visit`. Until wave 2 migrates them, outbound campaign rows still carry the
- * legacy `start_to_*` spelling, which is also the real key of a non-outbound channel (an ad putting
- * people on the site), so both spellings are legs here and both enter where the lead first moves
+ * `lead_found_to_website_visit`. A campaign row or a caller can still carry the legacy `start_to_*`
+ * spelling (accepted, never served for an outbound channel), which is also the real key of a
+ * non-outbound channel (an ad putting people on the site), so both spellings are legs here and both enter where the lead first moves
  * (see `entryOfLeg`). The two spellings of an outbound leg are one identity (`leg-identity.ts`).
  */
 export const LEGS: readonly Leg[] = [
