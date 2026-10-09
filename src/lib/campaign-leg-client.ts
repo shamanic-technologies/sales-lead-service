@@ -10,7 +10,7 @@
  */
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
-import { servedLegKey } from "./leg-identity.js";
+import { noteLegacyOutboundLegKey, servedLegKey } from "./leg-identity.js";
 
 export class CampaignLegsUnavailableError extends Error {
   constructor(message: string) {
@@ -97,5 +97,6 @@ async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaig
       "[campaign-leg-client] campaign-service /campaigns returned no campaigns array",
     );
   }
+  for (const row of data.campaigns) noteLegacyOutboundLegKey(row?.featureSlug, row?.legKey, "campaign-service GET /campaigns");
   return data.campaigns;
 }

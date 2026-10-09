@@ -18,6 +18,7 @@
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { buildCampaignFamilies, type CampaignIdentityRow } from "./campaign-identity.js";
+import { noteLegacyOutboundLegKey } from "./leg-identity.js";
 
 export interface CampaignIdentityContext {
   orgId: string;
@@ -53,6 +54,7 @@ export async function fetchOrgCampaignFamilies(ctx: CampaignIdentityContext) {
     throw new Error("[campaign-identity-client] campaign-service /campaigns returned no campaigns array");
   }
 
+  for (const row of data.campaigns) noteLegacyOutboundLegKey(row?.featureSlug, row?.legKey, "campaign-service GET /campaigns");
   return buildCampaignFamilies(data.campaigns);
 }
 
