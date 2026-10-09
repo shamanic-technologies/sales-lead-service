@@ -25,6 +25,7 @@ import leadHistoryRoutes from "./routes/lead-history.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import serveRecordsRoutes from "./routes/serve-records.js";
 import { requireBootReady } from "./middleware/readiness.js";
+import { withRequestContext } from "./lib/request-context.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -34,6 +35,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(withRequestContext);
 
 app.get("/openapi.json", (_req, res) => {
   if (existsSync(openapiPath)) {
