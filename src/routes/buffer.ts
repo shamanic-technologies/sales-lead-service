@@ -13,6 +13,7 @@ import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/cr
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 import { resolveServeSource, type ServeSource } from "../lib/source-campaign.js";
+import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 
 const router = Router();
 
@@ -194,6 +195,20 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     audienceId: req.audienceId,
   };
 
+  // Every answered ask is recorded as ONE `lead_requested` trigger event at campaign-service
+  // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
+  const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
+    recordLeadRequested({
+      orgId: req.orgId!,
+      brandId,
+      offerId: serveSource.kind === "source" ? serveSource.offerId : null,
+      requestedByCampaignId: campaignId,
+      callerRunId: runId,
+      leadId,
+      occurredAt: new Date().toISOString(),
+      performed,
+    });
+
   traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-start", detail: `campaignId=${campaignId}, brandIds=${brandIds.join(",")}, source=${serveSource.kind === "source" ? serveSource.campaignId : serveSource.kind}` }, req.headers).catch(() => {});
 
   // The audience's origin is a source campaign that is OFF, or over its daily budget: nothing is
@@ -217,6 +232,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       }
       return res.status(500).json({ error: "Internal server error" });
     }
+    recordAsk({ outcome: "skipped", reason: refused.reason, detail: refused.detail });
     return res.json(result);
   }
 
@@ -269,6 +285,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     const runStatus = "completed";
     await updateRun(serveRunId, runStatus, runMeta);
 
+    if (result.found) recordAsk({ outcome: "ran", campaignId: runCampaignId }, result.lead?.leadId ?? null);
+    else recordAsk({ outcome: "skipped", reason: result.reason ?? "reason_unstated" });
+
     res.json(result);
   } catch (error) {
     if (isCreditInsufficientError(error)) {
@@ -280,6 +299,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after credit-insufficient response:", runErr);
       }
+      recordAsk({ outcome: "skipped", reason: CREDIT_INSUFFICIENT_REASON });
       return res.json(result);
     }
 
@@ -296,6 +316,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after audience-not-serveable response:", runErr);
       }
+      recordAsk({ outcome: "skipped", reason: AUDIENCE_NOT_SERVEABLE_REASON });
       return res.json(result);
     }
 
