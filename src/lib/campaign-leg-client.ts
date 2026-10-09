@@ -10,6 +10,7 @@
  */
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { servedLegKey } from "./leg-identity.js";
 
 export class CampaignLegsUnavailableError extends Error {
   constructor(message: string) {
@@ -29,14 +30,22 @@ interface OrgCampaignRow {
   id?: string;
   legKey?: string | null;
   offerId?: string | null;
+  /** The channel's feature: decides whether an outbound leg is served in its new spelling. */
+  featureSlug?: string | null;
 }
 
-/** Every campaign of one org and the leg it states (null = states none) — one read. */
+/**
+ * Every campaign of one org and the leg it states (null = states none) — one read. An outbound leg
+ * comes back in its new spelling whichever one campaign-service stored (`servedLegKey`).
+ */
 export async function fetchOrgCampaignLegs(ctx: CampaignLegContext): Promise<Map<string, string | null>> {
   const byId = new Map<string, string | null>();
   for (const row of await fetchOrgCampaignRows(ctx)) {
     if (!row?.id) continue;
-    byId.set(row.id, typeof row.legKey === "string" && row.legKey.length > 0 ? row.legKey : null);
+    byId.set(
+      row.id,
+      typeof row.legKey === "string" && row.legKey.length > 0 ? servedLegKey(row.featureSlug, row.legKey) : null,
+    );
   }
   return byId;
 }

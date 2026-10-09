@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { legIdentity, OUTBOUND_RENAMED_FEATURE_SLUGS } from "../../src/lib/leg-identity.js";
+import { legIdentity, OUTBOUND_RENAMED_FEATURE_SLUGS, servedLegKey } from "../../src/lib/leg-identity.js";
 import { entryOfLeg, legOf, LEGS, STEP_ORDER, stepsRequiredBefore, stepsOnlyThrough } from "../../src/lib/step-graph.js";
 import { buildCampaignFamilies, identityKeyOf } from "../../src/lib/campaign-identity.js";
 import { LEAD_STEP_OUTCOMES } from "../../src/lib/step-statements.js";
@@ -35,6 +35,35 @@ describe("legIdentity", () => {
     expect(legIdentity(null, "lead_found_to_conversation")).toBe("lead_found_to_conversation");
     expect(legIdentity("sales-cold-email-outreach", "start_to_lead_found")).toBe("start_to_lead_found");
     expect(legIdentity("sales-cold-email-outreach", null)).toBeNull();
+  });
+});
+
+describe("servedLegKey (wave 2: serve the new spelling)", () => {
+  it("serves the new spelling for both spellings on every outbound slug", () => {
+    for (const slug of OUTBOUND_RENAMED_FEATURE_SLUGS) {
+      for (const [legacy, renamed] of PAIRS) {
+        expect(servedLegKey(slug, legacy)).toBe(renamed);
+        expect(servedLegKey(slug, renamed)).toBe(renamed);
+      }
+    }
+  });
+
+  it("never renames a non-outbound, featureless, sourcing or internal key", () => {
+    expect(servedLegKey("google-ads", "start_to_website_visit")).toBe("start_to_website_visit");
+    expect(servedLegKey(null, "start_to_conversation")).toBe("start_to_conversation");
+    expect(servedLegKey("sales-cold-email-outreach", "start_to_lead_found")).toBe("start_to_lead_found");
+    expect(servedLegKey("sales-cold-email-outreach", "conversation_to_meeting_booked")).toBe(
+      "conversation_to_meeting_booked",
+    );
+    expect(servedLegKey("sales-cold-email-outreach", null)).toBeNull();
+  });
+
+  it("a served key is the same identity as the one read", () => {
+    for (const [legacy] of PAIRS) {
+      expect(legIdentity("cold-call-outreach", servedLegKey("cold-call-outreach", legacy))).toBe(
+        legIdentity("cold-call-outreach", legacy),
+      );
+    }
   });
 });
 
