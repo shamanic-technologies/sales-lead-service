@@ -15,7 +15,7 @@
  */
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
-import { servedLegKey } from "./leg-identity.js";
+import { noteLegacyOutboundLegKey, servedLegKey } from "./leg-identity.js";
 import type { SourceRead } from "./outreach-client.js";
 
 export interface AnsweringCampaign {
@@ -92,6 +92,7 @@ export async function fetchAnswerers(
 }
 
 function servedCampaign(c: AnsweringCampaign | null): AnsweringCampaign | null {
+  if (c) noteLegacyOutboundLegKey(c.featureSlug, c.legKey, "campaign-service POST /internal/campaigns/answerers");
   return c && typeof c.legKey === "string" ? { ...c, legKey: servedLegKey(c.featureSlug, c.legKey) } : c;
 }
 
