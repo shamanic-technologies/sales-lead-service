@@ -1522,8 +1522,9 @@ export const LeadStandingSchema = z
       .openapi({
         description:
           "The leg this campaign works, as campaign-service states it (`legKey`). Never inferred; " +
-          "null when it could not be resolved.",
-        example: "start_to_website_visit",
+          "null when it could not be resolved. An outbound channel's leg is served in its new " +
+          "spelling (`lead_found_to_*`) whichever one campaign-service stored.",
+        example: "lead_found_to_website_visit",
       }),
     entryStep: z
       .string()

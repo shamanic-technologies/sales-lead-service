@@ -45,6 +45,30 @@ describe("fetchAnswerers", () => {
     }
   });
 
+  it("serves an outbound leg in its new spelling, leaves every other key as read", async () => {
+    const campaign = (legKey: string, featureSlug: string | null) => ({
+      campaignId: "x", legKey, status: "ongoing", featureSlug, acquisitionChannel: null, workflowSlug: null,
+    });
+    respond(200, {
+      campaigns: [
+        {
+          ok: true, campaignId: "c1", absence: null, startableFeatureSlugs: [], candidateAnswersCampaignId: null,
+          answeredBy: campaign("start_to_conversation", "sales-cold-email-outreach"),
+          candidate: campaign("start_to_website_visit", "google-ads"),
+        },
+      ],
+    });
+    const read = await fetchAnswerers(["c1"]);
+    expect(read.ok).toBe(true);
+    if (read.ok) {
+      const entry = read.data.get("c1");
+      expect(entry).toMatchObject({
+        answeredBy: { legKey: "lead_found_to_conversation" },
+        candidate: { legKey: "start_to_website_visit" },
+      });
+    }
+  });
+
   it("a non-2xx is a failed read, never an empty answer", async () => {
     respond(502, { error: "catalogue unreadable" });
     const read = await fetchAnswerers(["c1"]);
