@@ -185,13 +185,48 @@ describe("GET /orgs/leads/crm-pairings", () => {
   });
 
   // A brand with no mirrored CRM answers correctly rather than erroring.
-  it("answers crmConnected:false for a brand with no mirrored CRM", async () => {
+  it("answers crmConnected:false for a brand with no mirrored CRM and no person from any tool", async () => {
     fetchCrmConnection.mockResolvedValue(null);
+    fetchCrmContactsPage.mockResolvedValue([]);
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.crmConnected).toBe(false);
     expect(res.body.pairings).toEqual([]);
-    expect(fetchCrmContactsPage).not.toHaveBeenCalled();
+    expect(fetchCrmContactsPage).toHaveBeenCalledTimes(1);
+  });
+
+  // PostHog / Stripe / a CSV import, no GoHighLevel: their people are paired all the same.
+  it("serves a brand whose people come from tools other than GoHighLevel", async () => {
+    fetchCrmConnection.mockResolvedValue(null);
+    fetchCrmContactsPage.mockResolvedValue([contact()]);
+    matchConversion.mockResolvedValue({
+      matchedLeadId: null,
+      matchMethod: null,
+      matchConfidence: "unmatched",
+      attributionStatus: "unmatched",
+      candidateCount: 0,
+      candidates: [],
+    });
+    freezeMatches.mockResolvedValue(
+      new Map([
+        [
+          "crm-1",
+          {
+            crmContactId: "crm-1",
+            matchedLeadId: null,
+            matchMethod: null,
+            matchConfidence: "unmatched",
+            candidateCount: 0,
+            matchedAt: "2026-09-22T00:00:00.000Z",
+          },
+        ],
+      ]),
+    );
+    const res = await request(app).get(url).set(auth);
+    expect(res.status).toBe(200);
+    expect(res.body.crmConnected).toBe(true);
+    expect(res.body.connection).toBeNull();
+    expect(res.body.pairings).toHaveLength(1);
   });
 
   it("answers an empty page for a CRM whose contacts nothing pairs", async () => {
@@ -695,6 +730,7 @@ describe("GET /orgs/leads/crm-pairing-counts", () => {
 
   it("answers zeroes for a brand with no mirrored CRM", async () => {
     fetchCrmConnection.mockResolvedValue(null);
+    fetchCrmContactsPage.mockResolvedValue([]);
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.crmConnected).toBe(false);

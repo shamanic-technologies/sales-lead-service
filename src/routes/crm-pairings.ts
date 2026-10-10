@@ -422,6 +422,21 @@ async function walkFiltered(
   }
 }
 
+/**
+ * Whether the brand has a CRM to pair at all: a mirrored GoHighLevel connection, OR any person one
+ * of its other tools (PostHog, Stripe, a CSV import...) told the platform about. `connection` stays
+ * the GoHighLevel one, null when the brand has none.
+ */
+async function crmPresence(
+  brandId: string,
+  identity: { orgId: string; userId: string | null; runId: string | null; brandId: string },
+): Promise<{ connected: boolean; connection: Awaited<ReturnType<typeof fetchCrmConnection>> }> {
+  const connection = await fetchCrmConnection(brandId, identity);
+  if (connection) return { connected: true, connection };
+  const anyContact = await fetchCrmContactsPage(brandId, 1, 0, identity);
+  return { connected: anyContact.length > 0, connection: null };
+}
+
 router.get(
   "/orgs/leads/crm-pairings",
   apiKeyAuth,
@@ -465,8 +480,8 @@ router.get(
     try {
       // A brand with no mirrored CRM is an ANSWER, not an error — the surface renders an empty
       // table and says why.
-      const connection = await fetchCrmConnection(brandId, identity);
-      if (!connection) {
+      const { connected, connection } = await crmPresence(brandId, identity);
+      if (!connected) {
         return res.json({
           crmConnected: false,
           connection: null,
@@ -558,8 +573,8 @@ router.get(
     const client = watchClient(req, res);
 
     try {
-      const connection = await fetchCrmConnection(brandId, identity);
-      if (!connection) {
+      const { connected } = await crmPresence(brandId, identity);
+      if (!connected) {
         return res.json({
           crmConnected: false,
           counts: zeroCrmPairingCounts(),

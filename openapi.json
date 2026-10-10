@@ -6682,9 +6682,11 @@
           "step": {
             "type": "string",
             "enum": [
+              "signup",
               "meeting_booked",
               "meeting_attended",
-              "sale"
+              "sale",
+              "positive_reply"
             ]
           },
           "evidence": {
@@ -11935,9 +11937,11 @@
             "schema": {
               "type": "string",
               "enum": [
+                "signup",
                 "meeting_booked",
                 "meeting_attended",
-                "sale"
+                "sale",
+                "positive_reply"
               ]
             },
             "required": true,
@@ -12082,9 +12086,11 @@
             "schema": {
               "type": "string",
               "enum": [
+                "signup",
                 "meeting_booked",
                 "meeting_attended",
-                "sale"
+                "sale",
+                "positive_reply"
               ]
             },
             "required": true,
