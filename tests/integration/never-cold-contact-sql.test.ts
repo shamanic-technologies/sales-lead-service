@@ -9,7 +9,7 @@ import request from "supertest";
 import { randomUUID } from "node:crypto";
 
 const { db } = await import("../../src/db/index.js");
-const { leads, leadContactMethods, conversionEvents } = await import("../../src/db/schema.js");
+const { leads, leadContactMethods, conversionEvents, crmFacts } = await import("../../src/db/schema.js");
 const routes = (await import("../../src/routes/never-cold-contact.js")).default;
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -57,6 +57,29 @@ describe.skipIf(!hasRealDatabase)("never-cold-contact read against a real databa
     return row.id;
   }
 
+  async function crmFact(
+    over: Partial<typeof crmFacts.$inferInsert> & { emails: string[]; type: string },
+  ): Promise<string> {
+    const factId = randomUUID();
+    await db.insert(crmFacts).values({
+      factId,
+      seq: BigInt(Math.floor(Math.random() * 1e15)),
+      orgId,
+      brandId,
+      personKey: `email:${over.emails[0] ?? randomUUID()}`,
+      fullName: null,
+      phones: [],
+      occurredAt: new Date("2026-06-18T10:00:00.000Z"),
+      dateBasis: "occurred_at",
+      source: "posthog",
+      sourceRef: `ref-${randomUUID()}`,
+      payload: {},
+      raw: { itest: true },
+      ...over,
+    });
+    return factId;
+  }
+
   const get = (brand: string, org: string, email?: string) => {
     const q = email === undefined ? "" : `?email=${encodeURIComponent(email)}`;
     return request(app)
@@ -79,12 +102,42 @@ describe.skipIf(!hasRealDatabase)("never-cold-contact read against a real databa
     await outcome(await lead("signup", [addr("signup")]), { event: "signup" });
     await outcome(await lead("otherbrand", [addr("otherbrand")]), { brandId: otherBrandId });
     await outcome(await lead("otherorg", [addr("otherorg")]), { orgId: otherOrgId });
+    // CRM people (lead or not): a signup, a payment closes them; a visit, a withdrawn fact,
+    // another brand or org does not.
+    await crmFact({ emails: [addr("crmsignup")], type: "signup" });
+    await crmFact({ emails: [`CrmPay-${tag}@Example.com`], type: "payment", source: "stripe" });
+    await crmFact({ emails: [addr("crmvisit")], type: "website_visit" });
+    const pulled = await crmFact({ emails: [addr("crmpulled")], type: "signup" });
+    await crmFact({ emails: [addr("crmpulled")], type: "withdrawn", withdrawnOf: pulled });
+    await crmFact({ emails: [addr("crmotherbrand")], type: "signup", brandId: otherBrandId });
+    await crmFact({ emails: [addr("crmotherorg")], type: "signup", orgId: otherOrgId });
   }, 60_000);
+
+  it("closes a person the brand's CRM shows signed up or paying, lead or not", async () => {
+    const res = await get(brandId, orgId);
+    expect(res.status).toBe(200);
+    expect(res.body.emails).toContain(addr("crmsignup"));
+    expect(res.body.emails).toContain(`crmpay-${tag}@example.com`);
+    for (const name of ["crmvisit", "crmpulled", "crmotherbrand", "crmotherorg"]) {
+      expect(res.body.emails).not.toContain(addr(name));
+    }
+    const signup = res.body.crmPeople.find((p: { emails: string[] }) => p.emails.includes(addr("crmsignup")));
+    expect(signup).toMatchObject({ types: ["signup"], sources: ["posthog"], firstAt: "2026-06-18T10:00:00.000Z" });
+    for (const name of ["crmsignup", "crmpay"]) {
+      const one = name === "crmsignup" ? addr(name) : `CRMPAY-${tag}@example.com`;
+      const r = await get(brandId, orgId, one);
+      expect(r.body.emails).toEqual([one.toLowerCase()]);
+      expect(r.body.leads).toEqual([]);
+    }
+    for (const name of ["crmvisit", "crmpulled", "crmotherbrand"]) {
+      expect((await get(brandId, orgId, addr(name))).body).toMatchObject({ emails: [], leads: [], crmPeople: [] });
+    }
+  });
 
   it("lists booked, attended and sale, whoever observed them", async () => {
     const res = await get(brandId, orgId);
     expect(res.status).toBe(200);
-    expect(res.body.emails).toEqual(
+    expect(res.body.emails.filter((e: string) => !e.startsWith("crm"))).toEqual(
       [addr("booked"), addr("attended"), addr("sold"), addr("legacy"), addr("both"), `alias-${tag}@example.com`].sort(),
     );
     const byLead = new Map(res.body.leads.map((l: { leadId: string }) => [l.leadId, l]));
@@ -105,7 +158,7 @@ describe.skipIf(!hasRealDatabase)("never-cold-contact read against a real databa
     for (const email of all) {
       const res = await get(brandId, orgId, email.toUpperCase());
       expect(res.body.emails).toEqual([email]);
-      expect(res.body.leads).toHaveLength(1);
+      expect(res.body.leads.length + res.body.crmPeople.length).toBe(1);
     }
     for (const name of ["withdrawn", "review", "signup", "otherbrand", "otherorg", "nobody"]) {
       const res = await get(brandId, orgId, addr(name));
@@ -115,7 +168,7 @@ describe.skipIf(!hasRealDatabase)("never-cold-contact read against a real databa
   });
 
   it("another brand of the same org is not closed by this brand's meetings", async () => {
-    expect((await get(otherBrandId, orgId)).body.emails).toEqual([addr("otherbrand")]);
+    expect((await get(otherBrandId, orgId)).body.emails).toEqual([addr("crmotherbrand"), addr("otherbrand")]);
   });
 
   it("withdrawing the booked statement drops the person on the next read", async () => {
