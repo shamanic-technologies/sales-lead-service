@@ -6285,6 +6285,81 @@ registry.registerPath({
   },
 });
 
+const NeverColdContactLeadSchema = z
+  .object({
+    leadId: z.string().uuid().openapi({ description: "The lead the brand must never cold-contact again." }),
+    emails: z.array(z.string()).openapi({
+      description:
+        "Every email address registered to this lead, lowercased and trimmed. Empty when the lead holds no email address (still listed, so the set never silently shrinks).",
+    }),
+    firstAt: z.string().nullable().openapi({
+      description: "When the earliest closing outcome happened, ISO-8601. Null only when genuinely undated, never fabricated.",
+    }),
+    steps: z.array(z.enum(["meeting_booked", "meeting_attended", "sale"])).openapi({
+      description: "Which live outcomes close this person to cold outreach (the legacy `purchase` reads as `sale`).",
+    }),
+    sources: z.array(z.enum(["manual", "tracker", "crm", "reply"])).openapi({
+      description:
+        "Who observed them: `manual` (a person stated it), `tracker` (the brand's website tag), `crm` (the customer's own CRM), `reply` (the prospect's own reply).",
+    }),
+  })
+  .openapi("NeverColdContactLead");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/never-cold-contact",
+  summary: "The people this brand must never cold-contact again, keyed by email",
+  description:
+    "Every lead of the (org, brand) holding a live, attributed `meeting_booked`, `meeting_attended` or `sale` on the outcome ledger, whoever observed it " +
+    "(a person's statement, the brand's tracker, the customer's own CRM, the prospect's reply). A booked meeting closes the person to cold outreach by this brand forever. " +
+    "Wider than `/won-leads` (paying clients only), same shape for the `emails` set. Scope is the whole brand (every campaign, every offer) within the calling org. " +
+    "A withdrawn statement stops counting on the next read. With `email`: the same read narrowed to that exact address (case-insensitive), `emails` is `[email]` or `[]`. " +
+    "Built for the people gateway's serve gate. Any failure is a 500, never an empty set.",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      email: z.string().optional().openapi({ description: "One exact address to check (case-insensitive)." }),
+    }),
+  },
+  parameters: [
+    {
+      in: "header" as const,
+      name: "x-api-key",
+      required: true,
+      schema: { type: "string" as const },
+      description: "API key for authenticating requests",
+    },
+    {
+      in: "header" as const,
+      name: "x-org-id",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Internal organization UUID — the org whose brand is asked about",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The people the brand must never cold-contact again",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              emails: z.array(z.string()).openapi({
+                description: "Distinct lowercased addresses of every such lead (or `[email]` / `[]` when `email` was asked).",
+              }),
+              leads: z.array(NeverColdContactLeadSchema),
+            })
+            .openapi("NeverColdContactResponse"),
+        },
+      },
+    },
+    400: { description: "Missing x-org-id, or an empty `email`" },
+    401: { description: "Unauthorized" },
+    500: { description: "The set could not be read — never answered as an empty set" },
+  },
+});
+
 // --- "Already a customer", read off the prospect's own reply ---
 
 const ExistingCustomerCampaignParam = z.object({
