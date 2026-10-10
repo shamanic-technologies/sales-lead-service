@@ -6921,6 +6921,86 @@
           "sources"
         ]
       },
+      "NeverColdContactResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Distinct lowercased addresses of every such lead (or `[email]` / `[]` when `email` was asked)."
+          },
+          "leads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NeverColdContactLead"
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "emails",
+          "leads"
+        ]
+      },
+      "NeverColdContactLead": {
+        "type": "object",
+        "properties": {
+          "leadId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The lead the brand must never cold-contact again."
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every email address registered to this lead, lowercased and trimmed. Empty when the lead holds no email address (still listed, so the set never silently shrinks)."
+          },
+          "firstAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When the earliest closing outcome happened, ISO-8601. Null only when genuinely undated, never fabricated."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "meeting_booked",
+                "meeting_attended",
+                "sale"
+              ]
+            },
+            "description": "Which live outcomes close this person to cold outreach (the legacy `purchase` reads as `sale`)."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "manual",
+                "tracker",
+                "crm",
+                "reply"
+              ]
+            },
+            "description": "Who observed them: `manual` (a person stated it), `tracker` (the brand's website tag), `crm` (the customer's own CRM), `reply` (the prospect's own reply)."
+          }
+        },
+        "required": [
+          "leadId",
+          "emails",
+          "firstAt",
+          "steps",
+          "sources"
+        ]
+      },
       "ExistingCustomerResponse": {
         "type": "object",
         "properties": {
@@ -12212,6 +12292,71 @@
           },
           "500": {
             "description": "The won set could not be read — never answered as an empty set"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/never-cold-contact": {
+      "get": {
+        "summary": "The people this brand must never cold-contact again, keyed by email",
+        "description": "Every lead of the (org, brand) holding a live, attributed `meeting_booked`, `meeting_attended` or `sale` on the outcome ledger, whoever observed it (a person's statement, the brand's tracker, the customer's own CRM, the prospect's reply). A booked meeting closes the person to cold outreach by this brand forever. Wider than `/won-leads` (paying clients only), same shape for the `emails` set. Scope is the whole brand (every campaign, every offer) within the calling org. A withdrawn statement stops counting on the next read. With `email`: the same read narrowed to that exact address (case-insensitive), `emails` is `[email]` or `[]`. Built for the people gateway's serve gate. Any failure is a 500, never an empty set.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID — the org whose brand is asked about"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "One exact address to check (case-insensitive)."
+            },
+            "required": false,
+            "description": "One exact address to check (case-insensitive).",
+            "name": "email",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The people the brand must never cold-contact again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NeverColdContactResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing x-org-id, or an empty `email`"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The set could not be read — never answered as an empty set"
           }
         }
       }
