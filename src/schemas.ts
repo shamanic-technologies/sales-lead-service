@@ -2450,17 +2450,19 @@ registry.registerPath({
       description:
         "Restrict the read to ONE engagement bucket: `contacted`, `website_visit`, " +
         "`positive_reply`, `signup`, `meeting_booked`, `meeting_attended`, `form_submission`, " +
-        "`sale`. Buckets are the tabs a leads page offers, and they are NOT exclusive — somebody " +
+        "`sale`, `booking_call`. Buckets are the tabs a leads page offers, and they are NOT exclusive — somebody " +
         "who bought was also contacted, and appears under both. `contacted` / `website_visit` / " +
         "`positive_reply` come from the delivery evidence at this read's scope (a website visit is " +
         "a measured click OR a hand-stated visit, unioned per person, never summed); the five " +
         "outcomes come from this service's live, attributed conversion ledger, tracker-reported " +
-        "and hand-stated alike, withdrawn statements excluded. `total` is then the bucket's size. " +
+        "and hand-stated alike, withdrawn statements excluded. `booking_call` is an act of ours, not " +
+        "an outcome: the people an AI Instant Call campaign (leg conversation_to_booking_call) " +
+        "placed a booking call with, from the follow-up ledger. `total` is then the bucket's size. " +
         "GET /orgs/leads/bucket-counts answers every bucket's count without returning any rows. " +
         "An unknown value is a 400.",
       schema: { type: "string" as const, enum: [
         "contacted", "website_visit", "positive_reply", "signup", "meeting_booked",
-        "meeting_attended", "form_submission", "sale",
+        "meeting_attended", "form_submission", "sale", "booking_call",
       ] },
     },
     {
@@ -2583,6 +2585,11 @@ const LeadBucketCountsResponseSchema = z
         meeting_attended: z.number().int(),
         form_submission: z.number().int(),
         sale: z.number().int(),
+        booking_call: z.number().int().openapi({
+          description:
+            "People an AI Instant Call campaign (leg conversation_to_booking_call) placed a " +
+            "booking call with. An act of ours, not an outcome the person reached.",
+        }),
       })
       .openapi({
         description:

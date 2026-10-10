@@ -61,6 +61,11 @@ let indexRows: Array<{
   searchText: string;
 }> = [];
 let outcomes = new Map<string, { steps: Set<string>; latestAt: string | null }>();
+let bookingCalled = new Set<string>();
+
+vi.mock("../../src/lib/booking-calls.js", () => ({
+  fetchBookingCallLeadIds: () => Promise.resolve(bookingCalled),
+}));
 
 vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../src/lib/lead-index.js")>()),
@@ -189,6 +194,7 @@ beforeEach(() => {
     },
   };
   outcomes = new Map([[indexRows[3].leadId, { steps: new Set(["sale"]), latestAt: "2026-03-01T00:00:00.000Z" }]]);
+  bookingCalled = new Set([indexRows[4].leadId]);
   hydrated = [];
   fakeModelSearches.length = 0;
   gatewayFails = false;
@@ -225,6 +231,7 @@ describe("GET /orgs/leads/bucket-counts", () => {
       meeting_booked: 0,
       meeting_attended: 0,
       form_submission: 0,
+      booking_call: 1,
     });
     // A count is a number: nothing was hydrated to produce it.
     expect(hydrated).toEqual([]);
@@ -296,6 +303,14 @@ describe("GET /orgs/leads — one bucket at a time", () => {
     expect(res.body.nextCursor).toBeTruthy();
     // ONLY the page's ids were hydrated — not the bucket, and not the brand.
     expect(hydrated).toEqual([[indexRows[0].id, indexRows[1].id]]);
+  });
+
+  it("lists the people a booking call was placed with, and the count equals the list total", async () => {
+    const res = await get(`?brandId=${BRAND}&bucket=booking_call&limit=10`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(hydrated).toEqual([[indexRows[4].id]]);
+    expect((await counts(`?brandId=${BRAND}`)).body.counts.booking_call).toBe(res.body.total);
   });
 
   it("pages a bucket without repeating or skipping anybody", async () => {
