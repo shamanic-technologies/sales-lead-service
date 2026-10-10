@@ -37,6 +37,15 @@
  *      pairings rest on a hesitant model and confirm or deny them. A denial removes everything the
  *      pairing contributed on the next evidence pass.
  *
+ *      A NAME IS ONLY EVER A HINT (owner, 2026-10-10). A pairing whose only signal is a name
+ *      (first+last or last name alone: no shared email, phone or company domain) is never
+ *      EVIDENCE until a person accepts it, however sure the model is: the judgment may pair it,
+ *      but always `toConfirm`, and `pairingCarriesEvidence` keeps every CRM fact of that contact
+ *      off the lead's replies, steps, conversions, sale and standing. A judgment is a model's
+ *      reading of two names, and "Kimmy Johnson" filling a Meta Ads form is not "McKenzie
+ *      Johnson" replying to our email (prod, 72 Johnsons, judged 0.21 and counted as a positive
+ *      reply). Deterministic and company-domain signals are untouched.
+ *
  *   4. A HUMAN OUTRANKS ALL OF IT. Somebody looking at the two rows can accept or deny the
  *      pairing, and their statement beats both the signal and the judgment. It is retractable and
  *      it never deletes (the same posture step statements already take), which is what makes a
@@ -179,9 +188,11 @@ export interface CrmPairingVerdict {
   state: CrmPairingState;
   decidedBy: CrmPairingDecider | null;
   /**
-   * `true` only on a pairing a HESITANT judgment decided (probability strictly between the floor
-   * and the bar): it counts as paired, and a person should confirm it. `false` on every other
-   * verdict — a confident judgment, a deterministic signal, a human ruling, or no pairing at all.
+   * `true` on a pairing a judgment decided that a person should confirm: a HESITANT judgment
+   * (probability strictly between the floor and the bar), or ANY judgment on a name-only signal
+   * (whose facts do not count until a person accepts it, see `pairingCarriesEvidence`). `false` on
+   * every other verdict — a confident judgment on a stronger signal, a deterministic signal, a
+   * human ruling, or no pairing at all.
    */
   toConfirm: boolean;
   judgmentStatus: CrmJudgmentStatus;
@@ -214,6 +225,22 @@ export function signalVerdict(signal: CrmPairingSignal): CrmPairingState {
     case "unmatched":
       return "unpaired";
   }
+}
+
+/** A pairing whose only signal is a NAME: no shared email, phone or company domain. */
+export function isNameOnlySignal(signal: CrmPairingSignal): boolean {
+  return signal.matchConfidence === "probabilistic";
+}
+
+/**
+ * Whether this pairing's CRM facts count as the LEAD's evidence (replies, steps, conversions, sale,
+ * standing). `paired` is necessary; a name-only pairing additionally needs a PERSON's acceptance —
+ * a judgment alone leaves it a "to confirm" hint (owner, 2026-10-10).
+ */
+export function pairingCarriesEvidence(signal: CrmPairingSignal, verdict: CrmPairingVerdict): boolean {
+  if (verdict.state !== "paired") return false;
+  if (isNameOnlySignal(signal)) return verdict.decidedBy === "human";
+  return true;
 }
 
 /** Whether a judgment is worth paying for: only where the signal could not decide. */
@@ -278,11 +305,12 @@ export function resolveCrmPairing(input: CrmPairingInput): CrmPairingVerdict {
         judgmentUnavailableReason: null,
       };
     }
-    // A confident yes pairs; a hesitant one pairs too — doubt leans to us — and says so.
+    // A confident yes pairs; a hesitant one pairs too — doubt leans to us — and says so. A
+    // name-only pairing is ALWAYS to confirm: only a person turns a name into evidence.
     return {
       state: "paired",
       decidedBy: "judgment",
-      toConfirm: verdict === "undecided",
+      toConfirm: verdict === "undecided" || isNameOnlySignal(signal),
       judgmentStatus,
       judgmentUnavailableReason: null,
     };
