@@ -35,8 +35,10 @@ import { awaitsJudgment, judgeCandidates } from "./crm-judging.js";
 import { fetchPairedLeadFacts } from "./crm-pairing-view.js";
 import { judgeSamePersonAsPlatform } from "./judgment-client.js";
 import {
+  CRM_PAYMENT_EVENT,
   CRM_POSITIVE_REPLY_STEP,
   formSubmissionsFrom,
+  paidValueCents,
   positiveReplyEvidence,
   crmCauseRule,
   crmOutcomeSignature,
@@ -141,6 +143,8 @@ interface LeadEvidence {
   crmContactId: string;
   match: FrozenMatch;
   crmEmail: string | null;
+  /** What this contact paid the customer, net (`paidValueCents`); the value of a payment-evidenced sale. */
+  paidCents: number | null;
 }
 
 /** Every form submission of every contact paired with a lead, kept whole (see positiveReplyEvidence). */
@@ -159,14 +163,19 @@ async function primaryEmails(leadIds: string[]): Promise<Map<string, string>> {
   return out;
 }
 
-/** Their won deal's value, in cents, read off the opportunity the sale evidence names. */
+/**
+ * The sale's value, in cents: what the person paid when a payment evidences it, else their won
+ * deal's value read off the opportunity the sale evidence names.
+ */
 function saleValueCents(
-  evidence: CrmStepEvidence,
+  item: LeadEvidence,
   opportunities: Map<string, { externalId: string | null; monetaryValue: number | null }[]>,
-  crmContactId: string,
 ): number | null {
-  if (evidence.step !== "sale" || !evidence.sourceId) return null;
-  const opp = (opportunities.get(crmContactId) ?? []).find((o) => o.externalId === evidence.sourceId);
+  const evidence = item.evidence;
+  if (evidence.step !== "sale") return null;
+  if (evidence.crmStep === CRM_PAYMENT_EVENT) return item.paidCents;
+  if (!evidence.sourceId) return null;
+  const opp = (opportunities.get(item.crmContactId) ?? []).find((o) => o.externalId === evidence.sourceId);
   const value = opp?.monetaryValue ?? null;
   return value !== null && value > 0 ? Math.round(value * 100) : null;
 }
@@ -225,11 +234,12 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     pairedContacts += 1;
 
     const leadId = match.matchedLeadId;
+    const paidCents = paidValueCents(contact.events);
     const steps = byLead.get(leadId) ?? new Map<string, LeadEvidence>();
     const submissions = formSubmissionsFrom(contact.events);
     if (submissions.length > 0) {
       const forms = formsByLead.get(leadId) ?? [];
-      forms.push({ crmContactId: contact.contactId, match, crmEmail: contact.primaryEmail, submissions });
+      forms.push({ crmContactId: contact.contactId, match, crmEmail: contact.primaryEmail, paidCents, submissions });
       formsByLead.set(leadId, forms);
     }
     for (const evidence of evidenceFromEvents(contact.events)) {
@@ -242,6 +252,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
         crmContactId: contact.contactId,
         match,
         crmEmail: contact.primaryEmail,
+        paidCents,
       };
       if (!current || mergeEvidence(current.evidence, evidence) === evidence) steps.set(key, next);
     }
@@ -274,7 +285,9 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     loadCauseStatements(brandId, leadIds),
   ]);
 
-  const needsValue = leadIds.some((id) => byLead.get(id)!.has("outcome:sale"));
+  // Only a sale their GoHighLevel pipeline evidences takes its value off an opportunity; a paid one
+  // carries its own, so a brand with no pipeline never asks for one.
+  const needsValue = leadIds.some((id) => byLead.get(id)!.get("outcome:sale")?.evidence.crmStep === "sale");
   const opportunities = needsValue
     ? await fetchCrmOpportunitiesByContact(brandId, ctx)
     : new Map<string, { externalId: string | null; monetaryValue: number | null }[]>();
@@ -297,7 +310,13 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     for (const form of formsByLead.get(leadId) ?? []) {
       const chosen = positiveReplyEvidence(form.submissions, firstDeliveredAt);
       if (chosen && (!reply || mergeEvidence(reply.evidence, chosen) === chosen)) {
-        reply = { evidence: chosen, crmContactId: form.crmContactId, match: form.match, crmEmail: form.crmEmail };
+        reply = {
+          evidence: chosen,
+          crmContactId: form.crmContactId,
+          match: form.match,
+          crmEmail: form.crmEmail,
+          paidCents: form.paidCents,
+        };
       }
     }
     if (reply) steps.set(`outcome:${CRM_POSITIVE_REPLY_STEP}`, reply);
@@ -329,7 +348,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
         leadId,
         step,
         occurredAt: item.evidence.occurredAt,
-        valueCents: saleValueCents(item.evidence, opportunities, item.crmContactId),
+        valueCents: saleValueCents(item, opportunities),
         causedByOutreach: cause.causedByOutreach,
         email: emails.get(leadId) ?? item.crmEmail,
         matchMethod: item.match.matchMethod,
@@ -388,10 +407,17 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
   };
 }
 
-/** Every (org, brand) whose CRM has ever been paired against our leads. */
+/**
+ * Every (org, brand) the pass runs for: every brand any of whose tools ever told the platform about
+ * a person (a fact on the copy of crm-service's people feed), plus every brand already paired. NOT
+ * only brands somebody once opened the pairings page for: a brand enters the pass the moment its
+ * first fact lands, whichever tool it came from.
+ */
 export async function listCrmBrands(): Promise<Array<{ orgId: string; brandId: string }>> {
   const rows = (await db.execute(sql`
-    SELECT DISTINCT org_id, brand_id FROM crm_pairing_matches
+    SELECT org_id, brand_id FROM crm_facts GROUP BY org_id, brand_id
+    UNION
+    SELECT org_id, brand_id FROM crm_pairing_matches GROUP BY org_id, brand_id
   `)) as unknown as Array<{ org_id: string; brand_id: string }>;
   return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
 }

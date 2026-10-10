@@ -6016,7 +6016,7 @@ registry.registerPath({
 // What the customer's own CRM evidences, and whose win it was
 // ---------------------------------------------------------------------------
 
-const CRM_EVIDENCED_STEP_ENUM = ["meeting_booked", "meeting_attended", "sale"] as const;
+const CRM_EVIDENCED_STEP_ENUM = ["signup", "meeting_booked", "meeting_attended", "sale", "positive_reply"] as const;
 
 const CrmCauseRuleSchema = z
   .object({

@@ -88,7 +88,7 @@ const { db } = await import("../../src/db/index.js");
 const { sql } = await import("drizzle-orm");
 const { leads, leadsCampaigns, leadContactMethods } = await import("../../src/db/schema.js");
 const { freezeMatches, saveJudgment, upsertRuling, withdrawRuling } = await import("../../src/lib/crm-pairing-store.js");
-const { syncCrmEvidence } = await import("../../src/lib/crm-evidence-sync.js");
+const { syncCrmEvidence, listCrmBrands } = await import("../../src/lib/crm-evidence-sync.js");
 const { supersedeCrmOutcome, upsertCauseStatement, withdrawCauseStatement } = await import(
   "../../src/lib/crm-evidence-store.js"
 );
@@ -183,10 +183,11 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     await seedLead("noshow", [campaignA, campaignB]);
     await seedLead("stated", [campaignA]);
     await seedLead("named", [campaignA]);
+    await seedLead("payer", [campaignA]);
     state.legByCampaign.set(campaignA, "start_to_conversation");
     state.legByCampaign.set(campaignB, "start_to_conversation");
 
-    for (const key of ["after", "before", "undated", "noshow", "stated"]) {
+    for (const key of ["after", "before", "undated", "noshow", "stated", "payer"]) {
       await pair(`c-${key}`, ids[key].leadId, "deterministic");
       state.delivered.set(ids[key].email, "2026-05-11T00:00:00.000Z");
     }
@@ -211,6 +212,16 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
         { step: "meeting_not_held", occurredAt: "2026-06-02T00:00:00.000Z", dateBasis: "scheduled_start", source: "appointment", sourceId: "ap9", detail: null },
       ] },
       { contactId: "c-stated", primaryEmail: null, fullName: null, events: [sale("2026-06-03T00:00:00.000Z")] },
+      // Not GoHighLevel: a PostHog signup and Stripe payments of the same person.
+      { contactId: "c-payer", primaryEmail: null, fullName: null, events: [
+        { step: "signup", occurredAt: "2026-05-12T00:00:00.000Z", dateBasis: "person_created_at", source: null, sourceId: "ph-1", detail: {} },
+        { step: "payment", occurredAt: "2026-05-15T00:00:00.000Z", dateBasis: "created", source: null, sourceId: "py_1",
+          detail: { status: "succeeded", currency: "usd", amountMinor: 9900, amountRefunded: 0, refunded: false } },
+        { step: "payment", occurredAt: "2026-05-13T00:00:00.000Z", dateBasis: "created", source: null, sourceId: "py_0",
+          detail: { status: "succeeded", currency: "usd", amountMinor: 1000, amountRefunded: 1000, refunded: true } },
+        { step: "payment", occurredAt: "2026-06-15T00:00:00.000Z", dateBasis: "created", source: null, sourceId: "py_2",
+          detail: { status: "succeeded", currency: "usd", amountMinor: 9900, amountRefunded: 0, refunded: false } },
+      ] },
       { contactId: "c-named", primaryEmail: null, fullName: null, events: [
         { step: "form_submitted", occurredAt: "2026-06-05T00:00:00.000Z", dateBasis: "submitted_at", source: "form", sourceId: "f1", detail: null },
         { step: "meeting_booked", occurredAt: "2026-06-06T00:00:00.000Z", dateBasis: "booked_at", source: "appointment", sourceId: "ap2", detail: null },
@@ -233,7 +244,7 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
 
   it("reflects only paired evidence, with whose-win following the date rule", async () => {
     const result = await syncCrmEvidence(orgId, brandId);
-    expect(result.pairedContacts).toBe(5);
+    expect(result.pairedContacts).toBe(6);
 
     const after = await crmOutcomes(ids.after.leadId);
     const afterSale = after.find((r) => r.event === "sale")!;
@@ -254,6 +265,48 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     expect(await crmOutcomes(ids.unsure.leadId)).toHaveLength(0);
     expect(await crmOutcomes(ids.stated.leadId)).toHaveLength(0);
     expect(await crmOutcomes(ids.named.leadId)).toHaveLength(0);
+  });
+
+  it("a signup and a payment from tools other than GoHighLevel are the signup and sale steps", async () => {
+    const rows = (await db.execute(sql`
+      SELECT event, caused_by_outreach, received_at, value_cents, crm_evidence
+      FROM conversion_events
+      WHERE brand_id = ${brandId} AND matched_lead_id = ${ids.payer.leadId} AND source = 'crm' AND withdrawn_at IS NULL
+      ORDER BY event
+    `)) as unknown as Array<{
+      event: string;
+      caused_by_outreach: boolean | null;
+      received_at: unknown;
+      value_cents: number | null;
+      crm_evidence: { crmStep: string; sourceId: string };
+    }>;
+    expect(rows.map((r) => r.event)).toEqual(["sale", "signup"]);
+    const [sale, signup] = rows;
+    // The refunded payment is not the paid moment: the first payment that stayed is.
+    expect(new Date(sale.received_at as string).toISOString()).toBe("2026-05-15T00:00:00.000Z");
+    expect(sale.crm_evidence).toMatchObject({ crmStep: "payment", sourceId: "py_1" });
+    expect(Number(sale.value_cents)).toBe(19800);
+    expect(sale.caused_by_outreach).toBe(true);
+    expect(signup.caused_by_outreach).toBe(true);
+  });
+
+  it("the pass covers a brand with facts nobody ever paired", async () => {
+    const factOrg = randomUUID();
+    const factBrand = randomUUID();
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, crm_contact_id, emails, phones, type,
+        occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${Math.floor(Math.random() * 1e12) * 10 + 7}, ${factOrg}, ${factBrand}, 'x@example.com',
+        ${randomUUID()}, ARRAY['x@example.com'], ARRAY[]::text[], 'signup', now(), 'person_created_at', 'posthog', 'p-x',
+        '{}'::jsonb, '{}'::jsonb)
+    `);
+    try {
+      const brands = await listCrmBrands();
+      expect(brands).toContainEqual({ orgId: factOrg, brandId: factBrand });
+      expect(brands).toContainEqual({ orgId, brandId });
+    } finally {
+      await db.execute(sql`DELETE FROM crm_facts WHERE org_id = ${factOrg}`);
+    }
   });
 
   it("a name-only pairing counts once a PERSON accepts it, and stops when they take it back", async () => {
