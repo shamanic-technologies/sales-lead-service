@@ -2674,6 +2674,10 @@
               },
               "sale": {
                 "type": "integer"
+              },
+              "booking_call": {
+                "type": "integer",
+                "description": "People an AI Instant Call campaign (leg conversation_to_booking_call) placed a booking call with. An act of ours, not an outcome the person reached."
               }
             },
             "required": [
@@ -2684,7 +2688,8 @@
               "meeting_booked",
               "meeting_attended",
               "form_submission",
-              "sale"
+              "sale",
+              "booking_call"
             ],
             "description": "How many people are in each engagement bucket. Every key is ALWAYS present — a bucket nobody is in is 0, never absent. A consumer shows whichever of the five outcomes it cares about; this read does not decide that, because a brand works several legs at once."
           },
@@ -7915,7 +7920,7 @@
             "in": "query",
             "name": "bucket",
             "required": false,
-            "description": "Restrict the read to ONE engagement bucket: `contacted`, `website_visit`, `positive_reply`, `signup`, `meeting_booked`, `meeting_attended`, `form_submission`, `sale`. Buckets are the tabs a leads page offers, and they are NOT exclusive — somebody who bought was also contacted, and appears under both. `contacted` / `website_visit` / `positive_reply` come from the delivery evidence at this read's scope (a website visit is a measured click OR a hand-stated visit, unioned per person, never summed); the five outcomes come from this service's live, attributed conversion ledger, tracker-reported and hand-stated alike, withdrawn statements excluded. `total` is then the bucket's size. GET /orgs/leads/bucket-counts answers every bucket's count without returning any rows. An unknown value is a 400.",
+            "description": "Restrict the read to ONE engagement bucket: `contacted`, `website_visit`, `positive_reply`, `signup`, `meeting_booked`, `meeting_attended`, `form_submission`, `sale`, `booking_call`. Buckets are the tabs a leads page offers, and they are NOT exclusive — somebody who bought was also contacted, and appears under both. `contacted` / `website_visit` / `positive_reply` come from the delivery evidence at this read's scope (a website visit is a measured click OR a hand-stated visit, unioned per person, never summed); the five outcomes come from this service's live, attributed conversion ledger, tracker-reported and hand-stated alike, withdrawn statements excluded. `booking_call` is an act of ours, not an outcome: the people an AI Instant Call campaign (leg conversation_to_booking_call) placed a booking call with, from the follow-up ledger. `total` is then the bucket's size. GET /orgs/leads/bucket-counts answers every bucket's count without returning any rows. An unknown value is a 400.",
             "schema": {
               "type": "string",
               "enum": [
@@ -7926,7 +7931,8 @@
                 "meeting_booked",
                 "meeting_attended",
                 "form_submission",
-                "sale"
+                "sale",
+                "booking_call"
               ]
             }
           },

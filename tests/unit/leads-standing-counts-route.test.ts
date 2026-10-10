@@ -78,6 +78,10 @@ vi.mock("../../src/lib/lead-index.js", async (importOriginal) => ({
 // The read model is rows in Postgres in production; `sql` is mocked here, so the route gets the
 // in-memory double, which derives its rows with the real code. The SQL and the freshness machinery
 // are covered in tests/integration/lead-read-model-sql.test.ts.
+vi.mock("../../src/lib/booking-calls.js", () => ({
+  fetchBookingCallLeadIds: () => Promise.resolve(new Set()),
+}));
+
 vi.mock("../../src/lib/lead-read-model.js", async (importOriginal) => {
   const { fakeReadModelModule } = await import("../helpers/fake-lead-read-model.js");
   return fakeReadModelModule(await importOriginal());

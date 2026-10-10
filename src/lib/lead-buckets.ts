@@ -19,6 +19,10 @@
  *    tracker reported it or a human stated it. Withdrawn statements are excluded exactly as every
  *    other outcome read excludes them.
  *
+ * `booking_call` is a third kind: an ACT of ours, a booking call AI Instant Call placed with the
+ * person (the follow-up ledger, see booking-calls.ts). It is not an outcome the person reached, so
+ * it lives in neither family above and no outcome count reads it.
+ *
  * `website_visit` is the one step measured BOTH ways (see measured-visits.ts): a click the delivery
  * layer measured, and a visit a human stated. Here the two are UNIONED per person rather than
  * summed — this is a population, not a total, so somebody known both ways is one person in the
@@ -39,6 +43,7 @@ export const LEAD_BUCKETS = [
   "meeting_attended",
   "form_submission",
   "sale",
+  "booking_call",
 ] as const;
 
 export type LeadBucket = (typeof LEAD_BUCKETS)[number];
@@ -87,6 +92,8 @@ export function bucketsForRow(
   outcomes: ReadonlySet<LeadStepOutcomeName>,
   /** A positive reply the outcome ledger holds (their CRM's form submission). Unioned per person. */
   ledgerPositiveReply = false,
+  /** A booking call was placed with this person (booking-calls.ts). */
+  bookingCall = false,
 ): Set<LeadBucket> {
   const buckets = new Set<LeadBucket>();
   if (delivery?.contacted) buckets.add("contacted");
@@ -97,6 +104,7 @@ export function bucketsForRow(
     buckets.add("positive_reply");
   }
   for (const b of outcomeBucketsOf(outcomes)) buckets.add(b);
+  if (bookingCall) buckets.add("booking_call");
   return buckets;
 }
 

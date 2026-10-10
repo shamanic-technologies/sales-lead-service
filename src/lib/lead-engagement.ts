@@ -10,6 +10,7 @@
 import { toIsoTimestamp } from "./basic-leads.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { DEFAULT_STATUS, type FlattenedStatus } from "./delivery-flatten.js";
+import { fetchBookingCallLeadIds } from "./booking-calls.js";
 import { bucketsForRow, leadActivityAt, type LeadBucket } from "./lead-buckets.js";
 import { fetchOutcomesByLead, type LeadIndexRow, type LeadOutcomes } from "./lead-index.js";
 import type { LeadStandingState } from "./lead-standing.js";
@@ -82,11 +83,11 @@ export async function enrichLeadIndex(
     }));
   }
 
-  const outcomesByLead = await fetchOutcomesByLead(
-    ctx.orgId,
-    ctx.brandId,
-    rows.map((r) => r.leadId),
-  );
+  const leadIds = rows.map((r) => r.leadId);
+  const [outcomesByLead, bookingCallLeads] = await Promise.all([
+    fetchOutcomesByLead(ctx.orgId, ctx.brandId, leadIds),
+    fetchBookingCallLeadIds(ctx.orgId, ctx.brandId, leadIds),
+  ]);
 
   const noOutcomes: LeadOutcomes = { steps: new Set<LeadStepOutcomeName>(), latestAt: null };
 
@@ -103,7 +104,12 @@ export async function enrichLeadIndex(
     const outcomes = outcomesByLead.get(row.leadId) ?? noOutcomes;
     return {
       ...row,
-      buckets: bucketsForRow(delivery, outcomes.steps, outcomes.positiveReply === true),
+      buckets: bucketsForRow(
+        delivery,
+        outcomes.steps,
+        outcomes.positiveReply === true,
+        bookingCallLeads.has(row.leadId),
+      ),
       delivery,
       activityAt: leadActivityAt(delivery, outcomes.latestAt, row.servedAt, isoCreatedAt(row.createdAtText)),
     };

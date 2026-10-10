@@ -129,3 +129,11 @@ describe("whether a person was sent an email, and whether it was delivered", () 
     expect(isDelivered(delivery({ bounced: true }))).toBe(false);
   });
 });
+
+describe("booking_call bucket", () => {
+  it("is a bucket key, filled only by a placed booking call, never by an outcome", () => {
+    expect(LEAD_BUCKETS).toContain("booking_call");
+    expect(bucketsForRow(DEFAULT_STATUS, new Set(), false, true).has("booking_call")).toBe(true);
+    expect(bucketsForRow(DEFAULT_STATUS, new Set<LeadStepOutcomeName>(["meeting_booked"]), true, false).has("booking_call")).toBe(false);
+  });
+});
