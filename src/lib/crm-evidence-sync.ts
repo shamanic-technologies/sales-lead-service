@@ -4,7 +4,8 @@
  * Reads, in order: crm-service's dated funnel events (the contacts carrying any), the frozen pairing
  * for each of those contacts (matching any not matched yet, with the SAME matcher the pairings view
  * uses), the frozen judgments and the human rulings — and decides each pairing with the SAME policy
- * (`resolveCrmPairing`). Only `paired` counts — confident or `toConfirm` alike (doubt leans to us).
+ * (`resolveCrmPairing`). Only `paired` counts — confident or `toConfirm` alike (doubt leans to us) —
+ * EXCEPT a name-only pairing, which counts only once a person accepted it (`pairingCarriesEvidence`).
  *
  * Before any of that, the pass JUDGES EVERY CANDIDATE (`judgeEveryCandidate`): it walks their whole
  * contact list, matches whatever was never matched, and buys the same-person judgment for every
@@ -28,7 +29,7 @@ import {
   type CrmIdentityContext,
 } from "./crm-client.js";
 import { loadFrozenMatches, loadJudgments, loadRulings, rulingKey, type FrozenMatch } from "./crm-pairing-store.js";
-import { resolveCrmPairing } from "./crm-pairing.js";
+import { pairingCarriesEvidence, resolveCrmPairing } from "./crm-pairing.js";
 import { matchesForContacts } from "./crm-matching.js";
 import { awaitsJudgment, judgeCandidates } from "./crm-judging.js";
 import { fetchPairedLeadFacts } from "./crm-pairing-view.js";
@@ -219,7 +220,8 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
       judgmentUnavailableReason: null,
       ruling: rulings.get(rulingKey(contact.contactId, match.matchedLeadId)) ?? null,
     });
-    if (verdict.state !== "paired") continue;
+    // A name the model believes is still only a hint: no fact of a stranger reaches the lead.
+    if (!pairingCarriesEvidence(match, verdict)) continue;
     pairedContacts += 1;
 
     const leadId = match.matchedLeadId;

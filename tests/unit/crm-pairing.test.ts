@@ -6,7 +6,9 @@ import {
   canonicalizeOpportunityState,
   judgmentStatusOf,
   matchMethodKey,
+  isNameOnlySignal,
   needsJudgment,
+  pairingCarriesEvidence,
   resolveCrmPairing,
   signalVerdict,
   zeroCrmPairingCounts,
@@ -115,7 +117,9 @@ describe("resolveCrmPairing — precedence is human > judgment > signal", () => 
     expect(v.judgmentStatus).toBe("not_asked");
   });
 
-  it("a confident judgment pairs a name-only match", () => {
+  // Owner 2026-10-10: a name is only ever a hint. However sure the model is, a name-only pairing
+  // is to confirm, and none of its CRM facts reach the lead until a person accepts it.
+  it("a confident judgment pairs a name-only match, but ALWAYS to confirm", () => {
     const v = resolveCrmPairing({
       signal: nameOnly,
       judgment: { samePersonProbability: 0.94, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" },
@@ -125,6 +129,7 @@ describe("resolveCrmPairing — precedence is human > judgment > signal", () => 
     expect(v.state).toBe("paired");
     expect(v.decidedBy).toBe("judgment");
     expect(v.judgmentStatus).toBe("pair");
+    expect(v.toConfirm).toBe(true);
   });
 
   it("a judgment below the floor rejects it", () => {
@@ -155,7 +160,7 @@ describe("resolveCrmPairing — precedence is human > judgment > signal", () => 
   it("the band is strict: at the bar is confident, at the floor rejects, between is to confirm", () => {
     const at = (p: number) =>
       resolveCrmPairing({
-        signal: nameOnly,
+        signal: signal({ matchMethod: "domain_name", matchConfidence: "strong", candidateCount: 2 }),
         judgment: { samePersonProbability: p, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" },
         judgmentUnavailableReason: null,
         ruling: null,
@@ -324,5 +329,53 @@ describe("matchMethodKey", () => {
   it("buckets an unmatched contact under none so the methods still partition", () => {
     expect(matchMethodKey(null)).toBe("none");
     expect(matchMethodKey("domain_name")).toBe("domain_name");
+  });
+});
+
+describe("pairingCarriesEvidence — a name is a hint until a person accepts it", () => {
+  const judged = (p: number) => ({ samePersonProbability: p, model: "jev-1.13.0", judgedAt: "2026-09-22T00:00:00Z" });
+  const ruling = (r: "accepted" | "rejected") => ({
+    ruling: r,
+    note: null,
+    statedByUserId: "u",
+    statedAt: "2026-09-23T00:00:00Z",
+  });
+  const carries = (s: CrmPairingSignal, p: number | null, r: "accepted" | "rejected" | null = null) =>
+    pairingCarriesEvidence(
+      s,
+      resolveCrmPairing({
+        signal: s,
+        judgment: p === null ? null : judged(p),
+        judgmentUnavailableReason: null,
+        ruling: r ? ruling(r) : null,
+      }),
+    );
+
+  it("never on a name-only pairing a judgment decided, however confident", () => {
+    for (const method of ["full_name", "last_name"] as const) {
+      const s = signal({ matchMethod: method, matchConfidence: "probabilistic", candidateCount: 72 });
+      expect(isNameOnlySignal(s)).toBe(true);
+      // The prod case: 72 Johnsons, judged 0.21, counted as McKenzie's positive reply.
+      expect(carries(s, 0.21)).toBe(false);
+      expect(carries(s, 0.99)).toBe(false);
+      expect(carries(s, null)).toBe(false);
+      expect(carries(s, 0.99, "rejected")).toBe(false);
+    }
+  });
+
+  it("on a name-only pairing a PERSON accepted", () => {
+    const s = signal({ matchMethod: "last_name", matchConfidence: "probabilistic", candidateCount: 72 });
+    expect(carries(s, 0.21, "accepted")).toBe(true);
+    expect(carries(s, null, "accepted")).toBe(true);
+  });
+
+  it("unchanged for deterministic and company-domain pairings", () => {
+    expect(carries(signal({ matchMethod: "email", matchConfidence: "deterministic" }), null)).toBe(true);
+    expect(carries(signal({ matchMethod: "phone", matchConfidence: "deterministic" }), null)).toBe(true);
+    const strong = signal({ matchMethod: "domain_name", matchConfidence: "strong", candidateCount: 2 });
+    expect(isNameOnlySignal(strong)).toBe(false);
+    expect(carries(strong, 0.5)).toBe(true);
+    expect(carries(strong, 0.1)).toBe(false);
+    expect(carries(signal({ matchMethod: "email", matchConfidence: "deterministic" }), null, "rejected")).toBe(false);
   });
 });

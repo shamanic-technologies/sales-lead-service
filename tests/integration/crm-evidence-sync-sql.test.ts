@@ -6,6 +6,8 @@
  *
  * What it proves:
  *   - only a PAIRED contact's evidence lands; an unconfirmed pairing writes nothing
+ *   - a NAME-ONLY pairing a judgment paired (even confidently) writes nothing until a person
+ *     accepts it, and loses everything again once that acceptance is withdrawn
  *   - whose win follows the date rule against our first delivered email, and an undated event is
  *     never ours
  *   - the lead then reads customer, with a closed deal whose source is `crm`, through the SAME
@@ -85,7 +87,7 @@ vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
 const { db } = await import("../../src/db/index.js");
 const { sql } = await import("drizzle-orm");
 const { leads, leadsCampaigns, leadContactMethods } = await import("../../src/db/schema.js");
-const { freezeMatches, upsertRuling } = await import("../../src/lib/crm-pairing-store.js");
+const { freezeMatches, saveJudgment, upsertRuling, withdrawRuling } = await import("../../src/lib/crm-pairing-store.js");
 const { syncCrmEvidence } = await import("../../src/lib/crm-evidence-sync.js");
 const { supersedeCrmOutcome, upsertCauseStatement, withdrawCauseStatement } = await import(
   "../../src/lib/crm-evidence-store.js"
@@ -180,6 +182,7 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     await seedLead("unsure", [campaignA]);
     await seedLead("noshow", [campaignA, campaignB]);
     await seedLead("stated", [campaignA]);
+    await seedLead("named", [campaignA]);
     state.legByCampaign.set(campaignA, "start_to_conversation");
     state.legByCampaign.set(campaignB, "start_to_conversation");
 
@@ -188,6 +191,12 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
       state.delivered.set(ids[key].email, "2026-05-11T00:00:00.000Z");
     }
     await pair("c-unsure", ids.unsure.leadId, "probabilistic");
+    // A name the model is SURE about: still a hint, never evidence, until a person accepts it.
+    await pair("c-named", ids.named.leadId, "probabilistic");
+    await saveJudgment({
+      orgId, brandId, crmContactId: "c-named", leadId: ids.named.leadId, samePersonProbability: 0.97, model: "jev-1.13.0",
+    });
+    state.delivered.set(ids.named.email, "2026-05-11T00:00:00.000Z");
 
     state.contacts = [
       { contactId: "c-after", primaryEmail: null, fullName: null, events: [
@@ -202,6 +211,10 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
         { step: "meeting_not_held", occurredAt: "2026-06-02T00:00:00.000Z", dateBasis: "scheduled_start", source: "appointment", sourceId: "ap9", detail: null },
       ] },
       { contactId: "c-stated", primaryEmail: null, fullName: null, events: [sale("2026-06-03T00:00:00.000Z")] },
+      { contactId: "c-named", primaryEmail: null, fullName: null, events: [
+        { step: "form_submitted", occurredAt: "2026-06-05T00:00:00.000Z", dateBasis: "submitted_at", source: "form", sourceId: "f1", detail: null },
+        { step: "meeting_booked", occurredAt: "2026-06-06T00:00:00.000Z", dateBasis: "booked_at", source: "appointment", sourceId: "ap2", detail: null },
+      ] },
     ];
 
     // A person already stated the sale for "stated" — theirs outranks the CRM.
@@ -240,6 +253,21 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
 
     expect(await crmOutcomes(ids.unsure.leadId)).toHaveLength(0);
     expect(await crmOutcomes(ids.stated.leadId)).toHaveLength(0);
+    expect(await crmOutcomes(ids.named.leadId)).toHaveLength(0);
+  });
+
+  it("a name-only pairing counts once a PERSON accepts it, and stops when they take it back", async () => {
+    await upsertRuling({
+      orgId, brandId, crmContactId: "c-named", leadId: ids.named.leadId, ruling: "accepted", note: null, statedByUserId: "u1",
+    });
+    await syncCrmEvidence(orgId, brandId);
+    const accepted = await crmOutcomes(ids.named.leadId);
+    expect(accepted.map((r) => r.event).sort()).toEqual(["meeting_booked", "positive_reply"]);
+    expect(accepted.every((r) => r.withdrawn_at === null)).toBe(true);
+
+    await withdrawRuling({ brandId, crmContactId: "c-named", leadId: ids.named.leadId, withdrawnByUserId: "u1" });
+    await syncCrmEvidence(orgId, brandId);
+    expect((await crmOutcomes(ids.named.leadId)).every((r) => r.withdrawn_at !== null)).toBe(true);
   });
 
   it("reads the paired lead as a customer with a CRM closed deal, through the shared resolver", async () => {
