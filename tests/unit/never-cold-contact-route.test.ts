@@ -48,11 +48,12 @@ describe("GET /orgs/brands/:brandId/never-cold-contact", () => {
   });
 
   it("returns the union of addresses and folds the legacy sale spelling", async () => {
-    execute.mockResolvedValue([
+    execute.mockResolvedValueOnce([
       { lead_id: "l1", emails: ["a@x.com"], first_at: "2026-10-07 16:04:20+00", steps: ["meeting_booked"], sources: ["crm"] },
       { lead_id: "l2", emails: ["a@x.com", "b@x.com"], first_at: null, steps: ["purchase", "sale"], sources: ["manual"] },
       { lead_id: "l3", emails: null, first_at: null, steps: ["meeting_attended"], sources: ["tracker"] },
     ]);
+    execute.mockResolvedValueOnce([]);
     const res = await call(app, "/orgs/brands/b1/never-cold-contact");
     expect(res.status).toBe(200);
     expect(res.body.emails).toEqual(["a@x.com", "b@x.com"]);
@@ -64,12 +65,42 @@ describe("GET /orgs/brands/:brandId/never-cold-contact", () => {
   });
 
   it("narrows the SAME query to one normalized address", async () => {
-    execute.mockResolvedValue([{ lead_id: "l1", emails: ["a@x.com"], first_at: null, steps: ["meeting_booked"], sources: ["crm"] }]);
+    execute
+      .mockResolvedValueOnce([{ lead_id: "l1", emails: ["a@x.com"], first_at: null, steps: ["meeting_booked"], sources: ["crm"] }])
+      .mockResolvedValueOnce([]);
     const res = await call(app, "/orgs/brands/b1/never-cold-contact?email=%20A@X.com%20");
-    const q = compile(execute.mock.calls[0][0]);
-    expect(q.sql).toContain("EXISTS");
-    expect(q.params).toContain("a@x.com");
+    for (const c of execute.mock.calls) {
+      const q = compile(c[0]);
+      expect(q.sql).toContain("EXISTS");
+      expect(q.params).toContain("a@x.com");
+    }
     expect(res.body.emails).toEqual(["a@x.com"]);
+  });
+
+  it("closes a CRM signup or payment that is not a lead at all", async () => {
+    execute.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { person_key: "email:u@x.com", emails: ["u@x.com", "u2@x.com"], first_at: "2026-06-18 10:00:00+00", types: ["payment", "signup"], sources: ["posthog", "stripe"] },
+    ]);
+    const res = await call(app, "/orgs/brands/b1/never-cold-contact");
+    const q = compile(execute.mock.calls[1][0]);
+    expect(q.sql).toContain("crm_facts");
+    expect(q.sql).toContain("w.type = 'withdrawn'");
+    expect(q.params).toContainEqual(["signup", "payment", "sale", "meeting_booked", "meeting_attended"]);
+    expect(q.params).toContain("org-1");
+    expect(q.params).toContain("b1");
+    expect(res.body.emails).toEqual(["u2@x.com", "u@x.com"]);
+    expect(res.body.crmPeople).toEqual([
+      { personKey: "email:u@x.com", emails: ["u@x.com", "u2@x.com"], firstAt: "2026-06-18T10:00:00.000Z", types: ["payment", "signup"], sources: ["posthog", "stripe"] },
+    ]);
+  });
+
+  it("answers [email] for one address only the CRM knows", async () => {
+    execute.mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { person_key: "email:u@x.com", emails: ["u@x.com"], first_at: null, types: ["signup"], sources: ["clerk"] },
+    ]);
+    const res = await call(app, "/orgs/brands/b1/never-cold-contact?email=U@x.com");
+    expect(res.body.emails).toEqual(["u@x.com"]);
+    expect(res.body.leads).toEqual([]);
   });
 
   it("refuses an empty email", async () => {

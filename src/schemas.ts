@@ -6312,6 +6312,24 @@ const NeverColdContactLeadSchema = z
   })
   .openapi("NeverColdContactLead");
 
+const NeverColdContactCrmPersonSchema = z
+  .object({
+    personKey: z.string().openapi({ description: "crm-service's person key for this person." }),
+    emails: z.array(z.string()).openapi({
+      description: "Every email address on the person's closing CRM facts, lowercased and trimmed.",
+    }),
+    firstAt: z.string().nullable().openapi({
+      description: "When the earliest closing fact happened, ISO-8601. Null only when genuinely undated.",
+    }),
+    types: z.array(z.string()).openapi({
+      description: "Which live CRM facts close this person to cold outreach: `signup`, `payment`, `sale`, `meeting_booked`, `meeting_attended`.",
+    }),
+    sources: z.array(z.string()).openapi({
+      description: "The customer's tools that observed them (e.g. `posthog`, `stripe`, `gohighlevel`, `clerk`).",
+    }),
+  })
+  .openapi("NeverColdContactCrmPerson");
+
 registry.registerPath({
   method: "get",
   path: "/orgs/brands/{brandId}/never-cold-contact",
@@ -6319,6 +6337,7 @@ registry.registerPath({
   description:
     "Every lead of the (org, brand) holding a live, attributed `meeting_booked`, `meeting_attended` or `sale` on the outcome ledger, whoever observed it " +
     "(a person's statement, the brand's tracker, the customer's own CRM, the prospect's reply). A booked meeting closes the person to cold outreach by this brand forever. " +
+    "Plus every person the brand's own CRM shows as signed up, paying, met or sold (`crmPeople`: any CRM source, any date, a lead or not yet a lead), keyed on the CRM fact's emails; a fact withdrawn by the CRM stops counting. " +
     "Wider than `/won-leads` (paying clients only), same shape for the `emails` set. Scope is the whole brand (every campaign, every offer) within the calling org. " +
     "A withdrawn statement stops counting on the next read. With `email`: the same read narrowed to that exact address (case-insensitive), `emails` is `[email]` or `[]`. " +
     "Built for the people gateway's serve gate. Any failure is a 500, never an empty set.",
@@ -6353,9 +6372,10 @@ registry.registerPath({
             .object({
               brandId: z.string(),
               emails: z.array(z.string()).openapi({
-                description: "Distinct lowercased addresses of every such lead (or `[email]` / `[]` when `email` was asked).",
+                description: "Distinct lowercased addresses of every such lead AND CRM person (or `[email]` / `[]` when `email` was asked).",
               }),
               leads: z.array(NeverColdContactLeadSchema),
+              crmPeople: z.array(NeverColdContactCrmPersonSchema),
             })
             .openapi("NeverColdContactResponse"),
         },
