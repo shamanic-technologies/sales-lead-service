@@ -592,9 +592,10 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
     expect(second.body.nextOffset).toBeNull();
   });
 
-  it("a to-confirm read judges what it walks and serves only the hesitant pairings", async () => {
+  it("a to-confirm read judges what it walks and serves every name-only pairing a judgment paired", async () => {
     sixContactFixture();
-    // crm-c is judged the same person confidently; crm-f hesitantly — so it pairs, to confirm.
+    // crm-c is judged the same person confidently, crm-f hesitantly. Both are name-only, so both
+    // pair TO CONFIRM: a name is a hint until a person accepts it (owner, 2026-10-10).
     judgeSamePerson
       .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
       .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
@@ -602,10 +603,13 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
     expect(res.status).toBe(200);
     expect(judgeSamePerson).toHaveBeenCalledTimes(2);
     expect(saveJudgment).toHaveBeenCalledTimes(2);
-    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-f"]);
-    expect(res.body.pairings[0].pairing.state).toBe("paired");
-    expect(res.body.pairings[0].pairing.toConfirm).toBe(true);
-    expect(res.body.pairings[0].pairing.judgment.status).toBe("undecided");
+    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-c", "crm-f"]);
+    expect(res.body.pairings.map((p: { pairing: { state: string } }) => p.pairing.state)).toEqual(["paired", "paired"]);
+    expect(res.body.pairings.every((p: { pairing: { toConfirm: boolean } }) => p.pairing.toConfirm)).toBe(true);
+    expect(res.body.pairings.map((p: { pairing: { judgment: { status: string } } }) => p.pairing.judgment.status)).toEqual([
+      "pair",
+      "undecided",
+    ]);
   });
 
   it("an unconfirmed read after every candidate is judged serves nothing — doubt lean to us", async () => {

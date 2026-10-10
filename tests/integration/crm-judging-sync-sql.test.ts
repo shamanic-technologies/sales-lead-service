@@ -134,14 +134,16 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     state.delivered.set(email, FIRST_EMAIL);
   }
 
-  async function pairByLastName(key: string) {
+  // Company domain + last name shared by two leads: the signal cannot decide, so a judgment does.
+  // (A name-only pairing would never carry evidence without a person; see crm-evidence-sync-sql.)
+  async function pairByDomainName(key: string) {
     await freezeMatches(orgId, brandId, [
       {
         crmContactId: `c-${key}`,
         result: {
           matchedLeadId: ids[key].leadId,
-          matchMethod: "last_name",
-          matchConfidence: "probabilistic",
+          matchMethod: "domain_name",
+          matchConfidence: "strong",
           attributionStatus: "needs_review",
           candidateCount: 2,
           candidates: [{ leadId: ids[key].leadId }],
@@ -184,7 +186,7 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
   beforeAll(async () => {
     for (const key of KEYS) {
       await seedLead(key);
-      await pairByLastName(key);
+      await pairByDomainName(key);
     }
     state.legByCampaign.set(campaign, "start_to_conversation");
     state.contacts = KEYS.map((key) => ({
