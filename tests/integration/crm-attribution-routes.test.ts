@@ -90,7 +90,7 @@ describe.skipIf(!hasRealDatabase)("crm-attribution routes against a real databas
     const none = await call("put", `/orgs/leads/${rowId}/crm-attribution/meeting_booked`).send({ causedByOutreach: true });
     expect(none.status).toBe(409);
     expect(none.body.code).toBe("no_crm_evidence");
-    const bad = await call("put", `/orgs/leads/${rowId}/crm-attribution/signup`).send({ causedByOutreach: true });
+    const bad = await call("put", `/orgs/leads/${rowId}/crm-attribution/website_visit`).send({ causedByOutreach: true });
     expect(bad.status).toBe(400);
   });
 

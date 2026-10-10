@@ -31,8 +31,13 @@ export interface CrmContactFunnelEvents {
   events: CrmFunnelEvent[];
 }
 
-/** The fact types that are funnel events: crm-service names them exactly as funnel-events did. */
+/**
+ * The fact types that are funnel events (crm-service names them exactly as funnel-events did, plus
+ * `signup` and `payment`, emitted by whichever of the customer's tools saw them).
+ */
 export const CRM_FUNNEL_FACT_TYPES = [
+  "signup",
+  "payment",
   "form_submitted",
   "meeting_booked",
   "meeting_attended",

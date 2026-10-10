@@ -5,12 +5,14 @@
  * any of it and nothing here ever writes back — no service in this fleet has a write path into a
  * customer's CRM, by design.
  *
- * Three reads, all brand-scoped, because a GoHighLevel sub-account is keyed to exactly one brand
- * (crm-service's `ghl_connections` is UNIQUE on `(org_id, brand_id)`):
+ * Brand-scoped reads:
  *
- *   - `fetchCrmConnection`   — does this brand have a mirrored CRM at all
- *   - `streamCrmContacts`    — their contacts, a page at a time, never all in memory
- *   - `fetchCrmOpportunities` — their opportunities, flattened out of the pipeline view
+ *   - `fetchCrmConnection`   — does this brand have a mirrored GoHighLevel CRM
+ *   - `streamCrmContacts`    — their contacts from EVERY source crm-service mirrors (GoHighLevel,
+ *                              PostHog, Stripe, CSV imports, chat...), a page at a time, never all in
+ *                              memory. One list, no per-source branch: a person is a candidate for
+ *                              pairing whichever of the customer's tools told the platform about them.
+ *   - `fetchCrmOpportunities` — their GoHighLevel opportunities, flattened out of the pipeline view
  *
  * FAIL LOUD: every failure throws `CrmServiceError` and the route answers 502. A CRM we could not
  * read and a CRM holding nothing are different facts, and collapsing them would tell a customer
@@ -168,6 +170,8 @@ export interface CrmContact {
   /** Provenance. Always present on a contact read through `fetchCrmContactsPage`. */
   record?: CrmContactRecord;
   lastRebuiltAt?: string | null;
+  /** Which of the customer's tools the record came from (crm-service's word, verbatim). */
+  source?: string | null;
 }
 
 /**
@@ -187,6 +191,7 @@ interface RawCrmContact {
   lastName?: string | null;
   unsubscribed?: boolean;
   lastRebuiltAt?: string | null;
+  source?: string | null;
   companyName?: string | null;
   company?: { name?: string | null; website?: string | null } | null;
   record?: {
@@ -223,6 +228,7 @@ export function normalizeCrmContact(raw: RawCrmContact): CrmContact {
     lastName: raw.lastName ?? null,
     unsubscribed: raw.unsubscribed === true,
     lastRebuiltAt: raw.lastRebuiltAt ?? null,
+    source: textOrNull(raw.source),
     companyName: textOrNull(raw.company?.name) ?? textOrNull(raw.companyName),
     companyUrl: textOrNull(raw.company?.website),
     record: {
@@ -240,17 +246,79 @@ export function normalizeCrmContact(raw: RawCrmContact): CrmContact {
   };
 }
 
+/**
+ * crm-service's contact ROW, as `/orgs/contacts` serves it (every source, flat columns). Read into
+ * the same grouped shape the GoHighLevel read serves, so every caller sees one contact type.
+ */
+export interface RawCrmContactRow {
+  id: string;
+  brandId: string;
+  source?: string | null;
+  externalId?: string | null;
+  primaryEmail?: string | null;
+  phoneE164?: string | null;
+  fullName?: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  unsubscribed?: boolean;
+  lastRebuiltAt?: string | null;
+  companyName?: string | null;
+  website?: string | null;
+  contactType?: unknown;
+  leadSource?: unknown;
+  tags?: unknown;
+  sourceCreatedAt?: unknown;
+  sourceUpdatedAt?: unknown;
+  originMedium?: unknown;
+  originUrl?: unknown;
+  originReferrer?: unknown;
+}
+
+export function normalizeCrmContactRow(row: RawCrmContactRow): CrmContact {
+  return normalizeCrmContact({
+    id: row.id,
+    brandId: row.brandId,
+    source: row.source ?? null,
+    externalId: row.externalId ?? null,
+    primaryEmail: row.primaryEmail ?? null,
+    phoneE164: row.phoneE164 ?? null,
+    fullName: row.fullName ?? null,
+    firstName: row.firstName ?? null,
+    lastName: row.lastName ?? null,
+    unsubscribed: row.unsubscribed,
+    lastRebuiltAt: row.lastRebuiltAt ?? null,
+    company: { name: row.companyName ?? null, website: row.website ?? null },
+    record: {
+      type: row.contactType,
+      leadSource: row.leadSource,
+      tags: row.tags,
+      createdAt: row.sourceCreatedAt,
+      updatedAt: row.sourceUpdatedAt,
+      origin: { medium: row.originMedium, url: row.originUrl, referrer: row.originReferrer },
+    },
+  });
+}
+
+/**
+ * One page of the brand's contacts, EVERY source (crm-service `GET /orgs/contacts`, a total order
+ * on `lastRebuiltAt DESC, id`). A record crm-service rebuilds mid-walk moves to the front, so a walk
+ * can miss it once; every walk here is repeated (the evidence pass each interval), so a miss is
+ * picked up on the next one, never lost.
+ */
 export async function fetchCrmContactsPage(
   brandId: string,
   limit: number,
   offset: number,
   ctx: CrmIdentityContext,
 ): Promise<CrmContact[]> {
-  const body = await getJson<{ contacts?: RawCrmContact[] }>(
-    `/orgs/gohighlevel/contacts?brandId=${encodeURIComponent(brandId)}&limit=${limit}&offset=${offset}`,
+  const body = await getJson<{ contacts?: RawCrmContactRow[] }>(
+    `/orgs/contacts?brandId=${encodeURIComponent(brandId)}&limit=${limit}&offset=${offset}`,
     ctx,
   );
-  return Array.isArray(body.contacts) ? body.contacts.map(normalizeCrmContact) : [];
+  if (!Array.isArray(body.contacts)) {
+    throw new CrmServiceError(`crm-service /orgs/contacts answered with no contacts array`);
+  }
+  return body.contacts.map(normalizeCrmContactRow);
 }
 
 /**

@@ -33,6 +33,12 @@
  *   form_submitted   -> outcome positive_reply  (owner: "a form submitted in their CRM = a positive
  *                                                reply for us" — written only when the whose-win
  *                                                rule says it answered our outreach)
+ *   signup           -> outcome signup          (a person who signed up to their product, e.g. PostHog)
+ *   payment          -> outcome sale            (a person who PAID them, e.g. Stripe: only a payment
+ *                                                that succeeded and was not wholly refunded; its value
+ *                                                is what the person paid, net — `paidValueCents`)
+ * The mapping is on crm-service's fact TYPE, never on which tool emitted it: a signup is a signup
+ * whichever of the customer's tools saw it.
  * A never is represented exactly as a person's "never" is (lead_step_disqualifications), so the
  * leg graph's rules apply to it unchanged — and an outcome on the same step still beats it.
  */
@@ -64,6 +70,7 @@ export const CRM_FORM_SUBMITTED_EVENT = "form_submitted" as const;
 
 /** The steps a CRM can evidence, in OUR vocabulary. */
 export const CRM_EVIDENCED_STEPS = [
+  "signup",
   "meeting_booked",
   "meeting_attended",
   "sale",
@@ -78,7 +85,48 @@ const CRM_STEP_MAP: Record<string, { kind: CrmEvidenceKind; step: CrmEvidencedSt
   meeting_not_held: { kind: "never", step: "meeting_attended" },
   deal_lost: { kind: "never", step: "sale" },
   [CRM_FORM_SUBMITTED_EVENT]: { kind: "outcome", step: CRM_POSITIVE_REPLY_STEP },
+  signup: { kind: "outcome", step: "signup" },
+  payment: { kind: "outcome", step: "sale" },
 };
+
+/** crm-service's fact for money a person paid the customer — its own token, verbatim. */
+export const CRM_PAYMENT_EVENT = "payment" as const;
+
+function minor(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Whether a payment stands as evidence the person PAID: it succeeded and was not wholly refunded.
+ * A failed, pending or fully refunded payment is a fact about money that did not stay, not a paid
+ * client.
+ */
+export function paymentStands(detail: Record<string, unknown> | null | undefined): boolean {
+  if (!detail || detail.status !== "succeeded") return false;
+  const amount = minor(detail.amountMinor);
+  const refunded = minor(detail.amountRefunded) ?? 0;
+  if (amount !== null) return amount - refunded > 0;
+  return detail.refunded !== true;
+}
+
+/**
+ * What a person paid, in cents: the sum, net of refunds, of every payment of theirs that stands.
+ * `null` when none stands, or when one is not in USD or carries no amount — amounts in different
+ * currencies are not added up and nothing is estimated.
+ */
+export function paidValueCents(events: readonly CrmFunnelEvent[]): number | null {
+  let total = 0;
+  let counted = 0;
+  for (const e of events) {
+    if (e.step !== CRM_PAYMENT_EVENT || !paymentStands(e.detail)) continue;
+    const amount = minor(e.detail!.amountMinor);
+    const currency = e.detail!.currency;
+    if (amount === null || typeof currency !== "string" || currency.toLowerCase() !== "usd") return null;
+    total += amount - (minor(e.detail!.amountRefunded) ?? 0);
+    counted += 1;
+  }
+  return counted > 0 ? Math.round(total) : null;
+}
 
 /** One step's evidence, chosen out of a contact's events. */
 export interface CrmStepEvidence {
@@ -117,6 +165,7 @@ export function evidenceFromEvents(events: readonly CrmFunnelEvent[]): CrmStepEv
   for (const e of events) {
     const mapped = CRM_STEP_MAP[e.step];
     if (!mapped) continue;
+    if (e.step === CRM_PAYMENT_EVENT && !paymentStands(e.detail)) continue;
     const candidate: CrmStepEvidence = {
       kind: mapped.kind,
       step: mapped.step,
