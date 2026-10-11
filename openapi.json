@@ -7552,6 +7552,272 @@
           "lastName",
           "company"
         ]
+      },
+      "SourcingStatsResponse": {
+        "type": "object",
+        "properties": {
+          "campaignId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string"
+          },
+          "origin": {
+            "type": "object",
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "lists": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "slug",
+              "name",
+              "lists"
+            ]
+          },
+          "outreachCampaignIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The offer's outreach campaigns a kept person is served to."
+          },
+          "found": {
+            "type": "object",
+            "properties": {
+              "people": {
+                "type": "integer"
+              },
+              "companies": {
+                "type": "integer",
+                "description": "Distinct company domains behind those people."
+              },
+              "peopleWithoutCompany": {
+                "type": "integer",
+                "description": "People whose company we do not hold (not counted in `companies`)."
+              }
+            },
+            "required": [
+              "people",
+              "companies",
+              "peopleWithoutCompany"
+            ]
+          },
+          "kept": {
+            "type": "object",
+            "properties": {
+              "people": {
+                "type": "integer"
+              },
+              "companies": {
+                "type": "integer",
+                "description": "Distinct company domains behind those people."
+              },
+              "peopleWithoutCompany": {
+                "type": "integer",
+                "description": "People whose company we do not hold (not counted in `companies`)."
+              },
+              "byThisSource": {
+                "type": "integer",
+                "description": "Kept people a serve under one of this source's audiences handed out."
+              },
+              "viaAnotherSource": {
+                "type": "integer",
+                "description": "Kept people this source found while another source's serve handed them out."
+              }
+            },
+            "required": [
+              "people",
+              "companies",
+              "peopleWithoutCompany",
+              "byThisSource",
+              "viaAnotherSource"
+            ]
+          },
+          "notKept": {
+            "type": "object",
+            "properties": {
+              "screened_out": {
+                "type": "integer"
+              },
+              "failed_qualification_check": {
+                "type": "integer"
+              },
+              "kept_by_another_offer": {
+                "type": "integer"
+              },
+              "not_served": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "screened_out",
+              "failed_qualification_check",
+              "kept_by_another_offer",
+              "not_served"
+            ]
+          },
+          "daily": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string",
+                  "example": "2026-10-10"
+                },
+                "found": {
+                  "type": "integer"
+                },
+                "kept": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "day",
+                "found",
+                "kept"
+              ]
+            }
+          },
+          "byAudience": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "null when human-service serves no card for it (retired audience)."
+                },
+                "list": {
+                  "type": "string"
+                },
+                "found": {
+                  "type": "integer"
+                },
+                "kept": {
+                  "type": "integer"
+                },
+                "screenedOut": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "name",
+                "list",
+                "found",
+                "kept",
+                "screenedOut"
+              ]
+            }
+          },
+          "bySignal": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "source": {
+                  "type": "string"
+                },
+                "competitorPage": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "postUrl": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "people": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "type",
+                "source",
+                "competitorPage",
+                "postUrl",
+                "people"
+              ]
+            },
+            "description": "Kept people per buying signal their serve under this source carried (LinkedIn: per competitor post)."
+          },
+          "keptWithoutSignal": {
+            "type": "integer"
+          },
+          "keptAlsoFoundByOtherSources": {
+            "type": "integer"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "no_audience",
+                    "audience_unattributed",
+                    "no_registered_email",
+                    "screened_audience_unknown",
+                    "qualified_before_us"
+                  ]
+                },
+                "people": {
+                  "type": "integer"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "offer",
+                    "brand",
+                    "source"
+                  ]
+                }
+              },
+              "required": [
+                "reason",
+                "people",
+                "scope"
+              ]
+            }
+          }
+        },
+        "required": [
+          "campaignId",
+          "brandId",
+          "offerId",
+          "origin",
+          "outreachCampaignIds",
+          "found",
+          "kept",
+          "notKept",
+          "daily",
+          "byAudience",
+          "bySignal",
+          "keptWithoutSignal",
+          "keptAlsoFoundByOtherSources",
+          "gaps"
+        ]
       }
     },
     "parameters": {},
@@ -13431,6 +13697,67 @@
           },
           "500": {
             "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/campaigns/{campaignId}/sourcing-stats": {
+      "get": {
+        "summary": "What one lead SOURCE campaign found and what we kept, since inception",
+        "description": "`campaignId` is a source pipe (a campaign-service campaign on leg `start_to_lead_found`, keyed offer + origin slug). Its people come from recorded facts, not from which campaign a serve run was filed under: the source's audiences are the brand's audiences of the offer whose LIST KIND the origin counts (features-service catalogue). FOUND = every person one of those audiences surfaced: a human-service membership (`served` or `found_taken`) or a candidate this service screened (pass or reject) or declined on a must-pass check. KEPT = found AND served to an outreach campaign of the offer. A person found by several sources counts in EACH (never first-found); `kept.byThisSource` vs `kept.viaAnotherSource` says whose serve handed them out. found.people = kept.people + sum(notKept). `daily`: found on the day the source first surfaced the person, kept on the day both were true (UTC; days with no event omitted). `gaps`: people whose source cannot be named, as counts with a reason, never guessed onto a source. 404 not a campaign of the org; 409 not a lead source; 502 a sibling could not answer (never a partial count).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The source's people since inception",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcingStatsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not a campaign of this org"
+          },
+          "409": {
+            "description": "Not a lead source campaign"
+          },
+          "502": {
+            "description": "A sibling service could not answer"
           }
         }
       }

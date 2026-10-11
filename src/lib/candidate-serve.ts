@@ -163,6 +163,8 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       reason,
       model,
       runId: identity.runId,
+      companyDomain: c.company.domain,
+      companyName: c.company.name,
     })
     .onConflictDoNothing();
   return { pass, reason };

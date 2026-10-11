@@ -126,8 +126,8 @@ describe("audience-client resolveBrandMembershipsByEmail", () => {
     expect(JSON.parse(calls[0].init.body as string)).toEqual({ orgId: "org-1", emails: ["a@x.com", "b@x.com"] });
     expect((calls[0].init.headers as Record<string, string>)["X-API-Key"]).toBe("human-key");
     expect(out.get("a@x.com")).toEqual([
-      { audienceId: "aud-1", offerId: null, list: "apollo_search", provenance: "served" },
-      { audienceId: "aud-2", offerId: "o", list: "linkedin_engagement", provenance: "found_taken" },
+      { audienceId: "aud-1", offerId: null, list: "apollo_search", provenance: "served", joinedAt: "2026-10-01T00:00:00Z" },
+      { audienceId: "aud-2", offerId: "o", list: "linkedin_engagement", provenance: "found_taken", joinedAt: "2026-10-02T00:00:00Z" },
     ]);
     expect(out.get("b@x.com")).toEqual([]);
   });
