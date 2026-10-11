@@ -3,6 +3,8 @@ import {
   BILLING_SERVICE_URL,
   CAMPAIGN_SERVICE_API_KEY,
   CAMPAIGN_SERVICE_URL,
+  HUMAN_SERVICE_API_KEY,
+  HUMAN_SERVICE_URL,
 } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { SOURCE_BUDGET_REACHED_REASON, SOURCE_CAMPAIGN_OFF_REASON } from "./serve-reasons.js";
@@ -27,8 +29,12 @@ import { SOURCE_BUDGET_REACHED_REASON, SOURCE_CAMPAIGN_OFF_REASON } from "./serv
  *   - the origin's source campaign is ON -> `source`, within ITS budget: billing's ceiling for
  *     (offer, start_to_lead_found, origin) against what that source campaign spent today. No ceiling
  *     stated -> nothing caps it here (the outreach campaign's gate still paces the run, as today).
- *   - the offer has source campaigns and this origin's is OFF or absent -> refused,
- *     `source_campaign_off`: nothing is bought from a source the customer did not turn on.
+ *   - else the offer's LEAD SOURCING campaign is ON (owner 2026-10-11: the sourcing channel that picks its
+ *     origins; human-service decides which, per brand) and human-service CHOSE this origin for it ->
+ *     `source` filed under the Lead Sourcing campaign, within ITS budget; the serve run carries
+ *     `lead-sourcing` (the channel it is filed under), the origin stays readable off the audience.
+ *   - the offer has source campaigns and this origin's is OFF or absent (and Lead Sourcing does not use it)
+ *     -> refused, `source_campaign_off`: nothing is bought from a source the customer did not turn on.
  *
  * FAIL LOUD: a read that cannot be completed throws SourceCampaignUnresolvedError and the serve fails
  * (500) before anything is bought, never a serve filed under the wrong campaign.
@@ -45,9 +51,13 @@ export class SourceCampaignUnresolvedError extends Error {
   }
 }
 
+/** The sourcing channel that picks its own origins (features-service `LEAD_SOURCING_CHANNEL`). */
+export const LEAD_SOURCING_SLUG = "lead-sourcing";
+
 export type ServeSource =
   | { kind: "legacy"; why: "channel_not_sourced" | "offer_not_on_source_campaigns" }
-  | { kind: "source"; campaignId: string; originSlug: string; offerId: string }
+  /** `sourceSlug` = the channel of the source campaign the serve is filed under (the origin, or Lead Sourcing). */
+  | { kind: "source"; campaignId: string; originSlug: string; sourceSlug: string; offerId: string }
   | {
       kind: "refused";
       reason: typeof SOURCE_CAMPAIGN_OFF_REASON | typeof SOURCE_BUDGET_REACHED_REASON;
@@ -134,46 +144,97 @@ async function fetchSourceBudgetToday(args: {
 }
 
 /**
+ * The origins human-service chose for the offer's Lead Sourcing campaign (`GET /orgs/lead-sourcing/sources`).
+ * Fail loud: unreadable = SourceCampaignUnresolvedError (the serve fails before anything is bought).
+ */
+async function fetchLeadSourcingChoice(args: {
+  orgId: string;
+  brandId: string;
+  offerId: string;
+  userId?: string | null;
+  runId?: string | null;
+}): Promise<Set<string>> {
+  const query = new URLSearchParams({ brandId: args.brandId, offerId: args.offerId });
+  const url = `${HUMAN_SERVICE_URL}/orgs/lead-sourcing/sources?${query}`;
+  const where = `brand=${args.brandId} offer=${args.offerId} org=${args.orgId}`;
+  const headers: Record<string, string> = { "x-api-key": HUMAN_SERVICE_API_KEY, "x-org-id": args.orgId };
+  if (args.userId) headers["x-user-id"] = args.userId;
+  if (args.runId) headers["x-run-id"] = args.runId;
+  const response = await fetchWithRetry(url, { headers, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+  if (!response.ok) {
+    throw new SourceCampaignUnresolvedError(`human-service lead-sourcing read failed (${where}): ${response.status} ${await response.text()}`);
+  }
+  const body = (await response.json()) as { chosenOriginSlugs?: unknown };
+  if (!Array.isArray(body.chosenOriginSlugs) || body.chosenOriginSlugs.some((s) => typeof s !== "string")) {
+    throw new SourceCampaignUnresolvedError(`human-service lead-sourcing answer unreadable (${where}): no chosenOriginSlugs`);
+  }
+  return new Set(body.chosenOriginSlugs as string[]);
+}
+
+/** Within the source campaign's own budget (billing), or why not. */
+async function withinBudget(args: { orgId: string; brandId: string; offerId: string; sourceSlug: string; campaignId: string; originSlug: string }): Promise<ServeSource> {
+  const budget = await fetchSourceBudgetToday({
+    orgId: args.orgId,
+    brandId: args.brandId,
+    offerId: args.offerId,
+    originSlug: args.sourceSlug,
+    sourceCampaignId: args.campaignId,
+  });
+  if (budget.dailyBudgetCents !== null && budget.spentCents >= budget.dailyBudgetCents) {
+    return {
+      kind: "refused",
+      reason: SOURCE_BUDGET_REACHED_REASON,
+      campaignId: args.campaignId,
+      detail: `source campaign ${args.campaignId} (${args.sourceSlug}) spent ${budget.spentCents}c of ${budget.dailyBudgetCents}c today`,
+    };
+  }
+  return { kind: "source", campaignId: args.campaignId, originSlug: args.originSlug, sourceSlug: args.sourceSlug, offerId: args.offerId };
+}
+
+/**
  * The source campaign this serve is filed under, or why it may not serve. `originSlug` is the
  * audience's sourcing origin (null when the serve has none: no audience, or one serving from no list,
- * which buys nothing and stays `legacy`).
+ * which buys nothing and stays `legacy`). `userId`/`runId` ride the Lead Sourcing read (human-service).
  */
 export async function resolveServeSource(params: {
   orgId: string;
   brandId: string;
   outreachCampaignId: string;
   originSlug: string | null;
+  userId?: string | null;
+  runId?: string | null;
 }): Promise<ServeSource> {
   if (!params.originSlug) return { kind: "legacy", why: "channel_not_sourced" };
   const read = await fetchCampaignSources(params.outreachCampaignId, params.orgId);
   if (!read.sourced || !read.offerId) return { kind: "legacy", why: "channel_not_sourced" };
   if (read.sourceCampaigns.length === 0) return { kind: "legacy", why: "offer_not_on_source_campaigns" };
+  const offerId = read.offerId;
 
   const ofOrigin = read.sourceCampaigns.filter((s) => s.featureSlug === params.originSlug);
   const on = ofOrigin.find((s) => s.running);
-  if (!on) {
+  if (on) {
+    return withinBudget({ orgId: params.orgId, brandId: params.brandId, offerId, sourceSlug: params.originSlug, campaignId: on.campaignId, originSlug: params.originSlug });
+  }
+
+  // LEAD SOURCING (owner 2026-10-11): its campaign is ON and human-service chose this origin for the brand.
+  const leadSourcing = read.sourceCampaigns.find((s) => s.featureSlug === LEAD_SOURCING_SLUG && s.running);
+  if (leadSourcing) {
+    const chosen = await fetchLeadSourcingChoice({ orgId: params.orgId, brandId: params.brandId, offerId, userId: params.userId, runId: params.runId });
+    if (chosen.has(params.originSlug)) {
+      return withinBudget({ orgId: params.orgId, brandId: params.brandId, offerId, sourceSlug: LEAD_SOURCING_SLUG, campaignId: leadSourcing.campaignId, originSlug: params.originSlug });
+    }
     return {
       kind: "refused",
       reason: SOURCE_CAMPAIGN_OFF_REASON,
-      campaignId: ofOrigin[0]?.campaignId ?? null,
-      detail: ofOrigin.length > 0 ? `source campaign ${ofOrigin[0].campaignId} (${params.originSlug}) is off` : `no ${params.originSlug} source campaign on this offer`,
+      campaignId: leadSourcing.campaignId,
+      detail: `lead sourcing campaign ${leadSourcing.campaignId} does not use ${params.originSlug} for this brand (it uses ${[...chosen].sort().join(", ") || "none"})`,
     };
   }
 
-  const budget = await fetchSourceBudgetToday({
-    orgId: params.orgId,
-    brandId: params.brandId,
-    offerId: read.offerId,
-    originSlug: params.originSlug,
-    sourceCampaignId: on.campaignId,
-  });
-  if (budget.dailyBudgetCents !== null && budget.spentCents >= budget.dailyBudgetCents) {
-    return {
-      kind: "refused",
-      reason: SOURCE_BUDGET_REACHED_REASON,
-      campaignId: on.campaignId,
-      detail: `source campaign ${on.campaignId} (${params.originSlug}) spent ${budget.spentCents}c of ${budget.dailyBudgetCents}c today`,
-    };
-  }
-  return { kind: "source", campaignId: on.campaignId, originSlug: params.originSlug, offerId: read.offerId };
+  return {
+    kind: "refused",
+    reason: SOURCE_CAMPAIGN_OFF_REASON,
+    campaignId: ofOrigin[0]?.campaignId ?? null,
+    detail: ofOrigin.length > 0 ? `source campaign ${ofOrigin[0].campaignId} (${params.originSlug}) is off` : `no ${params.originSlug} source campaign on this offer`,
+  };
 }

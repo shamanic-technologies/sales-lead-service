@@ -253,6 +253,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
       kind: "source",
       campaignId: SOURCE_CAMPAIGN,
       originSlug: "sourcing-apollo-cold-filters",
+      sourceSlug: "sourcing-apollo-cold-filters",
       offerId: "70000000-0000-0000-0000-000000000001",
     });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
@@ -262,12 +263,13 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     const res = await post(app, AUDIENCE);
 
     expect(res.status).toBe(200);
-    expect(resolveServeSource).toHaveBeenCalledWith({
+    expect(resolveServeSource).toHaveBeenCalledWith(expect.objectContaining({
       orgId: ORG,
       brandId: BRAND,
       outreachCampaignId: CAMPAIGN,
       originSlug: "sourcing-apollo-cold-filters",
-    });
+      runId: RUN,
+    }));
     expect(createRun).toHaveBeenCalledWith(
       expect.objectContaining({
         taskName: "lead-serve",
@@ -281,6 +283,30 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
       expect.anything(),
     );
     expect(updateRun).toHaveBeenCalledWith("serve-run-1", "completed", expect.objectContaining({ campaignId: SOURCE_CAMPAIGN }));
+  });
+
+  it("a serve filed under LEAD SOURCING runs under `lead-sourcing` (owner 2026-10-11), the lead stays the outreach campaign's", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-buying-signals");
+    resolveServeSource.mockResolvedValueOnce({
+      kind: "source",
+      campaignId: SOURCE_CAMPAIGN,
+      originSlug: "sourcing-apollo-buying-signals",
+      sourceSlug: "lead-sourcing",
+      offerId: "70000000-0000-0000-0000-000000000001",
+    });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ taskName: "lead-serve", campaignId: SOURCE_CAMPAIGN, featureSlug: "lead-sourcing" }));
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: CAMPAIGN, runCampaignId: SOURCE_CAMPAIGN, runFeatureSlug: "lead-sourcing" }),
+      expect.anything(),
+    );
+    expect(updateRun).toHaveBeenCalledWith("serve-run-1", "completed", expect.objectContaining({ campaignId: SOURCE_CAMPAIGN, featureSlug: "lead-sourcing" }));
   });
 
   it("a source campaign that is OFF buys nothing: found:false source_campaign_off, run closed, no serve", async () => {
@@ -342,7 +368,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("holds the per-outreach-campaign serial invariant in-process (a serve filed under a source is invisible to the runs guard)", async () => {
     resolveSourcingOriginSlug.mockResolvedValue("sourcing-apollo-cold-filters");
-    resolveServeSource.mockResolvedValue({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", offerId: "o" });
+    resolveServeSource.mockResolvedValue({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: "o" });
     createRun.mockResolvedValue({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     let release: (v: unknown) => void = () => {};
@@ -361,7 +387,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
   // ── lead_requested trigger events (src/lib/lead-requested-events.ts) ───────────────────────
   it("records ONE lead_requested event `ran` under the SOURCE campaign, naming the lead and the outreach campaign that asked", async () => {
     resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
-    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
