@@ -42,7 +42,7 @@ startOutcomeCauseWorker();
 startOutreachFactFeedWorker();
 // Keeps every brand's labelled timeline (silver lead_timeline_facts) current (see timeline-facts.ts).
 startTimelineFactsWorker();
-// Redelivers every lead_requested trigger event campaign-service has not recorded yet (lead-requested-events.ts).
+// Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one

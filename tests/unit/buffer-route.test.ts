@@ -59,6 +59,11 @@ vi.mock("../../src/lib/source-campaign.js", () => ({
   resolveServeSource: (...a: unknown[]) => resolveServeSource(...a),
 }));
 
+const openOnDemandRun = vi.fn();
+vi.mock("../../src/lib/on-demand-run.js", () => ({
+  openOnDemandRun: (...a: unknown[]) => openOnDemandRun(...a),
+}));
+
 const recordLeadRequested = vi.fn();
 vi.mock("../../src/lib/lead-requested-events.js", () => ({
   recordLeadRequested: (...a: unknown[]) => recordLeadRequested(...a),
@@ -104,6 +109,13 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     findFirst.mockResolvedValue(undefined);
     checkConcurrentBufferNext.mockResolvedValue({ blocked: false });
     resolveServeSource.mockResolvedValue({ kind: "legacy", why: "offer_not_on_source_campaigns" });
+    openOnDemandRun.mockImplementation(async (p: { campaignId: string }) => ({
+      runId: "on-demand-run-1",
+      campaignId: p.campaignId,
+      featureSlug: "sourcing-apollo-cold-filters",
+      workflowSlug: "sourcing-apollo-cold-filters-scheat",
+      brandIds: [BRAND],
+    }));
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
@@ -273,7 +285,8 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(createRun).toHaveBeenCalledWith(
       expect.objectContaining({
         taskName: "lead-serve",
-        parentRunId: RUN,
+        // Under the source unit's own on-demand run (src/lib/on-demand-run.ts), never the cold email run.
+        parentRunId: "on-demand-run-1",
         campaignId: SOURCE_CAMPAIGN,
         featureSlug: "sourcing-apollo-cold-filters",
       }),
@@ -384,8 +397,57 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect((await first).status).toBe(200);
     resolveSourcingOriginSlug.mockReset();
   });
-  // ── lead_requested trigger events (src/lib/lead-requested-events.ts) ───────────────────────
-  it("records ONE lead_requested event `ran` under the SOURCE campaign, naming the lead and the outreach campaign that asked", async () => {
+  // ── on_demand: the source unit's OWN run (src/lib/on-demand-run.ts, owner 2026-10-11) ──────
+  it("a serve under a source unit runs under the unit's OWN on-demand run, with the unit's workflow, and closes it", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(openOnDemandRun).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: ORG, callerRunId: RUN, campaignId: SOURCE_CAMPAIGN, audienceId: AUDIENCE }),
+    );
+    // The serve hangs from the unit's run, never the cold email run, and carries the unit's workflow.
+    expect(createRun).toHaveBeenCalledWith(
+      expect.objectContaining({ taskName: "lead-serve", parentRunId: "on-demand-run-1", campaignId: SOURCE_CAMPAIGN, workflowSlug: "sourcing-apollo-cold-filters-scheat" }),
+    );
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: "serve-run-1", workflowSlug: "sourcing-apollo-cold-filters-scheat", parentRunId: RUN }),
+      expect.anything(),
+    );
+    expect(updateRun).toHaveBeenCalledWith("serve-run-1", "completed", expect.objectContaining({ workflowSlug: "sourcing-apollo-cold-filters-scheat" }));
+    expect(updateRun).toHaveBeenCalledWith("on-demand-run-1", "completed", expect.objectContaining({ campaignId: SOURCE_CAMPAIGN }));
+  });
+
+  it("a legacy serve (no source unit) opens no on-demand run: today's serve under the caller's run", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    await post(app);
+
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ parentRunId: RUN }));
+  });
+
+  it("fails loud (500, no serve) when the unit's run cannot be opened", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
+    openOnDemandRun.mockRejectedValueOnce(new Error("campaign-service refused to open the on-demand run (409)"));
+
+    const res = await post(app, AUDIENCE);
+
+    expect(res.status).toBe(500);
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  // ── on_demand trigger events (src/lib/lead-requested-events.ts) ───────────────────────
+  it("records ONE on_demand event `ran` under the SOURCE campaign, naming the lead and the outreach campaign that asked", async () => {
     resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
     resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: "offer-1" });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });

@@ -6,9 +6,10 @@ import { fetchCampaign } from "./campaign-client.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 /**
- * EVERY ASK FOR A LEAD IS RECORDED AT campaign-service AS A `lead_requested` TRIGGER EVENT
- * (owner 2026-10-09: every leg is PROACTIVE or REACTIVE; the sourcing channels are REACTIVE on
- * `lead_requested`, and that ask is this service's serve, performed in-process).
+ * EVERY ASK FOR A LEAD IS RECORDED AT campaign-service AS AN `on_demand` TRIGGER EVENT
+ * (owner 2026-10-09: every leg is PROACTIVE or REACTIVE; the sourcing channels are REACTIVE on `on_demand` since
+ * 2026-10-11, `lead_requested` before: they run only when the outbound run asks, and that ask is this service's
+ * serve, performed in-process under the source unit's own run, src/lib/on-demand-run.ts).
  *
  * One serve (`POST /orgs/buffer/next`, one caller `x-run-id`) = one event, posted to campaign-service
  * `POST /internal/trigger-events` as ALREADY PERFORMED (nothing is dispatched there):
@@ -21,7 +22,7 @@ import { fetchWithRetry } from "./fetch-retry.js";
  * Rules:
  *   1. Recording NEVER blocks, slows or fails a serve: the route calls `recordLeadRequested` without
  *      awaiting it, and nothing it does can throw into the route.
- *   2. Exactly once: the idempotency key is the caller's run (`lead_requested:<x-run-id>`), so our
+ *   2. Exactly once: the idempotency key is the caller's run (`on_demand:<x-run-id>`), so our
  *      own redelivery and the caller's retry both replay the first event at campaign-service. A
  *      retry answered from the serve's idempotency cache is not a new ask and records nothing. A
  *      serve that 500s records nothing (the caller's retry under the same run is the ask).
@@ -34,7 +35,8 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *      no offer cannot be recorded: refused with that reason, visible in the outbox.
  */
 
-export const LEAD_REQUESTED_TRIGGER_ID = "lead_requested" as const;
+/** The trigger a sourcing pipe answers (features-service `channel-triggers.ts`); `lead_requested` until 2026-10-11. */
+export const LEAD_REQUESTED_TRIGGER_ID = "on_demand" as const;
 
 const CALL_TIMEOUT_MS = 10_000;
 export const OUTBOX_DRAIN_INTERVAL_MS = 60_000;
@@ -141,7 +143,7 @@ async function keepInOutbox(event: LeadRequestedEvent, result: Exclude<DeliveryR
 }
 
 /**
- * Record one serve's `lead_requested` event. Called WITHOUT await from the serve route; never throws,
+ * Record one serve's `on_demand` event. Called WITHOUT await from the serve route; never throws,
  * never rejects. A failed delivery lands in the outbox; a failed outbox write is logged loud.
  */
 export function recordLeadRequested(event: LeadRequestedEvent): void {
@@ -149,11 +151,11 @@ export function recordLeadRequested(event: LeadRequestedEvent): void {
     const result = await deliverLeadRequested(event);
     if (result.kind === "delivered") return;
     console.error(
-      `[lead-service] lead_requested event NOT recorded (${result.kind}), kept in trigger_event_outbox: ${describe(event)}: ${result.error}`,
+      `[lead-service] on_demand event NOT recorded (${result.kind}), kept in trigger_event_outbox: ${describe(event)}: ${result.error}`,
     );
     await keepInOutbox(event, result);
   })().catch((err) => {
-    console.error(`[lead-service] lead_requested event LOST (outbox write failed): ${describe(event)}:`, err);
+    console.error(`[lead-service] on_demand event LOST (outbox write failed): ${describe(event)}:`, err);
   });
 }
 
@@ -193,7 +195,7 @@ export async function drainTriggerEventOutbox(): Promise<{ delivered: number; re
       if (result.kind === "refused") counts.refused++;
       else counts.retried++;
       console.error(
-        `[lead-service] lead_requested redelivery ${result.kind} (attempt ${attempts}): ${describe(event)}: ${result.error}`,
+        `[lead-service] on_demand redelivery ${result.kind} (attempt ${attempts}): ${describe(event)}: ${result.error}`,
       );
     }
     if (due.length > 0) {
