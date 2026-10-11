@@ -959,7 +959,7 @@ export const crmFeedCursors = pgTable("crm_feed_cursors", {
 });
 
 /**
- * `lead_requested` trigger events campaign-service has not recorded yet (src/lib/lead-requested-events.ts).
+ * `on_demand` (was `lead_requested`) trigger events campaign-service has not recorded yet (src/lib/lead-requested-events.ts).
  * A row = one serve whose event delivery failed; redelivered by the background thread, deleted once
  * recorded. `refused_at` = campaign-service refused it (400) or it cannot be sent: kept, never retried.
  */

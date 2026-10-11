@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vite
 import express from "express";
 import request from "supertest";
 
-// lead_requested TRIGGER EVENTS (src/lib/lead-requested-events.ts): every answered serve is recorded at
+// on_demand (was lead_requested) TRIGGER EVENTS (src/lib/lead-requested-events.ts): every answered serve is recorded at
 // campaign-service exactly once; recording never blocks or fails the serve; a failed delivery waits in
 // trigger_event_outbox and is redelivered.
 
@@ -97,6 +97,10 @@ vi.mock("../../src/lib/campaign-client.js", () => ({
 // ── route deps (the real recorder is NOT mocked) ──────────────────────────────────────────────
 const pullNext = vi.fn();
 vi.mock("../../src/lib/buffer.js", () => ({ pullNext: (...a: unknown[]) => pullNext(...a) }));
+// The source unit's run opened (src/lib/on-demand-run.ts): what is unreachable here is the EVENT delivery.
+vi.mock("../../src/lib/on-demand-run.js", () => ({
+  openOnDemandRun: vi.fn(async (p: { campaignId: string }) => ({ runId: "on-demand-run-1", campaignId: p.campaignId, featureSlug: "sourcing-apollo-cold-filters", workflowSlug: "sourcing-apollo-cold-filters-scheat", brandIds: [] })),
+}));
 vi.mock("../../src/lib/runs-client.js", () => ({
   createRun: vi.fn(async () => ({ id: "serve-run-1" })),
   updateRun: vi.fn(async () => undefined),
@@ -141,7 +145,7 @@ async function settle(predicate: () => boolean) {
   for (let i = 0; i < 400 && !predicate(); i++) await new Promise((r) => setTimeout(r, 10));
 }
 
-describe("lead_requested trigger events", () => {
+describe("on_demand trigger events", () => {
   beforeEach(() => {
     outbox.length = 0;
     cacheInserts.length = 0;
@@ -167,12 +171,12 @@ describe("lead_requested trigger events", () => {
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({ "x-api-key": "campaign-key", "x-org-id": ORG });
     expect(JSON.parse(init.body as string)).toEqual({
-      triggerId: "lead_requested",
+      triggerId: "on_demand",
       brandId: BRAND,
       offerId: OFFER,
       leadId: "lead-1",
       requestedByCampaignId: CAMPAIGN,
-      idempotencyKey: `lead_requested:${RUN}`,
+      idempotencyKey: `on_demand:${RUN}`,
       occurredAt: "2026-10-09T12:00:00.000Z",
       performed: { outcome: "ran", campaignId: SOURCE },
     });
@@ -202,7 +206,7 @@ describe("lead_requested trigger events", () => {
     await settle(() => outbox.length === 1);
 
     expect(outbox).toHaveLength(1);
-    expect(outbox[0]).toMatchObject({ idempotencyKey: `lead_requested:${RUN}`, orgId: ORG, attempts: 1, refusedAt: null });
+    expect(outbox[0]).toMatchObject({ idempotencyKey: `on_demand:${RUN}`, orgId: ORG, attempts: 1, refusedAt: null });
     expect(outbox[0].lastError).toContain("fetch failed");
   });
 
@@ -233,7 +237,7 @@ describe("lead_requested trigger events", () => {
 
     outbox[0].nextAttemptAt = new Date(0);
     expect(await drainTriggerEventOutbox()).toEqual({ delivered: 1, retried: 0, refused: 0 });
-    expect(JSON.parse((fetchOk.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).idempotencyKey).toBe(`lead_requested:${RUN}`);
+    expect(JSON.parse((fetchOk.mock.calls[0] as unknown as [string, RequestInit])[1].body as string).idempotencyKey).toBe(`on_demand:${RUN}`);
     expect(outbox).toHaveLength(0);
   });
 
