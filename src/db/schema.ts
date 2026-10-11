@@ -869,6 +869,9 @@ export const candidateScreenings = pgTable(
     reason: text("reason"),
     model: text("model"),
     runId: text("run_id"),
+    // The candidate's company as human-service offered it (migration 0063); NULL on older rows.
+    companyDomain: text("company_domain"),
+    companyName: text("company_name"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

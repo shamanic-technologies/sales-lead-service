@@ -6,6 +6,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
 import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
 import {
@@ -6829,5 +6830,91 @@ registry.registerPath({
     400: { description: "x-org-id missing" },
     401: { description: "Unauthorized" },
     500: { description: "Internal server error" },
+  },
+});
+
+const SourcingCountSchema = z.object({
+  people: z.number().int(),
+  companies: z.number().int().openapi({ description: "Distinct company domains behind those people." }),
+  peopleWithoutCompany: z.number().int().openapi({ description: "People whose company we do not hold (not counted in `companies`)." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/campaigns/{campaignId}/sourcing-stats",
+  summary: "What one lead SOURCE campaign found and what we kept, since inception",
+  description:
+    "`campaignId` is a source pipe (a campaign-service campaign on leg `start_to_lead_found`, keyed offer + origin slug). " +
+    "Its people come from recorded facts, not from which campaign a serve run was filed under: the source's audiences are " +
+    "the brand's audiences of the offer whose LIST KIND the origin counts (features-service catalogue). " +
+    "FOUND = every person one of those audiences surfaced: a human-service membership (`served` or `found_taken`) or a " +
+    "candidate this service screened (pass or reject) or declined on a must-pass check. KEPT = found AND served to an " +
+    "outreach campaign of the offer. A person found by several sources counts in EACH (never first-found); `kept.byThisSource` " +
+    "vs `kept.viaAnotherSource` says whose serve handed them out. found.people = kept.people + sum(notKept). " +
+    "`daily`: found on the day the source first surfaced the person, kept on the day both were true (UTC; days with no event omitted). " +
+    "`gaps`: people whose source cannot be named, as counts with a reason, never guessed onto a source. " +
+    "404 not a campaign of the org; 409 not a lead source; 502 a sibling could not answer (never a partial count).",
+  request: { params: z.object({ campaignId: z.string() }) },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "The source's people since inception",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              campaignId: z.string(),
+              brandId: z.string(),
+              offerId: z.string(),
+              origin: z.object({ slug: z.string(), name: z.string(), lists: z.array(z.string()) }),
+              outreachCampaignIds: z.array(z.string()).openapi({ description: "The offer's outreach campaigns a kept person is served to." }),
+              found: SourcingCountSchema,
+              kept: SourcingCountSchema.extend({
+                byThisSource: z.number().int().openapi({ description: "Kept people a serve under one of this source's audiences handed out." }),
+                viaAnotherSource: z.number().int().openapi({ description: "Kept people this source found while another source's serve handed them out." }),
+              }),
+              notKept: z.object(Object.fromEntries(NOT_KEPT_REASONS.map((r) => [r, z.number().int()])) as Record<(typeof NOT_KEPT_REASONS)[number], z.ZodNumber>),
+              daily: z.array(z.object({ day: z.string().openapi({ example: "2026-10-10" }), found: z.number().int(), kept: z.number().int() })),
+              byAudience: z.array(
+                z.object({
+                  audienceId: z.string(),
+                  name: z.string().nullable().openapi({ description: "null when human-service serves no card for it (retired audience)." }),
+                  list: z.string(),
+                  found: z.number().int(),
+                  kept: z.number().int(),
+                  screenedOut: z.number().int(),
+                }),
+              ),
+              bySignal: z.array(
+                z.object({
+                  type: z.string(),
+                  source: z.string(),
+                  competitorPage: z.string().nullable(),
+                  postUrl: z.string().nullable(),
+                  people: z.number().int(),
+                }),
+              ).openapi({ description: "Kept people per buying signal their serve under this source carried (LinkedIn: per competitor post)." }),
+              keptWithoutSignal: z.number().int(),
+              keptAlsoFoundByOtherSources: z.number().int(),
+              gaps: z.array(
+                z.object({
+                  reason: z.enum(SOURCE_GAP_REASONS),
+                  people: z.number().int(),
+                  scope: z.enum(["offer", "brand", "source"]),
+                }),
+              ),
+            })
+            .openapi("SourcingStatsResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a campaign of this org" },
+    409: { description: "Not a lead source campaign" },
+    502: { description: "A sibling service could not answer" },
   },
 });

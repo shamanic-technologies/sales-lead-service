@@ -128,6 +128,8 @@ export interface BrandMembership {
   offerId: string | null;
   list: string | null;
   provenance: "served" | "found_taken";
+  /** When that audience found the person (ISO-8601); always set by the parser below, null when human-service sent none. */
+  joinedAt?: string | null;
 }
 
 /**
@@ -180,6 +182,7 @@ export async function resolveBrandMembershipsByEmail(
           offerId: typeof m.offerId === "string" ? m.offerId : null,
           list: typeof m.list === "string" ? m.list : null,
           provenance: m.provenance,
+          joinedAt: typeof m.joinedAt === "string" ? m.joinedAt : null,
         };
       }),
     );

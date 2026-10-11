@@ -25,6 +25,7 @@ import existingCustomersRoutes from "./routes/existing-customers.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import serveRecordsRoutes from "./routes/serve-records.js";
+import sourcePeopleRoutes from "./routes/source-people.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { withRequestContext } from "./lib/request-context.js";
 
@@ -72,6 +73,7 @@ app.use(followupsRoutes);
 app.use(existingCustomersRoutes);
 app.use(leadHistoryRoutes);
 app.use(serveRecordsRoutes);
+app.use(sourcePeopleRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });

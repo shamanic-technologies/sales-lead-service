@@ -27,7 +27,8 @@ export interface CampaignIdentityContext {
   brandId?: string | null;
 }
 
-export async function fetchOrgCampaignFamilies(ctx: CampaignIdentityContext) {
+/** Every campaign row of the org as campaign-service serves it (ORG-scoped `GET /campaigns`). Throws on failure. */
+export async function fetchOrgCampaignRows(ctx: CampaignIdentityContext): Promise<CampaignIdentityRow[]> {
   const headers: Record<string, string> = {
     "X-API-Key": CAMPAIGN_SERVICE_API_KEY,
     "x-org-id": ctx.orgId,
@@ -55,7 +56,11 @@ export async function fetchOrgCampaignFamilies(ctx: CampaignIdentityContext) {
   }
 
   for (const row of data.campaigns) noteLegacyOutboundLegKey(row?.featureSlug, row?.legKey, "campaign-service GET /campaigns");
-  return buildCampaignFamilies(data.campaigns);
+  return data.campaigns;
+}
+
+export async function fetchOrgCampaignFamilies(ctx: CampaignIdentityContext) {
+  return buildCampaignFamilies(await fetchOrgCampaignRows(ctx));
 }
 
 /**
