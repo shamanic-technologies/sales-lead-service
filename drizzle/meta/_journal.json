@@ -456,6 +456,13 @@
       "when": 1785369600000,
       "tag": "0064_followup_handed_to_human",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1785456000000,
+      "tag": "0065_answered_outside_statements",
+      "breakpoints": true
     }
   ]
 }
