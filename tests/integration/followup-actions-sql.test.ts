@@ -14,6 +14,11 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
   checkDeliveryStatus: async () => ({ results: [] }),
 }));
 
+// The acting responder started long before any fixture's due date (campaign-service createdAt).
+vi.mock("../../src/lib/campaign-client.js", () => ({
+  fetchCampaign: async (id: string) => ({ id, createdAt: "2020-01-01T00:00:00.000Z" }),
+}));
+
 const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, followupActions } = await import(
   "../../src/db/schema.js"

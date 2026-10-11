@@ -237,11 +237,17 @@ export const leadsCampaigns = pgTable(
     //                           the interval is the worker's per-lead choice, not a ladder here.
     // followup_last_action_at — when we last acted.
     // followup_stopped_reason — why the schedule is empty, when it is. Stated by the caller.
+    // followup_handed_at      — the thread is a PERSON's (client asked to answer, escalated, staff
+    //                           took it, or owed before any responder started): never claimed by an
+    //                           automated responder again, and a later `scheduled` does not re-enter
+    //                           it (migration 0064). followup_handed_reason says to whom / why.
     followupDueAt: timestamp("followup_due_at", { withTimezone: true }),
     followupClaimedAt: timestamp("followup_claimed_at", { withTimezone: true }),
     followupCount: integer("followup_count").notNull().default(0),
     followupLastActionAt: timestamp("followup_last_action_at", { withTimezone: true }),
     followupStoppedReason: text("followup_stopped_reason"),
+    followupHandedAt: timestamp("followup_handed_at", { withTimezone: true }),
+    followupHandedReason: text("followup_handed_reason"),
     servedAt: timestamp("served_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -268,6 +274,17 @@ export const leadsCampaigns = pgTable(
     ),
   ],
 );
+
+// --- Follow-up responders (src/lib/followup-queue.ts, migration 0064) ---
+// The earliest automated responder (acting campaign) known to drain a HELD campaign's queue, and
+// when it started (campaign-service created_at). A never-answered debt older than that start was a
+// human's, so the first claim hands it over instead of answering a weeks-old backlog.
+export const followupResponders = pgTable("followup_responders", {
+  heldCampaignId: text("held_campaign_id").primaryKey(),
+  firstResponderCampaignId: text("first_responder_campaign_id").notNull(),
+  firstResponderStartedAt: timestamp("first_responder_started_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // --- Follow-up actions ledger (src/lib/followup-actions.ts, migration 0045) ---
 // WHO acted on a follow-up row. The queue's own columns on leads_campaigns say what is owed and
