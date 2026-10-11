@@ -115,6 +115,20 @@ async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>>
     }
     listsBySlug.set(slug, { slug, name, lists: audienceLists as string[] });
   }
+  // LEAD SOURCING (owner 2026-10-11): no list of its own, it picks among the origins its channels take. As a
+  // source campaign it counts every list of those origins (its sourcing stats read people found on any of them).
+  const ls = (body as { leadSourcing?: unknown }).leadSourcing as { slug?: unknown; name?: unknown; mayUseByChannel?: unknown } | undefined;
+  if (ls !== undefined) {
+    if (typeof ls?.slug !== "string" || typeof ls.name !== "string" || !ls.mayUseByChannel || typeof ls.mayUseByChannel !== "object") {
+      throw new SourcingOriginUnresolvedError("features-service sourcing-origins leadSourcing unreadable (slug, name, mayUseByChannel)");
+    }
+    const lists = new Set<string>();
+    for (const origins of Object.values(ls.mayUseByChannel as Record<string, unknown>)) {
+      if (!Array.isArray(origins)) throw new SourcingOriginUnresolvedError("features-service leadSourcing.mayUseByChannel entry unreadable");
+      for (const o of origins) for (const l of listsBySlug.get(String(o))?.lists ?? []) lists.add(l);
+    }
+    listsBySlug.set(ls.slug, { slug: ls.slug, name: ls.name, lists: [...lists].sort() });
+  }
   originsCache = { at: Date.now(), byChannel, byList, listsBySlug };
   return originsCache;
 }

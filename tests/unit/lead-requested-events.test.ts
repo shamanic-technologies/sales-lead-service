@@ -275,7 +275,7 @@ describe("lead_requested trigger events", () => {
 
     it("still serves the lead; the ask waits in the outbox", async () => {
       vi.stubGlobal("fetch", vi.fn(async () => { throw connRefused(); }));
-      resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE, originSlug: "sourcing-apollo-cold-filters", offerId: OFFER });
+      resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER });
       pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
 
       const res = await request(app)
