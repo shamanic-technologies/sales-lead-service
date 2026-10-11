@@ -4854,6 +4854,16 @@ const FollowupStateSchema = z
         "Why the schedule is currently empty, when it is. Stated by whoever stopped it (\"opted_out\" is written by this service when the delivery layer reports an unsubscribe at claim time). NULL while a due date stands.",
       example: "answered_again",
     }),
+    handedAt: z.string().nullable().openapi({
+      description:
+        "When the thread was handed to a PERSON (client asked to answer, escalated, a human answered, or owed before any responder started). Non-null = no automated responder ever claims this row again, and a later scheduled statement does not re-enter it. NULL = an automated responder may still claim it.",
+      example: null,
+    }),
+    handedReason: z.string().nullable().openapi({
+      description:
+        "To whom / why, as the first hand-over stated it. `owed_before_responder_started` = a never-answered debt due before the earliest responder on this held campaign started (campaign-service createdAt), handed over by the claim instead of answered.",
+      example: null,
+    }),
   })
   .openapi("FollowupState", {
     description: "What we owe one person on one campaign, and when.",
@@ -4866,6 +4876,8 @@ const FollowupStateSchema = z
       followupCount: 3,
       lastActionAt: "2026-08-29T09:00:00.000Z",
       stoppedReason: null,
+      handedAt: null,
+      handedReason: null,
     },
   });
 
@@ -4911,7 +4923,12 @@ registry.registerPath({
     "cleared for good), a person with a BOOKED MEETING on record is never returned (a stated or " +
     "tracker-reported meeting_booked, meeting_attended or sale — the last two entail the booking), " +
     "and a person who ANSWERED AGAIN is never returned (whoever observes the reply stops their " +
-    "schedule, and qualification re-decides what we owe). The claim expires after an hour, so a " +
+    "schedule, and qualification re-decides what we owe). A thread HANDED TO A PERSON is never " +
+    "returned (kind=handed, permanent), and neither is a never-answered debt owed BEFORE the earliest " +
+    "responder on this held campaign started (campaign-service createdAt of the x-campaign-id " +
+    "campaign, the minimum over every responder seen): the claim hands those over (handedReason " +
+    "owed_before_responder_started) instead of answering a backlog that was a human's. x-campaign-id " +
+    "is REQUIRED (400 acting_campaign_required). The claim expires after an hour, so a " +
     "worker that dies mid-answer strands nobody. The scope is the campaign id named, not its " +
     "identity family: this hands out a single row whose due date a worker wrote while naming that " +
     "exact campaign, rather than totalling a population.",
@@ -4930,12 +4947,12 @@ registry.registerPath({
       description: "The claimed person, or nobody with a named reason",
       content: { "application/json": { schema: FollowupClaimSchema } },
     },
-    400: { description: "Missing campaignId or x-org-id" },
+    400: { description: "Missing campaignId or x-org-id, or no x-campaign-id (code acting_campaign_required)" },
     401: { description: "Unauthorized" },
     500: { description: "Internal server error" },
     502: {
       description:
-        "The delivery layer could not say who opted out (code opt_out_lookup_unavailable). Nobody is claimed rather than somebody answered on a guess: a wasted poll is recoverable, an email to somebody who asked us to stop is not.",
+        "campaign-service could not say when the claiming responder started (code responder_start_unavailable), or the delivery layer could not say who opted out (code opt_out_lookup_unavailable). Nobody is claimed rather than somebody answered on a guess: a wasted poll is recoverable, an email to somebody who asked us to stop is not.",
     },
   },
 });
@@ -5100,9 +5117,9 @@ registry.registerPath({
 
 const FollowupStatementRequestSchema = z
   .object({
-    kind: z.enum(["scheduled", "acted", "stopped"]).openapi({
+    kind: z.enum(["scheduled", "acted", "stopped", "handed"]).openapi({
       description:
-        "scheduled — we owe this person an action at dueAt (the first enqueue after qualification, and the re-enqueue after a fresh reply has been re-qualified); it is not an action, so the count does not move. acted — a worker answered them, and nextDueAt says when the next answer is owed; this is the only kind that increments the count. stopped — nothing is owed right now, and reason says why; NOT a tombstone, a later scheduled re-enters the person, which is exactly how \"they answered again\" is expressed.",
+        "handed — the thread is a PERSON's now (the client was asked to answer, the reply was escalated, a human answered); reason (required) says to whom / why; PERMANENT: no automated responder claims the row again and a later scheduled leaves the due date NULL. scheduled — we owe this person an action at dueAt (the first enqueue after qualification, and the re-enqueue after a fresh reply has been re-qualified); it is not an action, so the count does not move. acted — a worker answered them, and nextDueAt says when the next answer is owed; this is the only kind that increments the count. stopped — nothing is owed right now, and reason says why; NOT a tombstone, a later scheduled re-enters the person, which is exactly how \"they answered again\" is expressed.",
       example: "acted",
     }),
     dueAt: z.string().optional().openapi({
@@ -5117,7 +5134,7 @@ const FollowupStatementRequestSchema = z
     }),
     reason: z.string().optional().openapi({
       description:
-        "REQUIRED on kind=stopped: why nothing is owed right now, stated by the caller and stored verbatim (\"answered_again\", \"meeting_booked\", \"not_interested\"). Absent is a 400, never an empty string.",
+        "REQUIRED on kind=stopped and kind=handed: why nothing is owed right now, stated by the caller and stored verbatim (\"answered_again\", \"meeting_booked\", \"not_interested\"). Absent is a 400, never an empty string.",
       example: "answered_again",
     }),
   })
@@ -5146,7 +5163,7 @@ registry.registerPath({
     },
     400: {
       description:
-        "Invalid id or kind; a missing reason on kind=stopped (code reason_required); an unparseable due date (code due_date_unparseable); or one outside the accepted range (code due_date_out_of_bounds, with the bounds)",
+        "Invalid id or kind; a missing reason on kind=stopped or kind=handed (code reason_required); an unparseable due date (code due_date_unparseable); or one outside the accepted range (code due_date_out_of_bounds, with the bounds)",
     },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org" },

@@ -18,11 +18,22 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
   checkDeliveryStatus: async () => ({ results: [] }),
 }));
 
+/**
+ * When each acting responder campaign started (campaign-service createdAt). Default: long ago, so
+ * nothing in the concurrency fixtures predates a responder; the hand-over tests set their own.
+ */
+const responderCreatedAt = new Map<string, string>();
+vi.mock("../../src/lib/campaign-client.js", () => ({
+  fetchCampaign: async (id: string) => ({ id, createdAt: responderCreatedAt.get(id) ?? "2020-01-01T00:00:00.000Z" }),
+}));
+
 const { db } = await import("../../src/db/index.js");
-const { leads, leadContactMethods, leadsCampaigns } = await import("../../src/db/schema.js");
+const { leads, leadContactMethods, leadsCampaigns, followupResponders } = await import("../../src/db/schema.js");
 const {
   claimFollowup,
   loadFollowupCandidates,
+  OWED_BEFORE_RESPONDER_REASON,
+  recordResponder,
   pickFollowupCandidate,
   readFollowupState,
   lookupFollowupRowByEmail,
@@ -39,10 +50,11 @@ const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DS
 
 describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () => {
   const campaignId = `itest-followup-${randomUUID()}`;
+  const actingCampaignId = `itest-responder-${randomUUID()}`;
   const orgId = randomUUID();
   const brandId = randomUUID();
 
-  async function seedDueRow(dueAt: Date): Promise<string> {
+  async function seedDueRow(dueAt: Date, campaign = campaignId, followupCount = 0): Promise<string> {
     const [lead] = await db
       .insert(leads)
       .values({ name: `itest ${randomUUID()}` })
@@ -57,12 +69,13 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       .insert(leadsCampaigns)
       .values({
         leadId: lead.id,
-        campaignId,
+        campaignId: campaign,
         orgId,
         brandIds: [brandId],
         status: "served",
         servedAt: new Date(),
         followupDueAt: dueAt,
+        followupCount,
       })
       .returning({ id: leadsCampaigns.id });
     return row.id;
@@ -74,6 +87,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
 
   afterAll(async () => {
     await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, campaignId));
+    await db.delete(followupResponders).where(eq(followupResponders.heldCampaignId, campaignId));
   });
 
   it("claims a due row once — a second claim of the same row is refused", async () => {
@@ -108,6 +122,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
           orgId,
           campaignId,
           runId: randomUUID(),
+          actingCampaignId,
           context: { orgId },
         }),
       ),
@@ -130,6 +145,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       orgId,
       campaignId,
       runId: randomUUID(),
+      actingCampaignId,
       context: { orgId },
     });
 
@@ -143,6 +159,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       orgId,
       campaignId,
       runId: randomUUID(),
+      actingCampaignId,
       context: { orgId },
     });
 
@@ -169,7 +186,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       matchedLeadId: row.leadId,
     });
 
-    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now() });
+    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z" });
     expect(candidates).toHaveLength(0);
   });
 
@@ -188,7 +205,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       withdrawnAt: new Date(),
     });
 
-    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now() });
+    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z" });
     expect(candidates.map((c) => c.id)).toEqual([id]);
   });
 
@@ -215,6 +232,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       orgId,
       campaignId,
       runId: randomUUID(),
+      actingCampaignId,
       context: { orgId },
     });
     expect(claim.claimed).toBeNull();
@@ -233,7 +251,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     });
     expect(stopped).toMatchObject({ dueAt: null, stoppedReason: "answered_again" });
     expect(
-      (await pickFollowupCandidate({ orgId, campaignId, runId: null, context: { orgId } })).claimed,
+      (await pickFollowupCandidate({ orgId, campaignId, runId: null, actingCampaignId, context: { orgId } })).claimed,
     ).toBeNull();
 
     const requeued = await writeFollowupStatement({
@@ -246,9 +264,103 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     });
     expect(requeued).toMatchObject({ stoppedReason: null, followupCount: 0 });
     expect(
-      (await pickFollowupCandidate({ orgId, campaignId, runId: null, context: { orgId } })).claimed
+      (await pickFollowupCandidate({ orgId, campaignId, runId: null, actingCampaignId, context: { orgId } })).claimed
         ?.id,
     ).toBe(id);
+  });
+
+  it("a thread handed to a person is never claimed, and a later schedule does not re-enter it", async () => {
+    const id = await seedDueRow(new Date(Date.now() - 60_000));
+
+    const handed = await writeFollowupStatement({
+      orgId,
+      id,
+      kind: "handed",
+      dueAtIso: null,
+      reason: "client asked to answer",
+      nowMs: Date.now(),
+    });
+    expect(handed).toMatchObject({ dueAt: null, handedReason: "client asked to answer" });
+    expect(handed?.handedAt).not.toBeNull();
+
+    // The prospect writes again: qualification re-schedules, and the row stays the person's.
+    const requeued = await writeFollowupStatement({
+      orgId,
+      id,
+      kind: "scheduled",
+      dueAtIso: new Date(Date.now() - 1_000).toISOString(),
+      reason: null,
+      nowMs: Date.now(),
+    });
+    expect(requeued).toMatchObject({ dueAt: null, handedAt: handed?.handedAt, stoppedReason: "client asked to answer" });
+    expect(
+      (await pickFollowupCandidate({ orgId, campaignId, runId: null, actingCampaignId, context: { orgId } })).claimed,
+    ).toBeNull();
+    // Even a direct claim of the row is refused.
+    expect(await claimFollowup({ id, nowMs: Date.now(), runId: null })).toBe(false);
+  });
+
+  it("switching a responder on hands over the never-answered backlog instead of answering it", async () => {
+    const held = `itest-followup-backlog-${randomUUID()}`;
+    const responder = `itest-responder-${randomUUID()}`;
+    const startedAt = new Date(Date.now() - 10 * 60_000);
+    responderCreatedAt.set(responder, startedAt.toISOString());
+    try {
+      // Owed five weeks before the responder existed: a human's reply to answer.
+      const backlog = await seedDueRow(new Date(Date.now() - 35 * 24 * 3600_000), held);
+      // Already answered by a responder (an ongoing AI conversation): stays claimable.
+      const ongoing = await seedDueRow(new Date(Date.now() - 20 * 60_000), held, 2);
+      // A reply that landed after the responder started: the responder's to answer.
+      const fresh = await seedDueRow(new Date(Date.now() - 60_000), held);
+
+      const claimed: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const out = await pickFollowupCandidate({
+          orgId,
+          campaignId: held,
+          runId: null,
+          actingCampaignId: responder,
+          context: { orgId },
+        });
+        if (out.claimed) claimed.push(out.claimed.id);
+      }
+      expect(claimed.sort()).toEqual([ongoing, fresh].sort());
+
+      const state = await readFollowupState(orgId, backlog);
+      expect(state).toMatchObject({ dueAt: null, handedReason: OWED_BEFORE_RESPONDER_REASON });
+      expect(state?.handedAt).not.toBeNull();
+    } finally {
+      await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+      await db.delete(followupResponders).where(eq(followupResponders.heldCampaignId, held));
+    }
+  });
+
+  it("the earliest responder start wins: a later sibling never moves the cut forward", async () => {
+    const held = `itest-followup-siblings-${randomUUID()}`;
+    try {
+      const elder = await recordResponder({
+        heldCampaignId: held,
+        actingCampaignId: "elder",
+        actingStartedAtIso: "2026-09-02T00:00:00.000Z",
+      });
+      const younger = await recordResponder({
+        heldCampaignId: held,
+        actingCampaignId: "younger",
+        actingStartedAtIso: "2026-10-05T00:00:00.000Z",
+      });
+      const earlier = await recordResponder({
+        heldCampaignId: held,
+        actingCampaignId: "earliest",
+        actingStartedAtIso: "2026-08-01T00:00:00.000Z",
+      });
+      expect(elder).toBe("2026-09-02T00:00:00.000Z");
+      expect(younger).toBe("2026-09-02T00:00:00.000Z");
+      expect(earlier).toBe("2026-08-01T00:00:00.000Z");
+      const [row] = await db.select().from(followupResponders).where(eq(followupResponders.heldCampaignId, held));
+      expect(row.firstResponderCampaignId).toBe("earliest");
+    } finally {
+      await db.delete(followupResponders).where(eq(followupResponders.heldCampaignId, held));
+    }
   });
 
   it("stopFollowups clears a batch and readFollowupState reads it back", async () => {
