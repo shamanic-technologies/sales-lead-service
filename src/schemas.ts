@@ -2676,6 +2676,132 @@ registry.registerPath({
   },
 });
 
+const AwaitingReplyLabels = [
+  "interested",
+  "question_answerable",
+  "question_to_escalate",
+  "question",
+  "referral",
+  "other_proposal",
+  "hand_over",
+] as const;
+
+const AwaitingReplyPersonSchema = z
+  .object({
+    id: z.string().nullable().openapi({
+      description:
+        "The lead row (`leads_campaigns.id`, the `id` GET /orgs/leads and /orgs/leads/{id} use) the latest message " +
+        "came on, else the person's newest row at the brand. null only when the person holds no row at the brand.",
+    }),
+    leadId: z.string().openapi({ description: "The PERSON (leads.id). Every fact here is about the person at the brand." }),
+    email: z.string(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    name: z.string().nullable(),
+    waitingSince: z.string().openapi({
+      description: "When their FIRST message after our latest answer arrived (ISO-8601). No age limit: an old unanswered reply stays.",
+    }),
+    lastMessage: z.object({
+      at: z.string().openapi({ description: "When their latest message arrived (ISO-8601)." }),
+      kind: z.enum(["question", "interest", "other"]).openapi({
+        description: "question = they asked something; interest = they said they are interested; other = a referral, another proposal or a hand-over to a person.",
+      }),
+      label: z.enum(AwaitingReplyLabels).openapi({
+        description:
+          "The reply's label in the timeline vocabulary (the outreach provider's verdict placed by lead-service). " +
+          "question_to_escalate = a question only the sender's company can answer; question_answerable = one the responder can answer.",
+      }),
+      subject: z.string().nullable(),
+      campaignId: z.string().nullable(),
+    }),
+    lastAnsweredAt: z.string().nullable().openapi({ description: "When we last answered them, any way (null = never)." }),
+    unansweredMessages: z.number().int().openapi({ description: "How many of their messages came after our latest answer." }),
+  })
+  .openapi("AwaitingReplyPerson");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/awaiting-reply",
+  summary: "The people who wrote back and are waiting on us (\"Needs your call\")",
+  description:
+    "Every person at the brand whose latest message came after any answer of ours, oldest wait first. " +
+    "A message counts when it is a person's word (an automatic answer does not) and asks something of us " +
+    "(interest, a question, a referral, another proposal, a hand-over). An ANSWER of ours is any email we sent " +
+    "into their thread outside the sequence (Unibox reply, AI responder, a staff answer CC'd to the mailbox, " +
+    "any reply through our mailboxes) or a statement \"answered outside the platform\" " +
+    "(POST /orgs/leads/{id}/answered-outside). An opt-out (stop request or unsubscribe) takes a person out for " +
+    "good. Website visitors never enter. `total` is the length of `people`: the count and the list are one set. " +
+    "Fresh within ~2 minutes for answers through our mailboxes, immediately for a statement. " +
+    "503 outreach_copy_not_ready while the outreach fact copy has not caught up once.",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: {
+      description: "The people waiting on us",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ brandId: z.string(), total: z.number().int(), people: z.array(AwaitingReplyPersonSchema) })
+            .openapi("AwaitingReplyResponse"),
+        },
+      },
+    },
+    400: { description: "brandId missing" },
+    401: { description: "Unauthorized" },
+    503: { description: "The outreach fact copy has not caught up yet (code outreach_copy_not_ready)" },
+    500: { description: "Read failed" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/leads/{id}/answered-outside",
+  summary: "State \"I answered this person outside the platform\"",
+  description:
+    "Records that a person on the customer's side answered this prospect from a mailbox our systems do not read " +
+    "(their own Gmail). A fact about the PERSON at the brand, with who (x-user-id, required) and when (now), " +
+    "append-only. Takes them out of GET /orgs/leads/awaiting-reply; a NEW message from them dated after it puts " +
+    "them back. `{id}` is the lead row id; the brand is `brandId` (query) or x-brand-id when named (a brand the " +
+    "row is not part of is 404), else the row's own brand. No body.",
+  request: {
+    params: z.object({
+      id: z.string().openapi({ param: { name: "id", in: "path" }, description: "The lead row id (leads_campaigns.id)." }),
+    }),
+  },
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: false, schema: { type: "string" as const } },
+  ],
+  responses: {
+    201: {
+      description: "Recorded",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              statement: z.object({
+                id: z.string(),
+                leadId: z.string(),
+                brandId: z.string(),
+                statedByUserId: z.string(),
+                statedAt: z.string(),
+              }),
+              awaitingReply: z.boolean().openapi({ description: "Whether the person still waits on us after the statement (false unless a newer message arrived meanwhile)." }),
+            })
+            .openapi("AnsweredOutsideResponse"),
+        },
+      },
+    },
+    400: { description: "id is not a uuid, or x-user-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Lead not found (or not part of the named brand)" },
+    503: { description: "The outreach fact copy has not caught up yet" },
+    500: { description: "Write failed" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/bucket-counts",
