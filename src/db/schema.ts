@@ -286,6 +286,23 @@ export const followupResponders = pgTable("followup_responders", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// --- "Answered outside the platform" statements (src/lib/awaiting-reply.ts, migration 0065) ---
+// A person on the customer's side answered a prospect from a mailbox we never read. A fact about the
+// PERSON at the brand, append-only; read as an answer of ours dated `stated_at`.
+export const answeredOutsideStatements = pgTable(
+  "answered_outside_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    leadId: uuid("lead_id").notNull(),
+    leadCampaignId: uuid("lead_campaign_id"),
+    statedByUserId: text("stated_by_user_id"),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_answered_outside_brand_lead").on(table.orgId, table.brandId, table.leadId, table.statedAt)],
+);
+
 // --- Follow-up actions ledger (src/lib/followup-actions.ts, migration 0045) ---
 // WHO acted on a follow-up row. The queue's own columns on leads_campaigns say what is owed and
 // when; they never said which campaign's worker claimed or answered the person, and a campaign
