@@ -14,6 +14,7 @@ import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../l
 import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 import { resolveServeSource, type ServeSource } from "../lib/source-campaign.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
+import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 
 const router = Router();
 
@@ -78,6 +79,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // sources are campaigns, the serve run and every downstream call carry the ON source campaign's id
   // (the lead row keeps the outreach campaign that works it). `legacy` = today's serve, unchanged.
   let serveSource: ServeSource = { kind: "legacy", why: "channel_not_sourced" };
+
+  // The source unit's OWN run (src/lib/on-demand-run.ts): opened for a serve filed under a source campaign, the
+  // serve run hangs from it and carries its workflow. Null for a legacy serve (no source unit to run).
+  let onDemandRun: OnDemandRun | null = null;
 
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
@@ -163,16 +168,27 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       }
     }
 
-    // Create child run for traceability (x-run-id from caller becomes our parentRunId)
+    // A serve under a source unit is that unit answering its `on_demand` trigger: its own run, opened now.
+    if (serveSource.kind === "source") {
+      onDemandRun = await openOnDemandRun({
+        orgId: req.orgId!,
+        userId: req.userId,
+        callerRunId: runId,
+        campaignId: serveSource.campaignId,
+        audienceId: req.audienceId,
+      });
+    }
+
+    // The serve run: under the source unit's own run when there is one, else under the caller's run (legacy).
     const childRun = await createRun({
       orgId: req.orgId!,
       serviceName: "lead-service",
       taskName: "lead-serve",
-      parentRunId: runId,
+      parentRunId: onDemandRun?.runId ?? runId,
       userId: req.userId,
       brandId: req.brandId,
       campaignId: serveSource.kind === "source" ? serveSource.campaignId : campaignId,
-      workflowSlug,
+      workflowSlug: onDemandRun?.workflowSlug ?? workflowSlug,
       featureSlug: runFeatureSlug,
       goal: req.goal,
       brandProfileId: req.brandProfileId,
@@ -181,6 +197,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     serveRunId = childRun.id;
   } catch (err) {
     console.error(`[lead-service] buffer/next pre-serve setup failed for runId=${runId} campaignId=${campaignId}:`, err);
+    if (onDemandRun) {
+      const opened = onDemandRun;
+      updateRun(opened.runId, "failed", { orgId: req.orgId, userId: req.userId, campaignId: opened.campaignId, brandId: req.brandId, workflowSlug: opened.workflowSlug, featureSlug: opened.featureSlug }).catch((closeErr) =>
+        console.error(`[lead-service] on-demand run ${opened.runId} of unit ${opened.campaignId} not closed after a failed setup:`, closeErr),
+      );
+    }
     traceEvent(runId, { service: "lead-service", event: "buffer-next-setup-failed", level: "error", detail: err instanceof Error ? err.message : String(err) }, req.headers).catch(() => {});
     return res.status(500).json({ error: "Lead serve setup failed", detail: err instanceof Error ? err.message : String(err) });
   }
@@ -188,19 +210,31 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // The campaign the serve RUN (and every call under it) is filed under: the ON source campaign, else
   // the outreach campaign as before.
   const runCampaignId = serveSource.kind === "source" ? serveSource.campaignId : campaignId;
+  // Everything bought under the serve carries the source unit's workflow (its pipe's), never the asking run's.
+  const runWorkflowSlug = onDemandRun?.workflowSlug ?? workflowSlug;
   const runMeta = {
     orgId: req.orgId,
     userId: req.userId,
     campaignId: runCampaignId,
     brandId: req.brandId,
-    workflowSlug,
+    workflowSlug: runWorkflowSlug,
     featureSlug: runFeatureSlug,
     goal: req.goal,
     brandProfileId: req.brandProfileId,
     audienceId: req.audienceId,
   };
 
-  // Every answered ask is recorded as ONE `lead_requested` trigger event at campaign-service
+  // The source unit's run ends with its serve, same status. Never throws: the serve's answer stands.
+  const closeOnDemand = async (status: "completed" | "failed") => {
+    if (!onDemandRun) return;
+    try {
+      await updateRun(onDemandRun.runId, status, { ...runMeta, featureSlug: onDemandRun.featureSlug });
+    } catch (err) {
+      console.error(`[lead-service] on-demand run ${onDemandRun.runId} of unit ${onDemandRun.campaignId} not closed (${status}):`, err);
+    }
+  };
+
+  // Every answered ask is recorded as ONE `on_demand` trigger event at campaign-service
   // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
   const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
     recordLeadRequested({
@@ -228,10 +262,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       await db.insert(idempotencyCache).values({ idempotencyKey: runId, orgId: req.orgId!, response: result });
       traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-done", detail: `found=false reason=${refused.reason}`, data: { found: false, reason: refused.reason, detail: refused.detail } }, req.headers).catch(() => {});
       await updateRun(serveRunId, "completed", runMeta);
+      await closeOnDemand("completed");
     } catch (err) {
       console.error(`[lead-service] buffer/next failed to close a refused serve runId=${runId}:`, err);
       try {
         await updateRun(serveRunId, "failed", runMeta);
+        await closeOnDemand("failed");
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after refused-serve error:", runErr);
       }
@@ -256,7 +292,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         parentRunId: runId,
         runId: serveRunId,
         userId: req.userId ?? null,
-        workflowSlug,
+        workflowSlug: runWorkflowSlug,
         activeGoalId: req.activeGoalId ?? null,
         brandProfileId: req.brandProfileId ?? null,
         audienceId: req.audienceId ?? null,
@@ -289,6 +325,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     const runStatus = "completed";
     await updateRun(serveRunId, runStatus, runMeta);
+    await closeOnDemand(runStatus);
 
     if (result.found) recordAsk({ outcome: "ran", campaignId: runCampaignId }, result.lead?.leadId ?? null);
     else recordAsk({ outcome: "skipped", reason: result.reason ?? "reason_unstated" });
@@ -301,6 +338,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-credit-insufficient", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
       try {
         await updateRun(serveRunId, "completed", runMeta);
+        await closeOnDemand("completed");
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after credit-insufficient response:", runErr);
       }
@@ -318,6 +356,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-audience-not-serveable", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
       try {
         await updateRun(serveRunId, "completed", runMeta);
+        await closeOnDemand("completed");
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after audience-not-serveable response:", runErr);
       }
@@ -329,6 +368,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: String(error) }, req.headers).catch(() => {});
     try {
       await updateRun(serveRunId, "failed", runMeta);
+      await closeOnDemand("failed");
     } catch (runErr) {
       console.error("[lead-service] Failed to close run after error:", runErr);
     }
