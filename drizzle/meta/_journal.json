@@ -442,6 +442,13 @@
       "when": 1785196800000,
       "tag": "0062_trigger_event_outbox",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1785283200000,
+      "tag": "0063_candidate_screening_company",
+      "breakpoints": true
     }
   ]
 }

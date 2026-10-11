@@ -44,6 +44,7 @@ let originsCache: {
   at: number;
   byChannel: Map<string, Set<string>>;
   byList: Map<string, SourcingOriginName>;
+  listsBySlug: Map<string, SourcingOriginName & { lists: string[] }>;
 } | null = null;
 
 /** Test hook: forget the cached catalogue. */
@@ -63,6 +64,15 @@ async function loadOriginsByChannel(): Promise<Map<string, Set<string>>> {
  */
 export async function loadOriginNamesByList(): Promise<Map<string, SourcingOriginName>> {
   return (await loadOriginsCatalogue()).byList;
+}
+
+/**
+ * One origin by its slug, with every audience LIST KIND it counts (features-service's catalogue);
+ * null when the catalogue names no such origin. Throws SourcingOriginUnresolvedError when the
+ * catalogue cannot be read.
+ */
+export async function loadOriginBySlug(slug: string): Promise<(SourcingOriginName & { lists: string[] }) | null> {
+  return (await loadOriginsCatalogue()).listsBySlug.get(slug) ?? null;
 }
 
 async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>> {
@@ -91,6 +101,7 @@ async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>>
     throw new SourcingOriginUnresolvedError("features-service sourcing-origins answered without origins");
   }
   const byList = new Map<string, SourcingOriginName>();
+  const listsBySlug = new Map<string, SourcingOriginName & { lists: string[] }>();
   for (const origin of body.origins as Array<Record<string, unknown>>) {
     const { slug, name, audienceLists } = origin ?? {};
     if (typeof slug !== "string" || typeof name !== "string" || !Array.isArray(audienceLists)) {
@@ -102,8 +113,9 @@ async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>>
       }
       byList.set(list, { slug, name });
     }
+    listsBySlug.set(slug, { slug, name, lists: audienceLists as string[] });
   }
-  originsCache = { at: Date.now(), byChannel, byList };
+  originsCache = { at: Date.now(), byChannel, byList, listsBySlug };
   return originsCache;
 }
 
