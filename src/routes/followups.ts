@@ -13,6 +13,7 @@ import {
   FOLLOWUP_DUE_MAX_HORIZON_MS,
   FOLLOWUP_DUE_PAST_TOLERANCE_MS,
   FollowupOptOutLookupError,
+  FollowupResponderStartUnavailableError,
   dueDateBounds,
   lookupFollowupRowByEmail,
   parseDueDate,
@@ -38,7 +39,7 @@ function wrap<Req extends Request = Request>(
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const FollowupStatementBodySchema = z.object({
-  kind: z.enum(["scheduled", "acted", "stopped"]),
+  kind: z.enum(["scheduled", "acted", "stopped", "handed"]),
   dueAt: z.string().optional(),
   nextDueAt: z.string().optional(),
   reason: z.string().optional(),
@@ -84,6 +85,16 @@ router.post(
       res.status(400).json({ error: "campaignId required" });
       return;
     }
+    // Which responder is claiming decides which debts were ever a responder's (a reply owed before
+    // any responder started was a human's). Without it a weeks-old backlog reads like a fresh reply,
+    // so the claim is refused rather than made on a guess.
+    if (!req.campaignId) {
+      res.status(400).json({
+        error: "x-campaign-id (the responder campaign that claims) is required",
+        code: "acting_campaign_required",
+      });
+      return;
+    }
 
     try {
       const result = await pickFollowupCandidate({
@@ -92,7 +103,7 @@ router.post(
         runId: req.runId ?? null,
         // The campaign this worker was DISPATCHED for. For an internal leg it is not the campaign
         // named in the path (that one holds the person), and it is what the ledger attributes to.
-        actingCampaignId: req.campaignId ?? null,
+        actingCampaignId: req.campaignId,
         context: {
           orgId: req.orgId,
           userId: req.userId,
@@ -137,6 +148,14 @@ router.post(
         res.status(502).json({
           error: "Delivery status unavailable, so opt-outs cannot be honoured",
           code: "opt_out_lookup_unavailable",
+        });
+        return;
+      }
+      if (err instanceof FollowupResponderStartUnavailableError) {
+        console.error(`[lead-service] followup claim failed campaign=${campaignId}:`, err);
+        res.status(502).json({
+          error: "campaign-service could not say when the claiming responder started, so a backlog cannot be told from a fresh reply",
+          code: "responder_start_unavailable",
         });
         return;
       }
@@ -350,7 +369,8 @@ router.get(
  *
  * `scheduled` enqueues (qualification decided we owe an answer at T), `acted` records that a
  * worker answered and says when the next answer is owed, `stopped` empties the schedule with a
- * reason. A stop is not a tombstone: a later `scheduled` re-enters the person, which is how a
+ * reason, `handed` gives the thread to a person for good (no responder claims it again, a later
+ * `scheduled` does not re-enter it). A stop is not a tombstone: a later `scheduled` re-enters the person, which is how a
  * fresh reply works — whoever observes it stops the schedule so the old date cannot fire, and
  * qualification re-decides.
  */
@@ -376,11 +396,14 @@ router.post(
     let dueAtIso: string | null = null;
     let reason: string | null = null;
 
-    if (body.kind === "stopped") {
+    if (body.kind === "stopped" || body.kind === "handed") {
       const stated = body.reason?.trim();
       if (!stated) {
         res.status(400).json({
-          error: "reason is required when stopping a follow-up schedule",
+          error:
+            body.kind === "handed"
+              ? "reason is required when handing a thread to a person (to whom, why)"
+              : "reason is required when stopping a follow-up schedule",
           code: "reason_required",
         });
         return;

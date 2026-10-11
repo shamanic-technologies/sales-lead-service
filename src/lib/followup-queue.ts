@@ -25,11 +25,27 @@
  *    opted out (email-gateway's evidence, read at claim time), a booked meeting is on record for
  *    them, or they answered again (the observer of that reply says so, and the queue holds nothing
  *    until qualification re-decides what we owe).
+ *
+ * And one thing it DOES guarantee (owner 2026-10-11, Shockwavecenters): a thread handed to a PERSON
+ * is never claimed by an automated responder again. Two ways in, both facts, never a time threshold:
+ *
+ *  - STATED: whoever hands the thread over (instantly-service: the client is asked to answer, the
+ *    reply is escalated, a person already answered) sends `kind:"handed"`. Unlike a stop it is
+ *    permanent: a later `scheduled` (the prospect writes again) does not re-enter the row.
+ *  - OWED BEFORE ANY RESPONDER: a never-answered debt whose due date predates the earliest responder
+ *    known on this held campaign (campaign-service `createdAt` of the acting campaign) was a
+ *    human's reply to answer, because no responder existed when it arrived. The claim hands those
+ *    over instead of answering them: switching a responder on answered a 5-week-old backlog,
+ *    including a thread staff had promised to follow up and one the client was asked to answer.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { followupActionInsert } from "./followup-actions.js";
+import { fetchCampaign } from "./campaign-client.js";
+
+/** Why a pre-responder debt was handed over (stored on the row, `followup_handed_reason`). */
+export const OWED_BEFORE_RESPONDER_REASON = "owed_before_responder_started";
 
 /**
  * How long a claim holds a due row before another worker may take it.
@@ -115,12 +131,17 @@ export type FollowupStatementKind =
   /** Nothing is owed right now, and why. A later "scheduled" re-enters them; this is not a
    *  tombstone, which is what makes "they answered again" expressible: the observer of the reply
    *  stops the schedule, and qualification re-decides. */
-  | "stopped";
+  | "stopped"
+  /** The thread is a PERSON's now (client asked to answer, escalated, a human answered): no
+   *  automated responder ever claims it again, and unlike a stop a later "scheduled" does NOT
+   *  re-enter it. `reason` says to whom / why. */
+  | "handed";
 
 export const FOLLOWUP_STATEMENT_KINDS: readonly FollowupStatementKind[] = [
   "scheduled",
   "acted",
   "stopped",
+  "handed",
 ];
 
 export interface DueDateBounds {
@@ -189,6 +210,8 @@ export async function loadFollowupCandidates(params: {
   orgId: string;
   campaignId: string;
   nowMs: number;
+  /** Earliest responder start on this held campaign: a never-answered debt due before it is not claimable. */
+  responderStartedAtIso: string;
   limit?: number;
 }): Promise<FollowupCandidate[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -214,6 +237,8 @@ export async function loadFollowupCandidates(params: {
       AND lc.followup_due_at IS NOT NULL
       AND lc.followup_due_at <= ${now}
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
+      AND lc.followup_handed_at IS NULL
+      AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       AND NOT EXISTS (
         SELECT 1
         FROM conversion_events ce
@@ -270,6 +295,7 @@ export async function claimFollowup(params: {
          AND followup_due_at IS NOT NULL
          AND followup_due_at <= ${now}
          AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
+         AND followup_handed_at IS NULL
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
       ${followupActionInsert("claimed", params.actingCampaignId ?? null, params.runId, now)}
@@ -357,6 +383,134 @@ export type FollowupClaim =
   | { claimed: null; reason: FollowupEmptyReason };
 
 /**
+ * campaign-service could not say when the acting responder started. A claim never proceeds on a
+ * guess (the caller answers 502): without the start, a weeks-old backlog is indistinguishable from
+ * a reply that landed a minute ago, and answering a thread a person owns cannot be taken back.
+ */
+export class FollowupResponderStartUnavailableError extends Error {
+  constructor(message: string) {
+    super(`[followup-queue] responder start unavailable: ${message}`);
+    this.name = "FollowupResponderStartUnavailableError";
+  }
+}
+
+/** A campaign's creation never changes, so one read per acting campaign per process. */
+const responderStartCache = new Map<string, string>();
+
+/** Test seam: forget cached starts. */
+export function clearResponderStartCache(): void {
+  responderStartCache.clear();
+}
+
+/**
+ * When the acting responder campaign started: campaign-service's `createdAt` on its own row.
+ * Read, never inferred (not from the first claim: a responder can poll empty for days first).
+ */
+export async function resolveResponderStartedAt(
+  orgId: string,
+  actingCampaignId: string,
+  context: FollowupClaimContext,
+): Promise<string> {
+  const cached = responderStartCache.get(actingCampaignId);
+  if (cached) return cached;
+
+  let campaign: Awaited<ReturnType<typeof fetchCampaign>>;
+  try {
+    campaign = await fetchCampaign(actingCampaignId, orgId, {
+      userId: context.userId,
+      runId: context.runId,
+      brandId: context.brandId,
+    });
+  } catch (err) {
+    throw new FollowupResponderStartUnavailableError(
+      `campaign-service unreachable for campaign ${actingCampaignId}: ${String(err)}`,
+    );
+  }
+  if (!campaign) {
+    throw new FollowupResponderStartUnavailableError(
+      `campaign-service holds no campaign ${actingCampaignId} for org ${orgId}`,
+    );
+  }
+  const raw = (campaign as { createdAt?: unknown }).createdAt;
+  const ms = typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+  if (Number.isNaN(ms)) {
+    throw new FollowupResponderStartUnavailableError(
+      `campaign ${actingCampaignId} carries no readable createdAt (${JSON.stringify(raw)})`,
+    );
+  }
+  const iso = new Date(ms).toISOString();
+  responderStartCache.set(actingCampaignId, iso);
+  return iso;
+}
+
+/**
+ * Record that this responder drains this held campaign, and return the EARLIEST responder start
+ * known for it. Several responders can drain one held campaign (meeting booker, instant call), and
+ * a debt that arose while an elder ran is the elder's: a sibling switched on later must not hand it
+ * over, so the cut is the minimum, never the acting campaign's own start.
+ */
+export async function recordResponder(params: {
+  heldCampaignId: string;
+  actingCampaignId: string;
+  actingStartedAtIso: string;
+}): Promise<string> {
+  const rows = (await db.execute(sql`
+    INSERT INTO followup_responders (held_campaign_id, first_responder_campaign_id, first_responder_started_at, updated_at)
+    VALUES (${params.heldCampaignId}, ${params.actingCampaignId}, ${params.actingStartedAtIso}::timestamptz, now())
+    ON CONFLICT (held_campaign_id) DO UPDATE SET
+      first_responder_campaign_id = CASE
+        WHEN EXCLUDED.first_responder_started_at < followup_responders.first_responder_started_at
+        THEN EXCLUDED.first_responder_campaign_id
+        ELSE followup_responders.first_responder_campaign_id END,
+      first_responder_started_at = LEAST(followup_responders.first_responder_started_at, EXCLUDED.first_responder_started_at),
+      updated_at = CASE
+        WHEN EXCLUDED.first_responder_started_at < followup_responders.first_responder_started_at
+        THEN now()
+        ELSE followup_responders.updated_at END
+    RETURNING first_responder_started_at AS started_at
+  `)) as unknown as Array<{ started_at: Date | string }>;
+
+  const iso = rows[0] ? toIso(rows[0].started_at) : null;
+  if (!iso) {
+    throw new FollowupResponderStartUnavailableError(
+      `followup_responders returned no start for held campaign ${params.heldCampaignId}`,
+    );
+  }
+  return iso;
+}
+
+/**
+ * Hand over every never-answered debt of this held campaign that was owed BEFORE any responder
+ * started: no responder existed when that reply arrived, so it was a human's to answer (the client
+ * was told). Persisted, so the row reads as handed everywhere and never re-enters the queue.
+ */
+export async function handOverPreResponderDebts(params: {
+  orgId: string;
+  campaignId: string;
+  responderStartedAtIso: string;
+  nowMs: number;
+}): Promise<string[]> {
+  const now = new Date(params.nowMs).toISOString();
+  const rows = (await db.execute(sql`
+    UPDATE leads_campaigns
+       SET followup_handed_at = ${now},
+           followup_handed_reason = ${OWED_BEFORE_RESPONDER_REASON},
+           followup_stopped_reason = ${OWED_BEFORE_RESPONDER_REASON},
+           followup_due_at = NULL,
+           followup_claimed_at = NULL,
+           updated_at = ${now}
+     WHERE org_id = ${params.orgId}
+       AND campaign_id = ${params.campaignId}
+       AND followup_handed_at IS NULL
+       AND followup_due_at IS NOT NULL
+       AND COALESCE(followup_count, 0) = 0
+       AND followup_due_at < ${params.responderStartedAtIso}::timestamptz
+    RETURNING id
+  `)) as unknown as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
+/**
  * Hand back the next person due for a follow-up on this campaign, or nobody.
  *
  * The opt-out stop is applied here because only the delivery layer holds that evidence. If it
@@ -369,17 +523,44 @@ export async function pickFollowupCandidate(params: {
   orgId: string;
   campaignId: string;
   runId: string | null;
-  /** The campaign the claiming worker was dispatched for (x-campaign-id), recorded on the ledger. */
-  actingCampaignId?: string | null;
+  /**
+   * The campaign the claiming worker was dispatched for (x-campaign-id): recorded on the ledger,
+   * and its start decides which debts were ever a responder's. Required: without it a backlog
+   * cannot be told from a fresh reply.
+   */
+  actingCampaignId: string;
   context: FollowupClaimContext;
   nowMs?: number;
 }): Promise<FollowupClaim> {
   const nowMs = params.nowMs ?? Date.now();
 
+  const actingStartedAtIso = await resolveResponderStartedAt(
+    params.orgId,
+    params.actingCampaignId,
+    params.context,
+  );
+  const responderStartedAtIso = await recordResponder({
+    heldCampaignId: params.campaignId,
+    actingCampaignId: params.actingCampaignId,
+    actingStartedAtIso,
+  });
+  const handedIds = await handOverPreResponderDebts({
+    orgId: params.orgId,
+    campaignId: params.campaignId,
+    responderStartedAtIso,
+    nowMs,
+  });
+  if (handedIds.length > 0) {
+    console.log(
+      `[lead-service] followup handed over ${handedIds.length} debt(s) owed before the first responder started campaign=${params.campaignId} acting=${params.actingCampaignId} responderStartedAt=${responderStartedAtIso} ids=${handedIds.join(",")}`,
+    );
+  }
+
   const candidates = await loadFollowupCandidates({
     orgId: params.orgId,
     campaignId: params.campaignId,
     nowMs,
+    responderStartedAtIso,
   });
   if (candidates.length === 0) return { claimed: null, reason: "nothing_due" };
 
@@ -428,7 +609,7 @@ export async function pickFollowupCandidate(params: {
       id: candidate.id,
       nowMs,
       runId: params.runId,
-      actingCampaignId: params.actingCampaignId ?? null,
+      actingCampaignId: params.actingCampaignId,
     });
     if (claimed) {
       console.log(
@@ -451,6 +632,9 @@ export interface FollowupState {
   followupCount: number;
   lastActionAt: string | null;
   stoppedReason: string | null;
+  /** When the thread was handed to a person; null = an automated responder may still claim it. */
+  handedAt: string | null;
+  handedReason: string | null;
 }
 
 interface RawStateRow {
@@ -462,6 +646,8 @@ interface RawStateRow {
   followup_count: number | string | null;
   followup_last_action_at: Date | string | null;
   followup_stopped_reason: string | null;
+  followup_handed_at?: Date | string | null;
+  followup_handed_reason?: string | null;
 }
 
 /**
@@ -485,13 +671,16 @@ function toState(row: RawStateRow): FollowupState {
     followupCount: Number(row.followup_count ?? 0),
     lastActionAt: toIso(row.followup_last_action_at),
     stoppedReason: row.followup_stopped_reason,
+    handedAt: toIso(row.followup_handed_at ?? null),
+    handedReason: row.followup_handed_reason ?? null,
   };
 }
 
 const STATE_COLUMNS = sql`
   id, lead_id, campaign_id, followup_due_at, followup_claimed_at,
   COALESCE(followup_count, 0) AS followup_count,
-  followup_last_action_at, followup_stopped_reason
+  followup_last_action_at, followup_stopped_reason,
+  followup_handed_at, followup_handed_reason
 `;
 
 /**
@@ -527,6 +716,9 @@ export async function readFollowupState(
  *  - stopped: no due date, the claim is released, the reason is recorded. Not a tombstone — a
  *    later `scheduled` re-enters the person, which is exactly how "they answered again" works:
  *    whoever observes the reply stops the schedule, and qualification re-decides what we owe.
+ *  - handed: the thread is a person's. No due date, the claim is released, `followup_handed_at`
+ *    is stamped once (the first hand-over's time and reason are kept). Permanent: on a handed row
+ *    every later statement leaves the due date NULL and the stop reason as the hand-over wrote it.
  */
 export async function writeFollowupStatement(params: {
   orgId: string;
@@ -541,17 +733,28 @@ export async function writeFollowupStatement(params: {
 }): Promise<FollowupState | null> {
   const now = new Date(params.nowMs).toISOString();
   const acted = params.kind === "acted";
+  const handed = params.kind === "handed";
 
   // An 'acted' statement is also a ledger row, written by the same statement: the count on the
   // lifecycle row says HOW MANY answers were sent, the ledger says WHICH campaign's worker sent each.
   const rows = (await db.execute(sql`
     WITH updated AS (
       UPDATE leads_campaigns
-         SET followup_due_at = ${params.dueAtIso},
+         SET followup_due_at = ${
+               handed
+                 ? sql`NULL`
+                 : sql`CASE WHEN followup_handed_at IS NULL THEN ${params.dueAtIso}::timestamptz ELSE NULL END`
+             },
+             followup_handed_at = ${handed ? sql`COALESCE(followup_handed_at, ${now}::timestamptz)` : sql`followup_handed_at`},
+             followup_handed_reason = ${handed ? sql`COALESCE(followup_handed_reason, ${params.reason})` : sql`followup_handed_reason`},
              followup_claimed_at = NULL,
              followup_count = COALESCE(followup_count, 0) + ${acted ? 1 : 0},
              followup_last_action_at = ${acted ? now : sql`followup_last_action_at`},
-             followup_stopped_reason = ${params.reason},
+             followup_stopped_reason = ${
+               handed
+                 ? sql`${params.reason}`
+                 : sql`CASE WHEN followup_handed_at IS NULL THEN ${params.reason} ELSE followup_stopped_reason END`
+             },
              updated_at = ${now}
        WHERE id = ${params.id} AND org_id = ${params.orgId}
       RETURNING ${STATE_COLUMNS}, org_id, brand_ids

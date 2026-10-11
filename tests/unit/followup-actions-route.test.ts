@@ -126,12 +126,14 @@ describe("the writes attribute to the DISPATCHED campaign (x-campaign-id)", () =
     );
   });
 
-  it("no x-campaign-id is recorded as null, never guessed", async () => {
+  it("no x-campaign-id is refused, never claimed under a guessed responder", async () => {
     pickFollowupCandidate.mockResolvedValue({ claimed: null, reason: "nothing_due" });
-    await request(app)
+    const res = await request(app)
       .post(`/orgs/campaigns/${PRED}/followups/claim-next`)
       .set({ "x-api-key": "test-api-key", "x-org-id": "org-1" })
       .send({});
-    expect(pickFollowupCandidate).toHaveBeenCalledWith(expect.objectContaining({ actingCampaignId: null }));
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("acting_campaign_required");
+    expect(pickFollowupCandidate).not.toHaveBeenCalled();
   });
 });

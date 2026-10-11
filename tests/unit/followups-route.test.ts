@@ -28,6 +28,7 @@ vi.mock("../../src/lib/followup-queue.js", async (orig) => {
 
 const ROW = "40000000-0000-0000-0000-000000000001";
 const auth = { "x-api-key": "test-api-key", "x-org-id": "org-1" };
+const claimAuth = { ...auth, "x-campaign-id": "responder-1" };
 
 let app: express.Express;
 
@@ -61,6 +62,21 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
     expect(res.status).toBe(400);
   });
 
+  it("400 without x-campaign-id: which responder claims decides what was ever its debt", async () => {
+    const res = await request(app).post(url).set(auth).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("acting_campaign_required");
+    expect(pickFollowupCandidate).not.toHaveBeenCalled();
+  });
+
+  it("502 when campaign-service cannot say when the responder started — never claims on a guess", async () => {
+    const { FollowupResponderStartUnavailableError } = await import("../../src/lib/followup-queue.js");
+    pickFollowupCandidate.mockRejectedValue(new FollowupResponderStartUnavailableError("down"));
+    const res = await request(app).post(url).set(claimAuth).send({});
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("responder_start_unavailable");
+  });
+
   it("returns the claimed person", async () => {
     pickFollowupCandidate.mockResolvedValue({
       claimed: {
@@ -76,7 +92,7 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
       },
     });
 
-    const res = await request(app).post(url).set(auth).send({});
+    const res = await request(app).post(url).set(claimAuth).send({});
 
     expect(res.status).toBe(200);
     expect(res.body.found).toBe(true);
@@ -98,7 +114,7 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
       },
     });
 
-    const res = await request(app).post(url).set(auth).send({});
+    const res = await request(app).post(url).set(claimAuth).send({});
 
     expect(res.body.followup.dueAt).toBe("2026-09-01T09:00:00.000Z");
     expect(res.body.followup.lastActionAt).toBe("2026-08-30T09:00:00.000Z");
@@ -106,7 +122,7 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
 
   it("names why nobody came back", async () => {
     pickFollowupCandidate.mockResolvedValue({ claimed: null, reason: "nothing_due" });
-    const res = await request(app).post(url).set(auth).send({});
+    const res = await request(app).post(url).set(claimAuth).send({});
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ found: false, reason: "nothing_due" });
   });
@@ -115,7 +131,7 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
     const { FollowupOptOutLookupError } = await import("../../src/lib/followup-queue.js");
     pickFollowupCandidate.mockRejectedValue(new FollowupOptOutLookupError(new Error("down")));
 
-    const res = await request(app).post(url).set(auth).send({});
+    const res = await request(app).post(url).set(claimAuth).send({});
 
     expect(res.status).toBe(502);
     expect(res.body.code).toBe("opt_out_lookup_unavailable");
@@ -123,15 +139,15 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
 
   it("500 on an unexpected failure — the socket is answered, never hung", async () => {
     pickFollowupCandidate.mockRejectedValue(new Error("boom"));
-    const res = await request(app).post(url).set(auth).send({});
+    const res = await request(app).post(url).set(claimAuth).send({});
     expect(res.status).toBe(500);
   });
 
   it("claims for the campaign named, not its identity family", async () => {
     pickFollowupCandidate.mockResolvedValue({ claimed: null, reason: "nothing_due" });
-    await request(app).post(url).set({ ...auth, "x-run-id": "run-9" }).send({});
+    await request(app).post(url).set({ ...claimAuth, "x-run-id": "run-9" }).send({});
     expect(pickFollowupCandidate).toHaveBeenCalledWith(
-      expect.objectContaining({ orgId: "org-1", campaignId: "camp-1", runId: "run-9" }),
+      expect.objectContaining({ orgId: "org-1", campaignId: "camp-1", runId: "run-9", actingCampaignId: "responder-1" }),
     );
   });
 });
@@ -247,6 +263,28 @@ describe("POST /orgs/leads/:id/followups", () => {
     expect(res.body.followup.dueAt).toBeNull();
     expect(writeFollowupStatement).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "stopped", dueAtIso: null, reason: "answered_again" }),
+    );
+  });
+
+  it("hands the thread to a person, with the reason required", async () => {
+    const missing = await request(app).post(url).set(auth).send({ kind: "handed" });
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe("reason_required");
+
+    writeFollowupStatement.mockResolvedValue({
+      ...state,
+      dueAt: null,
+      handedAt: "2026-10-11T10:00:00.000Z",
+      handedReason: "client asked to answer",
+    });
+    const res = await request(app)
+      .post(url)
+      .set(auth)
+      .send({ kind: "handed", reason: "client asked to answer" });
+    expect(res.status).toBe(200);
+    expect(res.body.followup.handedAt).toBe("2026-10-11T10:00:00.000Z");
+    expect(writeFollowupStatement).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "handed", dueAtIso: null, reason: "client asked to answer" }),
     );
   });
 
