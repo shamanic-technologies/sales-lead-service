@@ -6407,6 +6407,82 @@ registry.registerPath({
 
 // --- "Already a customer", read off the prospect's own reply ---
 
+const NamedPersonCampaignParam = z.object({
+  campaignId: z.string().openapi({
+    param: { name: "campaignId", in: "path" },
+    description: "The campaign the person is filed under (campaign-service id). Its brand is read from campaign-service, never accepted from the caller.",
+    example: "4769db14-0000-4000-8000-000000000000",
+  }),
+});
+
+const NamedPersonRequestSchema = z
+  .object({
+    email: z.string().min(3).openapi({
+      description: "The person's email address. Case-folded. Must already be known to the campaign's brand.",
+      example: "marie@example.com",
+    }),
+  })
+  .openapi("NamedPersonRequest");
+
+const NamedPersonResponseSchema = z
+  .object({
+    status: z.enum(["filed", "already_filed"]),
+    leadId: z.string().uuid().openapi({ description: "The person as a lead (email-first identity)." }),
+    leadCampaignId: z.string().uuid().openapi({
+      description:
+        "The lead row on this campaign: the row the follow-up queue (`/followups/schedule-by-email`, `/followups/claim-next`) and step statements key on.",
+    }),
+    campaignId: z.string(),
+    brandId: z.string(),
+    email: z.string(),
+    servedAt: z.string().openapi({ description: "When the person became a lead of the brand on this campaign (ISO 8601)." }),
+  })
+  .openapi("NamedPersonResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/campaigns/{campaignId}/leads/by-email",
+  summary: "File a person the brand already knows as a lead of this campaign (no purchase)",
+  description:
+    "For campaign-service, when a campaign that NAMES its people is born or gains a person (any campaign may; " +
+    "the Copilot's one-person follow-up is the first). No provider purchase, no human-service serve, no " +
+    "never-cold-contact gate: nothing is bought and the person is not cold. The person must be KNOWN to the " +
+    "campaign's brand: a live fact of the brand's CRM copy carrying the address (a signup, a message, a " +
+    "payment, any source), or a lead row of the org already filed under that brand; anything else is 404 " +
+    "person_not_known (this door never sources strangers). Writes what a serve writes: the lead (the lead " +
+    "owning the address, else a new lead with the address registered) and ONE lead row on the campaign, " +
+    "status served, served_at now, brand = the campaign's brand, run/user from x-run-id/x-user-id when sent. " +
+    "So the person reads as a lead of the brand at once in every read (lists, standing `not_contacted` until " +
+    "something is sent, timeline, CRM pairing). IDEMPOTENT per (person, campaign): a second call answers the " +
+    "same row with status already_filed. To make the person due later: `POST /orgs/campaigns/{campaignId}/" +
+    "followups/schedule-by-email` with the same email, then the campaign's worker claims them via " +
+    "`/followups/claim-next` (a debt scheduled after the campaign was created is never handed over as " +
+    "owed_before_responder_started).",
+  request: {
+    params: NamedPersonCampaignParam,
+    body: { content: { "application/json": { schema: NamedPersonRequestSchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    201: { description: "Filed now", content: { "application/json": { schema: NamedPersonResponseSchema } } },
+    200: {
+      description: "Already filed on this campaign: the same row, nothing written",
+      content: { "application/json": { schema: NamedPersonResponseSchema } },
+    },
+    400: { description: "Missing x-org-id, or `email` is not an address" },
+    401: { description: "Unauthorized" },
+    404: {
+      description:
+        "campaign-service holds no such campaign for this org (code campaign_not_found), or the brand does not know the address (code person_not_known). Nothing written.",
+    },
+    409: {
+      description:
+        "The campaign states no brand (code campaign_has_no_brand), or the address is registered on more than one lead (code ambiguous_lead, with leadIds). Nothing written.",
+    },
+    502: { description: "campaign-service or the database did not answer (code filing_unavailable). Nothing filed; retry." },
+  },
+});
+
 const ExistingCustomerCampaignParam = z.object({
   campaignId: z.string().openapi({
     param: { name: "campaignId", in: "path" },
