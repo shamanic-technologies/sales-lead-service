@@ -77,6 +77,10 @@ Owner 2026-10-08: every fact about a person carries a LABEL that is a fact, inde
 3. **`campaign_id` is attribution only; `offer_id` NULL = a fact about the person at the brand**, served on every offer page of it. Never key a read on the campaign.
 4. Do not re-derive a label or tag in a consumer, and do not add a second reply classifier: the provider's verdict is the one judgment per reply.
 
+## Who is waiting on us: `GET /orgs/leads/awaiting-reply?brandId=` + `POST /orgs/leads/{id}/answered-outside` (`awaiting-reply*.ts`, migration 0065)
+
+Owner 2026-10-11 ("Needs your call" = only the people who wrote back and are waiting on US). Per PERSON at the brand, off the outreach fact copy (current fact per subject) + `answered_outside_statements`: waiting iff their latest word (reply placed by the timeline's `replyLabel`; `auto_reply` and unjudged replies ignored) came after our latest answer AND is in `WAITING_LABELS` (interest, questions, referral, other proposal, hand-over). An answer = any `reply_sent` fact (replies route human/AI, staff CC, Unibox) or a person's "answered outside" statement (append-only, who + `stated_at`); a sequence email is NOT an answer. Opt-out (stop request, unsubscribe) is sticky. `waitingSince` = first unanswered word; no age limit; `total` = `people.length` (count and list one set). Copy never caught up = 503. Not in the read model, not a bucket: never fold it into `positive_reply`/`sales_interest`.
+
 ## Paid-pool retry: `pullNext` drains already-paid serves BEFORE asking human-service for anyone new (`retry-pool.ts`, #443)
 
 A serve is billed and suppressed 3 months in human-service immediately, so a failure after it (email generation, vendor push) strands a paid prospect; the suppression is a PRE-payment guard that must not be relaxed. Pool = this campaign's own `status='served'`, `sent_at IS NULL` rows, oldest serve first, `RETRY_CANDIDATE_BATCH_SIZE`, resolved by ONE batched campaign-scoped email-gateway `/orgs/status`.

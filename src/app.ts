@@ -12,6 +12,7 @@ import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
+import awaitingReplyRoutes from "./routes/awaiting-reply.js";
 import qualificationRoutes from "./routes/qualification.js";
 import wonLeadsRoutes from "./routes/won-leads.js";
 import neverColdContactRoutes from "./routes/never-cold-contact.js";
@@ -62,6 +63,8 @@ app.use(crmPairingsRoutes);
 // Literal `/orgs/leads/crm-evidence/*` paths — registered before `/orgs/leads/:id`.
 app.use(crmEvidenceRoutes);
 app.use(qualificationRoutes);
+// Before leadsRoutes: `/orgs/leads/awaiting-reply` must not be read as a lead id.
+app.use(awaitingReplyRoutes);
 app.use(leadsRoutes);
 app.use(wonLeadsRoutes);
 app.use(neverColdContactRoutes);
