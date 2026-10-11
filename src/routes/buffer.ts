@@ -148,7 +148,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
           brandId,
           outreachCampaignId: campaignId,
           originSlug: runFeatureSlug,
+          userId: req.userId ?? null,
+          runId,
         });
+        // The run carries the slug of the source campaign it is filed under: the origin, or Lead Sourcing
+        // (whose serves keep their origin on the audience they served from).
+        if (serveSource.kind === "source") runFeatureSlug = serveSource.sourceSlug;
       } catch (err) {
         console.error(
           `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,

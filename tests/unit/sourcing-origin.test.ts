@@ -96,3 +96,40 @@ describe("resolveSourcingOriginSlug", () => {
     await expect(resolve()).rejects.toThrow(/originsByChannel/);
   });
 });
+
+describe("loadOriginBySlug: Lead Sourcing (owner 2026-10-11)", () => {
+  beforeEach(async () => {
+    const { resetSourcingOriginsCache } = await import("../../src/lib/sourcing-origin.js");
+    resetSourcingOriginsCache();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("counts every list of the origins it may use; absent from the catalogue = null, as before", async () => {
+    const catalogue = {
+      ...CATALOGUE,
+      origins: [
+        { slug: "sourcing-apollo-cold-filters", name: "Apollo Cold Filters", audienceLists: ["apollo_search"] },
+        { slug: "sourcing-apollo-buying-signals", name: "Apollo Buying Signals", audienceLists: ["apollo_buying_signal"] },
+        { slug: "sourcing-crm-contacts", name: "Your CRM Contacts", audienceLists: ["crm_contacts"] },
+      ],
+      leadSourcing: {
+        slug: "lead-sourcing",
+        name: "Lead Sourcing",
+        mayUseByChannel: { "sales-cold-email-outreach": ["sourcing-apollo-cold-filters", "sourcing-apollo-buying-signals"], "sales-crm-email-outreach": [] },
+      },
+    };
+    vi.stubGlobal("fetch", route(null, { catalogue }));
+    const { loadOriginBySlug } = await import("../../src/lib/sourcing-origin.js");
+    await expect(loadOriginBySlug("lead-sourcing")).resolves.toEqual({ slug: "lead-sourcing", name: "Lead Sourcing", lists: ["apollo_buying_signal", "apollo_search"] });
+    await expect(loadOriginBySlug("sourcing-crm-contacts")).resolves.toEqual({ slug: "sourcing-crm-contacts", name: "Your CRM Contacts", lists: ["crm_contacts"] });
+  });
+
+  it("a catalogue without leadSourcing (before features-service serves it) names no Lead Sourcing origin", async () => {
+    vi.stubGlobal("fetch", route(null, { catalogue: { ...CATALOGUE, origins: [{ slug: "sourcing-apollo-cold-filters", name: "Apollo Cold Filters", audienceLists: ["apollo_search"] }] } }));
+    const { loadOriginBySlug } = await import("../../src/lib/sourcing-origin.js");
+    await expect(loadOriginBySlug("lead-sourcing")).resolves.toBeNull();
+  });
+});

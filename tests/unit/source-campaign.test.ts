@@ -8,6 +8,8 @@ vi.mock("../../src/config.js", () => ({
   CAMPAIGN_SERVICE_API_KEY: "campaign-key",
   BILLING_SERVICE_URL: "http://billing",
   BILLING_SERVICE_API_KEY: "billing-key",
+  HUMAN_SERVICE_URL: "http://human",
+  HUMAN_SERVICE_API_KEY: "human-key",
 }));
 
 const ORG = "org-1";
@@ -34,10 +36,11 @@ function sources(entries: Array<{ featureSlug: string; campaignId: string; runni
   };
 }
 
-function stub(opts: { campaign: unknown; campaignStatus?: number; budget?: unknown; budgetStatus?: number; seen?: Array<{ url: string; headers: Record<string, string> }> }) {
+function stub(opts: { campaign: unknown; campaignStatus?: number; budget?: unknown; budgetStatus?: number; choice?: unknown; choiceStatus?: number; seen?: Array<{ url: string; headers: Record<string, string> }> }) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     opts.seen?.push({ url, headers: init?.headers as Record<string, string> });
     if (url === `http://campaign/internal/campaigns/${OUTREACH}/source-campaigns`) return json(opts.campaign, opts.campaignStatus ?? 200);
+    if (url === `http://human/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`) return json(opts.choice ?? { chosenOriginSlugs: [] }, opts.choiceStatus ?? 200);
     if (url.startsWith(`http://billing/internal/brands/${BRAND}/campaign-budget?`)) {
       return json(opts.budget ?? { dailyBudgetCents: null, today: null }, opts.budgetStatus ?? 200);
     }
@@ -49,7 +52,7 @@ function stub(opts: { campaign: unknown; campaignStatus?: number; budget?: unkno
 
 async function resolve(originSlug: string | null = COLD) {
   const { resolveServeSource } = await import("../../src/lib/source-campaign.js");
-  return resolveServeSource({ orgId: ORG, brandId: BRAND, outreachCampaignId: OUTREACH, originSlug });
+  return resolveServeSource({ orgId: ORG, brandId: BRAND, outreachCampaignId: OUTREACH, originSlug, userId: "user-1", runId: "run-1" });
 }
 
 describe("resolveServeSource", () => {
@@ -68,7 +71,7 @@ describe("resolveServeSource", () => {
       budget: { dailyBudgetCents: "4200", today: { spentCents: "1000.5" } },
       seen,
     });
-    await expect(resolve()).resolves.toEqual({ kind: "source", campaignId: "src-cold", originSlug: COLD, offerId: OFFER });
+    await expect(resolve()).resolves.toEqual({ kind: "source", campaignId: "src-cold", originSlug: COLD, sourceSlug: COLD, offerId: OFFER });
     expect(seen[0].headers).toMatchObject({ "x-api-key": "campaign-key", "x-org-id": ORG });
     const budgetUrl = new URL(seen[1].url);
     expect(Object.fromEntries(budgetUrl.searchParams)).toEqual({
@@ -126,6 +129,49 @@ describe("resolveServeSource", () => {
       budget: { dailyBudgetCents: null, today: { spentCents: "999999" } },
     });
     await expect(resolve()).resolves.toMatchObject({ kind: "source", campaignId: "src-cold" });
+  });
+
+  it("LEAD SOURCING (owner 2026-10-11): an origin human-service chose is filed under the Lead Sourcing campaign, within ITS budget", async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    stub({
+      campaign: sources([
+        { featureSlug: COLD, campaignId: "src-cold-old", running: false },
+        { featureSlug: "lead-sourcing", campaignId: "src-ls", running: true },
+      ]),
+      choice: { chosenOriginSlugs: [COLD, LINKEDIN] },
+      budget: { dailyBudgetCents: null, today: null },
+      seen,
+    });
+    await expect(resolve()).resolves.toEqual({ kind: "source", campaignId: "src-ls", originSlug: COLD, sourceSlug: "lead-sourcing", offerId: OFFER });
+    const human = seen.find((x) => x.url.startsWith("http://human/"))!;
+    expect(human.headers).toMatchObject({ "x-api-key": "human-key", "x-org-id": ORG, "x-user-id": "user-1", "x-run-id": "run-1" });
+    const budget = new URL(seen.find((x) => x.url.startsWith("http://billing/"))!.url);
+    expect(budget.searchParams.get("featureSlug")).toBe("lead-sourcing");
+    expect(budget.searchParams.get("campaignIds")).toBe("src-ls");
+  });
+
+  it("LEAD SOURCING: an origin human-service did not choose is refused source_campaign_off, nothing bought", async () => {
+    stub({ campaign: sources([{ featureSlug: "lead-sourcing", campaignId: "src-ls", running: true }]), choice: { chosenOriginSlugs: [COLD] } });
+    await expect(resolve(LINKEDIN)).resolves.toMatchObject({ kind: "refused", reason: "source_campaign_off", campaignId: "src-ls" });
+  });
+
+  it("an origin's OWN ON campaign wins over Lead Sourcing (human-service not asked)", async () => {
+    const fetchMock = stub({
+      campaign: sources([
+        { featureSlug: COLD, campaignId: "src-cold", running: true },
+        { featureSlug: "lead-sourcing", campaignId: "src-ls", running: true },
+      ]),
+    });
+    await expect(resolve()).resolves.toMatchObject({ kind: "source", campaignId: "src-cold", sourceSlug: COLD });
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith("http://human/"))).toBe(false);
+  });
+
+  it("LEAD SOURCING: human-service unreadable fails loud (never a serve filed on a guess)", async () => {
+    const { SourceCampaignUnresolvedError } = await import("../../src/lib/source-campaign.js");
+    stub({ campaign: sources([{ featureSlug: "lead-sourcing", campaignId: "src-ls", running: true }]), choice: { error: "x" }, choiceStatus: 502 });
+    await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
+    stub({ campaign: sources([{ featureSlug: "lead-sourcing", campaignId: "src-ls", running: true }]), choice: { nope: true } });
+    await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
   });
 
   it("fails loud when campaign-service or billing cannot answer", async () => {
