@@ -2728,7 +2728,9 @@ registry.registerPath({
     "A message counts when it is a person's word (an automatic answer does not) and asks something of us " +
     "(interest, a question, a referral, another proposal, a hand-over). An ANSWER of ours is any email we sent " +
     "into their thread outside the sequence (Unibox reply, AI responder, a staff answer CC'd to the mailbox, " +
-    "any reply through our mailboxes) or a statement \"answered outside the platform\" " +
+    "any reply through our mailboxes), an email one of our people sent them from their own Gmail (the org's " +
+    "mailboxes or a staff mailbox, as google-service mirrors them) that a Jev judgment says answers what they " +
+    "wrote (judged once, frozen; an unrelated email keeps them listed), or a statement \"answered outside the platform\" " +
     "(POST /orgs/leads/{id}/answered-outside). An opt-out (stop request or unsubscribe) takes a person out for " +
     "good. Website visitors never enter. `total` is the length of `people`: the count and the list are one set. " +
     "Fresh within ~2 minutes for answers through our mailboxes, immediately for a statement. " +
@@ -2743,7 +2745,23 @@ registry.registerPath({
       content: {
         "application/json": {
           schema: z
-            .object({ brandId: z.string(), total: z.number().int(), people: z.array(AwaitingReplyPersonSchema) })
+            .object({
+              brandId: z.string(),
+              total: z.number().int(),
+              people: z.array(AwaitingReplyPersonSchema),
+              outsideAnswers: z
+                .object({
+                  checked: z.number().int().openapi({ description: "People whose Gmail mirrors were read (or read in the last 2 minutes)." }),
+                  complete: z.boolean().openapi({
+                    description: "false = at least one mirror or judgment could not be read: those people stay listed, never guessed answered.",
+                  }),
+                  unreadable: z.array(z.object({ leadId: z.string(), email: z.string(), reason: z.string() })),
+                  judged: z.number().int().openapi({ description: "Emails of ours judged by this read." }),
+                  reason: z.string().nullable().openapi({ description: "Why no mirror was read at all, else null." }),
+                })
+                .nullable()
+                .openapi({ description: "How the answers sent from our people's own Gmail were checked for this read." }),
+            })
             .openapi("AwaitingReplyResponse"),
         },
       },

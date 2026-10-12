@@ -10,7 +10,9 @@
  *   - An ANSWER of ours is any email we sent into their thread outside the sequence (`reply_sent`:
  *     our replies route, a person or the AI responder, either transport; a staff answer CC'd to the
  *     mailbox; an answer typed into the provider's Unibox) OR a person's statement "I answered this
- *     person outside the platform" (answered_outside_statements), dated when stated. A sequence
+ *     person outside the platform" (answered_outside_statements), dated when stated, OR an email one
+ *     of our people sent them from a mirrored Gmail that Jev judged an answer to what they wrote
+ *     (outside_answer_judgments, `outside-answers.ts`), dated when sent. A sequence
  *     follow-up is NOT an answer: it was scheduled before they wrote.
  *   - They are waiting iff their latest word, after the latest answer, is one that asks something of
  *     us (`WAITING_LABELS`: interest, a question, a referral, another proposal, a hand-over to a
@@ -53,7 +55,7 @@ export type ConversationEvent =
   | { type: "opt_out"; at: string };
 
 /** How we answered: a reply_sent fact's own `via`, or a person's statement. */
-export type AnswerVia = "replies_route" | "staff_client" | "provider_unibox" | "answered_outside" | "unknown";
+export type AnswerVia = "replies_route" | "staff_client" | "provider_unibox" | "answered_outside" | "mailbox_judged" | "unknown";
 
 export interface AwaitingReply {
   waitingSince: string;
