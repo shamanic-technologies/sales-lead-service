@@ -135,8 +135,9 @@ describe.skipIf(!hasRealDatabase)("released people and the pipe's reach against 
       activeGoalId: null,
       brandProfileId: null,
       reachableBy: ["phone"],
+      askFit: async () => ({ fits: true }),
     });
-    expect(stocked?.leadId).toBe(withPhone.leadId);
-    expect(stocked?.leadId).not.toBe(noPhone.leadId);
+    expect(stocked.lead?.leadId).toBe(withPhone.leadId);
+    expect(stocked.lead?.leadId).not.toBe(noPhone.leadId);
   });
 });

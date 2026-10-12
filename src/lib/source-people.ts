@@ -24,9 +24,13 @@ import type { BuyingSignal } from "./buying-signal.js";
  * first-found. `keptBy` says whether this source's own serve handed them out or another's did.
  *
  * NOT KEPT, every person once, first match wins: `screened_out` (our audience screen said no),
- * `failed_qualification_check` (a must-pass check said no), `kept_by_another_offer` (the brand
- * works them under another offer only), `not_served` (passed, but no serve came of it: no
- * deliverable email, or still pending). found = kept + the four.
+ * `failed_qualification_check` (a must-pass check said no), `no_longer_fits` (a source found them on
+ * its own run, and by the time an outreach campaign took its stock the audience's owner said they no
+ * longer fit it: src/lib/source-stock.ts; the owner's words per reason in `noLongerFits`),
+ * `kept_by_another_offer` (the brand works them under another offer only), `in_stock` (a source found
+ * them on its own run and no outreach campaign took them yet), `not_served` (passed, but no serve came
+ * of it: no deliverable email, or still pending). found = kept + the six. A FIND (`sourceFound`) is
+ * never a serve: it never makes anyone kept or "kept by another offer".
  *
  * GAPS are served as counts with a reason, never guessed onto a source: a served row of the offer
  * with no audience (`no_audience`), an audience human-service states no list or offer for this person
@@ -50,6 +54,12 @@ export interface SourceServeRow {
   emails: string[];
   companyDomain: string | null;
   companyName: string | null;
+  /** A source's own-run FIND (status_reason `source_found`), not a serve to anyone. */
+  sourceFound: boolean;
+  /** A find an outreach campaign took from the stock (source_handed_at set). */
+  sourceHanded: boolean;
+  /** A find set aside at handover: the audience owner's reason (source_set_aside_reason), else null. */
+  setAsideReason: string | null;
 }
 
 export interface SourceScreeningRow {
@@ -81,7 +91,14 @@ export interface SourcePeopleInput {
   checkDeclines: SourceCheckDeclineRow[];
 }
 
-export const NOT_KEPT_REASONS = ["screened_out", "failed_qualification_check", "kept_by_another_offer", "not_served"] as const;
+export const NOT_KEPT_REASONS = [
+  "screened_out",
+  "failed_qualification_check",
+  "no_longer_fits",
+  "kept_by_another_offer",
+  "in_stock",
+  "not_served",
+] as const;
 export type NotKeptReason = (typeof NOT_KEPT_REASONS)[number];
 
 export const SOURCE_GAP_REASONS = [
@@ -113,6 +130,8 @@ export interface SourcePeopleResult {
   found: { people: number; companies: number; peopleWithoutCompany: number };
   kept: { people: number; companies: number; peopleWithoutCompany: number; byThisSource: number; viaAnotherSource: number };
   notKept: Record<NotKeptReason, number>;
+  /** `notKept.no_longer_fits` per reason the audience's owner gave, most people first. */
+  noLongerFits: Array<{ reason: string; people: number }>;
   daily: Array<{ day: string; found: number; kept: number }>;
   byAudience: SourceAudienceCount[];
   bySignal: SourceSignalCount[];
@@ -141,11 +160,20 @@ interface PersonAcc {
   screenedOut: boolean;
   failedCheck: boolean;
   takenByAnotherOffer: boolean;
+  noLongerFitsReason: string | null;
+  inStock: boolean;
   company: string | null;
   signals: Set<string>;
   screenedHere: boolean;
   servedByThisSource: boolean;
   otherSourceLists: boolean;
+}
+
+/** Where the person's own-run FINDS stand: still waiting in a stock, or set aside as no longer fitting. */
+function stockState(p: PersonAcc, rows: SourceServeRow[]): void {
+  const finds = rows.filter((r) => r.sourceFound && r.status === "served");
+  p.inStock = finds.some((r) => !r.sourceHanded && r.setAsideReason === null);
+  p.noLongerFitsReason = finds.find((r) => r.setAsideReason !== null)?.setAsideReason ?? null;
 }
 
 export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResult {
@@ -174,7 +202,7 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
       p = {
         firstFoundAt: null, keptAt: null, kept: false, keptByThisSource: false, audiences: new Set(),
         screenedOutAudiences: new Set(), screenedOut: false, failedCheck: false, takenByAnotherOffer: false,
-        company: null, signals: new Set(), screenedHere: false, servedByThisSource: false, otherSourceLists: false,
+        noLongerFitsReason: null, inStock: false, company: null, signals: new Set(), screenedHere: false, servedByThisSource: false, otherSourceLists: false,
       };
       people.set(key, p);
     }
@@ -214,7 +242,7 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
       }
     }
     const offerRows = rows.filter((r) => input.outreachCampaignIds.has(r.campaignId));
-    const servedOffer = offerRows.filter((r) => r.status === "served");
+    const servedOffer = offerRows.filter((r) => r.status === "served" && !r.sourceFound);
 
     // Offer-scope gaps: a served row of the offer whose source cannot be named.
     for (const r of servedOffer) {
@@ -251,9 +279,10 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
         const s = r.buyingSignal;
         if (s) p.signals.add(JSON.stringify([s.type, s.source, s.engagement?.competitorPage ?? null, s.engagement?.postUrl ?? null]));
       }
-    } else if (rows.some((r) => r.status === "served")) {
+    } else if (rows.some((r) => r.status === "served" && !r.sourceFound)) {
       p.takenByAnotherOffer = true;
     }
+    stockState(p, rows);
   }
 
   // ---- screenings and must-pass declines: candidates this service judged for the source ----
@@ -287,11 +316,12 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
     if (!existed && key.startsWith("lead:")) {
       // A lead of the brand none of whose memberships is ours: found by this source's screen only.
       const rows = leads.get(key.slice(5)) ?? [];
-      const servedOffer = rows.filter((r) => input.outreachCampaignIds.has(r.campaignId) && r.status === "served");
+      const servedOffer = rows.filter((r) => input.outreachCampaignIds.has(r.campaignId) && r.status === "served" && !r.sourceFound);
       if (servedOffer.length > 0) {
         p.kept = true;
         p.keptAt = maxIso(p.firstFoundAt as string, servedOffer.reduce<string | null>((a, r) => minIso(a, r.at), null) as string);
-      } else if (rows.some((r) => r.status === "served")) p.takenByAnotherOffer = true;
+      } else if (rows.some((r) => r.status === "served" && !r.sourceFound)) p.takenByAnotherOffer = true;
+      stockState(p, rows);
       if (!p.company) p.company = domainKey(rows.find((r) => domainKey(r.companyDomain))?.companyDomain);
     }
   }
@@ -306,7 +336,10 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
   }
 
   // ---- roll up ----
-  const notKept: Record<NotKeptReason, number> = { screened_out: 0, failed_qualification_check: 0, kept_by_another_offer: 0, not_served: 0 };
+  const notKept: Record<NotKeptReason, number> = {
+    screened_out: 0, failed_qualification_check: 0, no_longer_fits: 0, kept_by_another_offer: 0, in_stock: 0, not_served: 0,
+  };
+  const noLongerFits = new Map<string, number>();
   const daily = new Map<string, { found: number; kept: number }>();
   const bump = (d: string, f: "found" | "kept") => {
     const row = daily.get(d) ?? { found: 0, kept: 0 };
@@ -347,7 +380,11 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
       if (p.servedByThisSource && !p.screenedHere) gapPeople.qualified_before_us.add(key);
     } else if (p.screenedOut) notKept.screened_out += 1;
     else if (p.failedCheck) notKept.failed_qualification_check += 1;
-    else if (p.takenByAnotherOffer) notKept.kept_by_another_offer += 1;
+    else if (p.noLongerFitsReason !== null && !p.inStock) {
+      notKept.no_longer_fits += 1;
+      noLongerFits.set(p.noLongerFitsReason, (noLongerFits.get(p.noLongerFitsReason) ?? 0) + 1);
+    } else if (p.takenByAnotherOffer) notKept.kept_by_another_offer += 1;
+    else if (p.inStock) notKept.in_stock += 1;
     else notKept.not_served += 1;
   }
 
@@ -356,6 +393,9 @@ export function computeSourcePeople(input: SourcePeopleInput): SourcePeopleResul
     found: { people: people.size, companies: foundCompanies.size, peopleWithoutCompany: foundNoCompany },
     kept: { people: keptPeople, companies: keptCompanies.size, peopleWithoutCompany: keptNoCompany, byThisSource: keptByThis, viaAnotherSource: keptElsewhere },
     notKept,
+    noLongerFits: [...noLongerFits.entries()]
+      .map(([reason, people]) => ({ reason, people }))
+      .sort((a, b) => b.people - a.people || (a.reason < b.reason ? -1 : 1)),
     daily: [...daily.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([d, c]) => ({ day: d, ...c })),
     byAudience: [...byAudience.values()].sort((a, b) => b.found - a.found || (a.audienceId < b.audienceId ? -1 : 1)),
     bySignal: [...signals.entries()]

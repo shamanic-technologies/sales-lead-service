@@ -7255,6 +7255,7 @@ registry.registerPath({
     "candidate this service screened (pass or reject) or declined on a must-pass check. KEPT = found AND served to an " +
     "outreach campaign of the offer. A person found by several sources counts in EACH (never first-found); `kept.byThisSource` " +
     "vs `kept.viaAnotherSource` says whose serve handed them out. found.people = kept.people + sum(notKept). " +
+    "A source's own-run FIND waiting in its stock is `notKept.in_stock`; one set aside at handover is `notKept.no_longer_fits`. " +
     "`daily`: found on the day the source first surfaced the person, kept on the day both were true (UTC; days with no event omitted). " +
     "`gaps`: people whose source cannot be named, as counts with a reason, never guessed onto a source. " +
     "404 not a campaign of the org; 409 not a lead source; 502 a sibling could not answer (never a partial count).",
@@ -7281,6 +7282,13 @@ registry.registerPath({
                 viaAnotherSource: z.number().int().openapi({ description: "Kept people this source found while another source's serve handed them out." }),
               }),
               notKept: z.object(Object.fromEntries(NOT_KEPT_REASONS.map((r) => [r, z.number().int()])) as Record<(typeof NOT_KEPT_REASONS)[number], z.ZodNumber>),
+              noLongerFits: z
+                .array(z.object({ reason: z.string(), people: z.number().int() }))
+                .openapi({
+                  description:
+                    "`notKept.no_longer_fits` per reason, in the audience owner's words: found by the source on its own run, then set aside " +
+                    "when an outreach campaign took its stock because human-service said they no longer fit the audience they were found for.",
+                }),
               daily: z.array(z.object({ day: z.string().openapi({ example: "2026-10-10" }), found: z.number().int(), kept: z.number().int() })),
               byAudience: z.array(
                 z.object({
