@@ -195,7 +195,16 @@ export interface Person {
    * `readBuyingSignal` (src/lib/buying-signal.ts) — never trusted raw, never derived.
    */
   buyingSignal?: unknown;
+  /**
+   * The person's phone in E.164, as the provider holds it. ABSENT when it holds none
+   * (human-service: crm only). Recorded as a `phone` contact method on the serve, so a
+   * phone channel's retry pool / stock can tell who it can reach.
+   */
+  phone?: string | null;
 }
+
+/** A contact method a serving pipe needs (human-service / crm-service `reachableBy`). */
+export type ReachMethod = "email" | "phone";
 
 export interface ServiceContext {
   orgId: string;
@@ -209,6 +218,17 @@ export interface ServiceContext {
   activeGoalId?: string;
   brandProfileId?: string;
   audienceId?: string;
+  /**
+   * The channel(s) the SERVING PIPE writes on (src/lib/channel-reach.ts), sent as the serve
+   * body's `reachableBy`: human-service never hands out, reveals or marks served a person
+   * without them. Absent / empty = no key on the wire (bytes unchanged).
+   */
+  reachableBy?: ReachMethod[];
+}
+
+/** The serve body: `{ reachableBy }` when the pipe states one, else `{}` (today's bytes). */
+export function serveBody(ctx: ServiceContext): Record<string, unknown> {
+  return ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {};
 }
 
 function buildHeaders(ctx: ServiceContext): Record<string, string> {
@@ -277,7 +297,7 @@ export interface ServeNextResult {
 export async function serveNext(audienceId: string, ctx: ServiceContext): Promise<ServeNextResult> {
   return callHuman<ServeNextResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/serve-next`,
-    { method: "POST", body: {}, ctx },
+    { method: "POST", body: serveBody(ctx), ctx },
   );
 }
 
@@ -320,7 +340,7 @@ export interface Candidate {
 export interface NextCandidateResult {
   status: "candidate" | "exhausted" | "pending";
   candidate: Candidate | null;
-  reason?: "pool_exhausted" | "yield_exhausted";
+  reason?: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider";
   /** The audience text the screen judges against; null when the audience states none. */
   target: { text: string; field: string } | null;
 }
@@ -335,7 +355,7 @@ export class CandidatesUnsupportedError extends Error {
 
 export async function nextCandidate(audienceId: string, ctx: ServiceContext): Promise<NextCandidateResult> {
   try {
-    return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: {}, ctx });
+    return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: serveBody(ctx), ctx });
   } catch (error) {
     if (error instanceof PeopleServiceError && error.status === 422) throw new CandidatesUnsupportedError(error.message);
     throw error;

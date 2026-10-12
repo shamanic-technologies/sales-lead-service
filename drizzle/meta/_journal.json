@@ -484,6 +484,13 @@
       "when": 1785728800000,
       "tag": "0068_source_found_stock",
       "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1785815200000,
+      "tag": "0069_channel_released",
+      "breakpoints": true
     }
   ]
 }
