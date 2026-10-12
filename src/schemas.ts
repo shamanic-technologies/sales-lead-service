@@ -5121,6 +5121,21 @@ registry.registerPath({
         example: "camp-1",
       }),
     }),
+    body: {
+      required: false,
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              alsoCampaignIds: z.array(z.string().min(1)).optional().openapi({
+                description:
+                  "More held campaigns, each claimed on its own exact id, tried in order after the path one; the first person claimed wins (followup.campaignId names whose row it is). For a responder whose preceding leg runs on several campaigns at once (cold email and cold WhatsApp opening conversations for one offer).",
+              }),
+            })
+            .openapi("FollowupClaimBody"),
+        },
+      },
+    },
   },
   parameters: FollowupOrgHeaders,
   responses: {
@@ -5128,7 +5143,7 @@ registry.registerPath({
       description: "The claimed person, or nobody with a named reason",
       content: { "application/json": { schema: FollowupClaimSchema } },
     },
-    400: { description: "Missing campaignId or x-org-id, or no x-campaign-id (code acting_campaign_required)" },
+    400: { description: "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), or alsoCampaignIds not an array of ids (code invalid_also_campaign_ids)" },
     401: { description: "Unauthorized" },
     500: { description: "Internal server error" },
     502: {
