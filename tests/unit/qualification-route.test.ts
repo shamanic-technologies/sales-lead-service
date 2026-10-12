@@ -241,6 +241,22 @@ describe("POST suggestions, unreadable draft", () => {
   });
 });
 
+describe("POST suggestions, chat-service refuses for lack of money", () => {
+  it("is a 402 insufficient_credit, never a 502, and the run is closed failed", async () => {
+    // The refusal exactly as chat-service /complete answers it (prod 2026-10-12, org at $0).
+    const { complete } = await import("../../src/lib/chat-complete-client.js");
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "Insufficient credits", balance_cents: 0, required_cents: 3 }), { status: 402 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const refusal = await complete({ systemPrompt: "s", message: "m", json: true }, { orgId: "org-1", userId: "user-1", runId: "run-child", brandId: "b1", campaignId: null, workflowSlug: null, featureSlug: null }).catch((e) => e);
+    vi.unstubAllGlobals();
+    generateSuggestions.mockRejectedValue(refusal);
+    const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
+    expect(res.status).toBe(402);
+    expect(res.body).toEqual({ error: "Insufficient credit", code: "insufficient_credit", balanceCents: 0, requiredCents: 3 });
+    expect(updateRun).toHaveBeenCalledWith("run-child", "failed", expect.anything());
+  });
+});
+
 describe("GET lead qualification", () => {
   const lead = { leadId: LEAD_A, organization: null };
   beforeEach(() => {

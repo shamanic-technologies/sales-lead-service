@@ -5,6 +5,7 @@
  * (`choice`). The answer is frozen with the model RELEASE the vendor reports serving.
  */
 import { CHAT_SERVICE_API_KEY, CHAT_SERVICE_URL } from "../config.js";
+import { paymentRefusal } from "./credit-errors.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { identityHeaders, type SpendIdentity } from "./treg-client.js";
 
@@ -24,7 +25,12 @@ async function ask(
     body: JSON.stringify({ state, questions }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`[lead-service] chat-service judgment failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok) {
+    const text = await res.text();
+    const refusal = paymentRefusal(res.status, text);
+    if (refusal) throw refusal;
+    throw new Error(`[lead-service] chat-service judgment failed: ${res.status} ${text.slice(0, 300)}`);
+  }
   const body = (await res.json()) as { model?: unknown; answers?: Record<string, unknown> };
   if (typeof body.model !== "string" || !body.model) throw new Error("[lead-service] chat-service judgment answered without its model release");
   const answers: Record<string, Record<string, unknown>> = {};
