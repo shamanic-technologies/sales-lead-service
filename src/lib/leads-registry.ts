@@ -9,6 +9,7 @@ import {
   type NewOrganization,
 } from "../db/schema.js";
 import type { Person } from "./people-client.js";
+import { findLeadBySocialLinkedin, foldSocialLead } from "./social-identity.js";
 
 // Person fields the gateway's neutral Person provides that map 1:1 to lead columns.
 // (departments / functions / twitter / github / facebook are NOT in the neutral
@@ -123,7 +124,12 @@ export function pickOrgFields(
  * Identity precedence — EMAIL OWNER FIRST:
  *   1. the lead that already owns `person.email` in lead_contact_methods
  *   2. the lead carrying `person.providerPersonId` (leads.apollo_person_id)
- *   3. a fresh row
+ *   3. the lead an engagement with our social posts made for this LinkedIn profile
+ *      (social-identity.ts: a person known by their social identity before any email)
+ *   4. a fresh row
+ *
+ * When 1 or 2 found the person AND an engager lead holds the same LinkedIn profile, the engager
+ * lead is folded into it (its engagements move onto the person's timeline): one person, one lead.
  *
  * A person is ONE identity, and the email is the strongest key we have for it.
  * `idx_lcm_channel_value` makes "one email = one lead" a hard invariant, so once
@@ -161,7 +167,26 @@ export async function upsertLeadFromPerson(
     );
   }
 
+  const socialOwnerId = await findLeadBySocialLinkedin(person.linkedinUrl);
+  if (socialOwnerId && !emailOwnerId && !providerOwnerId) {
+    // An engager we held by their social identity only: this serve is the same person, now with an
+    // email. The provider id is free (no lead holds it), so the engager's lead takes it.
+    await db
+      .update(leads)
+      .set({
+        ...fields,
+        metadata,
+        ...(person.providerPersonId ? { apolloPersonId: person.providerPersonId } : {}),
+        ...(enrichedAt ? { enrichedAt } : {}),
+      })
+      .where(eq(leads.id, socialOwnerId));
+    return socialOwnerId;
+  }
+
   const existingId = emailOwnerId ?? providerOwnerId;
+  if (existingId && socialOwnerId && socialOwnerId !== existingId) {
+    await foldSocialLead(socialOwnerId, existingId);
+  }
   if (existingId) {
     await db
       .update(leads)

@@ -38,6 +38,8 @@ const TEST_ENV_VARS: Record<string, string> = {
   COSTS_SERVICE_URL: "http://costs:3018",
   CLOUDFLARE_SERVICE_URL: "http://cloudflare:3019",
   CLOUDFLARE_SERVICE_API_KEY: "test-cloudflare-key",
+  SOCIAL_SERVICE_URL: "http://social:3020",
+  SOCIAL_SERVICE_API_KEY: "test-social-key",
   NODE_ENV: "test",
 };
 

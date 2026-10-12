@@ -245,6 +245,9 @@ router.post(
       dueAtIso: due.iso,
       reason: null,
       nowMs,
+      // WHO set the due date decides who may claim it: a campaign scheduling its own person (its run names
+      // itself) keeps the debt for itself; an observer sends no x-campaign-id and anyone may claim it.
+      actingCampaignId: req.campaignId ?? null,
     });
 
     // The lookup already proved the row is this org's, so a miss here is a row deleted between the
@@ -258,7 +261,7 @@ router.post(
     }
 
     console.log(
-      `[lead-service] followup scheduled by email campaign=${campaignId} leadCampaignId=${lookup.id} due=${due.iso}`,
+      `[lead-service] followup scheduled by email campaign=${campaignId} leadCampaignId=${lookup.id} due=${due.iso} setBy=${req.campaignId ?? "observer"}`,
     );
 
     res.json({ followup: state, leadId: lookup.leadId, email: lookup.email });

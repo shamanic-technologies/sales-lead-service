@@ -20,6 +20,7 @@ import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
 import { startOutcomeCauseWorker } from "./lib/outcome-cause.js";
 import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
 import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
+import { startSocialEngagementsWorker } from "./lib/social-engagements.js";
 import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
@@ -42,6 +43,8 @@ startOutcomeCauseWorker();
 startOutreachFactFeedWorker();
 // Keeps every brand's labelled timeline (silver lead_timeline_facts) current (see timeline-facts.ts).
 startTimelineFactsWorker();
+// The people who engage with our social posts: leads of the post's brand, the fact on their timeline.
+startSocialEngagementsWorker();
 // Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
 
