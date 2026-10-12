@@ -31,6 +31,7 @@ import serveRecordsRoutes from "./routes/serve-records.js";
 import brandJourneysRoutes from "./routes/brand-journeys.js";
 import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
+import socialEngagementsRoutes from "./routes/social-engagements.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { withRequestContext } from "./lib/request-context.js";
 
@@ -85,6 +86,7 @@ app.use(serveRecordsRoutes);
 app.use(brandJourneysRoutes);
 app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
+app.use(socialEngagementsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
