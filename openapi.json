@@ -7773,6 +7773,162 @@
           "probeCostUsd"
         ]
       },
+      "BrandJourneysResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "journeys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BrandJourney"
+            }
+          },
+          "count": {
+            "type": "integer"
+          },
+          "factCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "brandId",
+          "journeys",
+          "count",
+          "factCount"
+        ]
+      },
+      "BrandJourney": {
+        "type": "object",
+        "properties": {
+          "leadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "offerId": {
+            "type": "string",
+            "nullable": true,
+            "description": "null = facts about the person at the brand stated on no offer (kept apart, never copied onto each offer)."
+          },
+          "firstActedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Earliest act on this person x offer; null when no campaign acted."
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyFact"
+            },
+            "description": "Every LIVE timeline fact that is not one of our emails, date order (undated last)."
+          },
+          "acts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyAct"
+            },
+            "description": "Campaigns that acted on the person, one entry per (campaign, kind), earliest first."
+          }
+        },
+        "required": [
+          "leadId",
+          "offerId",
+          "firstActedAt",
+          "facts",
+          "acts"
+        ]
+      },
+      "JourneyFact": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Timeline fact id (`<source>:<source ref>`)."
+          },
+          "label": {
+            "type": "string",
+            "description": "The fact's label VERBATIM (never filtered against a vocabulary: a label this service does not know, e.g. a catalogue step key such as `industry_update_video`, is served as is)."
+          },
+          "source": {
+            "type": "string"
+          },
+          "occurredAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "ISO-8601; null = undated."
+          },
+          "campaignId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Attribution: the campaign the fact came under; null when none."
+          },
+          "attributable": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Whether the fact is ours (true), not ours (false), or nobody can say (null)."
+          },
+          "attributionBasis": {
+            "type": "string",
+            "nullable": true
+          },
+          "valueCents": {
+            "type": "number",
+            "nullable": true,
+            "description": "The stated amount on an outcome (a sale), cents; null otherwise."
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "source",
+          "occurredAt",
+          "campaignId",
+          "attributable",
+          "attributionBasis",
+          "valueCents",
+          "url"
+        ]
+      },
+      "JourneyAct": {
+        "type": "object",
+        "properties": {
+          "campaignId": {
+            "type": "string",
+            "nullable": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "email",
+              "followup"
+            ],
+            "description": "`email` = our emails (sends and bounces, attribution basis `our_email`); `followup` = an `acted` row of the follow-up ledger (the acting campaign)."
+          },
+          "firstAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "campaignId",
+          "kind",
+          "firstAt",
+          "lastAt",
+          "count"
+        ]
+      },
       "ServeRecordsResponse": {
         "type": "object",
         "properties": {
@@ -14554,6 +14710,67 @@
           },
           "404": {
             "description": "Lead not on this brand"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/timeline-journeys": {
+      "get": {
+        "summary": "Every person x offer journey of a brand, off the silver timeline (internal, service-auth)",
+        "description": "One entry per person x offer of the (x-org-id, brand) on `lead_timeline_facts` (offer null = facts stated on no offer). `facts` = every live non-email fact with its label verbatim, date, campaign, attribution and stated amount; `acts` = the campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows). Withdrawn facts are excluded. A person on two offers appears once per offer, each with only that offer's facts. ONE streamed statement, ordered by leadId then offerId (null first); `count` (journeys) and `factCount` close the body. 503 while the outreach fact copy has not caught up; 502 when campaign-service cannot name the campaigns' offers; failure after the first byte destroys the socket (never a short body that parses).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every journey of the brand",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandJourneysResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "campaign-service could not name the campaigns' offers"
+          },
+          "503": {
+            "description": "The outreach fact copy has not reached the feed's end yet"
           }
         }
       }
