@@ -258,6 +258,12 @@ export const leadsCampaigns = pgTable(
     followupStoppedReason: text("followup_stopped_reason"),
     followupHandedAt: timestamp("followup_handed_at", { withTimezone: true }),
     followupHandedReason: text("followup_handed_reason"),
+    // followup_due_set_by_campaign_id — WHO the current due date is for, by who set it (migration 0071):
+    //                           the writer's x-campaign-id. Equal to campaign_id = the holding campaign's own
+    //                           debt (its own follow-up, a ladder on its own person): only it claims the row.
+    //                           Another campaign = that campaign's ladder on a predecessor's person: anyone but
+    //                           the holder claims it. NULL = an observer said "due" (a reply, a trigger): anyone.
+    followupDueSetByCampaignId: text("followup_due_set_by_campaign_id"),
     // --- Source stock (src/lib/source-stock.ts, migration 0068) ---
     // A source unit's own run stores the lead it found under the SOURCE campaign (status_reason 'source_found');
     // the outreach campaign that takes it claims the row here, once. NULL on every other row.
@@ -349,6 +355,26 @@ export const outsideAnswerJudgments = pgTable(
   (table) => [
     uniqueIndex("idx_outside_answer_judgments_message").on(table.orgId, table.brandId, table.leadId, table.gmailMessageId),
   ],
+);
+
+// --- What a person's personal-channel message asks of us (src/lib/personal-messages.ts, migration 0071) ---
+// One inbound message of the crm fact copy (source 'matrix': WhatsApp, LinkedIn...), judged ONCE by Jev and
+// frozen with the model release: does it wait on us (question / interest / other), close the talk, ask us to
+// stop, or come from a machine? "Needs your call" reads it like the outreach provider's reply verdict.
+export const personalMessageJudgments = pgTable(
+  "personal_message_judgments",
+  {
+    factId: text("fact_id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    leadId: uuid("lead_id").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    verdict: text("verdict").notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    model: text("model").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_personal_message_judgments_brand").on(table.orgId, table.brandId)],
 );
 
 // --- Follow-up actions ledger (src/lib/followup-actions.ts, migration 0045) ---

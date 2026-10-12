@@ -152,7 +152,7 @@ describe("isOptedOut — the prospect's own act, and nothing overrides it", () =
 
 describe("loadFollowupCandidates", () => {
   it("reads due rows oldest-due-first, skipping live claims and booked meetings", async () => {
-    await loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START });
+    await loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START, actingCampaignId: "acting-1" });
     const text = lastSql();
     expect(text).toContain("followup_handed_at is null");
     expect(text).toContain("not (coalesce(lc.followup_count, 0) = 0 and lc.followup_due_at <");
@@ -170,7 +170,7 @@ describe("loadFollowupCandidates", () => {
   it("binds the booked-outcome list as an array parameter, never a bare JS array", () => {
     // A bare array compiles to `ANY(($1, $2, $3)::text[])`, which Postgres rejects with
     // `op ANY/ALL (array) requires array on right side`.
-    return loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START }).then(() => {
+    return loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START, actingCampaignId: "acting-1" }).then(() => {
       const { sql: text, params } = compile(execute.mock.calls[0][0]);
       expect(text).toMatch(/= ANY\(\$\d+::text\[\]\)/);
       expect(params).toContainEqual([...FOLLOWUP_BOOKED_OUTCOMES]);
@@ -183,7 +183,7 @@ describe("loadFollowupCandidates", () => {
       { id: "r2", lead_id: "l2", campaign_id: "camp-1", brand_ids: ["b1"], email: "b@c.com", followup_due_at: "2026-09-01 10:00:00+00", followup_count: 2, followup_last_action_at: null, audience_id: "aud-1" },
     ]);
 
-    const out = await loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START });
+    const out = await loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START, actingCampaignId: "acting-1" });
 
     expect(out).toHaveLength(1);
     expect(out[0]).toMatchObject({ id: "r2", email: "b@c.com", followupCount: 2, brandId: "b1" });
@@ -193,7 +193,7 @@ describe("loadFollowupCandidates", () => {
 describe("claimFollowup — the arbiter", () => {
   it("is a conditional UPDATE that re-checks the row is still due and unclaimed", async () => {
     execute.mockResolvedValueOnce([{ id: "r1" }]);
-    const ok = await claimFollowup({ id: "r1", nowMs: NOW, runId: "run-1" });
+    const ok = await claimFollowup({ id: "r1", nowMs: NOW, runId: "run-1", actingCampaignId: "acting-1" });
 
     const text = lastSql();
     expect(ok).toBe(true);
@@ -207,7 +207,7 @@ describe("claimFollowup — the arbiter", () => {
 
   it("reports false when the row was taken in the interval — zero rows returned", async () => {
     execute.mockResolvedValueOnce([]);
-    expect(await claimFollowup({ id: "r1", nowMs: NOW, runId: "run-1" })).toBe(false);
+    expect(await claimFollowup({ id: "r1", nowMs: NOW, runId: "run-1", actingCampaignId: "acting-1" })).toBe(false);
   });
 });
 

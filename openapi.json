@@ -2711,13 +2711,60 @@
               "reason"
             ],
             "description": "How the answers sent from our people's own Gmail were checked for this read."
+          },
+          "personalMessages": {
+            "type": "object",
+            "properties": {
+              "judged": {
+                "type": "integer",
+                "description": "Personal-channel messages of theirs judged by this read."
+              },
+              "complete": {
+                "type": "boolean",
+                "description": "false = a message could not be judged (listed as waiting) or the crm fact copy is not whole yet."
+              },
+              "unjudged": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "leadId": {
+                      "type": "string"
+                    },
+                    "factId": {
+                      "type": "string"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "leadId",
+                    "factId",
+                    "reason"
+                  ]
+                }
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "judged",
+              "complete",
+              "unjudged",
+              "reason"
+            ],
+            "description": "How the people's personal-channel messages (WhatsApp...) were read for this read."
           }
         },
         "required": [
           "brandId",
           "total",
           "people",
-          "outsideAnswers"
+          "outsideAnswers",
+          "personalMessages"
         ]
       },
       "AwaitingReplyPerson": {
@@ -2776,9 +2823,10 @@
                   "question",
                   "referral",
                   "other_proposal",
-                  "hand_over"
+                  "hand_over",
+                  "reply"
                 ],
-                "description": "The reply's label in the timeline vocabulary (the outreach provider's verdict placed by lead-service). question_to_escalate = a question only the sender's company can answer; question_answerable = one the responder can answer."
+                "description": "The reply's label in the timeline vocabulary (the outreach provider's verdict placed by lead-service). question_to_escalate = a question only the sender's company can answer; question_answerable = one the responder can answer. reply = a personal-channel message that leaves the next move to us without being a question or interest, or one not judged yet."
               },
               "subject": {
                 "type": "string",
@@ -2787,6 +2835,10 @@
               "campaignId": {
                 "type": "string",
                 "nullable": true
+              },
+              "channel": {
+                "type": "string",
+                "description": "The channel they wrote on: \"email\", or a personal channel the crm fact feed names (\"whatsapp\", \"linkedin\"...)."
               }
             },
             "required": [
@@ -2794,7 +2846,8 @@
               "kind",
               "label",
               "subject",
-              "campaignId"
+              "campaignId",
+              "channel"
             ]
           },
           "lastAnsweredAt": {
@@ -5593,6 +5646,12 @@
             "nullable": true,
             "description": "To whom / why, as the first hand-over stated it. `owed_before_responder_started` = a never-answered debt due before the earliest responder on this held campaign started (campaign-service createdAt), handed over by the claim instead of answered.",
             "example": null
+          },
+          "dueSetByCampaignId": {
+            "type": "string",
+            "nullable": true,
+            "description": "WHO set the current due date (the x-campaign-id of the statement that set it), which decides who may claim it: the row's own campaignId = that campaign's own debt (its own follow-up), claimed only by it; another campaign = that campaign's ladder on this campaign's person, claimed by any campaign BUT this one; null = an observer said it is due (a reply, a trigger: no x-campaign-id), claimed by any campaign.",
+            "example": null
           }
         },
         "required": [
@@ -5605,7 +5664,8 @@
           "lastActionAt",
           "stoppedReason",
           "handedAt",
-          "handedReason"
+          "handedReason",
+          "dueSetByCampaignId"
         ],
         "description": "What we owe one person on one campaign, and when.",
         "example": {
@@ -5618,7 +5678,8 @@
           "lastActionAt": "2026-08-29T09:00:00.000Z",
           "stoppedReason": null,
           "handedAt": null,
-          "handedReason": null
+          "handedReason": null,
+          "dueSetByCampaignId": null
         }
       },
       "ScheduleFollowupByEmailRequest": {
@@ -9084,7 +9145,7 @@
     "/orgs/leads/awaiting-reply": {
       "get": {
         "summary": "The people who wrote back and are waiting on us (\"Needs your call\")",
-        "description": "Every person at the brand whose latest message came after any answer of ours, oldest wait first. A message counts when it is a person's word (an automatic answer does not) and asks something of us (interest, a question, a referral, another proposal, a hand-over). An ANSWER of ours is any email we sent into their thread outside the sequence (Unibox reply, AI responder, a staff answer CC'd to the mailbox, any reply through our mailboxes), an email one of our people sent them from their own Gmail (the org's mailboxes or a staff mailbox, as google-service mirrors them) that a Jev judgment says answers what they wrote (judged once, frozen; an unrelated email keeps them listed), or a statement \"answered outside the platform\" (POST /orgs/leads/{id}/answered-outside). An opt-out (stop request or unsubscribe) takes a person out for good. Website visitors never enter. `total` is the length of `people`: the count and the list are one set. Fresh within ~2 minutes for answers through our mailboxes, immediately for a statement. 503 outreach_copy_not_ready while the outreach fact copy has not caught up once.",
+        "description": "Every person at the brand whose latest message came after any answer of ours, oldest wait first. A message counts when it is a person's word (an automatic answer does not) and asks something of us (interest, a question, a referral, another proposal, a hand-over). An ANSWER of ours is any email we sent into their thread outside the sequence (Unibox reply, AI responder, a staff answer CC'd to the mailbox, any reply through our mailboxes), an email one of our people sent them from their own Gmail (the org's mailboxes or a staff mailbox, as google-service mirrors them) that a Jev judgment says answers what they wrote (judged once, frozen; an unrelated email keeps them listed), or a statement \"answered outside the platform\" (POST /orgs/leads/{id}/answered-outside). An opt-out (stop request or unsubscribe) takes a person out for good. Website visitors never enter. Every PERSONAL channel the crm fact feed carries (WhatsApp, LinkedIn...) reads the same way, in the same conversation per person: their message (a lead of the brand named by email or phone) is judged ONCE by Jev (waits on us: question / interest / other; closing; stop request = opt-out; automatic), frozen, and a message of ours on that channel (the AI responder's or a person's, as crm-service mirrors it) is an answer. A message not judged yet is listed as waiting (personalMessages.complete false). `total` is the length of `people`: the count and the list are one set. Fresh within ~2 minutes for answers through our mailboxes, immediately for a statement. 503 outreach_copy_not_ready while the outreach fact copy has not caught up once.",
         "parameters": [
           {
             "in": "header",
@@ -11828,7 +11889,7 @@
     "/orgs/campaigns/{campaignId}/followups/claim-next": {
       "post": {
         "summary": "Claim the next person due for a follow-up on this campaign",
-        "description": "Returns AT MOST ONE person, EXACTLY ONCE. The claim is an atomic conditional UPDATE, so two workers polling in the same instant receive different people or one receives nobody — never the same person twice, which is the failure this queue exists to prevent (a double email to a prospect cannot be taken back). The order is oldest-due-first, so a backlog cannot starve the people who have waited longest. Three stops are honoured and none of them is guessed: a person who OPTED OUT is never returned (read from the delivery layer at claim time and their schedule cleared for good), a person with a BOOKED MEETING on record is never returned (a stated or tracker-reported meeting_booked, meeting_attended or sale — the last two entail the booking), and a person who ANSWERED AGAIN is never returned (whoever observes the reply stops their schedule, and qualification re-decides what we owe). A thread HANDED TO A PERSON is never returned (kind=handed, permanent), and neither is a never-answered debt owed BEFORE the earliest responder on this held campaign started (campaign-service createdAt of the x-campaign-id campaign, the minimum over every responder seen): the claim hands those over (handedReason owed_before_responder_started) instead of answering a backlog that was a human's. x-campaign-id is REQUIRED (400 acting_campaign_required). The claim expires after an hour, so a worker that dies mid-answer strands nobody. The scope is the campaign id named, not its identity family: this hands out a single row whose due date a worker wrote while naming that exact campaign, rather than totalling a population.",
+        "description": "Returns AT MOST ONE person, EXACTLY ONCE. The claim is an atomic conditional UPDATE, so two workers polling in the same instant receive different people or one receives nobody — never the same person twice, which is the failure this queue exists to prevent (a double email to a prospect cannot be taken back). The order is oldest-due-first, so a backlog cannot starve the people who have waited longest. Three stops are honoured and none of them is guessed: a person who OPTED OUT is never returned (read from the delivery layer at claim time and their schedule cleared for good), a person with a BOOKED MEETING on record is never returned (a stated or tracker-reported meeting_booked, meeting_attended or sale — the last two entail the booking), and a person who ANSWERED AGAIN is never returned (whoever observes the reply stops their schedule, and qualification re-decides what we owe). A thread HANDED TO A PERSON is never returned (kind=handed, permanent), and neither is a never-answered debt owed BEFORE the earliest responder on this held campaign started (campaign-service createdAt of the x-campaign-id campaign, the minimum over every responder seen): the claim hands those over (handedReason owed_before_responder_started) instead of answering a backlog that was a human's. x-campaign-id is REQUIRED (400 acting_campaign_required). WHO a debt is for follows WHO SET its due date (dueSetByCampaignId): a due date this campaign set on its own row is handed only to this campaign; one another campaign set (its ladder on this campaign's person) to any acting campaign except this one; one set by an observer (no x-campaign-id) to any acting campaign. The claim expires after an hour, so a worker that dies mid-answer strands nobody. The scope is the campaign id named, not its identity family: this hands out a single row whose due date a worker wrote while naming that exact campaign, rather than totalling a population.",
         "parameters": [
           {
             "in": "header",
@@ -11992,7 +12053,7 @@
     "/orgs/campaigns/{campaignId}/followups/schedule-by-email": {
       "post": {
         "summary": "State that an answer is owed to a person identified by email",
-        "description": "The door into the follow-up queue for a caller that does NOT hold this service's leads_campaigns row id — the service that qualifies a reply holds the campaign and the person's address, and nothing else. Identical in effect to POST /orgs/leads/{id}/followups with kind=scheduled, differing only in how the row is identified. Identification is EXACT: a case-folded equality match on the registered email contact method, scoped to this org and the campaign named. There is no substring, fuzzy or best-guess path — an unknown address is a 404 (code lead_not_found) and an address that matches more than one row is a 409 (code ambiguous_lead, listing the matches), because a silent no-op would leave the caller believing the debt was recorded and a guess would email the wrong human. The campaign scope is the id NAMED, not its identity family, matching the claim's scope exactly: enqueueing onto a sibling campaign would write a debt nothing ever claims. The queue's stop conditions (opted out, a booked meeting on record) apply to a row enqueued this way exactly as to any other — they are enforced at claim time, which is the only moment they can be read honestly.",
+        "description": "The door into the follow-up queue for a caller that does NOT hold this service's leads_campaigns row id — the service that qualifies a reply holds the campaign and the person's address, and nothing else. Identical in effect to POST /orgs/leads/{id}/followups with kind=scheduled, differing only in how the row is identified. Identification is EXACT: a case-folded equality match on the registered email contact method, scoped to this org and the campaign named. There is no substring, fuzzy or best-guess path — an unknown address is a 404 (code lead_not_found) and an address that matches more than one row is a 409 (code ambiguous_lead, listing the matches), because a silent no-op would leave the caller believing the debt was recorded and a guess would email the wrong human. The campaign scope is the id NAMED, not its identity family, matching the claim's scope exactly: enqueueing onto a sibling campaign would write a debt nothing ever claims. The queue's stop conditions (opted out, a booked meeting on record) apply to a row enqueued this way exactly as to any other — they are enforced at claim time, which is the only moment they can be read honestly. The x-campaign-id the caller sends (if any) is recorded as WHO SET the due date (dueSetByCampaignId): a campaign scheduling its OWN person (x-campaign-id = the path campaign) keeps the debt for itself; an observer sends none and any acting campaign may claim it.",
         "parameters": [
           {
             "in": "header",
@@ -12092,7 +12153,7 @@
     "/orgs/leads/{id}/followups": {
       "post": {
         "summary": "Record what was done for this person and when the next action is due",
-        "description": "The lead is named by the `id` a list row already carries, so nothing about the person is re-supplied. The write releases any claim, so recording is what returns a person to the queue (or removes them from it) rather than waiting out the lease. The response IS the resulting state, so a caller never has to ask what its write did.",
+        "description": "The lead is named by the `id` a list row already carries, so nothing about the person is re-supplied. The write releases any claim, so recording is what returns a person to the queue (or removes them from it) rather than waiting out the lease. The response IS the resulting state, so a caller never has to ask what its write did. A statement that sets a due date (scheduled, acted) records the caller's x-campaign-id (absent = an observer) as WHO SET it (dueSetByCampaignId), which decides who may claim it (see claim-next).",
         "parameters": [
           {
             "in": "header",

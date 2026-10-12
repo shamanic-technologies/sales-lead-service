@@ -5,6 +5,9 @@
  * (lead, through the registered email), and hydrates the people waiting with the lifecycle row the
  * dashboard opens and their name.
  *
+ * Personal channels (WhatsApp, LinkedIn... off the crm fact copy, `personal-messages.ts`) join the SAME
+ * conversation per person: their message is an inbound word judged once by Jev, ours is an answer.
+ *
  * Freshness: the copy is pulled every 2 minutes, so an answer through our mailboxes takes the person
  * out within minutes; a statement is on the very next read. FAIL LOUD: a copy that has never reached
  * the feed's end once would read every answer as missing, so the read refuses (OutreachCopyNotReadyError).
@@ -15,6 +18,14 @@ import { loadOutreachFeedState } from "./outreach-fact-feed.js";
 import { replyLabel, type PlaceableJudgments, type PlaceableVerdict } from "./timeline-labels.js";
 import { awaitingReplyOf, type AnswerVia, type AwaitingReply, type ConversationEvent } from "./awaiting-reply.js";
 import { checkOutsideAnswers, readJudgedAnswers, type OutsideCheckContext, type OutsideCheckReport } from "./outside-answers.js";
+import {
+  judgeUnansweredPersonalMessages,
+  personalFeedCaughtUp,
+  readPersonalMessages,
+  readPersonalMessageVerdicts,
+  verdictEvent,
+  type PersonalMessagesReport,
+} from "./personal-messages.js";
 
 export class OutreachCopyNotReadyError extends Error {
   constructor() {
@@ -170,15 +181,18 @@ export async function readAwaitingReplyWithReport(input: {
   brandId: string;
   leadIds?: readonly string[];
   mailboxCheck?: Omit<OutsideCheckContext, "orgId" | "brandId">;
-}): Promise<{ people: AwaitingPerson[]; outsideAnswers: OutsideCheckReport | null }> {
+}): Promise<{ people: AwaitingPerson[]; outsideAnswers: OutsideCheckReport | null; personalMessages: PersonalMessagesReport }> {
   const { orgId, brandId } = input;
   const state = await loadOutreachFeedState();
   if (!state.caughtUp) throw new OutreachCopyNotReadyError();
 
-  const [facts, statements, judged] = await Promise.all([
+  const [facts, statements, judged, personalCaughtUp, personal, verdicts] = await Promise.all([
     readConversationFacts(orgId, brandId),
     readStatements(orgId, brandId),
     readJudgedAnswers(orgId, brandId),
+    personalFeedCaughtUp(),
+    readPersonalMessages(orgId, brandId),
+    readPersonalMessageVerdicts(orgId, brandId),
   ]);
   const leadByEmail = await readLeadsByEmail([...new Set(facts.map((f) => f.lead_email.toLowerCase()))]);
   const only = input.leadIds ? new Set(input.leadIds) : null;
@@ -201,6 +215,33 @@ export async function readAwaitingReplyWithReport(input: {
     if (at !== null) push(s.lead_id, { type: "answer", at, via: "answered_outside" });
   }
   for (const j of judged) push(j.leadId, { type: "answer", at: j.sentAt, via: "mailbox_judged" });
+
+  // Personal channels: ours are answers; theirs after our latest answer (any channel) are judged once,
+  // with the read's identity (a read without one lists them as waiting and says so).
+  for (const m of personal) if (m.direction === "out") push(m.leadId, { type: "answer", at: m.at, via: "personal_channel" });
+  const lastAnswerAt = new Map<string, number>();
+  for (const [leadId, list] of events) {
+    for (const e of list) {
+      const t = Date.parse(e.at);
+      if (e.type === "answer" && !Number.isNaN(t) && t > (lastAnswerAt.get(leadId) ?? Number.NEGATIVE_INFINITY)) lastAnswerAt.set(leadId, t);
+    }
+  }
+  const scoped = only ? personal.filter((m) => only.has(m.leadId)) : personal;
+  const personalMessages: PersonalMessagesReport = input.mailboxCheck
+    ? await judgeUnansweredPersonalMessages(scoped, lastAnswerAt, verdicts, {
+        orgId,
+        brandId,
+        userId: input.mailboxCheck.userId,
+        runId: input.mailboxCheck.runId,
+      })
+    : { judged: 0, complete: true, unjudged: [], reason: null };
+  if (!personalCaughtUp) {
+    personalMessages.complete = false;
+    personalMessages.reason = "the crm fact copy has not reached the feed's end yet: personal-channel answers of ours could be missing";
+  }
+  for (const m of scoped) {
+    if (m.direction === "in") push(m.leadId, verdictEvent(verdicts.get(m.factId) ?? null, { at: m.at, ref: `crm:${m.factId}`, channel: m.channel }));
+  }
 
   const emailOf = new Map<string, string>();
   for (const [email, leadId] of leadByEmail) if (!emailOf.has(leadId)) emailOf.set(leadId, email);
@@ -256,7 +297,7 @@ export async function readAwaitingReplyWithReport(input: {
       };
     })
     .sort((a, b) => Date.parse(a.waitingSince) - Date.parse(b.waitingSince) || a.leadId.localeCompare(b.leadId));
-  return { people, outsideAnswers };
+  return { people, outsideAnswers, personalMessages };
 }
 
 /** Record "I answered this person outside the platform". Append-only. */
