@@ -8,6 +8,7 @@
  * one sentence. Google models: flash-lite (cheapest that reads images) unless a job asks for flash.
  */
 import { CHAT_SERVICE_API_KEY, CHAT_SERVICE_URL } from "../config.js";
+import { paymentRefusal } from "./credit-errors.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { identityHeaders, type SpendIdentity } from "./treg-client.js";
 
@@ -58,6 +59,8 @@ export async function complete(req: CompleteRequest, id: SpendIdentity): Promise
   });
   if (!res.ok) {
     const text = await res.text();
+    const refusal = paymentRefusal(res.status, text);
+    if (refusal) throw refusal;
     // chat-service refuses a model answer that is not valid JSON: an intermittent model fault (the
     // same request succeeded on retry in prod 2026-10-07), named so a caller can ask once more.
     if (res.status === 502 && req.json && text.includes("LLM returned invalid JSON")) throw new ModelInvalidJsonError(text.slice(0, 300));
