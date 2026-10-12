@@ -11,12 +11,19 @@ const offers = new Map<string, string | null>();
 vi.mock("../../src/lib/campaign-leg-client.js", () => ({
   fetchOrgCampaignOffers: vi.fn(async () => offers),
 }));
+vi.mock("../../src/lib/campaign-client.js", () => ({
+  fetchCampaign: vi.fn(async (id: string) =>
+    offers.has(id) ? { id, offerId: offers.get(id), featureSlug: "social-post", workflowSlug: "social-post-scheat" } : null,
+  ),
+}));
 
 const { db, sql } = await import("../../src/db/index.js");
 const { leads } = await import("../../src/db/schema.js");
 const { ingestSocialEngagements, syncSocialEngagements } = await import("../../src/lib/social-engagements.js");
 const { streamBrandJourneys } = await import("../../src/lib/brand-journeys.js");
 const { upsertLeadFromPerson, registerServedEmail } = await import("../../src/lib/leads-registry.js");
+const { claimStockedLead } = await import("../../src/lib/source-stock.js");
+const { loadRetryCandidates } = await import("../../src/lib/retry-pool.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -62,11 +69,12 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
 
   afterAll(async () => {
     await sql`DELETE FROM lead_timeline_facts WHERE org_id = ${orgId}`;
+    await sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`;
   });
 
   it("files every fact on ONE lead per person; a second pass writes nothing", async () => {
     const first = await ingestSocialEngagements(feed);
-    expect(first).toEqual({ received: 3, filed: 3, written: 3, peopleCreated: 2, unscoped: 0, unplaced: 0 });
+    expect(first).toEqual({ received: 3, filed: 3, written: 3, peopleCreated: 2, unscoped: 0, unplaced: 0, foundNow: 2, campaignUnknown: 0 });
 
     const georgeLead = await leadOf(george.key);
     const alexLead = await leadOf(`linkedin:${memberB}`);
@@ -83,8 +91,30 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
     expect(person).toEqual({ name: "Cristian-George Farauanu", linkedin_url: `https://www.linkedin.com/in/${vanityA}` });
 
     const second = await ingestSocialEngagements(feed);
-    expect(second).toMatchObject({ received: 3, filed: 3, written: 0, peopleCreated: 0 });
+    expect(second).toMatchObject({ received: 3, filed: 3, written: 0, peopleCreated: 0, foundNow: 0 });
     expect(await leadOf(george.key)).toBe(georgeLead);
+  });
+
+  it("each engager is ONE person the post's campaign found (Leads list), and no email pipe can hand them out", async () => {
+    const georgeLead = await leadOf(george.key);
+    const rows = (await sql`
+      SELECT lead_id::text AS lead_id, status, status_reason, feature_slug, served_at, brand_ids FROM leads_campaigns
+      WHERE campaign_id = ${campaignId} ORDER BY served_at
+    `) as unknown as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.status === "served" && r.status_reason === "social_engagement" && r.feature_slug === "social-post")).toBe(true);
+    expect(rows.map((r) => r.brand_ids)).toEqual([[brandId], [brandId]]);
+    // Dated when the person engaged (the comment), never when we filed it.
+    expect(new Date(rows.find((r) => r.lead_id === georgeLead)!.served_at as string).toISOString()).toBe("2026-10-12T11:50:32.510Z");
+
+    // The source stock hands only `source_found` rows, and only to people with an email.
+    expect(await claimStockedLead({
+      orgId, sourceCampaignIds: [campaignId], outreachCampaignId: randomUUID(), brandIds: [brandId], featureSlug: "sales-cold-email-outreach",
+      runId: null, parentRunId: null, userId: null, workflowSlug: null, goal: null, activeGoalId: null, brandProfileId: null,
+      askFit: async () => { throw new Error("no engager row may reach the fit check"); },
+    } as never)).toEqual({ lead: null, setAside: [] });
+    // A campaign asking its own retry pool for these rows gets nobody: every pool demands an email.
+    expect(await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now() } as never)).toEqual([]);
   });
 
   it("a fact with no org or brand yet, or a label the vocabulary lacks, is counted, never written", async () => {
@@ -92,7 +122,7 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
       fact(`linkedin:${tag}:reaction:nobrand`, "reaction", { key: `linkedin:nobrand-${tag}` }, { orgId: null, brandId: null }),
       fact(`linkedin:${tag}:reaction:nolabel`, "reaction", { key: `linkedin:nolabel-${tag}` }, { label: "future_step", stepKey: "future_step" }),
     ]);
-    expect(r).toMatchObject({ received: 2, filed: 0, written: 0, peopleCreated: 0, unscoped: 1, unplaced: 1 });
+    expect(r).toMatchObject({ received: 2, filed: 0, written: 0, peopleCreated: 0, unscoped: 1, unplaced: 1, foundNow: 0 });
     expect(await leadOf(`linkedin:nobrand-${tag}`)).toBeNull();
   });
 
@@ -145,6 +175,8 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
     expect(leadId).toBe(emailLead.id);
     expect(await leadOf(`linkedin:stray-member-${tag}`)).toBe(emailLead.id);
     expect(await factsOf(emailLead.id)).toEqual([`social:linkedin:${tag}:comment:stray`]);
+    const moved = (await sql`SELECT lead_id::text AS id FROM leads_campaigns WHERE campaign_id = ${campaignId} AND lead_id IN (${emailLead.id}::uuid, ${engagerLead}::uuid)`) as unknown as Array<{ id: string }>;
+    expect(moved.map((m) => m.id)).toEqual([emailLead.id]);
     const gone = (await sql`SELECT 1 FROM leads WHERE id = ${engagerLead}::uuid`) as unknown as unknown[];
     expect(gone).toHaveLength(0);
   });
