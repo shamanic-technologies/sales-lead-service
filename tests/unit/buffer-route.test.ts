@@ -55,8 +55,21 @@ vi.mock("../../src/lib/sourcing-origin.js", () => ({
 }));
 
 const resolveServeSource = vi.fn();
+const withinBudget = vi.fn();
 vi.mock("../../src/lib/source-campaign.js", () => ({
   resolveServeSource: (...a: unknown[]) => resolveServeSource(...a),
+  withinBudget: (...a: unknown[]) => withinBudget(...a),
+}));
+
+// Default: campaign-service states no source that runs on its own (runsOnItsOwn absent) = today's serve.
+const decideSourceMode = vi.fn();
+vi.mock("../../src/lib/source-mode.js", () => ({
+  decideSourceMode: (...a: unknown[]) => decideSourceMode(...a),
+}));
+
+const resolveSourceAudiences = vi.fn();
+vi.mock("../../src/lib/source-audiences.js", () => ({
+  resolveSourceAudiences: (...a: unknown[]) => resolveSourceAudiences(...a),
 }));
 
 const openOnDemandRun = vi.fn();
@@ -109,6 +122,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     findFirst.mockResolvedValue(undefined);
     checkConcurrentBufferNext.mockResolvedValue({ blocked: false });
     resolveServeSource.mockResolvedValue({ kind: "legacy", why: "offer_not_on_source_campaigns" });
+    decideSourceMode.mockResolvedValue({ kind: "today", read: null });
     openOnDemandRun.mockImplementation(async (p: { campaignId: string }) => ({
       runId: "on-demand-run-1",
       campaignId: p.campaignId,
@@ -514,5 +528,148 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
     expect(res.status).toBe(500);
     expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  // --- LEADS-ONLY-FUNNEL-CAMPAIGN (2026-10-12): every pipe is independent (src/lib/source-mode.ts) ---
+
+  const UNIT = "80000000-0000-0000-0000-000000000001";
+  const OFFER_ID = "70000000-0000-0000-0000-000000000001";
+  const unit = (status = "ongoing") => ({ id: UNIT, featureSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID, brandId: BRAND, status });
+  const postAsUnit = (audienceId?: string) => {
+    const r = request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", UNIT)
+      .set("x-brand-id", BRAND)
+      .set("x-feature-slug", "sourcing-apollo-cold-filters");
+    if (audienceId) r.set("x-audience-id", audienceId);
+    return r.send({});
+  };
+
+  it("a source unit's OWN run (no x-audience-id) finds in its own audiences, files under itself, opens no on-demand run, records no on_demand event", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
+    resolveSourceAudiences.mockResolvedValueOnce(["aud-1", "aud-2"]);
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    const res = await postAsUnit();
+
+    expect(res.status).toBe(200);
+    expect(res.body.found).toBe(true);
+    expect(decideSourceMode).toHaveBeenCalledWith({ orgId: ORG, campaignId: UNIT, featureSlug: "sourcing-apollo-cold-filters" });
+    expect(resolveSourceAudiences).toHaveBeenCalledWith(expect.objectContaining({ brandId: BRAND, offerId: OFFER_ID, unitSlug: "sourcing-apollo-cold-filters", preferredAudienceId: null }));
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(resolveServeSource).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ parentRunId: RUN, campaignId: UNIT, featureSlug: "sourcing-apollo-cold-filters" }));
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaignId: UNIT,
+        runCampaignId: UNIT,
+        featureSlug: "sourcing-apollo-cold-filters",
+        runFeatureSlug: "sourcing-apollo-cold-filters",
+        mode: { kind: "find", audienceIds: ["aud-1", "aud-2"] },
+      }),
+      expect.anything(),
+    );
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a source unit that is not ongoing finds nothing: found:false source_campaign_off, nothing bought", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit("stopped") });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await postAsUnit();
+
+    expect(res.body).toEqual({ found: false, reason: "source_campaign_off" });
+    expect(withinBudget).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a source unit over its own budget finds nothing: found:false source_budget_reached", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    withinBudget.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: UNIT, detail: "spent 500c of 500c" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await postAsUnit();
+
+    expect(res.body).toEqual({ found: false, reason: "source_budget_reached" });
+    expect(resolveSourceAudiences).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("an outreach campaign whose source runs on its own serves the STOCK: no on-demand find, no on_demand event, empty = source_stock_empty", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "stock", sourceCampaignIds: [UNIT], read: { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] } });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "source_stock_empty" });
+
+    const res = await post(app);
+
+    expect(res.body).toEqual({ found: false, reason: "source_stock_empty" });
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ parentRunId: RUN, campaignId: CAMPAIGN, featureSlug: "lead-finder-v1" }));
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: CAMPAIGN, runCampaignId: CAMPAIGN, mode: { kind: "stock", sourceCampaignIds: [UNIT] } }),
+      expect.anything(),
+    );
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("stock mode: an audience whose origin resolves to a source that runs on its own is served from stock, never found on demand", async () => {
+    const read = { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] };
+    decideSourceMode.mockResolvedValueOnce({ kind: "stock", sourceCampaignIds: [UNIT], read });
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    await post(app, AUDIENCE);
+
+    expect(resolveServeSource).toHaveBeenCalledWith(expect.objectContaining({ read }));
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ campaignId: CAMPAIGN, featureSlug: "lead-finder-v1" }));
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ mode: { kind: "stock", sourceCampaignIds: [UNIT] } }), expect.anything());
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("stock mode: an audience whose source still answers ON DEMAND keeps today's on-demand serve", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "stock", sourceCampaignIds: [UNIT], read: { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] } });
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-buying-signals");
+    resolveServeSource.mockResolvedValueOnce({ kind: "source", campaignId: SOURCE_CAMPAIGN, originSlug: "sourcing-apollo-buying-signals", sourceSlug: "sourcing-apollo-buying-signals", offerId: OFFER_ID });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    await post(app, AUDIENCE);
+
+    expect(openOnDemandRun).toHaveBeenCalledWith(expect.objectContaining({ campaignId: SOURCE_CAMPAIGN }));
+    const pullArgs = pullNext.mock.calls[0][0] as Record<string, unknown>;
+    expect(pullArgs.mode).toBeUndefined();
+    expect(pullArgs.runCampaignId).toBe(SOURCE_CAMPAIGN);
+    expect(recordLeadRequested).toHaveBeenCalledWith(expect.objectContaining({ performed: { outcome: "ran", campaignId: SOURCE_CAMPAIGN } }));
+  });
+
+  it("today's mode hands the sources read on: resolveServeSource does not read campaign-service twice", async () => {
+    const read = { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] };
+    decideSourceMode.mockResolvedValueOnce({ kind: "today", read });
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    await post(app, AUDIENCE);
+
+    expect(resolveServeSource).toHaveBeenCalledWith(expect.objectContaining({ read }));
+    const pullArgs = pullNext.mock.calls[0][0] as Record<string, unknown>;
+    expect(pullArgs.mode).toBeUndefined();
   });
 });
