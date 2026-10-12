@@ -13,6 +13,12 @@ import { fetchAudienceOriginSlug } from "./sourcing-origin.js";
  * with the unit's slug as `x-feature-slug`, the same header serve-next gets). For Lead Sourcing: an origin human-service
  * CHOSE for the brand (`/orgs/lead-sourcing/sources`). Never guessed from names.
  *
+ * TARGETING (CRM-SEGMENT-SOURCING, owner 2026-10-12): when the unit's campaign states `audienceIds` (campaign-service,
+ * the same HARD subset the outreach audience bandit honours), the run looks ONLY in those of them that pass the rules
+ * above (active, of its brand and offer, served under its channel). None passing = `targets_unavailable`: it finds
+ * nobody and says why, never a fallback to the other audiences (for `sourcing-crm-contacts` every audience serves from
+ * the brand's whole CRM, so a fallback would hand out everyone the customer scoped out). No targets = unchanged.
+ *
  * Order: the audience the caller named first (when it is one of them), then most people left to contact first
  * (`availableToContactCount`, human-service's own figure), then id. This is the ONLY place lead-service orders
  * audiences, and only for a source unit's own run: an outreach serve still serves exactly `x-audience-id`.
@@ -64,6 +70,11 @@ export function orderSourceAudiences(audiences: ListedAudience[], preferredAudie
   return sorted.map((a) => a.id);
 }
 
+export type SourceAudiences =
+  | { kind: "walk"; audienceIds: string[] }
+  /** The campaign targets audiences and none of them can be walked under this unit: nobody is looked for. */
+  | { kind: "targets_unavailable"; detail: string };
+
 export async function resolveSourceAudiences(args: {
   orgId: string;
   brandId: string;
@@ -71,16 +82,29 @@ export async function resolveSourceAudiences(args: {
   /** The source unit's channel: an origin slug or `lead-sourcing`. */
   unitSlug: string;
   preferredAudienceId: string | null;
+  /** The unit campaign's targeted audiences (`SourceUnit.audienceIds`); null = none stated. */
+  targetAudienceIds: string[] | null;
   userId?: string | null;
   runId?: string | null;
-}): Promise<string[]> {
-  const [audiences, chosen] = await Promise.all([
+}): Promise<SourceAudiences> {
+  const targets = args.targetAudienceIds && args.targetAudienceIds.length > 0 ? new Set(args.targetAudienceIds) : null;
+  const where = `unit=${args.unitSlug} brand=${args.brandId} offer=${args.offerId}`;
+  const [listed, chosen] = await Promise.all([
     listActiveAudiences(args),
     args.unitSlug === LEAD_SOURCING_SLUG
       ? fetchLeadSourcingChoice({ orgId: args.orgId, brandId: args.brandId, offerId: args.offerId, userId: args.userId, runId: args.runId })
       : Promise.resolve(new Set([args.unitSlug])),
   ]);
-  if (chosen.size === 0 || audiences.length === 0) return [];
+  const audiences = targets ? listed.filter((a) => targets.has(a.id)) : listed;
+  if (targets) {
+    const inactive = [...targets].filter((id) => !audiences.some((a) => a.id === id));
+    if (inactive.length > 0) console.warn(`[lead-service] source unit run (${where}) targets audiences that are not active audiences of its offer: ${inactive.join(",")}`);
+  }
+  if (chosen.size === 0 || audiences.length === 0) {
+    return targets
+      ? { kind: "targets_unavailable", detail: `targeted audiences ${[...targets].join(",")} are not active audiences of this offer (${where})` }
+      : { kind: "walk", audienceIds: [] };
+  }
   const origins = await Promise.all(audiences.map((a) => fetchAudienceOriginSlug(a.id, args.orgId, args.unitSlug)));
   const ofThisSource = audiences.filter((_, i) => origins[i] !== null && chosen.has(origins[i] as string));
   if (args.preferredAudienceId && !ofThisSource.some((a) => a.id === args.preferredAudienceId)) {
@@ -88,5 +112,12 @@ export async function resolveSourceAudiences(args: {
       `[lead-service] source unit run named audience ${args.preferredAudienceId}, which is not an active audience of ${args.unitSlug} for brand=${args.brandId} offer=${args.offerId}: looking in its own audiences instead`,
     );
   }
-  return orderSourceAudiences(ofThisSource, args.preferredAudienceId);
+  if (targets) {
+    const offChannel = audiences.filter((a) => !ofThisSource.includes(a)).map((a) => a.id);
+    if (ofThisSource.length === 0) {
+      return { kind: "targets_unavailable", detail: `targeted audiences ${[...targets].join(",")}: none is served under this unit's channel (${where})` };
+    }
+    if (offChannel.length > 0) console.warn(`[lead-service] source unit run (${where}) targets audiences not served under its channel, skipped: ${offChannel.join(",")}`);
+  }
+  return { kind: "walk", audienceIds: orderSourceAudiences(ofThisSource, args.preferredAudienceId) };
 }

@@ -18,7 +18,7 @@ import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reaso
 import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
 import { decideSourceMode, type SourceUnit } from "../lib/source-mode.js";
 import { resolveSourceAudiences } from "../lib/source-audiences.js";
-import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
+import { SOURCE_CAMPAIGN_OFF_REASON, TARGETED_AUDIENCES_UNAVAILABLE_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 
@@ -170,15 +170,20 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         });
         if (budget.kind === "refused") serveSource = budget;
         else {
-          findAudienceIds = await resolveSourceAudiences({
+          const found = await resolveSourceAudiences({
             orgId: req.orgId!,
             brandId: unit.brandId,
             offerId: unit.offerId,
             unitSlug: unit.featureSlug,
             preferredAudienceId: req.audienceId ?? null,
+            targetAudienceIds: unit.audienceIds,
             userId: req.userId ?? null,
             runId,
           });
+          // The campaign's targeting is a hard subset: none of its audiences walkable = nobody looked for, said why.
+          if (found.kind === "targets_unavailable") {
+            serveSource = { kind: "refused", reason: TARGETED_AUDIENCES_UNAVAILABLE_REASON, campaignId: unit.id, detail: found.detail };
+          } else findAudienceIds = found.audienceIds;
         }
       }
     } else {
