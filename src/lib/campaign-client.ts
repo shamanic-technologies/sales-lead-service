@@ -15,6 +15,9 @@ export interface CampaignDetails {
    * offers refuses brand-scoped reads with 409 SEVERAL_OFFERS.
    */
   offerId: string | null;
+  /** The campaign's channel and workflow, as campaign-service states them. */
+  featureSlug?: string | null;
+  workflowSlug?: string | null;
 }
 
 export async function fetchCampaign(

@@ -178,7 +178,7 @@ export async function findLeadBySocialLinkedin(linkedinUrl: string | null | unde
 
 /**
  * Fold a lead known only by its social identity into the lead an email (or provider id) found for the
- * same person: its social contact methods and timeline facts move over, and the emptied row is dropped
+ * same person: its social contact methods, timeline facts and "found by the post's campaign" rows move over, and the emptied row is dropped
  * when nothing else points at it. A lead that is more than a social identity (an email, a serve) is a
  * person of its own: nothing is moved and the case is logged.
  */
@@ -190,7 +190,8 @@ export async function foldSocialLead(fromLeadId: string, intoLeadId: string): Pr
     const blockers = (await tx`
       SELECT
         EXISTS (SELECT 1 FROM lead_contact_methods WHERE lead_id = ${fromLeadId}::uuid AND channel IN ('email', 'phone')) AS has_contact,
-        EXISTS (SELECT 1 FROM leads_campaigns WHERE lead_id = ${fromLeadId}::uuid) AS has_serve
+        EXISTS (SELECT 1 FROM leads_campaigns WHERE lead_id = ${fromLeadId}::uuid
+          AND status_reason IS DISTINCT FROM 'social_engagement') AS has_serve
     `) as unknown as Array<{ has_contact: boolean; has_serve: boolean }>;
     if (blockers[0].has_contact || blockers[0].has_serve) {
       console.warn(
@@ -199,6 +200,13 @@ export async function foldSocialLead(fromLeadId: string, intoLeadId: string): Pr
       return false;
     }
     await tx`UPDATE lead_contact_methods SET lead_id = ${intoLeadId}::uuid WHERE lead_id = ${fromLeadId}::uuid`;
+    // The engager's "found by the post's campaign" rows follow the person (one per campaign: the email owner's
+    // own row for that campaign wins and the engager's is dropped).
+    await tx`
+      DELETE FROM leads_campaigns f WHERE f.lead_id = ${fromLeadId}::uuid
+        AND EXISTS (SELECT 1 FROM leads_campaigns t WHERE t.lead_id = ${intoLeadId}::uuid AND t.campaign_id = f.campaign_id)
+    `;
+    await tx`UPDATE leads_campaigns SET lead_id = ${intoLeadId}::uuid, updated_at = now() WHERE lead_id = ${fromLeadId}::uuid`;
     await tx`UPDATE lead_timeline_facts SET lead_id = ${intoLeadId}::uuid, updated_at = now() WHERE lead_id = ${fromLeadId}::uuid`;
     await tx`
       DELETE FROM leads l WHERE l.id = ${fromLeadId}::uuid
