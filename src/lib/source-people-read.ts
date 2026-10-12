@@ -4,6 +4,7 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
 import { readBuyingSignal } from "./buying-signal.js";
 import { fetchOrgCampaignRows } from "./campaign-identity-client.js";
 import { SOURCE_LEG_KEY } from "./source-campaign.js";
+import { SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
 import { loadOriginBySlug } from "./sourcing-origin.js";
 import {
   computeSourcePeople,
@@ -54,6 +55,9 @@ interface RawServe {
   campaign_id: string;
   audience_id: string | null;
   status: string;
+  status_reason: string | null;
+  source_handed: boolean;
+  source_set_aside_reason: string | null;
   at: RawTimestamp;
   buying_signal: unknown;
   apollo_person_id: string | null;
@@ -65,7 +69,8 @@ interface RawServe {
 async function loadBrandServes(orgId: string, brandId: string): Promise<SourceServeRow[]> {
   const out: SourceServeRow[] = [];
   const query = sql<RawServe[]>`
-    SELECT lc.lead_id, lc.campaign_id, lc.audience_id, lc.status,
+    SELECT lc.lead_id, lc.campaign_id, lc.audience_id, lc.status, lc.status_reason,
+           lc.source_handed_at IS NOT NULL AS source_handed, lc.source_set_aside_reason,
            COALESCE(lc.served_at, lc.created_at) AS at, lc.buying_signal, l.apollo_person_id,
            (SELECT array_agg(cm.value ORDER BY cm.value) FROM lead_contact_methods cm
              WHERE cm.lead_id = lc.lead_id AND cm.channel = 'email') AS emails,
@@ -97,6 +102,9 @@ async function loadBrandServes(orgId: string, brandId: string): Promise<SourceSe
         emails: r.emails ?? [],
         companyDomain: r.primary_domain,
         companyName: r.org_name,
+        sourceFound: r.status_reason === SOURCE_FOUND_STATUS_REASON,
+        sourceHanded: r.source_handed === true,
+        setAsideReason: r.source_set_aside_reason,
       });
     }
   }

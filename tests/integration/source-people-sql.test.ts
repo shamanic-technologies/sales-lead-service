@@ -102,7 +102,7 @@ describe.skipIf(!hasRealDatabase)("sourcing-stats read against a real database",
     expect(res.body.origin).toEqual({ slug: "sourcing-apollo-buying-signals", name: "Apollo Buying Signals", lists: ["apollo_buying_signal"] });
     expect(res.body.found).toEqual({ people: 3, companies: 3, peopleWithoutCompany: 0 });
     expect(res.body.kept).toMatchObject({ people: 1, companies: 1, byThisSource: 1, viaAnotherSource: 0 });
-    expect(res.body.notKept).toEqual({ screened_out: 1, failed_qualification_check: 1, kept_by_another_offer: 0, not_served: 0 });
+    expect(res.body.notKept).toEqual({ screened_out: 1, failed_qualification_check: 1, no_longer_fits: 0, kept_by_another_offer: 0, in_stock: 0, not_served: 0 });
     expect(res.body.daily).toEqual([{ day: "2026-10-10", found: 3, kept: 1 }]);
     expect(res.body.byAudience).toEqual([
       { audienceId: SIGNALS_AUD, name: `Audience ${SIGNALS_AUD.slice(0, 4)}`, list: "apollo_buying_signal", found: 3, kept: 1, screenedOut: 1 },
