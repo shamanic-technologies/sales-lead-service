@@ -32,6 +32,10 @@
  *                            runs (src/lib/source-mode.ts), and none of them holds a found lead nobody worked
  *                            yet. Nothing is found on demand from such a source: the stock refills on the
  *                            source's next run. Says nothing about any audience's people.
+ *   origin_not_fed         — the named audience serves from an origin the campaign's outreach channel is NOT fed
+ *                            by (features-service `originsByChannel`): nobody is served from it for this pipe
+ *                            (owner 2026-10-12). A wrong audience was named; says nothing about its people.
+ *   audience_offer_mismatch — the named audience belongs to another offer than the one the campaign sells.
  *
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
@@ -46,6 +50,8 @@ export const CREDIT_INSUFFICIENT_REASON = "credit_insufficient" as const;
 export const SOURCE_CAMPAIGN_OFF_REASON = "source_campaign_off" as const;
 export const SOURCE_BUDGET_REACHED_REASON = "source_budget_reached" as const;
 export const SOURCE_STOCK_EMPTY_REASON = "source_stock_empty" as const;
+export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
+export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -57,6 +63,8 @@ export const SERVE_EMPTY_REASONS = [
   SOURCE_CAMPAIGN_OFF_REASON,
   SOURCE_BUDGET_REACHED_REASON,
   SOURCE_STOCK_EMPTY_REASON,
+  ORIGIN_NOT_FED_REASON,
+  AUDIENCE_OFFER_MISMATCH_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];

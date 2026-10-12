@@ -152,3 +152,19 @@ describe("people-client serveNext", () => {
     expect(isAudienceNotServeableError(null)).toBe(false);
   });
 });
+
+describe("people-client serveNext: the serving pipe's reach on the wire", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends reachableBy when the pipe states one (WhatsApp: phone)", async () => {
+    const { calls } = mockFetch({ status: "exhausted", person: null });
+    await serveNext("aud-123", { ...ctx, reachableBy: ["phone"] });
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({ reachableBy: ["phone"] });
+  });
+
+  it("sends an empty body when it states none (bytes unchanged)", async () => {
+    const { calls } = mockFetch({ status: "exhausted", person: null });
+    await serveNext("aud-123", ctx);
+    expect(JSON.parse(String(calls[0].init.body))).toEqual({});
+  });
+});

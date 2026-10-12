@@ -18,10 +18,29 @@ vi.mock("../../src/lib/brand-client.js", () => ({
 const upsertLeadFromPerson = vi.fn();
 const recordEmploymentHistory = vi.fn();
 const registerServedEmail = vi.fn();
+const upsertContactMethod = vi.fn(async () => ({ inserted: true }));
 vi.mock("../../src/lib/leads-registry.js", () => ({
   upsertLeadFromPerson: (...args: unknown[]) => upsertLeadFromPerson(...args),
   recordEmploymentHistory: (...args: unknown[]) => recordEmploymentHistory(...args),
   registerServedEmail: (...args: unknown[]) => registerServedEmail(...args),
+  upsertContactMethod: (...args: unknown[]) => upsertContactMethod(...args),
+}));
+
+// Released people (src/lib/released-pool.ts) have their own suite: here nobody was released.
+const claimReleasedLead = vi.fn(async () => null);
+vi.mock("../../src/lib/released-pool.js", () => ({
+  claimReleasedLead: (...args: unknown[]) => claimReleasedLead(...(args as [])),
+}));
+
+// The audience's offer (human-service): brand-wide unless a test says otherwise.
+const fetchAudienceOfferId = vi.fn(async () => null as string | null);
+vi.mock("../../src/lib/sourcing-origin.js", () => ({
+  fetchAudienceOfferId: (...args: unknown[]) => fetchAudienceOfferId(...(args as [])),
+  AudienceOfferMismatchError: class extends Error {
+    constructor(a: string, b: string, c: string) {
+      super(`audience ${a} belongs to offer ${b}, the campaign sells offer ${c}`);
+    }
+  },
 }));
 
 const pickRetryCandidate = vi.fn();
@@ -620,5 +639,90 @@ describe("pullNext (audience serve-next flow)", () => {
       expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-paid" }, [bonus], expect.objectContaining({ runId: "run-1" }));
       expect(result.lead?.qualification).toEqual(qualification);
     });
+  });
+});
+
+describe("pullNext for a pipe: reach, sources, released people (owner 2026-10-12)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getCurrentGoal.mockResolvedValue("signup");
+    pickRetryCandidate.mockResolvedValue(null);
+    fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: null });
+    offerChecks.mockResolvedValue([]);
+    checksForWriter.mockResolvedValue({ domain: null, checks: [] });
+    claimReleasedLead.mockResolvedValue(null);
+    fetchAudienceOfferId.mockResolvedValue(null);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  function served(p: Person) {
+    serveNext.mockResolvedValueOnce({ status: "served", person: p });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+  }
+
+  it("a WhatsApp pipe asks human-service for people reachable by phone, every pool too, and records the phone served", async () => {
+    served({ ...person, provider: "apollo", phone: "+33612345678" });
+    const result = await pullNext({ ...baseParams, featureSlug: "cold-whatsapp-outreach", reachableBy: ["phone"] });
+    expect(result.found).toBe(true);
+    expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ reachableBy: ["phone"] }));
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }));
+    expect(claimReleasedLead).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }));
+    expect(upsertContactMethod).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", channel: "phone", value: "+33612345678" }));
+  });
+
+  it("an email pipe asks for email", async () => {
+    served(person);
+    await pullNext({ ...baseParams, featureSlug: "sales-cold-email-outreach", reachableBy: ["email"] });
+    expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ reachableBy: ["email"] }));
+    expect(upsertContactMethod).not.toHaveBeenCalled();
+  });
+
+  it("no requirement stated: the serve context carries none", async () => {
+    served(person);
+    await pullNext(baseParams);
+    expect(serveNext.mock.calls[0][1]).not.toHaveProperty("reachableBy");
+  });
+
+  it("an audience whose origin does not feed the pipe: no fresh serve, the reason says so", async () => {
+    const result = await pullNext({
+      ...baseParams,
+      reachableBy: ["phone"],
+      freshServeRefused: { reason: "origin_not_fed", detail: "apollo does not feed whatsapp" },
+    });
+    expect(result).toEqual({ found: false, reason: "origin_not_fed" });
+    expect(serveNext).not.toHaveBeenCalled();
+    // The campaign's own pools were still asked first.
+    expect(pickRetryCandidate).toHaveBeenCalled();
+  });
+
+  it("an audience of ANOTHER offer than the campaign's is never served", async () => {
+    fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: "offer-a" });
+    fetchAudienceOfferId.mockResolvedValue("offer-b");
+    const result = await pullNext(baseParams);
+    expect(result).toEqual({ found: false, reason: "audience_offer_mismatch" });
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+
+  it("a person another pipe released is taken before anyone is bought", async () => {
+    claimReleasedLead.mockResolvedValueOnce({
+      releasedRowId: "row-0",
+      releasedFromCampaignId: "whatsapp-campaign",
+      leadId: "lead-9",
+      email: "j@mii.md",
+      audienceId: "aud-apollo",
+      buyingSignal: null,
+      personId: null,
+      goal: null,
+    } as never);
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-9" });
+    const result = await pullNext({ ...baseParams, featureSlug: "sales-cold-email-outreach", reachableBy: ["email"] });
+    expect(result.found).toBe(true);
+    expect(result.lead?.leadId).toBe("lead-9");
+    expect(serveNext).not.toHaveBeenCalled();
   });
 });

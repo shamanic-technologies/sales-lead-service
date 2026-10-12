@@ -11,7 +11,10 @@ import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
-import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
+import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
+import { channelReachableBy } from "../lib/channel-reach.js";
+import type { ReachMethod } from "../lib/people-client.js";
+import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reasons.js";
 import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
 import { decideSourceMode, type SourceUnit } from "../lib/source-mode.js";
 import { resolveSourceAudiences } from "../lib/source-audiences.js";
@@ -94,6 +97,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   let findAudienceIds: string[] = [];
   let stockSourceIds: string[] | null = null;
 
+  // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
+  let reachableBy: ReachMethod[] | null = null;
+  // The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve, the
+  // campaign's own pools still drain (src/lib/buffer.ts).
+  let freshServeRefused: { reason: ServeEmptyReason; detail: string } | null = null;
+
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
   // unreachable through its Neon cold-start window) must return a clean 500 —
@@ -139,6 +148,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     inFlightOutreach.add(campaignId);
     res.on("close", () => inFlightOutreach.delete(campaignId));
 
+    reachableBy = await channelReachableBy(featureSlug);
+
     const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
 
     if (sourceMode.kind === "own_run") {
@@ -181,11 +192,17 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
           });
           if (origin) runFeatureSlug = origin;
         } catch (err) {
-          console.error(
-            `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
-            err,
-          );
-          throw err;
+          if (err instanceof OriginNotFedError) {
+            // A source that does not feed this pipe: nobody is served from it here, never "keeping the label".
+            console.error(`[lead-service] buffer/next origin_not_fed campaign=${campaignId} ${err.message}`);
+            freshServeRefused = { reason: ORIGIN_NOT_FED_REASON, detail: err.message };
+          } else {
+            console.error(
+              `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
+              err,
+            );
+            throw err;
+          }
         }
       }
 
@@ -361,6 +378,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         brandProfileId: req.brandProfileId ?? null,
         audienceId: req.audienceId ?? null,
         ...(pullMode ? { mode: pullMode } : {}),
+        ...(reachableBy ? { reachableBy } : {}),
+        ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,
     );

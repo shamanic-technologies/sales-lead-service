@@ -1,11 +1,14 @@
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
-import { serveNext, type Person, type ServiceContext } from "./people-client.js";
+import { serveNext, type Person, type ReachMethod, type ServiceContext } from "./people-client.js";
+import { claimReleasedLead } from "./released-pool.js";
+import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
 import { serveThroughCandidates } from "./candidate-serve.js";
 import {
   upsertLeadFromPerson,
   recordEmploymentHistory,
   registerServedEmail,
+  upsertContactMethod,
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
@@ -21,6 +24,7 @@ import {
   NO_AUDIENCE_REASON,
   SERVE_TIMED_OUT_REASON,
   SOURCE_STOCK_EMPTY_REASON,
+  AUDIENCE_OFFER_MISMATCH_REASON,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
@@ -69,6 +73,16 @@ interface PullNextParams {
   audienceId?: string | null;
   /** Absent = `serve` (today). */
   mode?: PullNextMode;
+  /**
+   * The contact method(s) the outreach pipe writes on (src/lib/channel-reach.ts). Passed on every fresh serve
+   * (human-service `reachableBy`) and applied to every pool (retry, stock, released). Absent = no requirement.
+   */
+  reachableBy?: ReachMethod[];
+  /**
+   * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
+   * campaign's retry / released pools still drain, then the answer names this reason.
+   */
+  freshServeRefused?: { reason: ServeEmptyReason; detail: string };
 }
 
 interface PullNextResult {
@@ -170,6 +184,7 @@ export async function pullNext(
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId: audienceId ?? undefined,
+    ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
   };
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
@@ -234,6 +249,7 @@ export async function pullNext(
     runId: params.runId ?? null,
     parentRunId: params.parentRunId ?? null,
     context: ctx,
+    reachableBy: params.reachableBy ?? null,
   });
 
   if (retry) {
@@ -301,6 +317,13 @@ export async function pullNext(
       source: person.provider,
     });
     await recordEmploymentHistory({ leadId, person });
+    // The phone the provider holds (crm only): what tells a phone pipe's pools who it can reach.
+    if (typeof person.phone === "string" && person.phone.trim().length > 0) {
+      const phone = await upsertContactMethod({ leadId, channel: "phone", value: person.phone.trim(), source: person.provider });
+      if (!phone.inserted) {
+        console.warn(`[lead-service] served phone already belongs to another lead: leadId=${leadId} campaign=${params.campaignId} (not recorded)`);
+      }
+    }
 
     await db
       .insert(leadsCampaigns)
@@ -357,6 +380,52 @@ export async function pullNext(
     };
   }
 
+  // RELEASED: a person another pipe of the brand served and could not reach on ITS channel (src/lib/released-pool.ts),
+  // that this pipe can. Paid for once already: taken before buying anyone new.
+  if (mode.kind !== "find") {
+    const released = await claimReleasedLead({
+      orgId: params.orgId,
+      campaignId: params.campaignId,
+      brandIds: params.brandIds,
+      featureSlug: params.featureSlug,
+      reachableBy: params.reachableBy ?? [],
+      offerId,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+    });
+    if (released) {
+      const releasedLead = await buildFullLead(released.leadId);
+      const qualification = await writerChecks(releasedLead);
+      console.log(
+        `[lead-service] pullNext found=true source=released campaign=${params.campaignId} from=${released.releasedFromCampaignId} email=${released.email} leadId=${released.leadId}`,
+      );
+      return {
+        found: true,
+        lead: {
+          leadId: released.leadId,
+          email: released.email,
+          data: releasedLead,
+          brandIds: params.brandIds,
+          orgId: params.orgId,
+          userId: params.userId ?? null,
+          apolloPersonId: releasedLead.apolloPersonId ?? null,
+          goal: released.goal ?? goal,
+          activeGoalId: params.activeGoalId ?? null,
+          brandProfileId: params.brandProfileId ?? null,
+          audienceId: released.audienceId,
+          buyingSignal: released.buyingSignal,
+          ...(released.personId ? { personId: released.personId } : {}),
+          qualification,
+        },
+      };
+    }
+  }
+
   // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
   if (mode.kind === "stock") {
     const stocked = await claimStockedLead({
@@ -372,6 +441,7 @@ export async function pullNext(
       goal,
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
+      reachableBy: params.reachableBy ?? null,
     });
     if (!stocked) {
       console.log(
@@ -437,6 +507,24 @@ export async function pullNext(
       `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable}`,
     );
     return { found: false, reason };
+  }
+
+  // The named audience does not feed this pipe (its origin): no fresh serve, the reason says why.
+  if (params.freshServeRefused) {
+    console.log(
+      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${params.freshServeRefused.reason} audienceId=${audienceId}: ${params.freshServeRefused.detail}`,
+    );
+    return { found: false, reason: params.freshServeRefused.reason };
+  }
+  // The named audience belongs to another offer than the one this campaign sells: never served here (owner
+  // 2026-10-12). A brand-wide audience (no offer) and an unknown campaign offer pass.
+  if (offerId) {
+    const audienceOffer = await fetchAudienceOfferId(audienceId as string, params.orgId);
+    if (audienceOffer !== null && audienceOffer !== offerId) {
+      const mismatch = new AudienceOfferMismatchError(audienceId as string, audienceOffer, offerId);
+      console.error(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=${AUDIENCE_OFFER_MISMATCH_REASON}: ${mismatch.message}`);
+      return { found: false, reason: AUDIENCE_OFFER_MISMATCH_REASON };
+    }
   }
 
   // 4. Next person of that audience worth paying for. Apollo audiences are served through

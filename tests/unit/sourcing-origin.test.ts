@@ -70,11 +70,10 @@ describe("resolveSourcingOriginSlug", () => {
     await expect(resolve()).rejects.toThrow(/no sourcingFeatureSlug/);
   });
 
-  it("keeps the outreach label (null) and logs an error for an origin the channel does not count", async () => {
-    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("refuses (OriginNotFedError) an origin the channel is not fed by: never served keeping the label (owner 2026-10-12)", async () => {
     vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-crm-contacts" }));
-    await expect(resolve()).resolves.toBeNull();
-    expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/origin=sourcing-crm-contacts is not one the outreach channel counts/);
+    const { OriginNotFedError } = await import("../../src/lib/sourcing-origin.js");
+    await expect(resolve()).rejects.toBeInstanceOf(OriginNotFedError);
   });
 
   it("accepts the CRM origin under the CRM channel", async () => {
@@ -94,6 +93,48 @@ describe("resolveSourcingOriginSlug", () => {
   it("refuses a catalogue that states no originsByChannel", async () => {
     vi.stubGlobal("fetch", route({ sourcingFeatureSlug: "sourcing-apollo-cold-filters" }, { catalogue: { origins: [] } }));
     await expect(resolve()).rejects.toThrow(/originsByChannel/);
+  });
+});
+
+describe("channelReachableBy: how a channel reaches a person (features-service contactMethodsByChannel)", () => {
+  beforeEach(async () => {
+    const { resetSourcingOriginsCache } = await import("../../src/lib/sourcing-origin.js");
+    resetSourcingOriginsCache();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+  const catalogue = {
+    ...CATALOGUE,
+    contactMethodsByChannel: {
+      "cold-whatsapp-outreach": ["phone"],
+      "sales-cold-email-outreach": ["email"],
+      "cold-linkedin-outreach": ["linkedin"],
+    },
+  };
+
+  it("WhatsApp needs a phone, cold email an email, read off the catalogue", async () => {
+    vi.stubGlobal("fetch", route({}, { catalogue }));
+    const { channelReachableBy } = await import("../../src/lib/channel-reach.js");
+    await expect(channelReachableBy("cold-whatsapp-outreach")).resolves.toEqual(["phone"]);
+    await expect(channelReachableBy("sales-cold-email-outreach")).resolves.toEqual(["email"]);
+  });
+
+  it("a channel stating no method, or one outside phone/email, passes nothing (and says so)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", route({}, { catalogue }));
+    const { channelReachableBy } = await import("../../src/lib/channel-reach.js");
+    await expect(channelReachableBy("cold-linkedin-outreach")).resolves.toBeNull();
+    await expect(channelReachableBy("meta-ads")).resolves.toBeNull();
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it("an older catalogue without the field passes nothing", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", route({}, { catalogue: CATALOGUE }));
+    const { channelReachableBy } = await import("../../src/lib/channel-reach.js");
+    await expect(channelReachableBy("cold-whatsapp-outreach")).resolves.toBeNull();
   });
 });
 
