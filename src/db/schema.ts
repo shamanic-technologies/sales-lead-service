@@ -313,6 +313,32 @@ export const answeredOutsideStatements = pgTable(
   (table) => [index("idx_answered_outside_brand_lead").on(table.orgId, table.brandId, table.leadId, table.statedAt)],
 );
 
+// --- "Did our email answer them?" Jev verdicts (src/lib/outside-answers.ts, migration 0067) ---
+// One later email of ours from a mirrored Gmail (org's own or staff), judged once: answers=true is
+// read as an answer of ours dated `sent_at`; answers=false is kept so it is never judged again.
+export const outsideAnswerJudgments = pgTable(
+  "outside_answer_judgments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    leadId: uuid("lead_id").notNull(),
+    gmailMessageId: text("gmail_message_id").notNull(),
+    mailbox: text("mailbox").notNull(),
+    fromEmail: text("from_email"),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    subject: text("subject"),
+    inboundRef: text("inbound_ref"),
+    answers: boolean("answers").notNull(),
+    probability: doublePrecision("probability").notNull(),
+    model: text("model").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_outside_answer_judgments_message").on(table.orgId, table.brandId, table.leadId, table.gmailMessageId),
+  ],
+);
+
 // --- Follow-up actions ledger (src/lib/followup-actions.ts, migration 0045) ---
 // WHO acted on a follow-up row. The queue's own columns on leads_campaigns say what is owed and
 // when; they never said which campaign's worker claimed or answered the person, and a campaign

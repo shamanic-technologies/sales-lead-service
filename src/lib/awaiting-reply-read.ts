@@ -14,6 +14,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { loadOutreachFeedState } from "./outreach-fact-feed.js";
 import { replyLabel, type PlaceableJudgments, type PlaceableVerdict } from "./timeline-labels.js";
 import { awaitingReplyOf, type AnswerVia, type AwaitingReply, type ConversationEvent } from "./awaiting-reply.js";
+import { checkOutsideAnswers, readJudgedAnswers, type OutsideCheckContext, type OutsideCheckReport } from "./outside-answers.js";
 
 export class OutreachCopyNotReadyError extends Error {
   constructor() {
@@ -149,17 +150,36 @@ async function hydrate(
 /**
  * Every person waiting on us at the brand, oldest wait first. `leadIds` narrows the answer to those
  * people (the statement write reads one person back).
+ *
+ * With `mailboxCheck` (the request's identity), every person still waiting has the Gmail mirrors
+ * read for a later email of ours to them, each judged once by Jev (`outside-answers.ts`); a "yes"
+ * is folded in as an answer before the list is returned, so a person answered from Gmail leaves
+ * the list on the very read that first sees the email. Without it, only frozen verdicts count.
  */
 export async function readAwaitingReply(input: {
   orgId: string;
   brandId: string;
   leadIds?: readonly string[];
+  mailboxCheck?: Omit<OutsideCheckContext, "orgId" | "brandId">;
 }): Promise<AwaitingPerson[]> {
+  return (await readAwaitingReplyWithReport(input)).people;
+}
+
+export async function readAwaitingReplyWithReport(input: {
+  orgId: string;
+  brandId: string;
+  leadIds?: readonly string[];
+  mailboxCheck?: Omit<OutsideCheckContext, "orgId" | "brandId">;
+}): Promise<{ people: AwaitingPerson[]; outsideAnswers: OutsideCheckReport | null }> {
   const { orgId, brandId } = input;
   const state = await loadOutreachFeedState();
   if (!state.caughtUp) throw new OutreachCopyNotReadyError();
 
-  const [facts, statements] = await Promise.all([readConversationFacts(orgId, brandId), readStatements(orgId, brandId)]);
+  const [facts, statements, judged] = await Promise.all([
+    readConversationFacts(orgId, brandId),
+    readStatements(orgId, brandId),
+    readJudgedAnswers(orgId, brandId),
+  ]);
   const leadByEmail = await readLeadsByEmail([...new Set(facts.map((f) => f.lead_email.toLowerCase()))]);
   const only = input.leadIds ? new Set(input.leadIds) : null;
 
@@ -180,21 +200,49 @@ export async function readAwaitingReply(input: {
     const at = toIsoTimestamp(s.stated_at);
     if (at !== null) push(s.lead_id, { type: "answer", at, via: "answered_outside" });
   }
+  for (const j of judged) push(j.leadId, { type: "answer", at: j.sentAt, via: "mailbox_judged" });
 
-  const waiting: Array<{ leadId: string; state: AwaitingReply }> = [];
+  const emailOf = new Map<string, string>();
+  for (const [email, leadId] of leadByEmail) if (!emailOf.has(leadId)) emailOf.set(leadId, email);
+
+  let waiting: Array<{ leadId: string; state: AwaitingReply }> = [];
   for (const [leadId, list] of events) {
     const state = awaitingReplyOf(list);
     if (state) waiting.push({ leadId, state });
+  }
+
+  let outsideAnswers: OutsideCheckReport | null = null;
+  if (input.mailboxCheck) {
+    outsideAnswers = await checkOutsideAnswers(
+      waiting
+        .filter((w) => emailOf.has(w.leadId))
+        .map((w) => ({
+          leadId: w.leadId,
+          email: emailOf.get(w.leadId)!,
+          waitingSince: w.state.waitingSince,
+          inbound: (events.get(w.leadId) ?? [])
+            .filter((e): e is Extract<ConversationEvent, { type: "inbound" }> => e.type === "inbound")
+            .filter((e) => e.label !== "auto_reply" && Date.parse(e.at) >= Date.parse(w.state.waitingSince))
+            .sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
+            .map((e) => ({ at: e.at, ref: e.ref, campaignId: e.campaignId, subject: e.subject, label: e.label })),
+        })),
+      { ...input.mailboxCheck, orgId, brandId },
+    );
+    if (outsideAnswers.judged > 0) {
+      const fresh = await readJudgedAnswers(orgId, brandId, waiting.map((w) => w.leadId));
+      for (const j of fresh) push(j.leadId, { type: "answer", at: j.sentAt, via: "mailbox_judged" });
+      waiting = waiting.flatMap((w) => {
+        const state = awaitingReplyOf(events.get(w.leadId) ?? []);
+        return state ? [{ leadId: w.leadId, state }] : [];
+      });
+    }
   }
   const hydrated = await hydrate(
     orgId,
     brandId,
     waiting.map((w) => ({ leadId: w.leadId, campaignId: w.state.lastMessage.campaignId })),
   );
-  const emailOf = new Map<string, string>();
-  for (const [email, leadId] of leadByEmail) if (!emailOf.has(leadId)) emailOf.set(leadId, email);
-
-  return waiting
+  const people = waiting
     .map(({ leadId, state }) => {
       const h = hydrated.get(leadId);
       return {
@@ -208,6 +256,7 @@ export async function readAwaitingReply(input: {
       };
     })
     .sort((a, b) => Date.parse(a.waitingSince) - Date.parse(b.waitingSince) || a.leadId.localeCompare(b.leadId));
+  return { people, outsideAnswers };
 }
 
 /** Record "I answered this person outside the platform". Append-only. */

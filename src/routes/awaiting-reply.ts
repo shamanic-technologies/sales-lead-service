@@ -4,6 +4,8 @@
  *   GET  /orgs/leads/awaiting-reply?brandId=      every person waiting, oldest wait first, with since
  *                                                 when and what kind of message they sent; `total` is
  *                                                 the length of the same list (count and list are one set).
+ *                                                 A person one of our people answered from Gmail (org or
+ *                                                 staff mailbox, judged an answer by Jev) leaves it by itself.
  *   POST /orgs/leads/:id/answered-outside         "I answered this person outside the platform": a fact
  *                                                 about the PERSON at the brand (who, when); a later new
  *                                                 message from them puts them back.
@@ -14,7 +16,12 @@
 import { Router, type Response } from "express";
 import { sql } from "../db/index.js";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
-import { OutreachCopyNotReadyError, readAwaitingReply, recordAnsweredOutside } from "../lib/awaiting-reply-read.js";
+import {
+  OutreachCopyNotReadyError,
+  readAwaitingReply,
+  readAwaitingReplyWithReport,
+  recordAnsweredOutside,
+} from "../lib/awaiting-reply-read.js";
 
 const router = Router();
 
@@ -36,8 +43,14 @@ router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, async (req: A
       res.status(400).json({ error: "brandId is required" });
       return;
     }
-    const people = await readAwaitingReply({ orgId: req.orgId!, brandId });
-    res.json({ brandId, total: people.length, people });
+    // Every person still waiting has the Gmail mirrors (the org's own, and staff's) read for a later
+    // email of ours, judged once by Jev, billed to this request's org (outside-answers.ts).
+    const { people, outsideAnswers } = await readAwaitingReplyWithReport({
+      orgId: req.orgId!,
+      brandId,
+      mailboxCheck: { userId: req.userId ?? null, runId: req.runId ?? null },
+    });
+    res.json({ brandId, total: people.length, people, outsideAnswers });
   } catch (error) {
     respondReadFailure(res, error, "awaiting-reply read");
   }

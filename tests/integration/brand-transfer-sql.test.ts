@@ -32,6 +32,7 @@ const BRAND_SCALAR_TABLES = [
   "lead_delivery_evidence",
   "lead_timeline_facts",
   "answered_outside_statements",
+  "outside_answer_judgments",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
@@ -144,6 +145,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO answered_outside_statements (org_id, brand_id, lead_id, stated_by_user_id)
       VALUES (${org}, ${brand}, ${leadId}::uuid, 'itest-user')`);
+    await db.execute(sql`
+      INSERT INTO outside_answer_judgments (org_id, brand_id, lead_id, gmail_message_id, mailbox, sent_at, answers, probability, model)
+      VALUES (${org}, ${brand}, ${leadId}::uuid, ${`g-${randomUUID()}`}, 'staff', now(), true, 0.9, 'jev-test')`);
     await db.execute(sql`
       INSERT INTO lead_read_models (scope_key, org_id, scope, applied_xmin)
       VALUES (${`itest-${randomUUID()}`}, ${org}, ${JSON.stringify({ orgId: org, brandId: brand })}::jsonb, pg_current_xact_id())`);
