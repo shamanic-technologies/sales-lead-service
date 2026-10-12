@@ -94,8 +94,8 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     const id = await seedDueRow(new Date(Date.now() - 60_000));
     const now = Date.now();
 
-    const first = await claimFollowup({ id, nowMs: now, runId: randomUUID() });
-    const second = await claimFollowup({ id, nowMs: now, runId: randomUUID() });
+    const first = await claimFollowup({ id, nowMs: now, runId: randomUUID(), actingCampaignId });
+    const second = await claimFollowup({ id, nowMs: now, runId: randomUUID(), actingCampaignId });
 
     expect(first).toBe(true);
     expect(second).toBe(false);
@@ -106,7 +106,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     const now = Date.now();
 
     const outcomes = await Promise.all(
-      Array.from({ length: 8 }, () => claimFollowup({ id, nowMs: now, runId: randomUUID() })),
+      Array.from({ length: 8 }, () => claimFollowup({ id, nowMs: now, runId: randomUUID(), actingCampaignId })),
     );
 
     expect(outcomes.filter(Boolean)).toHaveLength(1);
@@ -186,7 +186,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       matchedLeadId: row.leadId,
     });
 
-    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z" });
+    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z", actingCampaignId });
     expect(candidates).toHaveLength(0);
   });
 
@@ -205,13 +205,13 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       withdrawnAt: new Date(),
     });
 
-    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z" });
+    const candidates = await loadFollowupCandidates({ orgId, campaignId, nowMs: Date.now(), responderStartedAtIso: "2020-01-01T00:00:00.000Z", actingCampaignId });
     expect(candidates.map((c) => c.id)).toEqual([id]);
   });
 
   it("records an action, releases the claim, and re-enters the person at the stated date", async () => {
     const id = await seedDueRow(new Date(Date.now() - 60_000));
-    await claimFollowup({ id, nowMs: Date.now(), runId: randomUUID() });
+    await claimFollowup({ id, nowMs: Date.now(), runId: randomUUID(), actingCampaignId });
 
     const nextDue = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
     const state = await writeFollowupStatement({
@@ -297,7 +297,7 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
       (await pickFollowupCandidate({ orgId, campaignId, runId: null, actingCampaignId, context: { orgId } })).claimed,
     ).toBeNull();
     // Even a direct claim of the row is refused.
-    expect(await claimFollowup({ id, nowMs: Date.now(), runId: null })).toBe(false);
+    expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId })).toBe(false);
   });
 
   it("switching a responder on hands over the never-answered backlog instead of answering it", async () => {
@@ -473,5 +473,122 @@ describe.skipIf(!hasRealDatabase)("resolving a follow-up row by email", () => {
     expect(found.ok).toBe(false);
     if (found.ok || found.code !== "ambiguous_lead") throw new Error("expected ambiguity");
     expect(found.matches.map((m) => m.id).sort()).toEqual([a, b].sort());
+  });
+});
+
+/**
+ * WHO a debt is for follows WHO SET its due date (WA-RESPONDER-1012). An outreach that schedules its OWN
+ * follow-up on its own row and a responder that claims that campaign's queue share one row: run against a
+ * real Postgres, through the whole claim path, with the writer stated exactly as the routes state it
+ * (x-campaign-id -> actingCampaignId; an observer states none).
+ */
+describe.skipIf(!hasRealDatabase)("follow-up ownership: who set the due date decides who claims it", () => {
+  const orgId = randomUUID();
+  const brandId = randomUUID();
+  const held = `itest-own-held-${randomUUID()}`;
+  const responder = `itest-own-responder-${randomUUID()}`;
+  const otherResponder = `itest-own-responder-${randomUUID()}`;
+
+  async function seedRow(): Promise<string> {
+    const [lead] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
+    await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `${randomUUID()}@example.test`, source: "itest" });
+    const [row] = await db
+      .insert(leadsCampaigns)
+      .values({ leadId: lead.id, campaignId: held, orgId, brandIds: [brandId], status: "served", servedAt: new Date() })
+      .returning({ id: leadsCampaigns.id });
+    return row.id;
+  }
+
+  /** Make the row due a minute ago, stated by `setBy` (null = an observer). */
+  async function due(id: string, kind: "scheduled" | "acted", setBy: string | null): Promise<void> {
+    const state = await writeFollowupStatement({
+      orgId,
+      id,
+      kind,
+      dueAtIso: new Date(Date.now() - 60_000).toISOString(),
+      reason: null,
+      nowMs: Date.now(),
+      actingCampaignId: setBy,
+      runId: null,
+    });
+    expect(state?.dueSetByCampaignId).toBe(setBy);
+  }
+
+  const claimAs = (acting: string) =>
+    pickFollowupCandidate({ orgId, campaignId: held, runId: null, actingCampaignId: acting, context: { orgId } });
+
+  async function clean() {
+    await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+    await db.delete(followupResponders).where(eq(followupResponders.heldCampaignId, held));
+  }
+  beforeEach(clean);
+  afterAll(clean);
+
+  it("a due date the holding campaign set on its OWN row is handed only to that campaign", async () => {
+    const id = await seedRow();
+    await due(id, "scheduled", held); // the outreach scheduling its own follow-up from its own run
+
+    expect(await claimAs(responder)).toEqual({ claimed: null, reason: "nothing_due" });
+    expect(await claimAs(otherResponder)).toEqual({ claimed: null, reason: "nothing_due" });
+    expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId: responder })).toBe(false);
+    expect((await claimAs(held)).claimed?.id).toBe(id);
+  });
+
+  it("a due date ANOTHER campaign set (its ladder on the holder's person) is handed to anyone but the holder", async () => {
+    const id = await seedRow();
+    await due(id, "acted", responder); // the responder answered and stated the next due date
+
+    expect(await claimAs(held)).toEqual({ claimed: null, reason: "nothing_due" });
+    expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId: held })).toBe(false);
+    expect((await claimAs(responder)).claimed?.id).toBe(id);
+
+    const other = await seedRow();
+    await due(other, "acted", responder);
+    expect((await claimAs(otherResponder)).claimed?.id).toBe(other);
+  });
+
+  it("a due date an observer set (no x-campaign-id) is handed to any acting campaign, the holder included", async () => {
+    const first = await seedRow();
+    const second = await seedRow();
+    await due(first, "scheduled", null);
+    await due(second, "scheduled", null);
+
+    const a = await claimAs(responder);
+    const b = await claimAs(held);
+    expect([a.claimed?.id, b.claimed?.id].sort()).toEqual([first, second].sort());
+  });
+
+  it("a responder's own ladder on a person filed on the responder itself stays the responder's", async () => {
+    // The form path: a trigger files the person on the responder's OWN campaign (observer due-now), the
+    // responder answers and states its next date on its own row: that date is its own debt.
+    const id = await seedRow();
+    await due(id, "scheduled", null);
+    expect((await claimAs(held)).claimed?.id).toBe(id);
+    await due(id, "acted", held);
+    expect(await claimAs(responder)).toEqual({ claimed: null, reason: "nothing_due" });
+    expect((await claimAs(held)).claimed?.id).toBe(id);
+  });
+
+  it("a later due date restates the owner: an observer's due-now on an outreach's own row frees it", async () => {
+    const id = await seedRow();
+    await due(id, "scheduled", held);
+    await due(id, "scheduled", null);
+    expect((await claimAs(responder)).claimed?.id).toBe(id);
+  });
+
+  it("a responder never hands over a never-answered debt that is another campaign's own", async () => {
+    // The responder started after the outreach scheduled its own follow-up (due before the responder
+    // existed): that debt is the outreach's, so the responder's claim neither takes nor hands it over.
+    responderCreatedAt.set(responder, new Date().toISOString());
+    try {
+      const id = await seedRow();
+      await due(id, "scheduled", held);
+      expect(await claimAs(responder)).toEqual({ claimed: null, reason: "nothing_due" });
+      const state = await readFollowupState(orgId, id);
+      expect(state).toMatchObject({ handedAt: null, dueSetByCampaignId: held });
+      expect(state?.dueAt).not.toBeNull();
+    } finally {
+      responderCreatedAt.delete(responder);
+    }
   });
 });

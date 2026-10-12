@@ -2689,6 +2689,7 @@ const AwaitingReplyLabels = [
   "referral",
   "other_proposal",
   "hand_over",
+  "reply",
 ] as const;
 
 const AwaitingReplyPersonSchema = z
@@ -2714,10 +2715,14 @@ const AwaitingReplyPersonSchema = z
       label: z.enum(AwaitingReplyLabels).openapi({
         description:
           "The reply's label in the timeline vocabulary (the outreach provider's verdict placed by lead-service). " +
-          "question_to_escalate = a question only the sender's company can answer; question_answerable = one the responder can answer.",
+          "question_to_escalate = a question only the sender's company can answer; question_answerable = one the responder can answer. " +
+          "reply = a personal-channel message that leaves the next move to us without being a question or interest, or one not judged yet.",
       }),
       subject: z.string().nullable(),
       campaignId: z.string().nullable(),
+      channel: z.string().openapi({
+        description: "The channel they wrote on: \"email\", or a personal channel the crm fact feed names (\"whatsapp\", \"linkedin\"...).",
+      }),
     }),
     lastAnsweredAt: z.string().nullable().openapi({ description: "When we last answered them, any way (null = never)." }),
     unansweredMessages: z.number().int().openapi({ description: "How many of their messages came after our latest answer." }),
@@ -2737,7 +2742,12 @@ registry.registerPath({
     "mailboxes or a staff mailbox, as google-service mirrors them) that a Jev judgment says answers what they " +
     "wrote (judged once, frozen; an unrelated email keeps them listed), or a statement \"answered outside the platform\" " +
     "(POST /orgs/leads/{id}/answered-outside). An opt-out (stop request or unsubscribe) takes a person out for " +
-    "good. Website visitors never enter. `total` is the length of `people`: the count and the list are one set. " +
+    "good. Website visitors never enter. Every PERSONAL channel the crm fact feed carries (WhatsApp, LinkedIn...) reads " +
+    "the same way, in the same conversation per person: their message (a lead of the brand named by email or phone) is " +
+    "judged ONCE by Jev (waits on us: question / interest / other; closing; stop request = opt-out; automatic), frozen, " +
+    "and a message of ours on that channel (the AI responder's or a person's, as crm-service mirrors it) is an answer. " +
+    "A message not judged yet is listed as waiting (personalMessages.complete false). " +
+    "`total` is the length of `people`: the count and the list are one set. " +
     "Fresh within ~2 minutes for answers through our mailboxes, immediately for a statement. " +
     "503 outreach_copy_not_ready while the outreach fact copy has not caught up once.",
   parameters: [
@@ -2766,6 +2776,16 @@ registry.registerPath({
                 })
                 .nullable()
                 .openapi({ description: "How the answers sent from our people's own Gmail were checked for this read." }),
+              personalMessages: z
+                .object({
+                  judged: z.number().int().openapi({ description: "Personal-channel messages of theirs judged by this read." }),
+                  complete: z.boolean().openapi({
+                    description: "false = a message could not be judged (listed as waiting) or the crm fact copy is not whole yet.",
+                  }),
+                  unjudged: z.array(z.object({ leadId: z.string(), factId: z.string(), reason: z.string() })),
+                  reason: z.string().nullable(),
+                })
+                .openapi({ description: "How the people's personal-channel messages (WhatsApp...) were read for this read." }),
             })
             .openapi("AwaitingReplyResponse"),
         },
@@ -5013,6 +5033,14 @@ const FollowupStateSchema = z
         "To whom / why, as the first hand-over stated it. `owed_before_responder_started` = a never-answered debt due before the earliest responder on this held campaign started (campaign-service createdAt), handed over by the claim instead of answered.",
       example: null,
     }),
+    dueSetByCampaignId: z.string().nullable().openapi({
+      description:
+        "WHO set the current due date (the x-campaign-id of the statement that set it), which decides who may claim it: " +
+        "the row's own campaignId = that campaign's own debt (its own follow-up), claimed only by it; another campaign = " +
+        "that campaign's ladder on this campaign's person, claimed by any campaign BUT this one; null = an observer said " +
+        "it is due (a reply, a trigger: no x-campaign-id), claimed by any campaign.",
+      example: null,
+    }),
   })
   .openapi("FollowupState", {
     description: "What we owe one person on one campaign, and when.",
@@ -5027,6 +5055,7 @@ const FollowupStateSchema = z
       stoppedReason: null,
       handedAt: null,
       handedReason: null,
+      dueSetByCampaignId: null,
     },
   });
 
@@ -5077,7 +5106,10 @@ registry.registerPath({
     "responder on this held campaign started (campaign-service createdAt of the x-campaign-id " +
     "campaign, the minimum over every responder seen): the claim hands those over (handedReason " +
     "owed_before_responder_started) instead of answering a backlog that was a human's. x-campaign-id " +
-    "is REQUIRED (400 acting_campaign_required). The claim expires after an hour, so a " +
+    "is REQUIRED (400 acting_campaign_required). WHO a debt is for follows WHO SET its due date " +
+    "(dueSetByCampaignId): a due date this campaign set on its own row is handed only to this campaign; one " +
+    "another campaign set (its ladder on this campaign's person) to any acting campaign except this one; one " +
+    "set by an observer (no x-campaign-id) to any acting campaign. The claim expires after an hour, so a " +
     "worker that dies mid-answer strands nobody. The scope is the campaign id named, not its " +
     "identity family: this hands out a single row whose due date a worker wrote while naming that " +
     "exact campaign, rather than totalling a population.",
@@ -5222,7 +5254,10 @@ registry.registerPath({
     "NAMED, not its identity family, matching the claim's scope exactly: enqueueing onto a sibling " +
     "campaign would write a debt nothing ever claims. The queue's stop conditions (opted out, a " +
     "booked meeting on record) apply to a row enqueued this way exactly as to any other — they are " +
-    "enforced at claim time, which is the only moment they can be read honestly.",
+    "enforced at claim time, which is the only moment they can be read honestly. The x-campaign-id the " +
+    "caller sends (if any) is recorded as WHO SET the due date (dueSetByCampaignId): a campaign scheduling its " +
+    "OWN person (x-campaign-id = the path campaign) keeps the debt for itself; an observer sends none and any " +
+    "acting campaign may claim it.",
   request: {
     params: z.object({
       campaignId: z.string().openapi({
@@ -5299,7 +5334,9 @@ registry.registerPath({
     "The lead is named by the `id` a list row already carries, so nothing about the person is " +
     "re-supplied. The write releases any claim, so recording is what returns a person to the queue " +
     "(or removes them from it) rather than waiting out the lease. The response IS the resulting " +
-    "state, so a caller never has to ask what its write did.",
+    "state, so a caller never has to ask what its write did. A statement that sets a due date (scheduled, " +
+    "acted) records the caller's x-campaign-id (absent = an observer) as WHO SET it (dueSetByCampaignId), " +
+    "which decides who may claim it (see claim-next).",
   request: {
     params: LeadRowIdPathParam,
     body: { content: { "application/json": { schema: FollowupStatementRequestSchema } } },
