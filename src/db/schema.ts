@@ -258,6 +258,11 @@ export const leadsCampaigns = pgTable(
     followupStoppedReason: text("followup_stopped_reason"),
     followupHandedAt: timestamp("followup_handed_at", { withTimezone: true }),
     followupHandedReason: text("followup_handed_reason"),
+    // --- Source stock (src/lib/source-stock.ts, migration 0068) ---
+    // A source unit's own run stores the lead it found under the SOURCE campaign (status_reason 'source_found');
+    // the outreach campaign that takes it claims the row here, once. NULL on every other row.
+    sourceHandedAt: timestamp("source_handed_at", { withTimezone: true }),
+    sourceHandedToCampaignId: text("source_handed_to_campaign_id"),
     servedAt: timestamp("served_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

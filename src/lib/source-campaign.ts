@@ -65,10 +65,15 @@ export type ServeSource =
       detail: string;
     };
 
-interface CampaignSourceCampaigns {
+export interface CampaignSourceCampaigns {
   offerId: string | null;
   sourced: boolean;
-  sourceCampaigns: Array<{ featureSlug: string; campaignId: string; running: boolean }>;
+  /**
+   * `runsOnItsOwn` (campaign-service, additive, LEADS-ONLY-FUNNEL-CAMPAIGN 2026-10-12): true = campaign-service
+   * dispatches this source unit on its own (it FINDS leads in its own runs, src/lib/source-mode.ts), false = it
+   * still answers on demand. ABSENT reads as false: today's on-demand serve, unchanged.
+   */
+  sourceCampaigns: Array<{ featureSlug: string; campaignId: string; running: boolean; runsOnItsOwn: boolean }>;
 }
 
 function parseCampaignSources(body: unknown, where: string): CampaignSourceCampaigns {
@@ -81,12 +86,15 @@ function parseCampaignSources(body: unknown, where: string): CampaignSourceCampa
     if (typeof r.featureSlug !== "string" || typeof r.campaignId !== "string" || typeof r.running !== "boolean") {
       throw new SourceCampaignUnresolvedError(`campaign-service source campaign entry unreadable (${where})`);
     }
-    return { featureSlug: r.featureSlug, campaignId: r.campaignId, running: r.running };
+    if (r.runsOnItsOwn !== undefined && typeof r.runsOnItsOwn !== "boolean") {
+      throw new SourceCampaignUnresolvedError(`campaign-service source campaign runsOnItsOwn unreadable (${where})`);
+    }
+    return { featureSlug: r.featureSlug, campaignId: r.campaignId, running: r.running, runsOnItsOwn: r.runsOnItsOwn === true };
   });
   return { offerId: typeof b.offerId === "string" ? b.offerId : null, sourced: b.sourced, sourceCampaigns: sources };
 }
 
-async function fetchCampaignSources(outreachCampaignId: string, orgId: string): Promise<CampaignSourceCampaigns> {
+export async function fetchCampaignSources(outreachCampaignId: string, orgId: string): Promise<CampaignSourceCampaigns> {
   const url = `${CAMPAIGN_SERVICE_URL}/internal/campaigns/${encodeURIComponent(outreachCampaignId)}/source-campaigns`;
   const where = `campaign=${outreachCampaignId} org=${orgId}`;
   const response = await fetchWithRetry(url, {
@@ -147,7 +155,7 @@ async function fetchSourceBudgetToday(args: {
  * The origins human-service chose for the offer's Lead Sourcing campaign (`GET /orgs/lead-sourcing/sources`).
  * Fail loud: unreadable = SourceCampaignUnresolvedError (the serve fails before anything is bought).
  */
-async function fetchLeadSourcingChoice(args: {
+export async function fetchLeadSourcingChoice(args: {
   orgId: string;
   brandId: string;
   offerId: string;
@@ -172,7 +180,7 @@ async function fetchLeadSourcingChoice(args: {
 }
 
 /** Within the source campaign's own budget (billing), or why not. */
-async function withinBudget(args: { orgId: string; brandId: string; offerId: string; sourceSlug: string; campaignId: string; originSlug: string }): Promise<ServeSource> {
+export async function withinBudget(args: { orgId: string; brandId: string; offerId: string; sourceSlug: string; campaignId: string; originSlug: string }): Promise<ServeSource> {
   const budget = await fetchSourceBudgetToday({
     orgId: args.orgId,
     brandId: args.brandId,
@@ -203,9 +211,11 @@ export async function resolveServeSource(params: {
   originSlug: string | null;
   userId?: string | null;
   runId?: string | null;
+  /** The outreach campaign's sources when the caller already read them (src/lib/source-mode.ts): not read twice. */
+  read?: CampaignSourceCampaigns;
 }): Promise<ServeSource> {
   if (!params.originSlug) return { kind: "legacy", why: "channel_not_sourced" };
-  const read = await fetchCampaignSources(params.outreachCampaignId, params.orgId);
+  const read = params.read ?? (await fetchCampaignSources(params.outreachCampaignId, params.orgId));
   if (!read.sourced || !read.offerId) return { kind: "legacy", why: "channel_not_sourced" };
   if (read.sourceCampaigns.length === 0) return { kind: "legacy", why: "offer_not_on_source_campaigns" };
   const offerId = read.offerId;

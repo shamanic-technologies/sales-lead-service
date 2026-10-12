@@ -52,9 +52,10 @@
               "audience_not_serveable",
               "credit_insufficient",
               "source_campaign_off",
-              "source_budget_reached"
+              "source_budget_reached",
+              "source_stock_empty"
             ],
-            "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
+            "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
           }
         },
@@ -8109,6 +8110,93 @@
           "keptAlsoFoundByOtherSources",
           "gaps"
         ]
+      },
+      "SourceLeadsFoundResponse": {
+        "type": "object",
+        "properties": {
+          "recordedSince": {
+            "type": "string",
+            "description": "Earliest instant any mode is recorded from."
+          },
+          "modes": {
+            "type": "object",
+            "properties": {
+              "onDemand": {
+                "type": "object",
+                "properties": {
+                  "triggerIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "recordedSince": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "required": [
+                  "triggerIds",
+                  "recordedSince"
+                ]
+              },
+              "ownRuns": {
+                "type": "object",
+                "properties": {
+                  "recordedSince": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "recordedSince"
+                ]
+              }
+            },
+            "required": [
+              "onDemand",
+              "ownRuns"
+            ]
+          },
+          "counts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "campaignId": {
+                  "type": "string"
+                },
+                "found": {
+                  "type": "integer"
+                },
+                "onDemand": {
+                  "type": "integer"
+                },
+                "ownRuns": {
+                  "type": "integer"
+                },
+                "firstAt": {
+                  "type": "string"
+                },
+                "lastAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "campaignId",
+                "found",
+                "onDemand",
+                "ownRuns",
+                "firstAt",
+                "lastAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "recordedSince",
+          "modes",
+          "counts"
+        ]
       }
     },
     "parameters": {},
@@ -14450,6 +14538,41 @@
           },
           "502": {
             "description": "A sibling service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/source-campaigns/leads-found": {
+      "get": {
+        "summary": "Leads found per source campaign, fleet-wide, on demand AND in its own runs (internal, service-auth)",
+        "description": "Per source campaign: how many leads it found, first and last time. Two modes, each counted where it is recorded, never twice: `onDemand` = a serve an outreach run asked for and filed under the source (campaign-service `ran` trigger events `on_demand`, `lead_requested` before 2026-10-11, history included); `ownRuns` = a lead the source's own run found and stored under itself (`leads_campaigns.status_reason = 'source_found'`). `found = onDemand + ownRuns`. An on-demand event of an offer whose sources were not campaigns yet names the OUTREACH campaign, served verbatim. 502 when campaign-service cannot answer (never a partial count).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Leads found per source campaign",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceLeadsFoundResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "campaign-service could not answer"
           }
         }
       }

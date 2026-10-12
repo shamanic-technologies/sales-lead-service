@@ -28,6 +28,10 @@
  *                            (src/lib/source-campaign.ts): nothing is bought from a source the
  *                            customer did not turn on. Says nothing about the audience's people.
  *   source_budget_reached  — that source campaign already spent its daily budget today.
+ *   source_stock_empty     — the outreach campaign is fed by source campaigns that FIND leads in their own
+ *                            runs (src/lib/source-mode.ts), and none of them holds a found lead nobody worked
+ *                            yet. Nothing is found on demand from such a source: the stock refills on the
+ *                            source's next run. Says nothing about any audience's people.
  *
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
@@ -41,6 +45,7 @@ export const AUDIENCE_NOT_SERVEABLE_REASON = "audience_not_serveable" as const;
 export const CREDIT_INSUFFICIENT_REASON = "credit_insufficient" as const;
 export const SOURCE_CAMPAIGN_OFF_REASON = "source_campaign_off" as const;
 export const SOURCE_BUDGET_REACHED_REASON = "source_budget_reached" as const;
+export const SOURCE_STOCK_EMPTY_REASON = "source_stock_empty" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -51,6 +56,7 @@ export const SERVE_EMPTY_REASONS = [
   CREDIT_INSUFFICIENT_REASON,
   SOURCE_CAMPAIGN_OFF_REASON,
   SOURCE_BUDGET_REACHED_REASON,
+  SOURCE_STOCK_EMPTY_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];
