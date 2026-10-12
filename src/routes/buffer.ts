@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { eq, lt } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
-import { pullNext } from "../lib/buffer.js";
+import { pullNext, type PullNextMode } from "../lib/buffer.js";
 import { createRun, updateRun } from "../lib/runs-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { BufferNextRequestSchema } from "../schemas.js";
@@ -12,7 +12,10 @@ import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 import { resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
-import { resolveServeSource, type ServeSource } from "../lib/source-campaign.js";
+import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
+import { decideSourceMode, type SourceUnit } from "../lib/source-mode.js";
+import { resolveSourceAudiences } from "../lib/source-audiences.js";
+import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 
@@ -84,6 +87,13 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // serve run hangs from it and carries its workflow. Null for a legacy serve (no source unit to run).
   let onDemandRun: OnDemandRun | null = null;
 
+  // LEADS-ONLY-FUNNEL-CAMPAIGN (src/lib/source-mode.ts): a source unit's OWN run finds and stores a lead under itself
+  // (`ownRunUnit`, its audiences in `findAudienceIds`); an outreach campaign fed by sources that find on their own
+  // serves their stock (`stockSourceIds`). Neither is an on-demand ask: neither records an `on_demand` event.
+  let ownRunUnit: SourceUnit | null = null;
+  let findAudienceIds: string[] = [];
+  let stockSourceIds: string[] | null = null;
+
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
   // unreachable through its Neon cold-start window) must return a clean 500 —
@@ -129,42 +139,89 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     inFlightOutreach.add(campaignId);
     res.on("close", () => inFlightOutreach.delete(campaignId));
 
-    if (req.audienceId) {
-      try {
-        const origin = await resolveSourcingOriginSlug({
-          audienceId: req.audienceId,
-          orgId: req.orgId!,
-          outreachFeatureSlug: featureSlug,
-        });
-        if (origin) runFeatureSlug = origin;
-      } catch (err) {
-        console.error(
-          `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
-          err,
-        );
-        throw err;
-      }
-    }
+    const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
 
-    if (runFeatureSlug !== featureSlug) {
-      try {
-        serveSource = await resolveServeSource({
+    if (sourceMode.kind === "own_run") {
+      // The source unit's OWN run: within its own budget, in its own audiences, filed under itself.
+      const unit = sourceMode.unit;
+      ownRunUnit = unit;
+      runFeatureSlug = unit.featureSlug;
+      if (unit.status !== "ongoing") {
+        serveSource = { kind: "refused", reason: SOURCE_CAMPAIGN_OFF_REASON, campaignId: unit.id, detail: `source campaign ${unit.id} (${unit.featureSlug}) is ${unit.status}` };
+      } else {
+        const budget = await withinBudget({
           orgId: req.orgId!,
-          brandId,
-          outreachCampaignId: campaignId,
-          originSlug: runFeatureSlug,
-          userId: req.userId ?? null,
-          runId,
+          brandId: unit.brandId,
+          offerId: unit.offerId,
+          sourceSlug: unit.featureSlug,
+          campaignId: unit.id,
+          originSlug: unit.featureSlug,
         });
-        // The run carries the slug of the source campaign it is filed under: the origin, or Lead Sourcing
-        // (whose serves keep their origin on the audience they served from).
-        if (serveSource.kind === "source") runFeatureSlug = serveSource.sourceSlug;
-      } catch (err) {
-        console.error(
-          `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,
-          err,
-        );
-        throw err;
+        if (budget.kind === "refused") serveSource = budget;
+        else {
+          findAudienceIds = await resolveSourceAudiences({
+            orgId: req.orgId!,
+            brandId: unit.brandId,
+            offerId: unit.offerId,
+            unitSlug: unit.featureSlug,
+            preferredAudienceId: req.audienceId ?? null,
+            userId: req.userId ?? null,
+            runId,
+          });
+        }
+      }
+    } else {
+      const sourcesRead = sourceMode.read;
+      if (req.audienceId) {
+        try {
+          const origin = await resolveSourcingOriginSlug({
+            audienceId: req.audienceId,
+            orgId: req.orgId!,
+            outreachFeatureSlug: featureSlug,
+          });
+          if (origin) runFeatureSlug = origin;
+        } catch (err) {
+          console.error(
+            `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
+            err,
+          );
+          throw err;
+        }
+      }
+
+      if (runFeatureSlug !== featureSlug) {
+        try {
+          serveSource = await resolveServeSource({
+            orgId: req.orgId!,
+            brandId,
+            outreachCampaignId: campaignId,
+            originSlug: runFeatureSlug,
+            userId: req.userId ?? null,
+            runId,
+            ...(sourcesRead ? { read: sourcesRead } : {}),
+          });
+          // The run carries the slug of the source campaign it is filed under: the origin, or Lead Sourcing
+          // (whose serves keep their origin on the audience they served from).
+          if (serveSource.kind === "source") runFeatureSlug = serveSource.sourceSlug;
+        } catch (err) {
+          console.error(
+            `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,
+            err,
+          );
+          throw err;
+        }
+      }
+
+      if (sourceMode.kind === "stock") {
+        // Sources of this offer find on their own: serve their stock, never find on demand from them. The one
+        // exception is an audience whose origin resolves to a source that still answers on demand (the switch is
+        // per source): that serve is today's, byte for byte.
+        const onDemandSource = serveSource.kind === "source" && !sourceMode.sourceCampaignIds.includes(serveSource.campaignId);
+        if (!onDemandSource) {
+          stockSourceIds = sourceMode.sourceCampaignIds;
+          serveSource = { kind: "legacy", why: "offer_not_on_source_campaigns" };
+          runFeatureSlug = featureSlug;
+        }
       }
     }
 
@@ -237,7 +294,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // Every answered ask is recorded as ONE `on_demand` trigger event at campaign-service
   // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
   const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
-    recordLeadRequested({
+    ownRunUnit || stockSourceIds
+      ? undefined
+      : recordLeadRequested({
       orgId: req.orgId!,
       brandId,
       offerId: serveSource.kind === "source" ? serveSource.offerId : null,
@@ -278,6 +337,11 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   }
 
   const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
+  const pullMode: PullNextMode | null = ownRunUnit
+    ? { kind: "find", audienceIds: findAudienceIds }
+    : stockSourceIds
+      ? { kind: "stock", sourceCampaignIds: stockSourceIds }
+      : null;
 
   try {
     const result = await pullNext(
@@ -296,6 +360,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         activeGoalId: req.activeGoalId ?? null,
         brandProfileId: req.brandProfileId ?? null,
         audienceId: req.audienceId ?? null,
+        ...(pullMode ? { mode: pullMode } : {}),
       },
       pullSignal,
     );

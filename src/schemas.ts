@@ -1181,7 +1181,12 @@ export const BufferNextResponseSchema = z
           "serve budget expired before the look finished; `audience_not_serveable` means the named " +
           "audience has no committed provider yet, so its population is unknown rather than empty; " +
           "`credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM " +
-          "action was performed. Decide whether outreach may stop by testing for `audience_exhausted` " +
+          "action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent " +
+          "today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet " +
+          "(nothing is found on demand from them). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` " +
+          "campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; " +
+          "`audience_exhausted` there means every one of its audiences was walked and has nobody left. " +
+          "Decide whether outreach may stop by testing for `audience_exhausted` " +
           "specifically — never by excluding known-benign values, so a reason added later defaults to " +
           "not-exhaustion.",
         example: "audience_exhausted",
@@ -7153,5 +7158,48 @@ registry.registerPath({
     404: { description: "Not a campaign of this org" },
     409: { description: "Not a lead source campaign" },
     502: { description: "A sibling service could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/source-campaigns/leads-found",
+  summary: "Leads found per source campaign, fleet-wide, on demand AND in its own runs (internal, service-auth)",
+  description:
+    "Per source campaign: how many leads it found, first and last time. Two modes, each counted where it is recorded, never twice: " +
+    "`onDemand` = a serve an outreach run asked for and filed under the source (campaign-service `ran` trigger events `on_demand`, " +
+    "`lead_requested` before 2026-10-11, history included); `ownRuns` = a lead the source's own run found and stored under itself " +
+    "(`leads_campaigns.status_reason = 'source_found'`). `found = onDemand + ownRuns`. An on-demand event of an offer whose sources " +
+    "were not campaigns yet names the OUTREACH campaign, served verbatim. 502 when campaign-service cannot answer (never a partial count).",
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Leads found per source campaign",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              recordedSince: z.string().openapi({ description: "Earliest instant any mode is recorded from." }),
+              modes: z.object({
+                onDemand: z.object({ triggerIds: z.array(z.string()), recordedSince: z.string().nullable() }),
+                ownRuns: z.object({ recordedSince: z.string() }),
+              }),
+              counts: z.array(
+                z.object({
+                  campaignId: z.string(),
+                  found: z.number().int(),
+                  onDemand: z.number().int(),
+                  ownRuns: z.number().int(),
+                  firstAt: z.string(),
+                  lastAt: z.string(),
+                }),
+              ),
+            })
+            .openapi("SourceLeadsFoundResponse"),
+        },
+      },
+    },
+    401: { description: "Unauthorized" },
+    502: { description: "campaign-service could not answer" },
   },
 });

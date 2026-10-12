@@ -17,10 +17,28 @@ import { checksForWriter, offerChecks, type WriterChecks } from "./writer-checks
 import type { SpendIdentity } from "./treg-client.js";
 import {
   AUDIENCE_EXHAUSTED_REASON,
+  AUDIENCE_NOT_SERVEABLE_REASON,
   NO_AUDIENCE_REASON,
   SERVE_TIMED_OUT_REASON,
+  SOURCE_STOCK_EMPTY_REASON,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
+import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
+import { isAudienceNotServeableError } from "./people-client.js";
+
+/**
+ * What this serve does (src/lib/source-mode.ts, LEADS-ONLY-FUNNEL-CAMPAIGN 2026-10-12):
+ *   serve — today: serve `audienceId` for the outreach campaign (retry pool first).
+ *   find  — a SOURCE UNIT's own run: find one lead in its audiences (in order), store it under the source campaign
+ *           (`status_reason = 'source_found'`), contact nobody. No retry pool (nothing is ever sent from a source),
+ *           no Bonus check (writer context, paid when an outreach campaign takes the lead).
+ *   stock — an outreach campaign fed by sources that find on their own: retry pool first, then the oldest lead
+ *           those sources found that nobody worked yet; nothing is found on demand.
+ */
+export type PullNextMode =
+  | { kind: "serve" }
+  | { kind: "find"; audienceIds: string[] }
+  | { kind: "stock"; sourceCampaignIds: string[] };
 
 interface PullNextParams {
   orgId: string;
@@ -49,6 +67,8 @@ interface PullNextParams {
   activeGoalId?: string | null;
   brandProfileId?: string | null;
   audienceId?: string | null;
+  /** Absent = `serve` (today). */
+  mode?: PullNextMode;
 }
 
 interface PullNextResult {
@@ -115,12 +135,22 @@ export async function pullNext(
   signal?: AbortSignal,
 ): Promise<PullNextResult> {
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+  const mode: PullNextMode = params.mode ?? { kind: "serve" };
+
+  // A source unit's own run with no audience of its origin: it looked at nobody (never exhaustion).
+  if (mode.kind === "find" && mode.audienceIds.length === 0) {
+    console.log(
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId} origin=${params.runFeatureSlug}: no active audience of this source`,
+    );
+    return { found: false, reason: NO_AUDIENCE_REASON };
+  }
 
   // 1. The audience is selected by campaign-service per run and passed in via the
   // x-audience-id header. lead-service does NOT re-rank or re-select. No audience
   // id (campaign selected none) ⟹ clean found:false, no serve, no brand call.
-  const audienceId = params.audienceId ?? null;
-  if (!audienceId) {
+  // (A source unit's own run walks its own audiences, src/lib/source-audiences.ts; a stock serve needs none.)
+  const audienceId = mode.kind === "find" ? mode.audienceIds[0] : (params.audienceId ?? null);
+  if (!audienceId && mode.kind === "serve") {
     console.log(
       `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId} feature=${params.featureSlug}`,
     );
@@ -139,7 +169,7 @@ export async function pullNext(
     featureSlug: params.runFeatureSlug,
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
-    audienceId,
+    audienceId: audienceId ?? undefined,
   };
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
@@ -182,7 +212,8 @@ export async function pullNext(
           featureSlug: params.runFeatureSlug,
         }
       : null;
-    return checksForWriter(fullLead, checks, identity);
+    // A find hands the lead to nobody's writer: only the Hard filters are read back, no Bonus check is paid.
+    return checksForWriter(fullLead, mode.kind === "find" ? checks.filter((c) => c.mode !== "mention") : checks, identity);
   };
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
@@ -196,7 +227,7 @@ export async function pullNext(
   // who was never handed to the vendor, and the winner is claimed atomically so two
   // concurrent runs cannot take the same person. Nobody retryable (or email-gateway
   // unreachable, which is fail-closed) falls through to serveNext exactly as before.
-  const retry = await pickRetryCandidate({
+  const retry = mode.kind === "find" ? null : await pickRetryCandidate({
     orgId: params.orgId,
     campaignId: params.campaignId,
     brandId: params.brandId,
@@ -237,11 +268,183 @@ export async function pullNext(
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
 
+  // Record the served person into silver and answer. One definition for a serve and a find.
+  async function recordServed(served: { person?: Person | null; personId?: unknown }, servedAudienceId: string): Promise<PullNextResult> {
+    if (!served.person) throw new Error(`[lead-service] recordServed called without a person (audience=${servedAudienceId})`);
+    const person: Person = served.person;
+    // Read BEFORE any write: a malformed signal is a producer contract break and must
+    // fail the serve loudly rather than half-record it.
+    const buyingSignal = readBuyingSignal(person.buyingSignal);
+    const personId = readServedPersonId(served.personId);
+    if (!person.email) {
+      // serve-next promised a contactable person but gave no email — a producer
+      // contract violation, not an empty result. Fail loud.
+      throw new Error(
+        `[lead-service] serve-next returned status=served without an email: audienceId=${servedAudienceId}, campaign=${params.campaignId}`,
+      );
+    }
+
+    // 5. Record into silver (leads + contact + organization + lifecycle row).
+    //
+    // A person is ONE identity: when this email already belongs to a lead, THAT
+    // lead is the person and the serve is attributed to it. The global
+    // one-email-one-lead index means no other lead can ever carry the email, so
+    // serving a different lead would leave its delivery status permanently
+    // unresolvable — invisible in the dashboard funnel, in outreach counts, and
+    // in conversion attribution. `registerServedEmail` returns the owning lead,
+    // and fails loud if the email cannot be registered at all.
+    const resolvedLeadId = await upsertLeadFromPerson(person, { enriched: true });
+    const leadId = await registerServedEmail({
+      leadId: resolvedLeadId,
+      email: person.email,
+      status: person.emailStatus ?? null,
+      source: person.provider,
+    });
+    await recordEmploymentHistory({ leadId, person });
+
+    await db
+      .insert(leadsCampaigns)
+      .values({
+        leadId,
+        campaignId: params.campaignId,
+        orgId: params.orgId,
+        brandIds: params.brandIds,
+        status: "served",
+        // A find is the SOURCE's fact (src/lib/source-stock.ts reads it as stock); a serve is the outreach campaign's.
+        statusReason: mode.kind === "find" ? SOURCE_FOUND_STATUS_REASON : "served",
+        statusDetails: `Served via audience ${servedAudienceId}, email=${person.email}, leadId=${leadId}, campaign=${params.campaignId}`,
+        servedAt: new Date(),
+        parentRunId: params.parentRunId ?? null,
+        runId: params.runId ?? null,
+        pushRunId: params.runId ?? null,
+        userId: params.userId ?? null,
+        workflowSlug: params.workflowSlug ?? null,
+        featureSlug: params.featureSlug ?? null,
+        goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: servedAudienceId,
+        buyingSignal,
+        personId,
+      })
+      .onConflictDoNothing();
+
+    const fullLead = await buildFullLead(leadId);
+    const qualification = await writerChecks(fullLead);
+
+    console.log(
+      `[lead-service] pullNext found=true campaign=${params.campaignId} audienceId=${servedAudienceId} email=${person.email} leadId=${leadId}`,
+    );
+
+    return {
+      found: true,
+      lead: {
+        leadId,
+        email: person.email,
+        data: fullLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: person.providerPersonId,
+        goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: servedAudienceId,
+        buyingSignal,
+        ...(personId ? { personId } : {}),
+        qualification,
+      },
+    };
+  }
+
+  // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
+  if (mode.kind === "stock") {
+    const stocked = await claimStockedLead({
+      orgId: params.orgId,
+      sourceCampaignIds: mode.sourceCampaignIds,
+      outreachCampaignId: params.campaignId,
+      brandIds: params.brandIds,
+      featureSlug: params.featureSlug,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+    });
+    if (!stocked) {
+      console.log(
+        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SOURCE_STOCK_EMPTY_REASON} sources=${mode.sourceCampaignIds.join(",")}`,
+      );
+      return { found: false, reason: SOURCE_STOCK_EMPTY_REASON };
+    }
+    const stockLead = await buildFullLead(stocked.leadId);
+    const qualification = await writerChecks(stockLead);
+    console.log(
+      `[lead-service] pullNext found=true source=stock campaign=${params.campaignId} sourceCampaign=${stocked.sourceCampaignId} email=${stocked.email} leadId=${stocked.leadId}`,
+    );
+    return {
+      found: true,
+      lead: {
+        leadId: stocked.leadId,
+        email: stocked.email,
+        data: stockLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: stockLead.apolloPersonId ?? null,
+        goal: stocked.goal ?? goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: stocked.audienceId,
+        buyingSignal: stocked.buyingSignal,
+        ...(stocked.personId ? { personId: stocked.personId } : {}),
+        qualification,
+      },
+    };
+  }
+
+  // FIND: walk the source's audiences in order until one serves somebody. Only when EVERY audience was walked and
+  // answered nobody left is it `audience_exhausted`; an unfinished look or an audience that cannot be walked yet
+  // says so instead.
+  if (mode.kind === "find") {
+    let notServeable = 0;
+    for (const candidateAudienceId of mode.audienceIds) {
+      if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+      const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
+      let served: Awaited<ReturnType<typeof serveNext>>;
+      try {
+        served = (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal)) ?? (await serveNext(candidateAudienceId, audienceCtx));
+      } catch (err) {
+        if (isAudienceNotServeableError(err)) {
+          notServeable++;
+          continue;
+        }
+        throw err;
+      }
+      if (served.status === "pending") {
+        console.log(
+          `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${candidateAudienceId} serveNext=pending`,
+        );
+        return { found: false, reason: SERVE_TIMED_OUT_REASON };
+      }
+      if (served.status === "exhausted" || !served.person) continue;
+      return recordServed(served, candidateAudienceId);
+    }
+    const reason = notServeable > 0 ? AUDIENCE_NOT_SERVEABLE_REASON : AUDIENCE_EXHAUSTED_REASON;
+    console.log(
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable}`,
+    );
+    return { found: false, reason };
+  }
+
   // 4. Next person of that audience worth paying for. Apollo audiences are served through
   // CANDIDATES: the audience screen and the OFFER's must-pass checks are decided HERE before the
   // reveal is paid (src/lib/candidate-serve.ts). An audience human-service does not serve that
   // way (crm, apify, CRM outreach) answers null and keeps serve-next, screen and all.
-  const served = (await serveThroughCandidates(audienceId, ctx, offerId, signal)) ?? (await serveNext(audienceId, ctx));
+  const servedAudienceId = audienceId as string;
+  const served = (await serveThroughCandidates(servedAudienceId, ctx, offerId, signal)) ?? (await serveNext(servedAudienceId, ctx));
 
   // human-service bounds each serve-next call: when its budget runs out mid-walk it
   // answers `pending` with no person, and the next call resumes the walk. That is an
@@ -263,89 +466,7 @@ export async function pullNext(
     return { found: false, reason: AUDIENCE_EXHAUSTED_REASON };
   }
 
-  const person: Person = served.person;
-  // Read BEFORE any write: a malformed signal is a producer contract break and must
-  // fail the serve loudly rather than half-record it.
-  const buyingSignal = readBuyingSignal(person.buyingSignal);
-  const personId = readServedPersonId(served.personId);
-  if (!person.email) {
-    // serve-next promised a contactable person but gave no email — a producer
-    // contract violation, not an empty result. Fail loud.
-    throw new Error(
-      `[lead-service] serve-next returned status=served without an email: audienceId=${audienceId}, campaign=${params.campaignId}`,
-    );
-  }
-
-  // 5. Record into silver (leads + contact + organization + lifecycle row).
-  //
-  // A person is ONE identity: when this email already belongs to a lead, THAT
-  // lead is the person and the serve is attributed to it. The global
-  // one-email-one-lead index means no other lead can ever carry the email, so
-  // serving a different lead would leave its delivery status permanently
-  // unresolvable — invisible in the dashboard funnel, in outreach counts, and
-  // in conversion attribution. `registerServedEmail` returns the owning lead,
-  // and fails loud if the email cannot be registered at all.
-  const resolvedLeadId = await upsertLeadFromPerson(person, { enriched: true });
-  const leadId = await registerServedEmail({
-    leadId: resolvedLeadId,
-    email: person.email,
-    status: person.emailStatus ?? null,
-    source: person.provider,
-  });
-  await recordEmploymentHistory({ leadId, person });
-
-  await db
-    .insert(leadsCampaigns)
-    .values({
-      leadId,
-      campaignId: params.campaignId,
-      orgId: params.orgId,
-      brandIds: params.brandIds,
-      status: "served",
-      statusReason: "served",
-      statusDetails: `Served via audience ${audienceId}, email=${person.email}, leadId=${leadId}, campaign=${params.campaignId}`,
-      servedAt: new Date(),
-      parentRunId: params.parentRunId ?? null,
-      runId: params.runId ?? null,
-      pushRunId: params.runId ?? null,
-      userId: params.userId ?? null,
-      workflowSlug: params.workflowSlug ?? null,
-      featureSlug: params.featureSlug ?? null,
-      goal,
-      activeGoalId: params.activeGoalId ?? null,
-      brandProfileId: params.brandProfileId ?? null,
-      audienceId: audienceId,
-      buyingSignal,
-      personId,
-    })
-    .onConflictDoNothing();
-
-  const fullLead = await buildFullLead(leadId);
-  const qualification = await writerChecks(fullLead);
-
-  console.log(
-    `[lead-service] pullNext found=true campaign=${params.campaignId} audienceId=${audienceId} email=${person.email} leadId=${leadId}`,
-  );
-
-  return {
-    found: true,
-    lead: {
-      leadId,
-      email: person.email,
-      data: fullLead,
-      brandIds: params.brandIds,
-      orgId: params.orgId,
-      userId: params.userId ?? null,
-      apolloPersonId: person.providerPersonId,
-      goal,
-      activeGoalId: params.activeGoalId ?? null,
-      brandProfileId: params.brandProfileId ?? null,
-      audienceId: audienceId,
-      buyingSignal,
-      ...(personId ? { personId } : {}),
-      qualification,
-    },
-  };
+  return recordServed(served, servedAudienceId);
 }
 
 export { leadsCampaigns };

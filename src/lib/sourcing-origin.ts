@@ -134,7 +134,7 @@ async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>>
 }
 
 /** human-service's answer; null = the audience serves from no list (no committed provider). */
-async function fetchAudienceOriginSlug(audienceId: string, orgId: string, outreachFeatureSlug: string): Promise<string | null> {
+export async function fetchAudienceOriginSlug(audienceId: string, orgId: string, outreachFeatureSlug: string): Promise<string | null> {
   const url = `${HUMAN_SERVICE_URL}/orgs/audiences/${encodeURIComponent(audienceId)}/sourcing-origin`;
   const response = await fetchWithRetry(url, {
     headers: { "X-API-Key": HUMAN_SERVICE_API_KEY, "x-org-id": orgId, "x-feature-slug": outreachFeatureSlug },

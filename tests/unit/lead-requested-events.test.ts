@@ -114,6 +114,9 @@ vi.mock("../../src/lib/people-client.js", () => ({
 vi.mock("../../src/lib/sourcing-origin.js", () => ({ resolveSourcingOriginSlug: vi.fn(async () => "sourcing-apollo-cold-filters") }));
 const resolveServeSource = vi.fn();
 vi.mock("../../src/lib/source-campaign.js", () => ({ resolveServeSource: (...a: unknown[]) => resolveServeSource(...a) }));
+// runsOnItsOwn absent at campaign-service: today's serve (src/lib/source-mode.ts).
+vi.mock("../../src/lib/source-mode.js", () => ({ decideSourceMode: vi.fn(async () => ({ kind: "today", read: null })) }));
+vi.mock("../../src/lib/source-audiences.js", () => ({ resolveSourceAudiences: vi.fn() }));
 
 const ORG = "30000000-0000-0000-0000-000000000001";
 const BRAND = "20000000-0000-0000-0000-000000000001";
