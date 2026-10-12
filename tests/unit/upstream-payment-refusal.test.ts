@@ -23,6 +23,12 @@ describe("a sibling that owns the spend refuses for lack of money (402)", () => 
     expect(isCreditInsufficientError(err)).toBe(true);
   });
 
+  it("reads cents stated as decimal strings, as chat-service sends them (prod 2026-10-12)", async () => {
+    answer(402, JSON.stringify({ error: "Insufficient credits", balance_cents: "-1.2800000000", required_cents: "1.2800000000" }));
+    const err = await complete({ systemPrompt: "s", message: "m" }, id).catch((e) => e);
+    expect(err).toMatchObject({ balanceCents: -1.28, requiredCents: 1.28 });
+  });
+
   it("chat-service /orgs/judgments: InsufficientCreditError", async () => {
     answer(402, chatRefusal);
     const err = await judgeYesNo({ a: 1 }, { q: { instructions: "?" } }, id).catch((e) => e);
