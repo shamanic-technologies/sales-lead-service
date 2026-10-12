@@ -111,7 +111,8 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
     expect(await claimStockedLead({
       orgId, sourceCampaignIds: [campaignId], outreachCampaignId: randomUUID(), brandIds: [brandId], featureSlug: "sales-cold-email-outreach",
       runId: null, parentRunId: null, userId: null, workflowSlug: null, goal: null, activeGoalId: null, brandProfileId: null,
-    })).toBeNull();
+      askFit: async () => { throw new Error("no engager row may reach the fit check"); },
+    } as never)).toEqual({ lead: null, setAside: [] });
     // A campaign asking its own retry pool for these rows gets nobody: every pool demands an email.
     expect(await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now() } as never)).toEqual([]);
   });
