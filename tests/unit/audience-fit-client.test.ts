@@ -17,6 +17,14 @@ describe("audience fit client", () => {
     expect(() => readVerdict(null, 200)).toThrow();
   });
 
+  it("a person human-service cannot judge is set aside in its words, never fits", async () => {
+    const words = "The brand's CRM holds no person at this address, so this audience cannot say whether they still fit";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: words, code: "person_unknown_to_crm" }), { status: 422 })));
+    await expect(
+      askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null }, { orgId: "o" }),
+    ).resolves.toEqual({ fits: false, reason: words });
+  });
+
   it("a non-2xx from human-service throws, never fits", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("audience not found", { status: 404 })));
     await expect(

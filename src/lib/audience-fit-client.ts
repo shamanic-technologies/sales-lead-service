@@ -9,11 +9,17 @@ import type { AudienceFitVerdict } from "./source-stock.js";
  * so it is the only one that can say; lead-service never re-grades membership itself. Asked once per stocked find at
  * handover (src/lib/source-stock.ts). Free to ask: nothing is bought, nobody is marked served.
  *
- * Fail loud: any non-2xx, network failure or a verdict without a readable answer throws. A person human-service cannot
- * judge is never "fits" by default; the serve fails and the stock stays as it was.
+ * Never "fits" by default. A person human-service says it CANNOT judge (422: e.g. the brand's CRM no longer holds
+ * anyone at that address) is not shown to fit, so it is set aside with human-service's own words: failing the serve
+ * instead would block the whole stock on that one row forever. Every other non-2xx (404 unknown audience, 502 crm
+ * down), a network failure or an unreadable verdict throws: the serve fails and the stock stays as it was.
  */
 
-// Deployed wire contract: PENDING human-service STILL-FITS-1012 (conformed once its route is live).
+// Deployed wire contract (human-service v0.50.10, STILL-FITS-1012; direct to HUMAN_SERVICE_URL, X-API-Key):
+//   POST {HUMAN_SERVICE_URL}/internal/audiences/still-fits
+//   Body: { orgId, audienceId, brandId, email, personId: string|null }
+//   200:  { fits: true, basis } | { fits: false, reason: "<plain words>", basis, failed: [{code, reason}] }
+//   404 audience_not_found · 422 { error, code } the person cannot be judged · 502 crm-service down
 const FIT_PATH = "/internal/audiences/still-fits";
 
 export class AudienceFitError extends Error {
@@ -44,6 +50,7 @@ export async function askAudienceFit(
     signal: AbortSignal.timeout(15_000),
   });
   const text = await response.text();
+  if (response.status === 422) return cannotJudge(text);
   if (!response.ok) throw new AudienceFitError(response.status, text.slice(0, 300));
   return readVerdict(JSON.parse(text) as unknown, response.status);
 }
@@ -56,4 +63,16 @@ export function readVerdict(body: unknown, status: number): AudienceFitVerdict {
     throw new AudienceFitError(status, "answered no longer fits without a reason");
   }
   return { fits: false, reason: b.reason.trim() };
+}
+
+/** human-service cannot judge the person: not shown to fit, set aside in its own words. */
+function cannotJudge(text: string): AudienceFitVerdict {
+  let body: { error?: unknown } | null = null;
+  try {
+    body = JSON.parse(text) as { error?: unknown };
+  } catch {
+    throw new AudienceFitError(422, `cannot-judge answer unreadable: ${text.slice(0, 300)}`);
+  }
+  if (typeof body?.error !== "string" || body.error.trim() === "") throw new AudienceFitError(422, "cannot-judge answer without words");
+  return { fits: false, reason: body.error.trim() };
 }
