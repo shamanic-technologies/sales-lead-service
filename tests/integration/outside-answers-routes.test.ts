@@ -136,7 +136,8 @@ describe.skipIf(!hasRealDatabase)("outside answers clear Needs your call by them
       { lead_id: leadIds[other], mailbox: "org", answers: false, probability: 0.04, model: "jev-test-1" },
     ]);
     // Jev read what they wrote beside what we sent.
-    expect(judge.calls[0]).toMatchObject({ theirMessages: [{ text: "Who is the company behind this?" }] });
+    const lukasCall = judge.calls.find((c) => (c as { ourEmail: { subject: string } }).ourEmail.subject.startsWith("Re: Needs you"));
+    expect(lukasCall).toMatchObject({ theirMessages: [{ text: "Who is the company behind this?" }] });
   });
 
   it("a verdict is frozen: the next read (even with no run) judges nothing again and keeps Lukas out", async () => {
