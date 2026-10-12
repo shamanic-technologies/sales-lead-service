@@ -217,11 +217,21 @@ export async function fetchAudienceOfferId(audienceId: string, orgId: string): P
   return offerId;
 }
 
-/** human-service's answer; null = the audience serves from no list (no committed provider). */
-export async function fetchAudienceOriginSlug(audienceId: string, orgId: string, outreachFeatureSlug: string): Promise<string | null> {
+/**
+ * human-service's answer; null = the audience serves from no list (no committed provider).
+ *
+ * `outreachFeatureSlug` = the channel a serve-next will be asked under: the answer is the list THAT serve draws from
+ * (the CRM channels serve from the client's CRM whatever the audience's provider, so under them EVERY audience answers
+ * `sourcing-crm-contacts`). `null` = no channel: the origin of the audience's OWN list. "Which source does this
+ * audience belong to" is always the null form (LEAK-1012: a `sourcing-crm-contacts` unit asked with its own slug saw
+ * an Apollo audience as CRM and served Apollo prospects a thank-you-for-signing-up email).
+ */
+export async function fetchAudienceOriginSlug(audienceId: string, orgId: string, outreachFeatureSlug: string | null): Promise<string | null> {
   const url = `${HUMAN_SERVICE_URL}/orgs/audiences/${encodeURIComponent(audienceId)}/sourcing-origin`;
+  const headers: Record<string, string> = { "X-API-Key": HUMAN_SERVICE_API_KEY, "x-org-id": orgId };
+  if (outreachFeatureSlug !== null) headers["x-feature-slug"] = outreachFeatureSlug;
   const response = await fetchWithRetry(url, {
-    headers: { "X-API-Key": HUMAN_SERVICE_API_KEY, "x-org-id": orgId, "x-feature-slug": outreachFeatureSlug },
+    headers,
     signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
   });
   // Same answer serve-next gives the audience (audience_not_serveable): nothing will be bought.

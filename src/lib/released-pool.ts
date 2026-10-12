@@ -100,7 +100,8 @@ async function audienceFitsCampaign(args: {
   }
   const fedBy = await loadOriginsByChannelSlug(args.channelSlug);
   if (!fedBy) return true;
-  const origin = await fetchAudienceOriginSlug(args.audienceId, args.orgId, args.channelSlug);
+  // The audience's OWN list origin: asked under a CRM channel, human-service names EVERY audience CRM (LEAK-1012).
+  const origin = await fetchAudienceOriginSlug(args.audienceId, args.orgId, null);
   return origin !== null && fedBy.has(origin);
 }
 
