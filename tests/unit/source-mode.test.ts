@@ -164,6 +164,32 @@ describe("resolveSourceAudiences", () => {
     expect(got).toEqual({ kind: "walk", audienceIds: ["a-big", "a-small", "a-unknown"] });
   });
 
+  it("LEAK-1012: a CRM-contacts unit never walks an Apollo audience (and the reverse), asked for each audience's OWN list", async () => {
+    // human-service answers CRM for EVERY audience when asked under a CRM channel; only the header-less read says the
+    // audience's own list. The unit must judge on the latter.
+    const ownOrigin: Record<string, string> = { "a-crm": "sourcing-crm-contacts", "a-apollo": COLD };
+    const seenHeaders: Array<Record<string, string>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
+        if (url === list) return json({ audiences: [{ id: "a-apollo", availableToContactCount: 900 }, { id: "a-crm", availableToContactCount: 5 }], total: 2 });
+        const id = Object.keys(ownOrigin).find((k) => url === origin(k));
+        if (!id) throw new Error(`unexpected ${url}`);
+        const headers = init?.headers ?? {};
+        seenHeaders.push(headers);
+        const crmChannel = headers["x-feature-slug"] === "sourcing-crm-contacts" || headers["x-feature-slug"] === "sales-crm-email-outreach";
+        return json({ audienceId: id, sourcingFeatureSlug: crmChannel ? "sourcing-crm-contacts" : ownOrigin[id] });
+      }),
+    );
+    const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
+    const base = { orgId: ORG, brandId: "brand-1", offerId: "offer-1", preferredAudienceId: null, targetAudienceIds: null };
+    expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-crm-contacts" })).toEqual({ kind: "walk", audienceIds: ["a-crm"] });
+    expect(await resolveSourceAudiences({ ...base, unitSlug: COLD })).toEqual({ kind: "walk", audienceIds: ["a-apollo"] });
+    // The named Apollo audience is not walked by the CRM unit either.
+    expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-crm-contacts", preferredAudienceId: "a-apollo" })).toEqual({ kind: "walk", audienceIds: ["a-crm"] });
+    expect(seenHeaders.every((h) => !("x-feature-slug" in h))).toBe(true);
+  });
+
   it("the audience the caller named goes first when it is one of them", async () => {
     stubFetch({
       [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 900 }, { id: "a-2", availableToContactCount: 1 }], total: 2 }),

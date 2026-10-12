@@ -8,14 +8,18 @@ import { fetchAudienceOriginSlug } from "./sourcing-origin.js";
  *
  * A source unit run by campaign-service on its own may name no audience (`x-audience-id` absent: features-service's
  * projection lists none for the `start_to_lead_found` leg). The audiences it may find in are then the brand's ACTIVE
- * audiences of the unit's offer (human-service `GET /orgs/audiences?brandId&offerId&status=active`) whose list
- * human-service serves under the unit's channel from THAT origin (`GET /orgs/audiences/{id}/sourcing-origin`, asked
- * with the unit's slug as `x-feature-slug`, the same header serve-next gets). For Lead Sourcing: an origin human-service
- * CHOSE for the brand (`/orgs/lead-sourcing/sources`). Never guessed from names.
+ * audiences of the unit's offer (human-service `GET /orgs/audiences?brandId&offerId&status=active`) whose OWN list is
+ * THAT origin (`GET /orgs/audiences/{id}/sourcing-origin` asked WITHOUT a channel: the audience's own list). For Lead
+ * Sourcing: an origin human-service CHOSE for the brand (`/orgs/lead-sourcing/sources`). Never guessed from names.
+ *
+ * A source unit only ever serves audiences of its own origin, every origin alike (LEAK-1012, owner 2026-10-12): asked
+ * WITH the unit's slug, human-service answers `sourcing-crm-contacts` for EVERY audience under the CRM channel, so a
+ * CRM-contacts unit walked an Apollo audience ("Small teams 11-50") and served 60 Apollo prospects into a
+ * thank-you-for-signing-up sequence. Never ask this question with the channel header again.
  *
  * TARGETING (CRM-SEGMENT-SOURCING, owner 2026-10-12): when the unit's campaign states `audienceIds` (campaign-service,
  * the same HARD subset the outreach audience bandit honours), the run looks ONLY in those of them that pass the rules
- * above (active, of its brand and offer, served under its channel). None passing = `targets_unavailable`: it finds
+ * above (active, of its brand and offer, its own list of the unit's origin). None passing = `targets_unavailable`: it finds
  * nobody and says why, never a fallback to the other audiences (for `sourcing-crm-contacts` every audience serves from
  * the brand's whole CRM, so a fallback would hand out everyone the customer scoped out). No targets = unchanged.
  *
@@ -105,7 +109,8 @@ export async function resolveSourceAudiences(args: {
       ? { kind: "targets_unavailable", detail: `targeted audiences ${[...targets].join(",")} are not active audiences of this offer (${where})` }
       : { kind: "walk", audienceIds: [] };
   }
-  const origins = await Promise.all(audiences.map((a) => fetchAudienceOriginSlug(a.id, args.orgId, args.unitSlug)));
+  // The audience's OWN list origin (no channel header): never the label a CRM-channel serve would give it.
+  const origins = await Promise.all(audiences.map((a) => fetchAudienceOriginSlug(a.id, args.orgId, null)));
   const ofThisSource = audiences.filter((_, i) => origins[i] !== null && chosen.has(origins[i] as string));
   if (args.preferredAudienceId && !ofThisSource.some((a) => a.id === args.preferredAudienceId)) {
     console.warn(
@@ -115,9 +120,9 @@ export async function resolveSourceAudiences(args: {
   if (targets) {
     const offChannel = audiences.filter((a) => !ofThisSource.includes(a)).map((a) => a.id);
     if (ofThisSource.length === 0) {
-      return { kind: "targets_unavailable", detail: `targeted audiences ${[...targets].join(",")}: none is served under this unit's channel (${where})` };
+      return { kind: "targets_unavailable", detail: `targeted audiences ${[...targets].join(",")}: none is an audience of this unit's origin (${where})` };
     }
-    if (offChannel.length > 0) console.warn(`[lead-service] source unit run (${where}) targets audiences not served under its channel, skipped: ${offChannel.join(",")}`);
+    if (offChannel.length > 0) console.warn(`[lead-service] source unit run (${where}) targets audiences of another origin, skipped: ${offChannel.join(",")}`);
   }
   return { kind: "walk", audienceIds: orderSourceAudiences(ofThisSource, args.preferredAudienceId) };
 }

@@ -11,7 +11,12 @@ const audienceOffer = new Map<string, string | null>();
 const audienceOrigin = new Map<string, string>();
 vi.mock("../../src/lib/sourcing-origin.js", () => ({
   fetchAudienceOfferId: async (id: string) => audienceOffer.get(id) ?? null,
-  fetchAudienceOriginSlug: async (id: string) => audienceOrigin.get(id) ?? null,
+  // LEAK-1012: the released person's source is the audience's OWN list, never asked under the channel (a CRM channel
+  // names every audience CRM).
+  fetchAudienceOriginSlug: async (id: string, _orgId: string, channel: string | null) => {
+    if (channel !== null) throw new Error(`origin asked under channel ${channel}: must be the audience's own list`);
+    return audienceOrigin.get(id) ?? null;
+  },
   loadOriginsByChannelSlug: async (channel: string) =>
     ({
       "sales-cold-email-outreach": new Set(["sourcing-apollo-cold-filters", "sourcing-crm-contacts"]),
