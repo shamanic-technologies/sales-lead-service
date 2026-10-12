@@ -193,6 +193,7 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "candidate_screenings", touchesUpdatedAt: false },
       { table: "crm_facts", touchesUpdatedAt: false },
       { table: "answered_outside_statements", touchesUpdatedAt: false },
+      { table: "outside_answer_judgments", touchesUpdatedAt: false },
     ];
     for (const { table, touchesUpdatedAt } of scalarTables) {
       moved.push({
