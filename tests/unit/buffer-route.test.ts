@@ -50,9 +50,28 @@ vi.mock("../../src/lib/people-client.js", () => ({
 }));
 
 const resolveSourcingOriginSlug = vi.fn();
-vi.mock("../../src/lib/sourcing-origin.js", () => ({
-  resolveSourcingOriginSlug: (...a: unknown[]) => resolveSourcingOriginSlug(...a),
-}));
+// How each channel reaches a person (features-service contactMethodsByChannel), as the catalogue states it.
+const CONTACT_METHODS: Record<string, string[]> = {
+  "cold-whatsapp-outreach": ["phone"],
+  "sales-cold-email-outreach": ["email"],
+  "cold-linkedin-outreach": ["linkedin"],
+};
+vi.mock("../../src/lib/sourcing-origin.js", () => {
+  class OriginNotFedError extends Error {
+    constructor(
+      readonly originSlug: string,
+      readonly channelSlug: string,
+      readonly audienceId: string,
+    ) {
+      super(`audience ${audienceId} serves from ${originSlug}, which does not feed ${channelSlug}`);
+    }
+  }
+  return {
+    OriginNotFedError,
+    resolveSourcingOriginSlug: (...a: unknown[]) => resolveSourcingOriginSlug(...a),
+    loadChannelContactMethods: async (slug: string) => CONTACT_METHODS[slug] ?? null,
+  };
+});
 
 const resolveServeSource = vi.fn();
 const withinBudget = vi.fn();
@@ -671,5 +690,79 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(resolveServeSource).toHaveBeenCalledWith(expect.objectContaining({ read }));
     const pullArgs = pullNext.mock.calls[0][0] as Record<string, unknown>;
     expect(pullArgs.mode).toBeUndefined();
+  });
+});
+
+describe("POST /orgs/buffer/next — the pipe's reach and its sources (owner 2026-10-12)", () => {
+  let app: express.Express;
+  beforeAll(async () => {
+    const { default: route } = await import("../../src/routes/buffer.js");
+    app = express();
+    app.use(express.json());
+    app.use(route);
+  }, 30_000);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    findFirst.mockResolvedValue(undefined);
+    checkConcurrentBufferNext.mockResolvedValue({ blocked: false });
+    resolveServeSource.mockResolvedValue({ kind: "legacy", why: "offer_not_on_source_campaigns" });
+    decideSourceMode.mockResolvedValue({ kind: "today", read: null });
+    createRun.mockResolvedValue({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValue({ found: false, reason: "audience_exhausted" });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  function postFor(featureSlug: string) {
+    return request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", `${RUN.slice(0, -1)}${featureSlug.length % 10}`)
+      .set("x-campaign-id", `${CAMPAIGN}-${featureSlug}`)
+      .set("x-brand-id", BRAND)
+      .set("x-feature-slug", featureSlug)
+      .set("x-audience-id", AUDIENCE)
+      .send({});
+  }
+
+  it("a WhatsApp campaign's serve carries the phone requirement", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-crm-contacts");
+    const res = await postFor("cold-whatsapp-outreach");
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }), expect.anything());
+  });
+
+  it("an email campaign's serve carries the email requirement", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    const res = await postFor("sales-cold-email-outreach");
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["email"] }), expect.anything());
+  });
+
+  it("a channel whose method reachableBy cannot express passes nothing", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce(null);
+    await postFor("cold-linkedin-outreach");
+    expect(pullNext.mock.calls[0][0]).not.toHaveProperty("reachableBy");
+  });
+
+  it("an audience whose origin does not feed the channel is never served: the fresh serve is refused, the outreach label kept", async () => {
+    const { OriginNotFedError } = await import("../../src/lib/sourcing-origin.js");
+    resolveSourcingOriginSlug.mockRejectedValueOnce(
+      new OriginNotFedError("sourcing-apollo-cold-filters", "cold-whatsapp-outreach", AUDIENCE),
+    );
+    const res = await postFor("cold-whatsapp-outreach");
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runFeatureSlug: "cold-whatsapp-outreach",
+        freshServeRefused: expect.objectContaining({ reason: "origin_not_fed" }),
+      }),
+      expect.anything(),
+    );
+    expect(resolveServeSource).not.toHaveBeenCalled();
   });
 });

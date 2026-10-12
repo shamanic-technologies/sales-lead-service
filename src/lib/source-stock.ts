@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
+import type { ReachMethod } from "./people-client.js";
+import { reachClauses } from "./reach-sql.js";
 
 /**
  * THE STOCK A SOURCE FOUND ON ITS OWN, HANDED TO THE PIPE AFTER IT (LEADS-ONLY-FUNNEL-CAMPAIGN, 2026-10-12).
@@ -44,6 +46,8 @@ export async function claimStockedLead(params: {
   goal: string | null;
   activeGoalId: string | null;
   brandProfileId: string | null;
+  /** The outreach pipe's contact methods (src/lib/channel-reach.ts): a found lead missing one stays in the stock. */
+  reachableBy?: readonly ReachMethod[] | null;
 }): Promise<StockedLead | null> {
   if (params.sourceCampaignIds.length === 0) return null;
   const sourceIds = sql.join(params.sourceCampaignIds.map((id) => sql`${id}`), sql`, `);
@@ -61,7 +65,7 @@ export async function claimStockedLead(params: {
             AND NOT EXISTS (
               SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
             )
-            AND EXISTS (SELECT 1 FROM lead_contact_methods cm WHERE cm.lead_id = s.lead_id AND cm.channel = 'email')
+            ${reachClauses(sql`s.lead_id`, params.reachableBy)}
           ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
           LIMIT 1
           FOR UPDATE SKIP LOCKED

@@ -111,7 +111,11 @@ vi.mock("../../src/lib/people-client.js", () => ({
   AUDIENCE_NOT_SERVEABLE_REASON: "audience_not_serveable",
   isAudienceNotServeableError: () => false,
 }));
-vi.mock("../../src/lib/sourcing-origin.js", () => ({ resolveSourcingOriginSlug: vi.fn(async () => "sourcing-apollo-cold-filters") }));
+vi.mock("../../src/lib/sourcing-origin.js", () => ({
+  resolveSourcingOriginSlug: vi.fn(async () => "sourcing-apollo-cold-filters"),
+  OriginNotFedError: class extends Error {},
+  loadChannelContactMethods: vi.fn(async () => null),
+}));
 const resolveServeSource = vi.fn();
 vi.mock("../../src/lib/source-campaign.js", () => ({ resolveServeSource: (...a: unknown[]) => resolveServeSource(...a) }));
 // runsOnItsOwn absent at campaign-service: today's serve (src/lib/source-mode.ts).

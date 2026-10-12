@@ -53,7 +53,9 @@
               "credit_insufficient",
               "source_campaign_off",
               "source_budget_reached",
-              "source_stock_empty"
+              "source_stock_empty",
+              "origin_not_fed",
+              "audience_offer_mismatch"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
@@ -7291,6 +7293,28 @@
           "sources"
         ]
       },
+      "ChannelRefusalBody": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 320,
+            "description": "The person the sender refused, by the email the lead row carries."
+          },
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "description": "The sender's own refusal code, verbatim (e.g. no_phone_known, not_on_whatsapp).",
+            "example": "no_phone_known"
+          }
+        },
+        "required": [
+          "email",
+          "code"
+        ]
+      },
       "NamedPersonResponse": {
         "type": "object",
         "properties": {
@@ -13372,6 +13396,113 @@
           },
           "500": {
             "description": "The set could not be read — never answered as an empty set"
+          }
+        }
+      }
+    },
+    "/orgs/campaigns/{campaignId}/leads/channel-refusals": {
+      "post": {
+        "summary": "A sender could not reach this person on its CHANNEL: release them to the brand's other pipes",
+        "description": "For the workflow of a channel whose sender refuses a person for a reason about the CHANNEL (WhatsApp: no_phone_known, not_on_whatsapp), not about the person. The refusing campaign's row leaves its retry pool for good (send_refused_*, no end) and is RELEASED: before buying anyone new, another campaign of the same org and brand whose channel can reach the person (its contact methods, features-service contactMethodsByChannel), whose offer the person's audience belongs to (or none) and whose channel is fed by that audience's origin, takes them ONCE, filed as served (status_reason released_from_channel). Nothing is bought again. Idempotent: a second call reports alreadyReleased.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The campaign whose sender refused."
+            },
+            "required": true,
+            "description": "The campaign whose sender refused.",
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChannelRefusalBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Released",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "campaignId": {
+                      "type": "string"
+                    },
+                    "code": {
+                      "type": "string"
+                    },
+                    "released": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "leadId": {
+                            "type": "string",
+                            "format": "uuid"
+                          },
+                          "alreadyReleased": {
+                            "type": "boolean"
+                          }
+                        },
+                        "required": [
+                          "leadId",
+                          "alreadyReleased"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "campaignId",
+                    "code",
+                    "released"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing campaignId, email or code"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "This campaign holds no lead with that email (code lead_not_in_campaign)"
           }
         }
       }

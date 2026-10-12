@@ -6588,6 +6588,56 @@ const NamedPersonResponseSchema = z
   })
   .openapi("NamedPersonResponse");
 
+export const ChannelRefusalBodySchema = z
+  .object({
+    email: z.string().trim().min(3).max(320).refine((v) => v.includes("@"), "not an email address").openapi({
+      description: "The person the sender refused, by the email the lead row carries.",
+    }),
+    code: z.string().trim().min(1).max(100).openapi({
+      description: "The sender's own refusal code, verbatim (e.g. no_phone_known, not_on_whatsapp).",
+      example: "no_phone_known",
+    }),
+  })
+  .openapi("ChannelRefusalBody");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/campaigns/{campaignId}/leads/channel-refusals",
+  summary: "A sender could not reach this person on its CHANNEL: release them to the brand's other pipes",
+  description:
+    "For the workflow of a channel whose sender refuses a person for a reason about the CHANNEL (WhatsApp: " +
+    "no_phone_known, not_on_whatsapp), not about the person. The refusing campaign's row leaves its retry pool for good " +
+    "(send_refused_*, no end) and is RELEASED: before buying anyone new, another campaign of the same org and brand whose " +
+    "channel can reach the person (its contact methods, features-service contactMethodsByChannel), whose offer the " +
+    "person's audience belongs to (or none) and whose channel is fed by that audience's origin, takes them ONCE, filed " +
+    "as served (status_reason released_from_channel). Nothing is bought again. Idempotent: a second call reports " +
+    "alreadyReleased.",
+  request: {
+    params: z.object({
+      campaignId: z.string().openapi({ param: { name: "campaignId", in: "path" }, description: "The campaign whose sender refused." }),
+    }),
+    body: { content: { "application/json": { schema: ChannelRefusalBodySchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "Released",
+      content: {
+        "application/json": {
+          schema: z.object({
+            campaignId: z.string(),
+            code: z.string(),
+            released: z.array(z.object({ leadId: z.string().uuid(), alreadyReleased: z.boolean() })),
+          }),
+        },
+      },
+    },
+    400: { description: "Missing campaignId, email or code" },
+    401: { description: "Unauthorized" },
+    404: { description: "This campaign holds no lead with that email (code lead_not_in_campaign)" },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/orgs/campaigns/{campaignId}/leads/by-email",
