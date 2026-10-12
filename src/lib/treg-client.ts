@@ -55,9 +55,15 @@ export function identityHeaders(id: SpendIdentity): Record<string, string> {
   return h;
 }
 
+/**
+ * The org cannot pay for what it asked: refused by billing here, or by the service one hop down
+ * that owns the spend (chat-service, cloudflare-service answer 402, the fleet's "insufficient
+ * credit" status). Every route surfaces it as 402 so the gateway can tell the caller to prepay.
+ * The figures are null when the refusing service did not state them.
+ */
 export class InsufficientCreditError extends Error {
-  constructor(public readonly balanceCents: number, public readonly requiredCents: number) {
-    super(`insufficient credit: balance ${balanceCents}c, required ${requiredCents}c`);
+  constructor(public readonly balanceCents: number | null, public readonly requiredCents: number | null) {
+    super(`insufficient credit: balance ${balanceCents ?? "?"}c, required ${requiredCents ?? "?"}c`);
     this.name = "InsufficientCreditError";
   }
 }
