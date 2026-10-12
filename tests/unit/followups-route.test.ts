@@ -77,6 +77,50 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
     expect(res.body.code).toBe("responder_start_unavailable");
   });
 
+  it("alsoCampaignIds: tries each held campaign in order on its own id, the first claim wins", async () => {
+    pickFollowupCandidate
+      .mockResolvedValueOnce({ claimed: null, reason: "nothing_due" })
+      .mockResolvedValueOnce({
+        claimed: {
+          id: ROW,
+          leadId: "lead-1",
+          campaignId: "camp-2",
+          brandId: "brand-1",
+          email: "a@b.com",
+          audienceId: null,
+          dueAt: "2026-09-01 09:00:00+00",
+          followupCount: 0,
+          lastActionAt: null,
+        },
+      });
+
+    const res = await request(app).post(url).set(claimAuth).send({ alsoCampaignIds: ["camp-2", "camp-3", "camp-1"] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.followup).toMatchObject({ id: ROW, campaignId: "camp-2" });
+    expect(pickFollowupCandidate.mock.calls.map((c) => (c[0] as { campaignId: string }).campaignId)).toEqual(["camp-1", "camp-2"]);
+    expect((pickFollowupCandidate.mock.calls[1][0] as { actingCampaignId: string }).actingCampaignId).toBe("responder-1");
+  });
+
+  it("alsoCampaignIds: nobody anywhere names the most telling reason", async () => {
+    pickFollowupCandidate
+      .mockResolvedValueOnce({ claimed: null, reason: "nothing_due" })
+      .mockResolvedValueOnce({ claimed: null, reason: "all_claimed" })
+      .mockResolvedValueOnce({ claimed: null, reason: "nothing_due" });
+
+    const res = await request(app).post(url).set(claimAuth).send({ alsoCampaignIds: ["camp-2", "camp-3"] });
+
+    expect(res.body).toEqual({ found: false, reason: "all_claimed" });
+    expect(pickFollowupCandidate).toHaveBeenCalledTimes(3);
+  });
+
+  it("alsoCampaignIds: 400 when it is not an array of ids, nothing claimed", async () => {
+    const res = await request(app).post(url).set(claimAuth).send({ alsoCampaignIds: "camp-2" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_also_campaign_ids");
+    expect(pickFollowupCandidate).not.toHaveBeenCalled();
+  });
+
   it("returns the claimed person", async () => {
     pickFollowupCandidate.mockResolvedValue({
       claimed: {
