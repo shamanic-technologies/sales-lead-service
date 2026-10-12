@@ -46,6 +46,7 @@ const LEAD_STEP_OUTCOMES: readonly LeadStepOutcomeName[] = [
 /** A node of the leg graph, in the fleet's leg vocabulary. */
 export type GraphStep =
   | "lead_found"
+  | "industry_update_video"
   | "conversation"
   | "website_visit"
   | "meeting_booked"
@@ -91,6 +92,11 @@ export const LEGS: readonly Leg[] = [
   { legKey: "signup_to_paid_client", from: "signup", to: "paid_client" },
   { legKey: "form_submitted_to_paid_client", from: "form_submitted", to: "paid_client" },
   { legKey: "purchase_to_paid_client", from: "purchase", to: "paid_client" },
+  // The Social post pipe (owner 2026-10-12): the people who engage with our daily industry update
+  // video are put on the graph by it, then visit the site or pay.
+  { legKey: "start_to_industry_update_video", from: null, to: "industry_update_video" },
+  { legKey: "industry_update_video_to_website_visit", from: "industry_update_video", to: "website_visit" },
+  { legKey: "industry_update_video_to_paid_client", from: "industry_update_video", to: "paid_client" },
 ];
 
 /**
@@ -242,6 +248,7 @@ export interface LegEntry {
 
 const ENTRY_STEP_NAME: Readonly<Record<GraphStep, string>> = {
   lead_found: "lead_found",
+  industry_update_video: "industry_update_video",
   conversation: "conversation_reply",
   website_visit: "website_visit",
   meeting_booked: "meeting_booked",
