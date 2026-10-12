@@ -6,6 +6,8 @@
  *                                                 the length of the same list (count and list are one set).
  *                                                 A person one of our people answered from Gmail (org or
  *                                                 staff mailbox, judged an answer by Jev) leaves it by itself.
+ *                                                 Personal channels (WhatsApp...) read the same way: their
+ *                                                 message waits on us (judged once by Jev), ours answers.
  *   POST /orgs/leads/:id/answered-outside         "I answered this person outside the platform": a fact
  *                                                 about the PERSON at the brand (who, when); a later new
  *                                                 message from them puts them back.
@@ -45,12 +47,12 @@ router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, async (req: A
     }
     // Every person still waiting has the Gmail mirrors (the org's own, and staff's) read for a later
     // email of ours, judged once by Jev, billed to this request's org (outside-answers.ts).
-    const { people, outsideAnswers } = await readAwaitingReplyWithReport({
+    const { people, outsideAnswers, personalMessages } = await readAwaitingReplyWithReport({
       orgId: req.orgId!,
       brandId,
       mailboxCheck: { userId: req.userId ?? null, runId: req.runId ?? null },
     });
-    res.json({ brandId, total: people.length, people, outsideAnswers });
+    res.json({ brandId, total: people.length, people, outsideAnswers, personalMessages });
   } catch (error) {
     respondReadFailure(res, error, "awaiting-reply read");
   }

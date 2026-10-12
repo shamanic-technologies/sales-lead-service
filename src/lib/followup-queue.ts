@@ -37,12 +37,32 @@
  *    human's reply to answer, because no responder existed when it arrived. The claim hands those
  *    over instead of answering them: switching a responder on answered a 5-week-old backlog,
  *    including a thread staff had promised to follow up and one the client was asked to answer.
+ *
+ * WHO a due date is for is decided by WHO SET IT (`followup_due_set_by_campaign_id`, migration 0071; owner
+ * 2026-10-12, WA-RESPONDER-1012). Two kinds of worker share one row: an outreach that schedules its OWN
+ * follow-up on its own person (cold WhatsApp: one follow-up 3 days out) and a responder that claims its
+ * predecessor's queue. Every statement that sets a due date records the writer's `x-campaign-id`:
+ *  - set by the holding campaign itself (the row's `campaign_id`): only the holder may claim it;
+ *  - set by ANOTHER campaign (a responder's ladder on its predecessor's person): anyone BUT the holder;
+ *  - set by no campaign (an observer: instantly-service's due-now on a reply, campaign-service's due-now
+ *    on a trigger): anyone, the holder included.
+ * `ownedByActingSql` is the one predicate; the read, the claim and the pre-responder hand-over all use it.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { followupActionInsert } from "./followup-actions.js";
 import { fetchCampaign } from "./campaign-client.js";
+
+/**
+ * May the ACTING campaign take this row's current debt? See the module header: own-set = holder only,
+ * set by another campaign = anyone but the holder, observer-set (NULL) = anyone. `alias` is the
+ * `leads_campaigns` alias in the statement (empty = the bare table).
+ */
+export function ownedByActingSql(actingCampaignId: string, alias: "lc" | "" = "lc") {
+  const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : name);
+  return sql`(${col("followup_due_set_by_campaign_id")} IS NULL OR (${col("followup_due_set_by_campaign_id")} = ${col("campaign_id")}) = (${col("campaign_id")} = ${actingCampaignId}))`;
+}
 
 /** Why a pre-responder debt was handed over (stored on the row, `followup_handed_reason`). */
 export const OWED_BEFORE_RESPONDER_REASON = "owed_before_responder_started";
@@ -212,6 +232,8 @@ export async function loadFollowupCandidates(params: {
   nowMs: number;
   /** Earliest responder start on this held campaign: a never-answered debt due before it is not claimable. */
   responderStartedAtIso: string;
+  /** The campaign that claims (x-campaign-id): only debts that are its to take are read. */
+  actingCampaignId: string;
   limit?: number;
 }): Promise<FollowupCandidate[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -238,6 +260,7 @@ export async function loadFollowupCandidates(params: {
       AND lc.followup_due_at <= ${now}
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
       AND lc.followup_handed_at IS NULL
+      AND ${ownedByActingSql(params.actingCampaignId)}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       AND NOT EXISTS (
         SELECT 1
@@ -279,7 +302,7 @@ export async function claimFollowup(params: {
   nowMs: number;
   runId: string | null;
   /** The campaign the claiming worker was dispatched for (x-campaign-id). Recorded, never guessed. */
-  actingCampaignId?: string | null;
+  actingCampaignId: string;
 }): Promise<boolean> {
   const now = new Date(params.nowMs).toISOString();
   const leaseCutoff = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
@@ -296,9 +319,10 @@ export async function claimFollowup(params: {
          AND followup_due_at <= ${now}
          AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
          AND followup_handed_at IS NULL
+         AND ${ownedByActingSql(params.actingCampaignId, "")}
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
-      ${followupActionInsert("claimed", params.actingCampaignId ?? null, params.runId, now)}
+      ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now)}
     )
     SELECT id FROM claimed
   `)) as unknown as Array<{ id: string }>;
@@ -488,6 +512,8 @@ export async function handOverPreResponderDebts(params: {
   orgId: string;
   campaignId: string;
   responderStartedAtIso: string;
+  /** Only debts the acting campaign may take are its to hand over (another campaign's own debt is not). */
+  actingCampaignId: string;
   nowMs: number;
 }): Promise<string[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -505,6 +531,7 @@ export async function handOverPreResponderDebts(params: {
        AND followup_due_at IS NOT NULL
        AND COALESCE(followup_count, 0) = 0
        AND followup_due_at < ${params.responderStartedAtIso}::timestamptz
+       AND ${ownedByActingSql(params.actingCampaignId, "")}
     RETURNING id
   `)) as unknown as Array<{ id: string }>;
   return rows.map((r) => r.id);
@@ -548,6 +575,7 @@ export async function pickFollowupCandidate(params: {
     orgId: params.orgId,
     campaignId: params.campaignId,
     responderStartedAtIso,
+    actingCampaignId: params.actingCampaignId,
     nowMs,
   });
   if (handedIds.length > 0) {
@@ -561,6 +589,7 @@ export async function pickFollowupCandidate(params: {
     campaignId: params.campaignId,
     nowMs,
     responderStartedAtIso,
+    actingCampaignId: params.actingCampaignId,
   });
   if (candidates.length === 0) return { claimed: null, reason: "nothing_due" };
 
@@ -635,6 +664,11 @@ export interface FollowupState {
   /** When the thread was handed to a person; null = an automated responder may still claim it. */
   handedAt: string | null;
   handedReason: string | null;
+  /**
+   * Who set the current due date (the writer's x-campaign-id), which decides who may claim it: the row's
+   * own campaign = only it; another campaign = anyone but the holder; null = an observer, anyone.
+   */
+  dueSetByCampaignId: string | null;
 }
 
 interface RawStateRow {
@@ -648,6 +682,7 @@ interface RawStateRow {
   followup_stopped_reason: string | null;
   followup_handed_at?: Date | string | null;
   followup_handed_reason?: string | null;
+  followup_due_set_by_campaign_id?: string | null;
 }
 
 /**
@@ -673,6 +708,7 @@ function toState(row: RawStateRow): FollowupState {
     stoppedReason: row.followup_stopped_reason,
     handedAt: toIso(row.followup_handed_at ?? null),
     handedReason: row.followup_handed_reason ?? null,
+    dueSetByCampaignId: row.followup_due_set_by_campaign_id ?? null,
   };
 }
 
@@ -680,7 +716,7 @@ const STATE_COLUMNS = sql`
   id, lead_id, campaign_id, followup_due_at, followup_claimed_at,
   COALESCE(followup_count, 0) AS followup_count,
   followup_last_action_at, followup_stopped_reason,
-  followup_handed_at, followup_handed_reason
+  followup_handed_at, followup_handed_reason, followup_due_set_by_campaign_id
 `;
 
 /**
@@ -727,13 +763,18 @@ export async function writeFollowupStatement(params: {
   dueAtIso: string | null;
   reason: string | null;
   nowMs: number;
-  /** Recorded on the ledger for an 'acted' statement: the campaign the worker was dispatched for. */
+  /**
+   * The writer's x-campaign-id: recorded on the ledger for an 'acted' statement, and, on every statement that
+   * sets a due date ('scheduled', 'acted'), as WHO SET it (`followup_due_set_by_campaign_id`), which decides
+   * who may claim it. Absent = an observer (anyone may claim).
+   */
   actingCampaignId?: string | null;
   runId?: string | null;
 }): Promise<FollowupState | null> {
   const now = new Date(params.nowMs).toISOString();
   const acted = params.kind === "acted";
   const handed = params.kind === "handed";
+  const setsDue = params.kind === "scheduled" || params.kind === "acted";
 
   // An 'acted' statement is also a ledger row, written by the same statement: the count on the
   // lifecycle row says HOW MANY answers were sent, the ledger says WHICH campaign's worker sent each.
@@ -745,6 +786,7 @@ export async function writeFollowupStatement(params: {
                  ? sql`NULL`
                  : sql`CASE WHEN followup_handed_at IS NULL THEN ${params.dueAtIso}::timestamptz ELSE NULL END`
              },
+             followup_due_set_by_campaign_id = ${setsDue ? sql`${params.actingCampaignId ?? null}` : sql`followup_due_set_by_campaign_id`},
              followup_handed_at = ${handed ? sql`COALESCE(followup_handed_at, ${now}::timestamptz)` : sql`followup_handed_at`},
              followup_handed_reason = ${handed ? sql`COALESCE(followup_handed_reason, ${params.reason})` : sql`followup_handed_reason`},
              followup_claimed_at = NULL,

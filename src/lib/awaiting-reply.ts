@@ -24,6 +24,10 @@
  *     wait since the first); `lastMessage` is the latest. No age limit: a two-month-old reply nobody
  *     answered stays and shows its age.
  *   - Website visitors never enter: only a message they wrote does.
+ *   - Every PERSONAL channel the crm fact feed carries (source `matrix`: WhatsApp, LinkedIn...) reads the
+ *     same way (owner 2026-10-12, WA-RESPONDER-1012; `personal-messages.ts`): their message is an inbound
+ *     word whose meaning a Jev verdict states once (`waits`: does it leave the next move to us), ours is an
+ *     answer. One conversation per person across channels: a WhatsApp answer of ours answers an email too.
  * Undated facts cannot be ordered against an answer and are left out.
  */
 import type { TimelineItemLabel } from "./timeline-labels.js";
@@ -50,12 +54,34 @@ export function messageKindOf(label: TimelineItemLabel): AwaitingMessageKind {
 
 /** One thing that happened in a person's conversation at the brand. */
 export type ConversationEvent =
-  | { type: "inbound"; at: string; label: TimelineItemLabel; campaignId: string | null; subject: string | null; ref: string }
+  | {
+      type: "inbound";
+      at: string;
+      label: TimelineItemLabel;
+      campaignId: string | null;
+      subject: string | null;
+      ref: string;
+      /** The channel they wrote on: "email" (absent = email) or the personal channel the crm fact names. */
+      channel?: string;
+      /**
+       * Whether this word leaves the next move to us, when a judgment states it directly (a personal-channel
+       * message). Absent = read off the label (`WAITING_LABELS`), as every email reply is.
+       */
+      waits?: boolean;
+    }
   | { type: "answer"; at: string; via: AnswerVia }
   | { type: "opt_out"; at: string };
 
 /** How we answered: a reply_sent fact's own `via`, or a person's statement. */
-export type AnswerVia = "replies_route" | "staff_client" | "provider_unibox" | "answered_outside" | "mailbox_judged" | "unknown";
+export type AnswerVia =
+  | "replies_route"
+  | "staff_client"
+  | "provider_unibox"
+  | "answered_outside"
+  | "mailbox_judged"
+  /** A message of ours on a personal channel (WhatsApp...: the AI responder through crm-service, or by hand). */
+  | "personal_channel"
+  | "unknown";
 
 export interface AwaitingReply {
   waitingSince: string;
@@ -65,6 +91,8 @@ export interface AwaitingReply {
     label: TimelineItemLabel;
     subject: string | null;
     campaignId: string | null;
+    /** The channel they wrote on: "email", or a personal channel ("whatsapp", "linkedin"...). */
+    channel: string;
   };
   /** When we last answered (any way), null = never. */
   lastAnsweredAt: string | null;
@@ -97,7 +125,7 @@ export function awaitingReplyOf(events: readonly ConversationEvent[]): AwaitingR
   if (unanswered.length === 0) return null;
 
   const last = unanswered[unanswered.length - 1];
-  if (!WAITING_LABELS.has(last.label)) return null;
+  if (!(last.waits ?? WAITING_LABELS.has(last.label))) return null;
 
   return {
     waitingSince: new Date(ms(unanswered[0].at)).toISOString(),
@@ -107,6 +135,7 @@ export function awaitingReplyOf(events: readonly ConversationEvent[]): AwaitingR
       label: last.label,
       subject: last.subject,
       campaignId: last.campaignId,
+      channel: last.channel ?? "email",
     },
     lastAnsweredAt: lastAnsweredAt === null ? null : new Date(lastAnsweredMs).toISOString(),
     unansweredMessages: unanswered.length,
