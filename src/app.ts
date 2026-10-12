@@ -28,6 +28,7 @@ import channelRefusalRoutes from "./routes/channel-refusals.js";
 import leadHistoryRoutes from "./routes/lead-history.js";
 import crmEvidenceRoutes from "./routes/crm-evidence.js";
 import serveRecordsRoutes from "./routes/serve-records.js";
+import brandJourneysRoutes from "./routes/brand-journeys.js";
 import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
 import { requireBootReady } from "./middleware/readiness.js";
@@ -81,6 +82,7 @@ app.use(namedPeopleRoutes);
 app.use(channelRefusalRoutes);
 app.use(leadHistoryRoutes);
 app.use(serveRecordsRoutes);
+app.use(brandJourneysRoutes);
 app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
 

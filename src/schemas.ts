@@ -7071,6 +7071,81 @@ registry.registerPath({
   },
 });
 
+const JourneyFactSchema = z
+  .object({
+    id: z.string().openapi({ description: "Timeline fact id (`<source>:<source ref>`)." }),
+    label: z.string().openapi({ description: "The fact's label VERBATIM (never filtered against a vocabulary: a label this service does not know, e.g. a catalogue step key such as `industry_update_video`, is served as is)." }),
+    source: z.string(),
+    occurredAt: z.string().nullable().openapi({ description: "ISO-8601; null = undated." }),
+    campaignId: z.string().nullable().openapi({ description: "Attribution: the campaign the fact came under; null when none." }),
+    attributable: z.boolean().nullable().openapi({ description: "Whether the fact is ours (true), not ours (false), or nobody can say (null)." }),
+    attributionBasis: z.string().nullable(),
+    valueCents: z.number().nullable().openapi({ description: "The stated amount on an outcome (a sale), cents; null otherwise." }),
+    url: z.string().nullable(),
+  })
+  .openapi("JourneyFact");
+
+const JourneyActSchema = z
+  .object({
+    campaignId: z.string().nullable(),
+    kind: z.enum(["email", "followup"]).openapi({ description: "`email` = our emails (sends and bounces, attribution basis `our_email`); `followup` = an `acted` row of the follow-up ledger (the acting campaign)." }),
+    firstAt: z.string().nullable(),
+    lastAt: z.string().nullable(),
+    count: z.number().int(),
+  })
+  .openapi("JourneyAct");
+
+const BrandJourneySchema = z
+  .object({
+    leadId: z.string().uuid(),
+    offerId: z.string().nullable().openapi({ description: "null = facts about the person at the brand stated on no offer (kept apart, never copied onto each offer)." }),
+    firstActedAt: z.string().nullable().openapi({ description: "Earliest act on this person x offer; null when no campaign acted." }),
+    facts: z.array(JourneyFactSchema).openapi({ description: "Every LIVE timeline fact that is not one of our emails, date order (undated last)." }),
+    acts: z.array(JourneyActSchema).openapi({ description: "Campaigns that acted on the person, one entry per (campaign, kind), earliest first." }),
+  })
+  .openapi("BrandJourney");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/timeline-journeys",
+  summary: "Every person x offer journey of a brand, off the silver timeline (internal, service-auth)",
+  description:
+    "One entry per person x offer of the (x-org-id, brand) on `lead_timeline_facts` (offer null = facts stated on no offer). " +
+    "`facts` = every live non-email fact with its label verbatim, date, campaign, attribution and stated amount; `acts` = the " +
+    "campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows). " +
+    "Withdrawn facts are excluded. A person on two offers appears once per offer, each with only that offer's facts. ONE streamed " +
+    "statement, ordered by leadId then offerId (null first); `count` (journeys) and `factCount` close the body. 503 while the " +
+    "outreach fact copy has not caught up; 502 when campaign-service cannot name the campaigns' offers; failure after the first " +
+    "byte destroys the socket (never a short body that parses).",
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "Every journey of the brand",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              journeys: z.array(BrandJourneySchema),
+              count: z.number().int(),
+              factCount: z.number().int(),
+            })
+            .openapi("BrandJourneysResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id missing" },
+    401: { description: "Unauthorized" },
+    500: { description: "Internal server error" },
+    502: { description: "campaign-service could not name the campaigns' offers" },
+    503: { description: "The outreach fact copy has not reached the feed's end yet" },
+  },
+});
+
 const ServeRecordSchema = z
   .object({
     runId: z.string().openapi({ description: "The `lead-service:lead-serve` run that handed this person out (`leads_campaigns.run_id`)." }),
