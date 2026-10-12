@@ -28,6 +28,7 @@ import {
   type ServeEmptyReason,
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
+import { askAudienceFit } from "./audience-fit-client.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 
 /**
@@ -428,7 +429,7 @@ export async function pullNext(
 
   // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
   if (mode.kind === "stock") {
-    const stocked = await claimStockedLead({
+    const claim = await claimStockedLead({
       orgId: params.orgId,
       sourceCampaignIds: mode.sourceCampaignIds,
       outreachCampaignId: params.campaignId,
@@ -442,10 +443,14 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
+      // The audience's owner says whether a find still fits it now (STILL-FITS-1012); never re-graded here.
+      askFit: (q) =>
+        askAudienceFit({ ...q, brandId: params.brandId }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null }),
     });
+    const stocked = claim.lead;
     if (!stocked) {
       console.log(
-        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SOURCE_STOCK_EMPTY_REASON} sources=${mode.sourceCampaignIds.join(",")}`,
+        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SOURCE_STOCK_EMPTY_REASON} sources=${mode.sourceCampaignIds.join(",")} setAside=${claim.setAside.length}`,
       );
       return { found: false, reason: SOURCE_STOCK_EMPTY_REASON };
     }

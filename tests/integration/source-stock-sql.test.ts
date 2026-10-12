@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { eq, inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { leadContactMethods, leads, leadsCampaigns } from "../../src/db/schema.js";
-import { claimStockedLead } from "../../src/lib/source-stock.js";
+import { claimStockedLead, type AskAudienceFit } from "../../src/lib/source-stock.js";
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -42,7 +42,8 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
     return lead.id;
   }
 
-  const claim = (outreachCampaignId: string, sources = [source]) =>
+  const fitsAlways: AskAudienceFit = async () => ({ fits: true });
+  const claimAll = (outreachCampaignId: string, sources = [source], askFit: AskAudienceFit = fitsAlways) =>
     claimStockedLead({
       orgId,
       sourceCampaignIds: sources,
@@ -56,7 +57,9 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
       goal: "signup",
       activeGoalId: null,
       brandProfileId: null,
+      askFit,
     });
+  const claim = async (outreachCampaignId: string, sources = [source]) => (await claimAll(outreachCampaignId, sources)).lead;
 
   afterAll(async () => {
     if (leadIds.length) {
@@ -99,6 +102,55 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
     const ids = got.filter(Boolean).map((g) => g!.leadId);
     expect(ids).toHaveLength(3);
     expect(new Set(ids).size).toBe(3);
+  });
+
+  it("a found lead that no longer fits its audience is set aside with the owner's reason, never handed, and the next one is", async () => {
+    const s = `itest-src-${randomUUID()}`;
+    const out = `itest-out-${randomUUID()}`;
+    const answered = await seedFound(s, "2026-10-12T01:00:00Z");
+    const stillFits = await seedFound(s, "2026-10-12T02:00:00Z");
+    const asked: Array<{ audienceId: string; email: string }> = [];
+    const askFit: AskAudienceFit = async (q) => {
+      asked.push(q);
+      return asked.length === 1 ? { fits: false, reason: "Answered on WhatsApp since being found" } : { fits: true };
+    };
+
+    const got = await claimAll(out, [s], askFit);
+    expect(got.lead?.leadId).toBe(stillFits);
+    expect(got.setAside).toEqual([
+      expect.objectContaining({ leadId: answered, sourceCampaignId: s, audienceId: "aud-1", reason: "Answered on WhatsApp since being found" }),
+    ]);
+    expect(asked.map((q) => q.audienceId)).toEqual(["aud-1", "aud-1"]);
+
+    const rows = await db.select().from(leadsCampaigns).where(eq(leadsCampaigns.campaignId, s));
+    const aside = rows.find((r) => r.leadId === answered)!;
+    expect(aside).toMatchObject({ status: "served", sourceHandedAt: null, sourceSetAsideReason: "Answered on WhatsApp since being found" });
+    expect(aside.sourceSetAsideAt).not.toBeNull();
+    // Only the lead that still fits was filed under the outreach campaign.
+    const outRows = await db.select().from(leadsCampaigns).where(eq(leadsCampaigns.campaignId, out));
+    expect(outRows.map((r) => r.leadId)).toEqual([stillFits]);
+
+    // Set aside for good: another outreach campaign is never handed it, nor asked about it.
+    asked.length = 0;
+    const again = await claimAll(`itest-out-${randomUUID()}`, [s], async (q) => {
+      asked.push(q);
+      return { fits: true };
+    });
+    expect(again).toEqual({ lead: null, setAside: [] });
+    expect(asked).toHaveLength(0);
+  });
+
+  it("the owner unable to answer fails the claim: nothing handed, nothing set aside", async () => {
+    const s = `itest-src-${randomUUID()}`;
+    const lead = await seedFound(s, "2026-10-12T01:00:00Z");
+    await expect(
+      claimAll(`itest-out-${randomUUID()}`, [s], async () => {
+        throw new Error("human-service down");
+      }),
+    ).rejects.toThrow("human-service down");
+    const [row] = await db.select().from(leadsCampaigns).where(eq(leadsCampaigns.leadId, lead));
+    expect(row).toMatchObject({ sourceHandedAt: null, sourceSetAsideAt: null });
+    expect((await claimAll(`itest-out-${randomUUID()}`, [s])).lead?.leadId).toBe(lead);
   });
 
   it("the own-run tally counts finds per source campaign", async () => {

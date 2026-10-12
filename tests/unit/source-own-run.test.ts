@@ -18,6 +18,10 @@ vi.mock("../../src/lib/source-stock.js", () => ({
   SOURCE_FOUND_STATUS_REASON: "source_found",
   claimStockedLead: (...args: unknown[]) => claimStockedLead(...args),
 }));
+const askAudienceFit = vi.fn();
+vi.mock("../../src/lib/audience-fit-client.js", () => ({
+  askAudienceFit: (...args: unknown[]) => askAudienceFit(...args),
+}));
 
 const getCurrentGoal = vi.fn();
 vi.mock("../../src/lib/released-pool.js", () => ({ claimReleasedLead: vi.fn(async () => null) }));
@@ -207,14 +211,17 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
 
   it("serves the oldest stocked lead (no audience needed), never finds on demand, runs the writer's checks", async () => {
     claimStockedLead.mockResolvedValueOnce({
-      sourceRowId: "row-1",
-      sourceCampaignId: UNIT,
-      leadId: "lead-9",
-      email: "x@acme.com",
-      audienceId: "aud-7",
-      buyingSignal: null,
-      personId: null,
-      goal: "signup",
+      lead: {
+        sourceRowId: "row-1",
+        sourceCampaignId: UNIT,
+        leadId: "lead-9",
+        email: "x@acme.com",
+        audienceId: "aud-7",
+        buyingSignal: null,
+        personId: null,
+        goal: "signup",
+      },
+      setAside: [],
     });
 
     const result = await pullNext(stockParams());
@@ -228,6 +235,18 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
     expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-9", apolloPersonId: "ap-9" }, [{ id: "c-bonus", mode: "mention" }], expect.anything());
   });
 
+  it("asks human-service, for the brand and org of the serve, whether each stocked find still fits its audience", async () => {
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    askAudienceFit.mockResolvedValueOnce({ fits: false, reason: "Answered on WhatsApp" });
+    await pullNext(stockParams());
+    const { askFit } = claimStockedLead.mock.calls[0][0] as { askFit: (q: unknown) => Promise<unknown> };
+    await expect(askFit({ audienceId: "aud-7", email: "x@acme.com", personId: "p-1" })).resolves.toEqual({ fits: false, reason: "Answered on WhatsApp" });
+    expect(askAudienceFit).toHaveBeenCalledWith(
+      { audienceId: "aud-7", email: "x@acme.com", personId: "p-1", brandId: "brand-1" },
+      expect.objectContaining({ orgId: "org-1", runId: "run-1" }),
+    );
+  });
+
   it("drains the outreach campaign's own paid pool FIRST, like every serve", async () => {
     pickRetryCandidate.mockResolvedValueOnce({ leadId: "lead-r", email: "r@x.co", retryCount: 0, goal: null, audienceId: null, buyingSignal: null, personId: null });
     const result = await pullNext(stockParams());
@@ -236,7 +255,7 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
   });
 
   it("stock empty = source_stock_empty, never exhaustion, nothing found on demand", async () => {
-    claimStockedLead.mockResolvedValueOnce(null);
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
     await expect(pullNext(stockParams("aud-1"))).resolves.toEqual({ found: false, reason: "source_stock_empty" });
     expect(serveNext).not.toHaveBeenCalled();
   });
