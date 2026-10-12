@@ -476,3 +476,18 @@ describe("where a lead stands on the campaign it was served under", () => {
     });
   });
 });
+
+describe("a person the Social post campaign found (owner 2026-10-12)", () => {
+  it("the social legs are on the graph: the video puts people on it, then the site or the sale", () => {
+    expect(leg("start_to_industry_update_video")).toMatchObject({ step: "industry_update_video", measure: null });
+    expect(leg("industry_update_video_to_website_visit").step).toBe("industry_update_video");
+    expect(leg("industry_update_video_to_paid_client").reachableSteps).toContain("sale");
+  });
+
+  it("an engager nobody wrote to stands not_contacted (the Leads column), never unresolved", () => {
+    const s = stand({ entry: leg("start_to_industry_update_video") });
+    expect(s.state).toBe("not_contacted");
+    expect(s.reason).toBeNull();
+    expect(s.legKey).toBe("start_to_industry_update_video");
+  });
+});
