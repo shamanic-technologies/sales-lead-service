@@ -220,6 +220,16 @@ export const leadsCampaigns = pgTable(
     //                    duplicate that sends nothing; the row leaves the pool for good. Kept
     //                    apart from sent_at, which means an email went out.
     senderClosedAt: timestamp("sender_closed_at", { withTimezone: true }),
+    // send_refused_*   — the SENDER refused to send to this person (migration 0066): it stated
+    //                    the refusal on its status read, verbatim. code = the sender's own word
+    //                    (never interpreted here); until = when the sender says the refusal
+    //                    lapses (a re-contact window), NULL = it never does (an opt-out). While it
+    //                    stands the row is out of the paid-pool retry; once `until` passes the
+    //                    sender is asked again. Not sent_at, not sender_closed_at: nothing went
+    //                    out, and a window refusal is not the end of the person.
+    sendRefusedAt: timestamp("send_refused_at", { withTimezone: true }),
+    sendRefusalCode: text("send_refusal_code"),
+    sendRefusedUntil: timestamp("send_refused_until", { withTimezone: true }),
     // --- Follow-up queue (src/lib/followup-queue.ts) ---
     // What we owe this person NEXT, and when. Once somebody shows a sales interest we owe them an
     // answer now and, if they go quiet, further answers at growing intervals, indefinitely, until

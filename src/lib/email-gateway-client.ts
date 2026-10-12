@@ -44,6 +44,11 @@ export interface ScopedStatus {
   // nothing. Stated by the provider that owns the claim (instantly-service), forwarded whole
   // by email-gateway. ABSENT is a third state — nobody said so — and is never read as false.
   finished?: boolean;
+  // The SENDER's statement that it REFUSES to send to this person in this scope (emailed for
+  // the brand inside its re-contact window, opted out, ...): `{ code, until }`, code in the
+  // sender's words, `until` = when it lapses, null = never. Stated by instantly-service,
+  // forwarded whole by email-gateway. ABSENT = no refusal stated. Read by `retry-pool.ts` only.
+  sendRefusal?: { code: string; until: string | null } | null;
   lastDeliveredAt: string | null;
   firstContactedAt: string | null;
   firstSentAt: string | null;
