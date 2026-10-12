@@ -7376,7 +7376,9 @@ registry.registerPath({
     "held by their social identity until an email is found (a later serve with that email and LinkedIn profile lands on the same lead), " +
     "and the fact becomes a row of that lead's timeline at the post's brand: `id` `social:<sourceRef>`, label = the step key the fact " +
     "carries (e.g. `industry_update_video`), source `social`, attributable (`reaction_to_our_post`), its campaign and that campaign's offer. " +
-    "Idempotent per `sourceRef`: a second call writes nothing. A fact stating no org or brand is counted `unscoped` (filed once social-service " +
+    "The person is also filed as FOUND by the post's campaign (one `leads_campaigns` row, `served`, `status_reason` `social_engagement`), " +
+    "so the brand's Leads list shows them without an email; no email pipe can hand that row out (stock hands `source_found` only, every pool " +
+    "demands an email). Idempotent per `sourceRef`: a second call writes nothing. A fact stating no org or brand is counted `unscoped` (filed once social-service " +
     "adopts its campaign); a label the timeline vocabulary does not hold is counted `unplaced`. No body. 502 when social-service or " +
     "campaign-service cannot answer.",
   parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
@@ -7393,6 +7395,8 @@ registry.registerPath({
               peopleCreated: z.number().int().openapi({ description: "Leads minted for people nobody held yet." }),
               unscoped: z.number().int().openapi({ description: "Facts stating no org or brand yet." }),
               unplaced: z.number().int().openapi({ description: "Facts whose label the timeline vocabulary does not hold." }),
+              foundNow: z.number().int().openapi({ description: "People newly filed as found by the post's campaign (shown in the brand's Leads list, no email, contacted by nobody)." }),
+              campaignUnknown: z.number().int().openapi({ description: "Facts naming a campaign campaign-service does not know: on the timeline, not filed under it." }),
             })
             .openapi("SocialEngagementsSyncResponse"),
         },

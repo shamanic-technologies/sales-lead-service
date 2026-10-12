@@ -25,6 +25,8 @@ import { z } from "zod";
 import { SOCIAL_SERVICE_API_KEY, SOCIAL_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
+import { fetchCampaign, type CampaignDetails } from "./campaign-client.js";
+import { sql } from "../db/index.js";
 import { resolveSocialLead, socialIdentityOf, type SocialPerson } from "./social-identity.js";
 import { upsertTimelineFacts, type TimelineFactRow } from "./timeline-facts.js";
 import { TIMELINE_ITEM_LABELS, type TimelineItemLabel } from "./timeline-labels.js";
@@ -161,11 +163,51 @@ export interface SocialIngestResult {
   unscoped: number;
   /** Facts whose label the timeline vocabulary does not hold. */
   unplaced: number;
+  /** People newly filed as FOUND by the post's campaign (a `leads_campaigns` row, Leads list). */
+  foundNow: number;
+  /** Facts naming a campaign campaign-service does not know: on the timeline, not filed under it. */
+  campaignUnknown: number;
+}
+
+/** Why a `leads_campaigns` row exists for a person who only engaged with a post (never an email pipe's). */
+export const SOCIAL_ENGAGEMENT_STATUS_REASON = "social_engagement" as const;
+
+/**
+ * File the engager as a person the post's campaign FOUND, like a source finds a lead: ONE `leads_campaigns` row
+ * under that campaign (`served`, `status_reason = 'social_engagement'`), which is what the brand's Leads list,
+ * standing counts and serve records read. Nobody is contacted by it and no email pipe can hand it out: the
+ * campaign that holds it is the Social post campaign, the source stock hands only `source_found` rows, and every
+ * hand-out pool demands an email contact method (`reachClauses`). Idempotent per (person, campaign).
+ */
+export async function fileFoundEngager(p: {
+  leadId: string;
+  orgId: string;
+  brandId: string;
+  campaignId: string;
+  featureSlug: string | null;
+  workflowSlug: string | null;
+  foundAt: string;
+  sourceRef: string;
+}): Promise<boolean> {
+  const rows = (await sql`
+    INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, status_reason, status_details,
+      served_at, feature_slug, workflow_slug)
+    VALUES (${p.leadId}::uuid, ${p.campaignId}, ${p.orgId}, ARRAY[${p.brandId}]::text[], 'served',
+      ${SOCIAL_ENGAGEMENT_STATUS_REASON},
+      ${`Found by engaging with a social post of campaign ${p.campaignId} (${p.sourceRef}); no email, contacted by nobody`},
+      ${p.foundAt}::timestamptz, ${p.featureSlug}, ${p.workflowSlug})
+    ON CONFLICT (lead_id, campaign_id) DO NOTHING
+    RETURNING id
+  `) as unknown as unknown[];
+  return rows.length > 0;
 }
 
 /** File facts: one lead per person, one timeline row per fact. Throws when campaign offers are unreadable. */
 export async function ingestSocialEngagements(facts: readonly SocialEngagementFact[]): Promise<SocialIngestResult> {
-  const result: SocialIngestResult = { received: facts.length, filed: 0, written: 0, peopleCreated: 0, unscoped: 0, unplaced: 0 };
+  const result: SocialIngestResult = {
+    received: facts.length, filed: 0, written: 0, peopleCreated: 0, unscoped: 0, unplaced: 0, foundNow: 0, campaignUnknown: 0,
+  };
+  const campaigns = new Map<string, CampaignDetails | null>();
   const offersByOrg = new Map<string, ReadonlyMap<string, string | null>>();
   const rows: TimelineFactRow[] = [];
   for (const fact of facts) {
@@ -188,6 +230,22 @@ export async function ingestSocialEngagements(facts: readonly SocialEngagementFa
     const { leadId, created } = await resolveSocialLead(socialIdentityOf(fact.platform, person), person);
     if (created) result.peopleCreated++;
     rows.push(engagementRow({ ...fact, orgId, brandId }, label, leadId, offers));
+    if (fact.campaignId) {
+      if (!campaigns.has(fact.campaignId)) campaigns.set(fact.campaignId, await fetchCampaign(fact.campaignId, orgId));
+      const campaign = campaigns.get(fact.campaignId) ?? null;
+      if (!campaign) {
+        result.campaignUnknown++;
+        console.error(`[lead-service] social engagements: campaign ${fact.campaignId} of fact ${fact.sourceRef} is unknown to campaign-service; the person is not filed under it`);
+      } else if (
+        await fileFoundEngager({
+          leadId, orgId, brandId, campaignId: fact.campaignId,
+          featureSlug: campaign.featureSlug ?? null, workflowSlug: campaign.workflowSlug ?? null,
+          foundAt: fact.occurredAt ?? fact.firstSeenAt, sourceRef: fact.sourceRef,
+        })
+      ) {
+        result.foundNow++;
+      }
+    }
   }
   result.filed = rows.length;
   result.written = await upsertTimelineFacts(rows);
