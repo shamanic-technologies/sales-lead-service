@@ -23,6 +23,8 @@ interface Row {
   sent_at: string | null;
   retry_claimed_at: string | null;
   sender_closed_at?: string | null;
+  send_refused_at?: string | null;
+  send_refused_until?: string | null;
   status: string;
 }
 
@@ -81,12 +83,14 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
     const now = paramAfter(params, /SET\s+retry_claimed_at = $/) as string;
     const id = paramAfter(params, /WHERE id = $/) as string;
     const leaseCutoff = paramAfter(params, /retry_claimed_at < $/) as string;
+    const refusalNow = paramAfter(params, /send_refused_until <= $/) as string;
     const row = rows.find((r) => r.id === id);
     if (
       !row ||
       row.status !== "served" ||
       row.sent_at !== null ||
       (row.sender_closed_at ?? null) !== null ||
+      refusalStands(row, refusalNow) ||
       (row.retry_claimed_at !== null && row.retry_claimed_at >= leaseCutoff)
     ) {
       return Promise.resolve([]);
@@ -100,12 +104,14 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
   const campaignId = paramAfter(params, /lc\.campaign_id = $/) as string;
   const leaseCutoff = paramAfter(params, /lc\.retry_claimed_at < $/) as string;
   const limit = paramAfter(params, /LIMIT $/) as number;
+  const refusalNow = paramAfter(params, /lc\.send_refused_until <= $/) as string;
   const eligible = rows
     .filter(
       (r) =>
         r.status === "served" &&
         r.sent_at === null &&
         (r.sender_closed_at ?? null) === null &&
+        !refusalStands(r, refusalNow) &&
         (r.retry_claimed_at === null || r.retry_claimed_at < leaseCutoff),
     )
     .sort((a, b) =>
@@ -123,6 +129,13 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
       __campaign: campaignId,
     }));
   return Promise.resolve(eligible);
+}
+
+/** The pool's refusal predicate, as the SQL states it: refused and not yet lapsed. */
+function refusalStands(r: Row, now: string): boolean {
+  if (typeof now !== "string") throw new Error("refusal predicate missing its now param");
+  if ((r.send_refused_at ?? null) === null) return false;
+  return (r.send_refused_until ?? null) === null || r.send_refused_until! > now;
 }
 
 const markSentUpdates: { ids: unknown; set: unknown }[] = [];
@@ -160,7 +173,13 @@ const NOW = Date.parse("2026-08-25T12:00:00.000Z");
 const CAMPAIGN = "campaign-1";
 
 function scoped(
-  over: Partial<{ contacted: boolean; sent: boolean; queued: boolean; finished: boolean }>,
+  over: Partial<{
+    contacted: boolean;
+    sent: boolean;
+    queued: boolean;
+    finished: boolean;
+    sendRefusal: { code: string; until: string | null } | null;
+  }>,
 ) {
   return {
     contacted: false,
@@ -318,14 +337,14 @@ describe("campaignScopeFlags", () => {
         { email: "a@example.com", broadcast: { campaign: scoped({ contacted: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false, queued: null, finished: null });
+    ).toEqual({ contacted: true, sent: false, queued: null, finished: null, refusal: null });
 
     expect(
       campaignScopeFlags(
         { email: "a@example.com", transactional: { campaign: scoped({ sent: true }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: true, queued: null, finished: null });
+    ).toEqual({ contacted: false, sent: true, queued: null, finished: null, refusal: null });
   });
 
   it("reads `queued` from the broadcast provider only, true winning over false", () => {
@@ -340,14 +359,14 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false, queued: true, finished: null });
+    ).toEqual({ contacted: true, sent: false, queued: true, finished: null, refusal: null });
 
     expect(
       campaignScopeFlags(
         { email: "a@example.com", broadcast: { campaign: scoped({ queued: false }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: false, finished: null });
+    ).toEqual({ contacted: false, sent: false, queued: false, finished: null, refusal: null });
 
     // A transactional scope's `queued` is not the sender's statement.
     expect(
@@ -355,7 +374,7 @@ describe("campaignScopeFlags", () => {
         { email: "a@example.com", transactional: { campaign: scoped({ queued: false }) } },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: null, finished: null });
+    ).toEqual({ contacted: false, sent: false, queued: null, finished: null, refusal: null });
   });
 
   it("reads `finished` from the broadcast provider only, absent staying null", () => {
@@ -367,7 +386,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: false, queued: false, finished: true });
+    ).toEqual({ contacted: true, sent: false, queued: false, finished: true, refusal: null });
 
     expect(
       campaignScopeFlags(
@@ -398,7 +417,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: true, sent: true, queued: null, finished: null });
+    ).toEqual({ contacted: true, sent: true, queued: null, finished: null, refusal: null });
   });
 
   it("ignores another campaign's entry — that is human-service's suppression policy, not this pool's", () => {
@@ -410,7 +429,7 @@ describe("campaignScopeFlags", () => {
         },
         CAMPAIGN,
       ),
-    ).toEqual({ contacted: false, sent: false, queued: null, finished: null });
+    ).toEqual({ contacted: false, sent: false, queued: null, finished: null, refusal: null });
   });
 
   it("is null when email-gateway has no result for the email", () => {
@@ -649,5 +668,138 @@ describe("pickRetryCandidate", () => {
 
     expect(await pickRetryCandidate(base)).toBeNull();
     expect(checkDeliveryStatus).not.toHaveBeenCalled();
+  });
+});
+
+describe("a person the sender REFUSES to email (RECONTACT-LOOP-1011)", () => {
+  const until = "2026-10-23T13:08:59.751Z";
+
+  it("is set aside, not re-served, whatever else the sender says short of holding them", () => {
+    const refusal = { code: "recent_brand_contact", until };
+    expect(
+      decideRetry({ contacted: false, sent: false, queued: false, finished: null, refusal }, null, NOW),
+    ).toBe("sender_refuses");
+    // A refusal statement is enough even where the queue state is unstated.
+    expect(
+      decideRetry({ contacted: false, sent: false, queued: null, finished: null, refusal }, null, NOW),
+    ).toBe("sender_refuses");
+    // Sent and still-queued outrank it: those people are not stranded.
+    expect(
+      decideRetry({ contacted: true, sent: true, queued: false, finished: null, refusal }, null, NOW),
+    ).toBe("terminal");
+    expect(
+      decideRetry({ contacted: true, sent: false, queued: true, finished: null, refusal }, null, NOW),
+    ).toBe("in_vendor_queue");
+  });
+
+  it("reads the refusal off the broadcast campaign scope, verbatim; the longest one wins", () => {
+    const flags = campaignScopeFlags(
+      {
+        email: "a@x.com",
+        broadcast: {
+          campaign: scoped({ queued: false, sendRefusal: { code: "recent_brand_contact", until } }),
+          byCampaign: {
+            [CAMPAIGN]: scoped({ queued: false, sendRefusal: { code: "lead_opted_out", until: null } }),
+          },
+        },
+      },
+      CAMPAIGN,
+    );
+    expect(flags?.refusal).toEqual({ code: "lead_opted_out", until: null });
+  });
+
+  it("states no refusal when the sender says none (today's payload)", () => {
+    const flags = campaignScopeFlags({ email: "a@x.com", broadcast: { campaign: scoped({ queued: false }) } }, CAMPAIGN);
+    expect(flags?.refusal).toBeNull();
+  });
+
+  it("refuses to read a malformed refusal as no refusal", () => {
+    expect(() =>
+      campaignScopeFlags(
+        {
+          email: "a@x.com",
+          broadcast: { campaign: scoped({ queued: false, sendRefusal: { code: "", until } }) },
+        },
+        CAMPAIGN,
+      ),
+    ).toThrow(/without a code/);
+    expect(() =>
+      campaignScopeFlags(
+        {
+          email: "a@x.com",
+          broadcast: {
+            campaign: scoped({ queued: false, sendRefusal: { code: "x", until: "soon" } as never }),
+          },
+        },
+        CAMPAIGN,
+      ),
+    ).toThrow(/unreadable until/);
+  });
+
+  it("hands out a NEW person instead of the refused one, and records the refusal verbatim", async () => {
+    markSentUpdates.length = 0;
+    rows = [
+      row({ id: "refused", served_at: "2026-08-25T08:00:00.000Z" }),
+      row({ id: "next", served_at: "2026-08-25T09:00:00.000Z" }),
+    ];
+    checkDeliveryStatus.mockImplementation(async (_b: string, _c: string, items: Array<{ email: string }>) => ({
+      results: items.map((i) =>
+        i.email === "refused@example.com"
+          ? {
+              email: i.email,
+              broadcast: {
+                campaign: scoped({ queued: false, sendRefusal: { code: "recent_brand_contact", until } }),
+              },
+            }
+          : notHeld(i.email),
+      ),
+    }));
+
+    const picked = await pickRetryCandidate(base);
+
+    expect(picked?.id).toBe("next");
+    const write = markSentUpdates.find((u) => (u.set as Record<string, unknown>).sendRefusalCode !== undefined);
+    expect(write?.set).toMatchObject({
+      sendRefusalCode: "recent_brand_contact",
+      sendRefusedUntil: new Date(until),
+    });
+  });
+
+  it("never re-serves a refused person inside the window; asks again once it lapses", async () => {
+    rows = [
+      row({
+        id: "window",
+        send_refused_at: "2026-08-25T08:00:00.000Z",
+        send_refused_until: "2026-08-26T00:00:00.000Z",
+      }),
+    ];
+    expect(await pickRetryCandidate(base)).toBeNull();
+    expect(checkDeliveryStatus).not.toHaveBeenCalled();
+
+    // A day later the window has lapsed: the row is a candidate again, and the sender decides.
+    const later = await pickRetryCandidate({ ...base, nowMs: Date.parse("2026-08-26T00:00:01.000Z") });
+    expect(later?.id).toBe("window");
+  });
+
+  it("never re-serves an opted-out person (a refusal with no end)", async () => {
+    rows = [row({ id: "optout", send_refused_at: "2026-08-25T08:00:00.000Z", send_refused_until: null })];
+    for (const nowMs of [NOW, NOW + 365 * 24 * 60 * 60 * 1000 * 10]) {
+      expect(await pickRetryCandidate({ ...base, nowMs })).toBeNull();
+    }
+    expect(checkDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a person whose refusal statement is unreadable", async () => {
+    rows = [row({ id: "garbled" })];
+    checkDeliveryStatus.mockImplementation(async (_b: string, _c: string, items: Array<{ email: string }>) => ({
+      results: items.map((i) => ({
+        email: i.email,
+        broadcast: { campaign: scoped({ queued: false, sendRefusal: { code: 42 } as never }) },
+      })),
+    }));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await pickRetryCandidate(base)).toBeNull();
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
   });
 });

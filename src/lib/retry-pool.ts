@@ -1,4 +1,4 @@
-import { and, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
@@ -88,7 +88,28 @@ export type RetryVerdict =
    * never produce an email — it only burns the slot that would buy somebody new. Out of the
    * pool for good, never queried again. Not `terminal`: nothing was sent.
    */
-  | "sender_closed";
+  | "sender_closed"
+  /**
+   * The sender REFUSES to send to this person (it says so on its status read: emailed for
+   * this brand inside its re-contact window, opted out, ...). Handing them back can only fail
+   * the run again, so they leave the pool for as long as the sender says the refusal stands,
+   * and the campaign moves on to somebody new. Not `terminal`, not `sender_closed`: nothing
+   * was sent, and a refusal with an end date is not the end of the person.
+   */
+  | "sender_refuses";
+
+/**
+ * The sender's own statement that it will NOT send to this person, as it states it.
+ *
+ * `code` is the sender's word, stored verbatim and never interpreted here (no refusal kind
+ * is named in this service). `until` is when the sender says the refusal lapses; `null` =
+ * it never does (an opt-out). Which kinds exist and how long each lasts is the sender's
+ * policy, never re-derived here from send dates or windows.
+ */
+export interface SendRefusal {
+  code: string;
+  until: string | null;
+}
 
 /** The two flags email-gateway already serves per scope, for one candidate. */
 export interface CandidateStatusFlags {
@@ -109,6 +130,11 @@ export interface CandidateStatusFlags {
    * age or from how many times the person was handed out.
    */
   finished: boolean | null;
+  /**
+   * The sender's statement that it refuses to send to this person. `null`/absent = it stated
+   * no refusal (today's payload, or none stands).
+   */
+  refusal?: SendRefusal | null;
 }
 
 export interface RetryCandidate {
@@ -134,6 +160,7 @@ export interface RetryCandidate {
  *   |------|--------|----------|-----------|---------------------|------------------|
  *   | true | —      | —        | —         | any                 | terminal         |
  *   | false| true   | —        | —         | any                 | in_vendor_queue  |
+ *   | false| not true (refusal stated)        | any                 | sender_refuses   |
  *   | false| false  | true     | —         | any                 | sender_closed    |
  *   | false| null   | —        | —         | any                 | unknown          |
  *   | false| false  | not true | false     | any                 | retry            |
@@ -162,6 +189,9 @@ export function decideRetry(
   if (!flags) return "unknown";
   if (flags.sent) return "terminal";
   if (flags.queued === true) return "in_vendor_queue";
+  // The sender says it will not send to this person: handing them back can only fail the
+  // run again (RECONTACT-LOOP-1011: 7 refused people froze a paying campaign for hours).
+  if (flags.refusal) return "sender_refuses";
   if (flags.finished === true) return "sender_closed";
   if (flags.queued === null) return "unknown";
   if (!flags.contacted) return "retry";
@@ -197,6 +227,7 @@ export function campaignScopeFlags(
   let sent = false;
   let queued: boolean | null = null;
   let finished: boolean | null = null;
+  let refusal: SendRefusal | null = null;
 
   for (const provider of [result.broadcast, result.transactional]) {
     if (!provider) continue;
@@ -211,10 +242,43 @@ export function campaignScopeFlags(
       if (provider === result.broadcast && typeof scope.finished === "boolean") {
         finished = finished === true || scope.finished;
       }
+      if (provider === result.broadcast && scope.sendRefusal != null) {
+        refusal = laterRefusal(refusal, readSendRefusal(scope.sendRefusal));
+      }
     }
   }
 
-  return { contacted, sent, queued, finished };
+  return { contacted, sent, queued, finished, refusal };
+}
+
+/**
+ * Read the sender's refusal statement, or THROW on one it cannot read.
+ *
+ * A malformed statement is not "no refusal": reading it as absent would hand the person
+ * back into the same refusal. The caller turns the throw into `unknown` for that person
+ * (not retried), which is the safe direction.
+ */
+export function readSendRefusal(raw: unknown): SendRefusal {
+  if (!raw || typeof raw !== "object") {
+    throw new Error(`[retry-pool] unreadable sendRefusal: ${JSON.stringify(raw)}`);
+  }
+  const { code, until } = raw as { code?: unknown; until?: unknown };
+  if (typeof code !== "string" || code.trim() === "") {
+    throw new Error(`[retry-pool] sendRefusal without a code: ${JSON.stringify(raw)}`);
+  }
+  if (until === null) return { code, until: null };
+  if (typeof until !== "string" || Number.isNaN(Date.parse(until))) {
+    throw new Error(`[retry-pool] sendRefusal with an unreadable until: ${JSON.stringify(raw)}`);
+  }
+  return { code, until: new Date(until).toISOString() };
+}
+
+/** Two statements for one person: the one that lasts longer wins (never = longest). */
+function laterRefusal(a: SendRefusal | null, b: SendRefusal): SendRefusal {
+  if (!a) return b;
+  if (a.until === null) return a;
+  if (b.until === null) return b;
+  return Date.parse(b.until) > Date.parse(a.until) ? b : a;
 }
 
 function toMillis(value: Date | string | null): number | null {
@@ -253,6 +317,7 @@ export async function loadRetryCandidates(params: {
   limit?: number;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
+  const nowIso = new Date(params.nowMs).toISOString();
   const limit = params.limit ?? RETRY_CANDIDATE_BATCH_SIZE;
 
   const rows = (await db.execute(sql<RawCandidateRow[]>`
@@ -273,6 +338,7 @@ export async function loadRetryCandidates(params: {
       AND lc.status = 'served'
       AND lc.sent_at IS NULL
       AND lc.sender_closed_at IS NULL
+      AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
@@ -329,6 +395,31 @@ export async function markSenderClosedCandidates(ids: string[], nowMs: number): 
 }
 
 /**
+ * Take a candidate out of the pool because the sender refuses to send to them.
+ *
+ * Written from the sender's statement only, verbatim: its code and when it lapses (NULL =
+ * never). A later statement overwrites an earlier one (the row re-enters the pool when a
+ * window lapses, and the sender is asked again).
+ */
+export async function markSendRefusedCandidates(
+  refused: Array<{ id: string; refusal: SendRefusal }>,
+  nowMs: number,
+): Promise<void> {
+  const now = new Date(nowMs);
+  for (const { id, refusal } of refused) {
+    await db
+      .update(leadsCampaigns)
+      .set({
+        sendRefusedAt: now,
+        sendRefusalCode: refusal.code,
+        sendRefusedUntil: refusal.until === null ? null : new Date(refusal.until),
+        updatedAt: now,
+      })
+      .where(eq(leadsCampaigns.id, id));
+  }
+}
+
+/**
  * Claim one candidate for this run, atomically.
  *
  * Two runs pulling at the same time both read `contacted = false` for the same person;
@@ -359,6 +450,7 @@ export async function claimCandidate(params: {
        AND status = 'served'
        AND sent_at IS NULL
        AND sender_closed_at IS NULL
+       AND (send_refused_at IS NULL OR (send_refused_until IS NOT NULL AND send_refused_until <= ${now}))
        AND (retry_claimed_at IS NULL OR retry_claimed_at < ${leaseCutoff})
     RETURNING id
   `)) as unknown as Array<{ id: string }>;
@@ -446,15 +538,28 @@ export async function pickRetryCandidate(params: {
 
   const terminalIds: string[] = [];
   const closedIds: string[] = [];
+  const refused: Array<{ id: string; refusal: SendRefusal }> = [];
   const retryable: RetryCandidate[] = [];
   let queuedCount = 0;
   let unknownCount = 0;
 
   for (const candidate of candidates) {
-    const flags = campaignScopeFlags(byEmail.get(candidate.email.toLowerCase()), params.campaignId);
+    let flags: CandidateStatusFlags | null;
+    try {
+      flags = campaignScopeFlags(byEmail.get(candidate.email.toLowerCase()), params.campaignId);
+    } catch (err) {
+      // An unreadable refusal statement: never read as "no refusal" (that re-serves the person
+      // into the same refusal). Not retried; loud.
+      console.error(
+        `[lead-service] retry-pool: unreadable sender status campaign=${params.campaignId} leadId=${candidate.leadId}:`,
+        err,
+      );
+      flags = null;
+    }
     const verdict = decideRetry(flags, candidate.servedAt, nowMs);
     if (verdict === "terminal") terminalIds.push(candidate.id);
     else if (verdict === "sender_closed") closedIds.push(candidate.id);
+    else if (verdict === "sender_refuses") refused.push({ id: candidate.id, refusal: flags!.refusal! });
     else if (verdict === "retry") retryable.push(candidate);
     else if (verdict === "in_vendor_queue") queuedCount += 1;
     else unknownCount += 1;
@@ -473,6 +578,16 @@ export async function pickRetryCandidate(params: {
   await markSentCandidates(terminalIds, nowMs);
   // Same for people the sender is finished with here: re-serving them can never send.
   await markSenderClosedCandidates(closedIds, nowMs);
+  // And people the sender refuses: out of the pool while the refusal stands, so the run
+  // takes somebody new instead of failing on them again.
+  await markSendRefusedCandidates(refused, nowMs);
+  if (refused.length > 0) {
+    console.log(
+      `[lead-service] retry-pool set aside ${refused.length} candidate(s) the sender refuses campaign=${params.campaignId} ${refused
+        .map((r) => `${r.id}:${r.refusal.code}:${r.refusal.until ?? "never"}`)
+        .join(",")}`,
+    );
+  }
   if (closedIds.length > 0) {
     console.log(
       `[lead-service] retry-pool closed ${closedIds.length} candidate(s) the sender is finished with campaign=${params.campaignId}`,
@@ -488,7 +603,7 @@ export async function pickRetryCandidate(params: {
     });
     if (claimed) {
       console.log(
-        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} closed=${closedIds.length} queued=${queuedCount} unknown=${unknownCount}`,
+        `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} closed=${closedIds.length} refused=${refused.length} queued=${queuedCount} unknown=${unknownCount}`,
       );
       return candidate;
     }

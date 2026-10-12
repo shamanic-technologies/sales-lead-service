@@ -20,6 +20,7 @@ import {
   claimCandidate,
   loadRetryCandidates,
   markSenderClosedCandidates,
+  markSendRefusedCandidates,
   markSentCandidates,
 } from "../../src/lib/retry-pool.js";
 
@@ -163,5 +164,49 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
 
     const claimed = await claimCandidate({ id, nowMs: Date.now(), runId: randomUUID(), parentRunId: null });
     expect(claimed).toBe(false);
+  });
+  it("sets aside a person the sender refuses for a window: out until it lapses, then back", async () => {
+    const id = await seedServedRow();
+    const now = Date.now();
+    const until = new Date(now + 24 * 60 * 60 * 1000).toISOString();
+
+    await markSendRefusedCandidates([{ id, refusal: { code: "recent_brand_contact", until } }], now);
+
+    const [after] = await db
+      .select({
+        at: leadsCampaigns.sendRefusedAt,
+        code: leadsCampaigns.sendRefusalCode,
+        until: leadsCampaigns.sendRefusedUntil,
+        sentAt: leadsCampaigns.sentAt,
+        closedAt: leadsCampaigns.senderClosedAt,
+      })
+      .from(leadsCampaigns)
+      .where(eq(leadsCampaigns.id, id));
+    expect(after.at).not.toBeNull();
+    expect(after.code).toBe("recent_brand_contact");
+    expect(after.until?.toISOString()).toBe(until);
+    expect(after.sentAt).toBeNull();
+    expect(after.closedAt).toBeNull();
+
+    const inside = await loadRetryCandidates({ orgId, campaignId, nowMs: now });
+    expect(inside.map((c) => c.id)).not.toContain(id);
+    expect(await claimCandidate({ id, nowMs: now, runId: randomUUID(), parentRunId: null })).toBe(false);
+
+    const lapsed = Date.parse(until) + 1;
+    expect(await claimCandidate({ id, nowMs: lapsed, runId: randomUUID(), parentRunId: null })).toBe(true);
+  });
+
+  it("never hands back a person the sender refuses for good (opt-out: no end)", async () => {
+    const id = await seedServedRow();
+    const now = Date.now();
+
+    await markSendRefusedCandidates([{ id, refusal: { code: "lead_opted_out", until: null } }], now);
+
+    const tenYears = now + 10 * 365 * 24 * 60 * 60 * 1000;
+    for (const nowMs of [now, tenYears]) {
+      const candidates = await loadRetryCandidates({ orgId, campaignId, nowMs });
+      expect(candidates.map((c) => c.id)).not.toContain(id);
+      expect(await claimCandidate({ id, nowMs, runId: randomUUID(), parentRunId: null })).toBe(false);
+    }
   });
 });
