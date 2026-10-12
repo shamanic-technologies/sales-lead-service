@@ -40,8 +40,10 @@ export function isCreditInsufficientError(error: unknown): boolean {
   );
 }
 
+/** chat-service states cents as decimal STRINGS (`"-1.2800000000"`); billing as numbers. */
 function centsOrNull(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  const n = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
 }
 
 /**
