@@ -8128,7 +8128,13 @@
               "failed_qualification_check": {
                 "type": "integer"
               },
+              "no_longer_fits": {
+                "type": "integer"
+              },
               "kept_by_another_offer": {
+                "type": "integer"
+              },
+              "in_stock": {
                 "type": "integer"
               },
               "not_served": {
@@ -8138,9 +8144,30 @@
             "required": [
               "screened_out",
               "failed_qualification_check",
+              "no_longer_fits",
               "kept_by_another_offer",
+              "in_stock",
               "not_served"
             ]
+          },
+          "noLongerFits": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string"
+                },
+                "people": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "reason",
+                "people"
+              ]
+            },
+            "description": "`notKept.no_longer_fits` per reason, in the audience owner's words: found by the source on its own run, then set aside when an outreach campaign took its stock because human-service said they no longer fit the audience they were found for."
           },
           "daily": {
             "type": "array",
@@ -8284,6 +8311,7 @@
           "found",
           "kept",
           "notKept",
+          "noLongerFits",
           "daily",
           "byAudience",
           "bySignal",
@@ -14833,7 +14861,7 @@
     "/orgs/campaigns/{campaignId}/sourcing-stats": {
       "get": {
         "summary": "What one lead SOURCE campaign found and what we kept, since inception",
-        "description": "`campaignId` is a source pipe (a campaign-service campaign on leg `start_to_lead_found`, keyed offer + origin slug). Its people come from recorded facts, not from which campaign a serve run was filed under: the source's audiences are the brand's audiences of the offer whose LIST KIND the origin counts (features-service catalogue). FOUND = every person one of those audiences surfaced: a human-service membership (`served` or `found_taken`) or a candidate this service screened (pass or reject) or declined on a must-pass check. KEPT = found AND served to an outreach campaign of the offer. A person found by several sources counts in EACH (never first-found); `kept.byThisSource` vs `kept.viaAnotherSource` says whose serve handed them out. found.people = kept.people + sum(notKept). `daily`: found on the day the source first surfaced the person, kept on the day both were true (UTC; days with no event omitted). `gaps`: people whose source cannot be named, as counts with a reason, never guessed onto a source. 404 not a campaign of the org; 409 not a lead source; 502 a sibling could not answer (never a partial count).",
+        "description": "`campaignId` is a source pipe (a campaign-service campaign on leg `start_to_lead_found`, keyed offer + origin slug). Its people come from recorded facts, not from which campaign a serve run was filed under: the source's audiences are the brand's audiences of the offer whose LIST KIND the origin counts (features-service catalogue). FOUND = every person one of those audiences surfaced: a human-service membership (`served` or `found_taken`) or a candidate this service screened (pass or reject) or declined on a must-pass check. KEPT = found AND served to an outreach campaign of the offer. A person found by several sources counts in EACH (never first-found); `kept.byThisSource` vs `kept.viaAnotherSource` says whose serve handed them out. found.people = kept.people + sum(notKept). A source's own-run FIND waiting in its stock is `notKept.in_stock`; one set aside at handover is `notKept.no_longer_fits`. `daily`: found on the day the source first surfaced the person, kept on the day both were true (UTC; days with no event omitted). `gaps`: people whose source cannot be named, as counts with a reason, never guessed onto a source. 404 not a campaign of the org; 409 not a lead source; 502 a sibling could not answer (never a partial count).",
         "parameters": [
           {
             "in": "header",

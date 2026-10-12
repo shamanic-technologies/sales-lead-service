@@ -26,6 +26,9 @@ const serve = (over: Partial<SourceServeRow> & { leadId: string }): SourceServeR
   emails: [`${over.leadId}@x.com`],
   companyDomain: `${over.leadId}.com`,
   companyName: null,
+  sourceFound: false,
+  sourceHanded: false,
+  setAsideReason: null,
   ...over,
 });
 
@@ -99,7 +102,7 @@ describe("computeSourcePeople", () => {
     );
     expect(r.found).toEqual({ people: 3, companies: 3, peopleWithoutCompany: 0 });
     expect(r.kept.people).toBe(1);
-    expect(r.notKept).toEqual({ screened_out: 1, failed_qualification_check: 1, kept_by_another_offer: 0, not_served: 0 });
+    expect(r.notKept).toEqual({ screened_out: 1, failed_qualification_check: 1, no_longer_fits: 0, kept_by_another_offer: 0, in_stock: 0, not_served: 0 });
     expect(r.found.people).toBe(r.kept.people + Object.values(r.notKept).reduce((a, b) => a + b, 0));
     expect(r.byAudience[0]).toMatchObject({ found: 3, kept: 1, screenedOut: 1 });
     // Alice was screened here: her rejected peers are in `found`, so no qualified_before_us gap.
@@ -126,6 +129,31 @@ describe("computeSourcePeople", () => {
     // Served by this source's audience but only under another offer's outreach: found, not kept here.
     expect(r.notKept.kept_by_another_offer).toBe(1);
     expect(r.found.people).toBe(2);
+  });
+
+  it("a source's own-run finds are never serves: waiting = in_stock, set aside at handover = no_longer_fits with the owner's reason", () => {
+    const SOURCE = "source-unit";
+    const find = (leadId: string, over: Partial<SourceServeRow> = {}) =>
+      serve({ leadId, campaignId: SOURCE, audienceId: SIGNALS_AUD, at: "2026-10-12T13:34:00.000Z", sourceFound: true, ...over });
+    const ms = new Map<string, BrandMembership[]>(
+      ["waiting", "answered", "handed"].map((id) => [`${id}@x.com`, [m(SIGNALS_AUD, "apollo_buying_signal", "served", "2026-10-12T13:34:00.000Z")]]),
+    );
+    const r = computeSourcePeople(
+      input({
+        serves: [
+          find("waiting"),
+          find("answered", { setAsideReason: "Answered on WhatsApp since being found" }),
+          find("handed", { sourceHanded: true }),
+          serve({ leadId: "handed", audienceId: SIGNALS_AUD, at: "2026-10-12T15:00:00.000Z" }),
+        ],
+        membershipsByEmail: ms,
+      }),
+    );
+    expect(r.found.people).toBe(3);
+    expect(r.kept.people).toBe(1);
+    expect(r.notKept).toMatchObject({ in_stock: 1, no_longer_fits: 1, kept_by_another_offer: 0, not_served: 0 });
+    expect(r.noLongerFits).toEqual([{ reason: "Answered on WhatsApp since being found", people: 1 }]);
+    expect(r.found.people).toBe(r.kept.people + Object.values(r.notKept).reduce((a, b) => a + b, 0));
   });
 
   it("flags the source's kept people that human-service qualified before handing them to us", () => {

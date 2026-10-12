@@ -16,6 +16,14 @@ import { reachClauses } from "./reach-sql.js";
  *      person as the find), which is what the sender works and what every delivery read keys on.
  * One person contacted once: a lead the outreach campaign already holds is skipped; a handed row is never handed again.
  * The source row keeps `served` (its fact: found) and stays the source's on the dashboard.
+ *
+ * STILL FITS (STILL-FITS-1012, 2026-10-12): a find can sit in the stock for hours, and a person can stop fitting the
+ * audience meanwhile (the "signed up, never answered" CRM pool: their WhatsApp thread merged in later, 32-54 messages
+ * with the owner, and they were still messaged). Before handing a row, the audience's OWNER (human-service) is asked,
+ * inside the claim's transaction, whether the person still fits it NOW. Its verdict is never re-graded here, for every
+ * audience kind alike. No longer fits = the row is SET ASIDE (`source_set_aside_at` + the owner's reason, verbatim),
+ * never handed again, and the next row is tried. The owner unreachable or unreadable = the serve fails (the claim rolls
+ * back, nothing handed, nothing set aside): never "fits" by default.
  */
 
 export const SOURCE_FOUND_STATUS_REASON = "source_found" as const;
@@ -30,6 +38,33 @@ export interface StockedLead {
   personId: string | null;
   goal: string | null;
 }
+
+/** human-service's verdict on one found person, at handover (src/lib/audience-fit-client.ts). */
+export type AudienceFitVerdict = { fits: true } | { fits: false; reason: string };
+
+export type AskAudienceFit = (question: {
+  audienceId: string;
+  email: string;
+  personId: string | null;
+}) => Promise<AudienceFitVerdict>;
+
+export interface SetAsideLead {
+  sourceRowId: string;
+  sourceCampaignId: string;
+  leadId: string;
+  email: string;
+  audienceId: string;
+  reason: string;
+}
+
+export interface StockClaim {
+  /** The lead handed to the outreach campaign; null = nothing in the stock still fits. */
+  lead: StockedLead | null;
+  /** Rows this claim found no longer fitting their audience, set aside on the way. */
+  setAside: SetAsideLead[];
+}
+
+type ClaimStep = { kind: "empty" } | { kind: "set_aside"; row: SetAsideLead } | { kind: "handed"; lead: StockedLead };
 
 export async function claimStockedLead(params: {
   orgId: string;
@@ -48,29 +83,42 @@ export async function claimStockedLead(params: {
   brandProfileId: string | null;
   /** The outreach pipe's contact methods (src/lib/channel-reach.ts): a found lead missing one stays in the stock. */
   reachableBy?: readonly ReachMethod[] | null;
-}): Promise<StockedLead | null> {
-  if (params.sourceCampaignIds.length === 0) return null;
+  /** Asks the audience's owner whether a found person still fits it (never answered here). */
+  askFit: AskAudienceFit;
+}): Promise<StockClaim> {
+  const setAside: SetAsideLead[] = [];
+  if (params.sourceCampaignIds.length === 0) return { lead: null, setAside };
+  // Each set-aside row leaves the stock for good, so this ends: handed, or the stock holds nobody who still fits.
+  for (;;) {
+    const step = await claimOne(params);
+    if (step.kind === "empty") return { lead: null, setAside };
+    if (step.kind === "handed") return { lead: step.lead, setAside };
+    setAside.push(step.row);
+    console.warn(
+      `[lead-service] source stock set aside: no longer fits audience=${step.row.audienceId} sourceCampaign=${step.row.sourceCampaignId} row=${step.row.sourceRowId} email=${step.row.email} reason="${step.row.reason}"`,
+    );
+  }
+}
+
+async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise<ClaimStep> {
   const sourceIds = sql.join(params.sourceCampaignIds.map((id) => sql`${id}`), sql`, `);
-  return db.transaction(async (tx) => {
-    const claimed = (await tx.execute(sql`
-      UPDATE leads_campaigns lc
-         SET source_handed_at = now(), source_handed_to_campaign_id = ${params.outreachCampaignId}, updated_at = now()
-       WHERE lc.id = (
-         SELECT s.id FROM leads_campaigns s
-          WHERE s.org_id = ${params.orgId}
-            AND s.campaign_id IN (${sourceIds})
-            AND s.status_reason = ${SOURCE_FOUND_STATUS_REASON}
-            AND s.status = 'served'
-            AND s.source_handed_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
-            )
-            ${reachClauses(sql`s.lead_id`, params.reachableBy)}
-          ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
-          LIMIT 1
-          FOR UPDATE SKIP LOCKED
-       )
-      RETURNING lc.id, lc.campaign_id, lc.lead_id, lc.audience_id, lc.buying_signal, lc.person_id, lc.goal
+  return db.transaction(async (tx): Promise<ClaimStep> => {
+    const candidates = (await tx.execute(sql`
+      SELECT s.id, s.campaign_id, s.lead_id, s.audience_id, s.buying_signal, s.person_id, s.goal
+        FROM leads_campaigns s
+       WHERE s.org_id = ${params.orgId}
+         AND s.campaign_id IN (${sourceIds})
+         AND s.status_reason = ${SOURCE_FOUND_STATUS_REASON}
+         AND s.status = 'served'
+         AND s.source_handed_at IS NULL
+         AND s.source_set_aside_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
+         )
+         ${reachClauses(sql`s.lead_id`, params.reachableBy)}
+       ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
+       LIMIT 1
+       FOR UPDATE SKIP LOCKED
     `)) as unknown as Array<{
       id: string;
       campaign_id: string;
@@ -80,8 +128,8 @@ export async function claimStockedLead(params: {
       person_id: string | null;
       goal: string | null;
     }>;
-    const row = claimed[0];
-    if (!row) return null;
+    const row = candidates[0];
+    if (!row) return { kind: "empty" };
 
     const [email] = (await tx.execute(sql`
       SELECT cm.value FROM lead_contact_methods cm
@@ -89,6 +137,37 @@ export async function claimStockedLead(params: {
        ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
        LIMIT 1
     `)) as unknown as Array<{ value: string }>;
+    if (!email) throw new Error(`[source-stock] found lead ${row.lead_id} (row ${row.id}) has no registered email`);
+    if (!row.audience_id) {
+      // Every find is recorded under the audience that found it (src/lib/buffer.ts): without one, nobody can say it fits.
+      throw new Error(`[source-stock] found row ${row.id} (source campaign ${row.campaign_id}) carries no audience`);
+    }
+
+    const verdict = await params.askFit({ audienceId: row.audience_id, email: email.value, personId: row.person_id });
+    if (!verdict.fits) {
+      await tx.execute(sql`
+        UPDATE leads_campaigns
+           SET source_set_aside_at = now(), source_set_aside_reason = ${verdict.reason}, updated_at = now()
+         WHERE id = ${row.id}
+      `);
+      return {
+        kind: "set_aside",
+        row: {
+          sourceRowId: row.id,
+          sourceCampaignId: row.campaign_id,
+          leadId: row.lead_id,
+          email: email.value,
+          audienceId: row.audience_id,
+          reason: verdict.reason,
+        },
+      };
+    }
+
+    await tx.execute(sql`
+      UPDATE leads_campaigns
+         SET source_handed_at = now(), source_handed_to_campaign_id = ${params.outreachCampaignId}, updated_at = now()
+       WHERE id = ${row.id}
+    `);
     const goal = params.goal ?? row.goal;
     const brandIds = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
     await tx.execute(sql`
@@ -106,14 +185,17 @@ export async function claimStockedLead(params: {
       ON CONFLICT (lead_id, campaign_id) DO NOTHING
     `);
     return {
-      sourceRowId: row.id,
-      sourceCampaignId: row.campaign_id,
-      leadId: row.lead_id,
-      email: email.value,
-      audienceId: row.audience_id,
-      buyingSignal: readBuyingSignal(row.buying_signal),
-      personId: row.person_id,
-      goal,
+      kind: "handed",
+      lead: {
+        sourceRowId: row.id,
+        sourceCampaignId: row.campaign_id,
+        leadId: row.lead_id,
+        email: email.value,
+        audienceId: row.audience_id,
+        buyingSignal: readBuyingSignal(row.buying_signal),
+        personId: row.person_id,
+        goal,
+      },
     };
   });
 }

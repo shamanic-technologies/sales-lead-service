@@ -30,8 +30,9 @@
  *   source_budget_reached  — that source campaign already spent its daily budget today.
  *   source_stock_empty     — the outreach campaign is fed by source campaigns that FIND leads in their own
  *                            runs (src/lib/source-mode.ts), and none of them holds a found lead nobody worked
- *                            yet. Nothing is found on demand from such a source: the stock refills on the
- *                            source's next run. Says nothing about any audience's people.
+ *                            yet that still fits its audience (a find that stopped fitting is set aside on the
+ *                            way, src/lib/source-stock.ts). Nothing is found on demand from such a source: the
+ *                            stock refills on the source's next run. Says nothing about any audience's people.
  *   origin_not_fed         — the named audience serves from an origin the campaign's outreach channel is NOT fed
  *                            by (features-service `originsByChannel`): nobody is served from it for this pipe
  *                            (owner 2026-10-12). A wrong audience was named; says nothing about its people.

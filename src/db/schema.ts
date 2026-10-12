@@ -263,6 +263,9 @@ export const leadsCampaigns = pgTable(
     // the outreach campaign that takes it claims the row here, once. NULL on every other row.
     sourceHandedAt: timestamp("source_handed_at", { withTimezone: true }),
     sourceHandedToCampaignId: text("source_handed_to_campaign_id"),
+    // A found lead that no longer fits its audience at handover (human-service's verdict, migration 0070): never handed.
+    sourceSetAsideAt: timestamp("source_set_aside_at", { withTimezone: true }),
+    sourceSetAsideReason: text("source_set_aside_reason"),
     // --- Channel release (src/lib/released-pool.ts, migration 0069) ---
     // A sender refused this person for a reason about its CHANNEL (no phone known, not on WhatsApp...): released to
     // the brand's other pipes. channel_released_* on the refusing row; released_taken_* = the one hand-off claim.
