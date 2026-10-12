@@ -74,6 +74,12 @@ function boundsPayload(nowMs: number) {
  * of this service answers for the whole family because it TOTALS a population; this claims a
  * single row whose due date some worker wrote while naming that exact campaign, so widening it
  * would hand a worker somebody another campaign's schedule owns.
+ *
+ * `alsoCampaignIds` (optional body) names MORE held campaigns, each exactly, tried in order after
+ * the path one; the first person claimed wins. A responder whose preceding leg runs on several
+ * campaigns at once (cold email AND cold WhatsApp opening conversations for one offer) answers the
+ * people of each in one run, instead of the run failing because it cannot pick one (campaign
+ * 67a0eb30, 2026-10-12). Every campaign is still claimed on its own exact id.
  */
 router.post(
   "/orgs/campaigns/:campaignId/followups/claim-next",
@@ -96,28 +102,45 @@ router.post(
       return;
     }
 
-    try {
-      const result = await pickFollowupCandidate({
-        orgId: req.orgId as string,
-        campaignId,
-        runId: req.runId ?? null,
-        // The campaign this worker was DISPATCHED for. For an internal leg it is not the campaign
-        // named in the path (that one holds the person), and it is what the ledger attributes to.
-        actingCampaignId: req.campaignId,
-        context: {
-          orgId: req.orgId,
-          userId: req.userId,
-          runId: req.runId,
-          campaignId,
-          brandId: req.brandId,
-          workflowSlug: req.workflowSlug,
-          featureSlug: req.featureSlug,
-          audienceId: req.audienceId,
-        },
-      });
+    const also: unknown = req.body?.alsoCampaignIds;
+    if (also !== undefined && also !== null && (!Array.isArray(also) || also.some((id) => typeof id !== "string" || id.length === 0))) {
+      res.status(400).json({ error: "alsoCampaignIds must be an array of campaign ids", code: "invalid_also_campaign_ids" });
+      return;
+    }
+    const heldCampaignIds = [...new Set([campaignId, ...((also as string[] | null | undefined) ?? [])])];
 
-      if (!result.claimed) {
-        res.json({ found: false, reason: result.reason });
+    try {
+      let result: Awaited<ReturnType<typeof pickFollowupCandidate>> | null = null;
+      let reasonNobody: string | undefined;
+      for (const heldCampaignId of heldCampaignIds) {
+        const attempt = await pickFollowupCandidate({
+          orgId: req.orgId as string,
+          campaignId: heldCampaignId,
+          runId: req.runId ?? null,
+          // The campaign this worker was DISPATCHED for. For an internal leg it is not the campaign
+          // named in the path (that one holds the person), and it is what the ledger attributes to.
+          actingCampaignId: req.campaignId,
+          context: {
+            orgId: req.orgId,
+            userId: req.userId,
+            runId: req.runId,
+            campaignId: heldCampaignId,
+            brandId: req.brandId,
+            workflowSlug: req.workflowSlug,
+            featureSlug: req.featureSlug,
+            audienceId: req.audienceId,
+          },
+        });
+        if (attempt.claimed) {
+          result = attempt;
+          break;
+        }
+        // "Someone was due but taken" says more than "nobody was due", whichever queue said it.
+        if (reasonNobody === undefined || reasonNobody === "nothing_due") reasonNobody = attempt.reason;
+      }
+
+      if (!result?.claimed) {
+        res.json({ found: false, reason: reasonNobody });
         return;
       }
 
