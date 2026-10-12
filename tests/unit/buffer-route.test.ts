@@ -553,7 +553,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   const UNIT = "80000000-0000-0000-0000-000000000001";
   const OFFER_ID = "70000000-0000-0000-0000-000000000001";
-  const unit = (status = "ongoing") => ({ id: UNIT, featureSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID, brandId: BRAND, status });
+  const unit = (status = "ongoing", audienceIds: string[] | null = null) => ({ id: UNIT, featureSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID, brandId: BRAND, status, audienceIds });
   const postAsUnit = (audienceId?: string) => {
     const r = request(app)
       .post("/orgs/buffer/next")
@@ -570,7 +570,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
   it("a source unit's OWN run (no x-audience-id) finds in its own audiences, files under itself, opens no on-demand run, records no on_demand event", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
     withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
-    resolveSourceAudiences.mockResolvedValueOnce(["aud-1", "aud-2"]);
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1", "aud-2"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
@@ -580,7 +580,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(res.status).toBe(200);
     expect(res.body.found).toBe(true);
     expect(decideSourceMode).toHaveBeenCalledWith({ orgId: ORG, campaignId: UNIT, featureSlug: "sourcing-apollo-cold-filters" });
-    expect(resolveSourceAudiences).toHaveBeenCalledWith(expect.objectContaining({ brandId: BRAND, offerId: OFFER_ID, unitSlug: "sourcing-apollo-cold-filters", preferredAudienceId: null }));
+    expect(resolveSourceAudiences).toHaveBeenCalledWith(expect.objectContaining({ brandId: BRAND, offerId: OFFER_ID, unitSlug: "sourcing-apollo-cold-filters", preferredAudienceId: null, targetAudienceIds: null }));
     expect(openOnDemandRun).not.toHaveBeenCalled();
     expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
     expect(resolveServeSource).not.toHaveBeenCalled();
@@ -595,6 +595,21 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
       }),
       expect.anything(),
     );
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a source unit whose campaign TARGETS audiences passes them on; none walkable = found:false targeted_audiences_unavailable, nothing bought", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit("ongoing", ["aud-a"]) });
+    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "targets_unavailable", detail: "none is served under this unit's channel" });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await postAsUnit();
+
+    expect(res.body).toEqual({ found: false, reason: "targeted_audiences_unavailable" });
+    expect(resolveSourceAudiences).toHaveBeenCalledWith(expect.objectContaining({ targetAudienceIds: ["aud-a"] }));
+    expect(pullNext).not.toHaveBeenCalled();
     expect(recordLeadRequested).not.toHaveBeenCalled();
   });
 
