@@ -7328,3 +7328,40 @@ registry.registerPath({
     502: { description: "campaign-service could not answer" },
   },
 });
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/social-engagements/sync",
+  summary: "File the people who engaged with our social posts as leads, with the engagement on their timeline (internal, service-auth)",
+  description:
+    "Reads social-service's engagement facts of the last 14 days (`GET /internal/social-engagements`: like, comment, repost, quote of " +
+    "one of our posts) and files each one NOW; a background sweep does the same every 10 minutes. Per fact: the person becomes ONE lead, " +
+    "held by their social identity until an email is found (a later serve with that email and LinkedIn profile lands on the same lead), " +
+    "and the fact becomes a row of that lead's timeline at the post's brand: `id` `social:<sourceRef>`, label = the step key the fact " +
+    "carries (e.g. `industry_update_video`), source `social`, attributable (`reaction_to_our_post`), its campaign and that campaign's offer. " +
+    "Idempotent per `sourceRef`: a second call writes nothing. A fact stating no org or brand is counted `unscoped` (filed once social-service " +
+    "adopts its campaign); a label the timeline vocabulary does not hold is counted `unplaced`. No body. 502 when social-service or " +
+    "campaign-service cannot answer.",
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "What this pass filed",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              received: z.number().int().openapi({ description: "Facts read off the feed." }),
+              filed: z.number().int().openapi({ description: "Facts on a lead's timeline after this pass (written now or already there)." }),
+              written: z.number().int().openapi({ description: "Timeline rows written now (new or changed)." }),
+              peopleCreated: z.number().int().openapi({ description: "Leads minted for people nobody held yet." }),
+              unscoped: z.number().int().openapi({ description: "Facts stating no org or brand yet." }),
+              unplaced: z.number().int().openapi({ description: "Facts whose label the timeline vocabulary does not hold." }),
+            })
+            .openapi("SocialEngagementsSyncResponse"),
+        },
+      },
+    },
+    401: { description: "Unauthorized" },
+    502: { description: "social-service or campaign-service could not answer" },
+  },
+});

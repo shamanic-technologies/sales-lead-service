@@ -86,6 +86,12 @@ export const CLOUDFLARE_SERVICE_URL = required("CLOUDFLARE_SERVICE_URL");
 export const CLOUDFLARE_SERVICE_API_KEY = required("CLOUDFLARE_SERVICE_API_KEY");
 export const TREG_BASE_URL = "https://treg.to";
 
+// --- Social engagements (src/lib/social-engagements.ts) ---
+// social-service owns the fact "this person liked / commented / reposted / quoted our post"; this
+// service makes that person a lead of the post's brand and puts the fact on their timeline.
+export const SOCIAL_SERVICE_URL = required("SOCIAL_SERVICE_URL");
+export const SOCIAL_SERVICE_API_KEY = required("SOCIAL_SERVICE_API_KEY");
+
 // --- Conversion tracking (beta) ---
 // Public URL of the api-service gateway a client's website hits for
 // POST /public/conversions. This is the PUBLIC gateway host, NOT the internal

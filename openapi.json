@@ -6211,7 +6211,8 @@
               "form_filled",
               "meeting_booked",
               "meeting_attended",
-              "paid_client"
+              "paid_client",
+              "industry_update_video"
             ],
             "description": "What this fact IS, independent of the campaign and the channel it came by. Sends (initial_email, followup, bounced), reactions (opened, website_visit, link_click, unsubscribed, tagged_as_spam), answers (interested, not_interested, question, hand_over = a referral or another proposal, wrong_contact, opt_out, auto_reply = a machine answered, reply = judged but placed nowhere else) and progress (signup, form_filled, meeting_booked, meeting_attended, paid_client). A person stating a step will never happen is not_interested.",
             "example": "not_interested"
@@ -6225,7 +6226,8 @@
               "manual",
               "crm",
               "reply_statement",
-              "never"
+              "never",
+              "social"
             ],
             "description": "reply: a reply and the verdict the outreach provider holds for it. tracker: the brand's website tag. manual: a person stated it. crm: the customer's own CRM. reply_statement: read off the prospect's reply (\"already a client\"). never: a person stated a step will never happen."
           },
@@ -6249,6 +6251,7 @@
               "person",
               "rule",
               "stated_on_our_lead",
+              "reaction_to_our_post",
               null
             ],
             "description": "Why: reaction_to_our_email (a reply to our email), person (somebody said whose win it was), rule (the date rule: after our first delivered email = ours), stated_on_our_lead."
@@ -8377,6 +8380,43 @@
           "recordedSince",
           "modes",
           "counts"
+        ]
+      },
+      "SocialEngagementsSyncResponse": {
+        "type": "object",
+        "properties": {
+          "received": {
+            "type": "integer",
+            "description": "Facts read off the feed."
+          },
+          "filed": {
+            "type": "integer",
+            "description": "Facts on a lead's timeline after this pass (written now or already there)."
+          },
+          "written": {
+            "type": "integer",
+            "description": "Timeline rows written now (new or changed)."
+          },
+          "peopleCreated": {
+            "type": "integer",
+            "description": "Leads minted for people nobody held yet."
+          },
+          "unscoped": {
+            "type": "integer",
+            "description": "Facts stating no org or brand yet."
+          },
+          "unplaced": {
+            "type": "integer",
+            "description": "Facts whose label the timeline vocabulary does not hold."
+          }
+        },
+        "required": [
+          "received",
+          "filed",
+          "written",
+          "peopleCreated",
+          "unscoped",
+          "unplaced"
         ]
       }
     },
@@ -14922,6 +14962,41 @@
           },
           "502": {
             "description": "campaign-service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/social-engagements/sync": {
+      "post": {
+        "summary": "File the people who engaged with our social posts as leads, with the engagement on their timeline (internal, service-auth)",
+        "description": "Reads social-service's engagement facts of the last 14 days (`GET /internal/social-engagements`: like, comment, repost, quote of one of our posts) and files each one NOW; a background sweep does the same every 10 minutes. Per fact: the person becomes ONE lead, held by their social identity until an email is found (a later serve with that email and LinkedIn profile lands on the same lead), and the fact becomes a row of that lead's timeline at the post's brand: `id` `social:<sourceRef>`, label = the step key the fact carries (e.g. `industry_update_video`), source `social`, attributable (`reaction_to_our_post`), its campaign and that campaign's offer. Idempotent per `sourceRef`: a second call writes nothing. A fact stating no org or brand is counted `unscoped` (filed once social-service adopts its campaign); a label the timeline vocabulary does not hold is counted `unplaced`. No body. 502 when social-service or campaign-service cannot answer.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What this pass filed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SocialEngagementsSyncResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "social-service or campaign-service could not answer"
           }
         }
       }

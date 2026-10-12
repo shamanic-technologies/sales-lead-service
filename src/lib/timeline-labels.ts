@@ -69,11 +69,18 @@ export const TIMELINE_ITEM_LABELS = [
   "meeting_booked",
   "meeting_attended",
   "paid_client",
+  // How the person reacted to a social post of ours (social-service names the step the post is: its
+  // label IS the funnel step key, e.g. the daily industry update video).
+  "industry_update_video",
 ] as const;
 export type TimelineItemLabel = (typeof TIMELINE_ITEM_LABELS)[number];
 
 /** Where a timeline fact came from. */
-export const TIMELINE_SOURCES = ["outreach", "reply", "tracker", "manual", "crm", "reply_statement", "never"] as const;
+export const TIMELINE_SOURCES = [
+  "outreach", "reply", "tracker", "manual", "crm", "reply_statement", "never",
+  /** social-service: a like, comment, repost or quote of one of our posts. */
+  "social",
+] as const;
 export type TimelineSource = (typeof TIMELINE_SOURCES)[number];
 
 /** Why an item is (or is not) ours. */
@@ -90,6 +97,8 @@ export const TIMELINE_ATTRIBUTION_BASES = [
   "rule",
   /** A person stated it on a lead we worked. */
   "stated_on_our_lead",
+  /** A reaction to a social post we published (a like, comment, repost, quote): ours by construction. */
+  "reaction_to_our_post",
 ] as const;
 export type TimelineAttributionBasis = (typeof TIMELINE_ATTRIBUTION_BASES)[number];
 
