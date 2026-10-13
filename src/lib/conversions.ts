@@ -6,7 +6,9 @@ import { db } from "../db/index.js";
 // Hightouch / Amperity): deterministic (a shared unique id like email/phone), strong
 // (a high-signal combination), probabilistic (name-only, inherently ambiguous).
 export type MatchConfidence = "deterministic" | "strong" | "probabilistic" | "unmatched";
-export type MatchMethod = "email" | "phone" | "domain_name" | "full_name" | "last_name" | null;
+// "human" = human-service says the CRM contact IS the lead's human (crm-evidence-sync.ts): never produced
+// by the waterfall below, only by the CRM evidence sync's human pairing.
+export type MatchMethod = "email" | "phone" | "domain_name" | "full_name" | "last_name" | "human" | null;
 export type AttributionStatus = "attributed" | "needs_review" | "unmatched";
 export type ConversionEventName = "signup" | "meeting_booked" | "form_submission" | "sale";
 

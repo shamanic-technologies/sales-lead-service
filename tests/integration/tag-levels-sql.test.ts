@@ -28,6 +28,7 @@ vi.mock("../../src/lib/company-client.js", async (orig) => ({
 import { db } from "../../src/db/index.js";
 import { leads, leadContactMethods, organizations } from "../../src/db/schema.js";
 import {
+  listBrandCompanyDisqualifications,
   effectiveLeadOrCompanyMark,
   loadLeadAndCompanyMarks,
   setCompanyDisqualification,
@@ -105,6 +106,13 @@ describe.skipIf(!hasRealDatabase)("tag levels: human / lead / company", () => {
     });
     const m = await loadLeadAndCompanyMarks({ orgId, brandIds: [brandId], leadIds: [b] });
     expect(effectiveLeadOrCompanyMark(m, b, brandId, null)?.level).toBe("company");
+    for (const id of [a, b]) {
+      await db.execute(sql`INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status)
+        VALUES (${id}::uuid, ${`c-${randomUUID()}`}, ${orgId}, ${sql.param([brandId])}::text[], 'served')`);
+    }
+    const listed = (await listBrandCompanyDisqualifications({ orgId, brandId, offerId: null })).find((c) => c.companyKey === `org:${o.id}`);
+    expect(listed).toMatchObject({ companyId: null, leadCount: 2, leadIds: [a, b].sort() });
+    await db.execute(sql`DELETE FROM leads_campaigns WHERE lead_id = ANY(${sql.param([a, b])}::uuid[])`);
   });
 
   it("reads a human opt-out on every lead of the human, through a merge alias", async () => {

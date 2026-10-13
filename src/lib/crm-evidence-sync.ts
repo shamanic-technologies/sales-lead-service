@@ -98,6 +98,7 @@ export async function judgeEveryCandidate(
   orgId: string,
   brandId: string,
   ctx: CrmIdentityContext,
+  pairedByHuman: ReadonlySet<string> = new Set(),
 ): Promise<CrmJudgingResult> {
   const out: CrmJudgingResult = { contacts: 0, judged: 0, judgmentFailed: 0, deferred: 0, withoutLead: 0 };
   const budget = { remaining: MAX_JUDGMENTS_PER_PASS };
@@ -109,7 +110,8 @@ export async function judgeEveryCandidate(
       loadJudgments(brandId, ids),
       loadRulings(brandId, ids),
     ]);
-    const waiting = page.filter((c) => awaitsJudgment(c, matches, judgments, rulings));
+    // human-service already said who they are: no judgment is bought for them.
+    const waiting = page.filter((c) => !pairedByHuman.has(c.id) && awaitsJudgment(c, matches, judgments, rulings));
     if (waiting.length === 0) continue;
     const leadFacts = await fetchPairedLeadFacts(
       brandId,
@@ -172,12 +174,55 @@ async function upgradeFrozenMatches(
   return upgraded;
 }
 
+/**
+ * "Same human?" is human-service's answer (owner 2026-10-13, LEAD-REFONTE-1013): a CRM contact whose
+ * facts carry a `humanId` (crm-service#125) IS the lead of the brand holding that human (directly, or
+ * through a fleet merge alias). Several leads of one human at the brand (they changed company) = the
+ * most recently created one, the person's current company. Deterministic: no matcher, no judgment. A
+ * person's ruling on the pair still outranks it (resolveCrmPairing).
+ */
+export async function pairByHuman(
+  orgId: string,
+  brandId: string,
+  contacts: readonly CrmContactFunnelEvents[],
+): Promise<Map<string, FrozenMatch>> {
+  const out = new Map<string, FrozenMatch>();
+  const humans = [...new Set(contacts.map((c) => c.humanId).filter((h): h is string => Boolean(h)))];
+  if (humans.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT ON (h.hid) h.hid::text AS human_id, l.id::text AS lead_id
+    FROM unnest(${sql.param(humans)}::uuid[]) AS h(hid)
+    LEFT JOIN human_aliases a ON a.atomic_human_id = h.hid
+    JOIN leads l ON l.human_id = COALESCE(a.human_id, h.hid)
+    WHERE EXISTS (SELECT 1 FROM leads_campaigns lc WHERE lc.lead_id = l.id AND lc.org_id = ${orgId} AND ${brandId} = ANY(lc.brand_ids))
+    ORDER BY h.hid, l.created_at DESC, l.id
+  `)) as unknown as Array<{ human_id: string; lead_id: string }>;
+  const leadOf = new Map(rows.map((r) => [r.human_id, r.lead_id]));
+  for (const c of contacts) {
+    const leadId = c.humanId ? leadOf.get(c.humanId) : undefined;
+    if (!leadId) continue;
+    out.set(c.contactId, {
+      crmContactId: c.contactId,
+      matchedLeadId: leadId,
+      matchMethod: "human",
+      matchConfidence: "deterministic",
+      candidateCount: 1,
+      matchedAt: null,
+    });
+  }
+  return out;
+}
+
 export interface CrmEvidenceSyncResult {
   brandId: string;
   judging: CrmJudgingResult;
   contactsWithEvents: number;
   /** Frozen matches replaced this pass by a deterministic one (crm-pairing-store.ts). */
   upgradedMatches: number;
+  /** Contacts with events paired by human-service's humanId (no matcher, no judgment). */
+  pairedByHuman: number;
+  /** Contacts with events that still needed the old matcher (no humanId, or no lead holds it yet). */
+  neededMatcher: number;
   pairedContacts: number;
   leads: number;
   outcomes: number;
@@ -231,17 +276,20 @@ function saleValueCents(
 export async function syncCrmEvidence(orgId: string, brandId: string): Promise<CrmEvidenceSyncResult> {
   const ctx: CrmIdentityContext = { orgId, brandId };
 
-  const judging = await judgeEveryCandidate(orgId, brandId, ctx);
-
   // Off the bronze copy of crm-service's people fact feed (crm-fact-events.ts); throws, setting
   // nothing aside, while that copy is still filling.
   const contacts = (await loadCrmFunnelEvents(orgId, brandId)).filter((c) => c.events.length > 0);
   const contactIds = contacts.map((c) => c.contactId);
 
+  // Who human-service says each contact IS answers first (pairByHuman); only the rest go through
+  // the old matcher + judgment, and that remainder is counted (`neededMatcher`) until it is 0.
+  const humanMatches = await pairByHuman(orgId, brandId, contacts);
+  const judging = await judgeEveryCandidate(orgId, brandId, ctx, new Set(humanMatches.keys()));
+
   // The frozen pairing for each contact with evidence; match (and freeze) any never matched yet,
   // with the matcher the pairings view uses, off their full contact record.
-  const matches = await loadFrozenMatches(brandId, contactIds);
-  const missing = new Set(contactIds.filter((id) => !matches.has(id)));
+  const matches = await loadFrozenMatches(brandId, contactIds.filter((id) => !humanMatches.has(id)));
+  const missing = new Set(contactIds.filter((id) => !matches.has(id) && !humanMatches.has(id) && !id.startsWith("human:")));
   if (missing.size > 0) {
     const toMatch: CrmContact[] = [];
     for await (const page of streamCrmContacts(brandId, ctx)) {
@@ -253,7 +301,8 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
 
   // A match frozen before the person was a lead (unmatched, or only a name guess) is replaced by a
   // deterministic one once a lead of the brand carries the contact's email (crm-pairing-store.ts).
-  const upgraded = await upgradeFrozenMatches(brandId, contacts, matches);
+  const upgraded = await upgradeFrozenMatches(brandId, contacts.filter((c) => !humanMatches.has(c.contactId)), matches);
+  for (const [id, m] of humanMatches) matches.set(id, m);
 
   const [judgments, rulings] = await Promise.all([
     loadJudgments(brandId, contactIds),
@@ -451,6 +500,8 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     judging,
     contactsWithEvents: contacts.length,
     upgradedMatches: upgraded,
+    pairedByHuman: humanMatches.size,
+    neededMatcher: contacts.length - humanMatches.size,
     pairedContacts,
     leads: leadIds.length,
     outcomes,

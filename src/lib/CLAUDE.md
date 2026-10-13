@@ -39,6 +39,8 @@ features-service keeps a scope's compact rows and fetches only what changed. Per
 
 10. **A frozen match is replaced ONLY by a deterministic one** (`upgradeToDeterministic`, run by the evidence pass): a contact frozen `unmatched` or on a name guess before the person was a lead of the brand is re-matched on its email once a served lead carries it (2026-10-13: 1 of distribute.you's 98 signups was paired, the rest frozen before they became leads). A deterministic match is never touched; judgments/rulings stay with their old pair.
 
+11. **"Same human?" is human-service's answer first (LEAD-REFONTE-1013, crm-service#125)**: a CRM fact carrying `humanId` (read off the copy's `raw`, org view) pairs its contact with the brand's lead holding that human (`pairByHuman`, through `human_aliases`; several leads of one human at the brand = the newest, their current company), deterministic, `matchMethod: "human"`, no matcher, no judgment bought; a fact with no contact row is keyed `human:<id>`. A person's ruling still outranks it. Every pass logs `byHuman` / `neededMatcher`: the matcher + Jev pairing are deleted once `neededMatcher` reads 0 fleet-wide, not before.
+
 Do NOT write back to their CRM, re-ask a frozen judgment on read, or change what attribution does with the shared matcher. Needs `CRM_SERVICE_URL`/`CRM_SERVICE_API_KEY`.
 
 ## CRM evidence on paired leads: `source = 'crm'` (`crm-evidence*.ts`, migration 0040)
