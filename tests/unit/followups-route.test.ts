@@ -7,6 +7,7 @@ const readFollowupState = vi.fn();
 const writeFollowupStatement = vi.fn();
 const lookupFollowupRowByEmail = vi.fn();
 const recordActedByEmail = vi.fn();
+const withdrawHandover = vi.fn();
 
 vi.mock("../../src/config.js", () => ({ LEAD_SERVICE_API_KEY: "test-api-key" }));
 
@@ -23,6 +24,7 @@ vi.mock("../../src/lib/followup-queue.js", async (orig) => {
     readFollowupState: (...a: unknown[]) => readFollowupState(...a),
     writeFollowupStatement: (...a: unknown[]) => writeFollowupStatement(...a),
     lookupFollowupRowByEmail: (...a: unknown[]) => lookupFollowupRowByEmail(...a),
+    withdrawHandover: (...a: unknown[]) => withdrawHandover(...a),
   };
 });
 
@@ -541,6 +543,60 @@ describe("POST /orgs/campaigns/:campaignId/followup-actions/by-email", () => {
     lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "p@x.com" });
     recordActedByEmail.mockRejectedValue(new Error("db down"));
     const res = await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(res.status).toBe(500);
+  });
+});
+
+describe("POST /orgs/leads/:id/followups/handover/withdraw", () => {
+  const url = `/orgs/leads/${ROW}/followups/handover/withdraw`;
+  const state = { id: ROW, handedAt: null, handoverWithdrawal: { withdrawnAt: "2026-10-14T00:00:00.000Z" } };
+
+  beforeEach(() => {
+    withdrawHandover.mockReset();
+  });
+
+  it("400 reason_required when handedReason or reason is missing or blank", async () => {
+    for (const body of [{}, { handedReason: "R" }, { reason: "why" }, { handedReason: "  ", reason: "why" }]) {
+      const res = await request(app).post(url).set(auth).send(body);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("reason_required");
+    }
+    expect(withdrawHandover).not.toHaveBeenCalled();
+  });
+
+  it("400 on a non-uuid id", async () => {
+    const res = await request(app).post("/orgs/leads/nope/followups/handover/withdraw").set(auth).send({ handedReason: "R", reason: "w" });
+    expect(res.status).toBe(400);
+  });
+
+  it("lifted: 200 with the state, the named reason passed through trimmed", async () => {
+    withdrawHandover.mockResolvedValue({ outcome: "lifted", state });
+    const res = await request(app).post(url).set(auth).send({ handedReason: " R ", reason: "re-judged positive" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ outcome: "lifted", followup: state });
+    expect(withdrawHandover).toHaveBeenCalledWith(
+      expect.objectContaining({ orgId: "org-1", id: ROW, handedReason: "R", reason: "re-judged positive" }),
+    );
+  });
+
+  it("nothing_to_lift: 200 naming the cause", async () => {
+    withdrawHandover.mockResolvedValue({ outcome: "nothing_to_lift", cause: "reason_mismatch", state });
+    const res = await request(app).post(url).set(auth).send({ handedReason: "R", reason: "w" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ outcome: "nothing_to_lift", cause: "reason_mismatch", followup: state });
+  });
+
+  it("404 when the row is not the org's", async () => {
+    withdrawHandover.mockResolvedValue({ outcome: "row_not_found" });
+    const res = await request(app).post(url).set(auth).send({ handedReason: "R", reason: "w" });
+    expect(res.status).toBe(404);
+  });
+
+  it("500 when the write throws", async () => {
+    withdrawHandover.mockImplementation(async () => {
+      throw new Error("db down");
+    });
+    const res = await request(app).post(url).set(auth).send({ handedReason: "R", reason: "w" });
     expect(res.status).toBe(500);
   });
 });

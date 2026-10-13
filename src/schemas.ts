@@ -5272,6 +5272,18 @@ const FollowupStateSchema = z
         "To whom / why, as the first hand-over stated it. `owed_before_responder_started` = a never-answered debt due before the earliest responder on this held campaign started (campaign-service createdAt), handed over by the claim instead of answered.",
       example: null,
     }),
+    handoverWithdrawal: z
+      .object({
+        withdrawnAt: z.string(),
+        reason: z.string().nullable().openapi({ description: "Why the hand-over was withdrawn, as the caller stated it." }),
+        handedAt: z.string().nullable().openapi({ description: "When the lifted hand-over had been stated." }),
+        handedReasons: z.array(z.string()).openapi({ description: "Every reason the lifted hand-over carried, in order." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "History: the last hand-over WITHDRAWN on this row (POST /orgs/leads/{id}/followups/handover/withdraw), when, why and what it lifted. null = none ever was. A withdrawn hand-over no longer holds the row.",
+      }),
     dueSetByCampaignId: z.string().nullable().openapi({
       description:
         "WHO set the current due date (the x-campaign-id of the statement that set it), which decides who may claim it: " +
@@ -5294,6 +5306,7 @@ const FollowupStateSchema = z
       stoppedReason: null,
       handedAt: null,
       handedReason: null,
+      handoverWithdrawal: null,
       dueSetByCampaignId: null,
     },
   });
@@ -5605,6 +5618,56 @@ registry.registerPath({
       description:
         "Invalid id or kind; a missing reason on kind=stopped or kind=handed (code reason_required); an unparseable due date (code due_date_unparseable); or one outside the accepted range (code due_date_out_of_bounds, with the bounds)",
     },
+    401: { description: "Unauthorized" },
+    404: { description: "No such lead row for this org" },
+    500: { description: "Internal server error" },
+  },
+});
+
+const WithdrawHandoverRequestSchema = z
+  .object({
+    handedReason: z.string().openapi({
+      description:
+        "The hand-over being withdrawn, named by the reason it was stated with, EXACTLY as written (trimmed). The row is lifted only when every hand-over on it carries this reason; a hand-over anyone else stated (a person answered, the client was asked, owed_before_responder_started) is never lifted.",
+      example: "The reply is about something other than the offer; handed to a person, the automated responder does not answer it",
+    }),
+    reason: z.string().openapi({
+      description: "Why it is withdrawn (stored as history and as the row's stop reason until a scheduled statement).",
+      example: "reply re-judged positive",
+    }),
+  })
+  .openapi("WithdrawHandoverRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/leads/{id}/followups/handover/withdraw",
+  summary: "Withdraw a hand-over to a person whose verdict turned out wrong",
+  description:
+    "For the observer that stated kind=handed when the verdict behind it was wrong (the same reply re-judged). " +
+    "outcome=lifted: the row is no longer handed (no due date, claim released, the lifted hand-over kept under " +
+    "followup.handoverWithdrawal); nothing is due until a later scheduled statement, which re-enters the person " +
+    "like a fresh row. outcome=nothing_to_lift: nothing changed; cause=not_handed (the row holds no hand-over) or " +
+    "reason_mismatch (a hand-over on it names another reason, it stays handed for good). Idempotent: a second " +
+    "withdrawal answers nothing_to_lift/not_handed.",
+  request: {
+    params: LeadRowIdPathParam,
+    body: { content: { "application/json": { schema: WithdrawHandoverRequestSchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "What the withdrawal did, and the resulting state",
+      content: {
+        "application/json": {
+          schema: z.object({
+            outcome: z.enum(["lifted", "nothing_to_lift"]),
+            cause: z.enum(["not_handed", "reason_mismatch"]).optional().openapi({ description: "Present on nothing_to_lift only." }),
+            followup: FollowupStateSchema,
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid id; handedReason or reason missing or blank (code reason_required)" },
     401: { description: "Unauthorized" },
     404: { description: "No such lead row for this org" },
     500: { description: "Internal server error" },
