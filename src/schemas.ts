@@ -7346,6 +7346,107 @@ registry.registerPath({
   },
 });
 
+export const SourceStockRecheckBodySchema = z
+  .object({
+    dryRun: z.boolean().openapi({ description: "true = report what would be set aside, write nothing." }),
+  })
+  .openapi("SourceStockRecheckBody");
+
+export const SourceStockAdoptBodySchema = z
+  .object({
+    fromSourceCampaignId: z.string().min(1).openapi({ description: "The source campaign that set the finds aside." }),
+    dryRun: z.boolean().openapi({ description: "true = report what would be adopted, write nothing." }),
+  })
+  .openapi("SourceStockAdoptBody");
+
+const StockAudienceCountSchema = z.object({ audienceId: z.string().nullable(), inStock: z.number().int() });
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/source-campaigns/{campaignId}/stock/recheck",
+  summary: "Set aside every find in a source's stock that is not its own (internal, service-auth)",
+  description:
+    "Asks, per audience of the source's stock (finds never handed, never set aside), the same question the handover asks: " +
+    "does the audience belong to the source's offer, is its own list the source's origin, and, when the source's campaign " +
+    "targets audiences, is it one of them. Every find of an audience that fails is set aside with that reason " +
+    "(`source_set_aside_reason`), never handed. `before`/`after` count the stock per audience. 404 = not a source campaign " +
+    "of this org; 502 = campaign-service or human-service could not answer (nothing written).",
+  request: {
+    params: z.object({ campaignId: z.string().openapi({ param: { name: "campaignId", in: "path" }, description: "The source campaign." }) }),
+    body: { content: { "application/json": { schema: SourceStockRecheckBodySchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "Rechecked",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              sourceCampaignId: z.string(),
+              dryRun: z.boolean(),
+              before: z.array(StockAudienceCountSchema),
+              setAside: z.array(z.object({ audienceId: z.string(), rows: z.number().int(), reason: z.string() })),
+              after: z.array(StockAudienceCountSchema),
+            })
+            .openapi("SourceStockRecheckResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id or dryRun missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a source campaign of this org" },
+    502: { description: "A sibling service could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/source-campaigns/{campaignId}/stock/adopt",
+  summary: "Take the finds another source set aside that belong to this source (internal, service-auth)",
+  description:
+    "For finds another source of the org set aside and never handed (nobody contacted them through it): per audience, " +
+    "when this source's judge accepts the audience (its offer, its origin, its targeted audiences), every such find is " +
+    "filed under this source as its own find, keeping its original find time; the original row stays set aside. A person " +
+    "this source already holds is skipped. The handover's still-fits question still applies. 404 = not a source campaign " +
+    "of this org; 502 = a sibling could not answer (nothing written).",
+  request: {
+    params: z.object({ campaignId: z.string().openapi({ param: { name: "campaignId", in: "path" }, description: "The source campaign taking the finds." }) }),
+    body: { content: { "application/json": { schema: SourceStockAdoptBodySchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "Adopted",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              sourceCampaignId: z.string(),
+              fromSourceCampaignId: z.string(),
+              dryRun: z.boolean(),
+              audiences: z.array(
+                z.object({
+                  audienceId: z.string(),
+                  candidates: z.number().int(),
+                  adopted: z.number().int(),
+                  refusedReason: z.string().nullable(),
+                }),
+              ),
+              before: z.array(StockAudienceCountSchema),
+              after: z.array(StockAudienceCountSchema),
+            })
+            .openapi("SourceStockAdoptResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id, fromSourceCampaignId or dryRun missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a source campaign of this org" },
+    502: { description: "A sibling service could not answer" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/source-campaigns/leads-found",
