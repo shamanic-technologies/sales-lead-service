@@ -19,6 +19,14 @@ function wrap<Req extends Request = Request>(
 
 const BodySchema = z.object({
   email: z.string().trim().min(3).max(320).refine((v) => v.includes("@"), "not an email address"),
+  // The brand's own organization names this person (src/lib/named-person.ts): absent = today's door.
+  statedBy: z
+    .object({
+      triggerEventId: z.string().trim().min(1).max(200),
+      triggerId: z.string().trim().min(1).max(200).nullish(),
+    })
+    .nullish(),
+  name: z.string().trim().max(300).nullish(),
 });
 
 router.post(
@@ -44,6 +52,8 @@ router.post(
         email: parsed.data.email,
         userId: req.userId ?? null,
         runId: req.runId ?? null,
+        statedBy: parsed.data.statedBy ?? null,
+        fullName: parsed.data.name ?? null,
       });
     } catch (err) {
       console.error(`[lead-service] named person: filing failed campaign=${campaignId}:`, err);
@@ -67,6 +77,18 @@ router.post(
         });
         return;
       }
+      if (result.code === "person_suppressed") {
+        console.log(
+          `[lead-service] named person: suppressed campaign=${campaignId} reason=${result.reason}`,
+        );
+        res.status(409).json({
+          error:
+            "The person may not be contacted (unsubscribed, hard-bounced, or a live opt_out / do_not_contact fact on the human); nothing was filed",
+          code: result.code,
+          reason: result.reason,
+        });
+        return;
+      }
       if (result.code === "campaign_has_no_brand") {
         res.status(409).json({ error: "The campaign states no brand, so there is no brand to file a lead under", code: result.code });
         return;
@@ -81,7 +103,7 @@ router.post(
 
     const { ok: _ok, ...filing } = result;
     console.log(
-      `[lead-service] named person: ${filing.status} campaign=${campaignId} lead=${filing.leadId} row=${filing.leadCampaignId}`,
+      `[lead-service] named person: ${filing.status} campaign=${campaignId} lead=${filing.leadId} row=${filing.leadCampaignId} knownBy=${filing.knownBy}`,
     );
     res.status(filing.status === "filed" ? 201 : 200).json(filing);
   }),

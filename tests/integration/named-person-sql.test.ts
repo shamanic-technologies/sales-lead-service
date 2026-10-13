@@ -12,8 +12,17 @@ import { eq, inArray } from "drizzle-orm";
 const campaignCreatedAt = new Map<string, string>();
 const campaignBrand = new Map<string, string | null>();
 
+const unsubscribed = new Set<string>();
+const gatewayCalls: string[] = [];
 vi.mock("../../src/lib/email-gateway-client.js", () => ({
-  checkDeliveryStatus: async () => ({ results: [] }),
+  checkDeliveryStatus: async (_brandId: string, _campaignId: string, items: Array<{ email: string }>) => {
+    gatewayCalls.push(...items.map((i) => i.email));
+    return {
+      results: items
+        .filter((i) => unsubscribed.has(i.email))
+        .map((i) => ({ email: i.email, broadcast: { global: { email: { bounced: false, unsubscribed: true } } } })),
+    };
+  },
 }));
 
 vi.mock("../../src/lib/campaign-client.js", () => ({
@@ -31,7 +40,8 @@ vi.mock("../../src/lib/campaign-client.js", () => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
-const { leads, leadContactMethods, leadsCampaigns, crmFacts } = await import("../../src/db/schema.js");
+const { leads, leadContactMethods, leadsCampaigns, crmFacts, brandPersonStatements } = await import("../../src/db/schema.js");
+const { sql } = await import("drizzle-orm");
 const namedPeopleRoutes = (await import("../../src/routes/named-people.js")).default;
 const { lookupFollowupRowByEmail, writeFollowupStatement, pickFollowupCandidate } = await import(
   "../../src/lib/followup-queue.js"
@@ -60,13 +70,15 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
   app.use(express.json());
   app.use(namedPeopleRoutes);
 
-  const file = (campaign: string, email: string) =>
+  const file = (campaign: string, email: string, extra: Record<string, unknown> = {}) =>
     request(app)
       .post(`/orgs/campaigns/${campaign}/leads/by-email`)
       .set("x-api-key", "test-api-key")
       .set("x-org-id", orgId)
       .set("x-run-id", randomUUID())
-      .send({ email });
+      .send({ email, ...extra });
+  const stated = (triggerEventId = randomUUID()) => ({ statedBy: { triggerEventId, triggerId: "email_pushed_via_api" } });
+  const humanIds: string[] = [];
 
   async function crmFact(email: string, over: Partial<typeof crmFacts.$inferInsert> = {}): Promise<string> {
     const factId = randomUUID();
@@ -94,6 +106,10 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
   afterAll(async () => {
     await db.delete(leadsCampaigns).where(inArray(leadsCampaigns.campaignId, [campaignId, secondCampaignId]));
     await db.delete(crmFacts).where(eq(crmFacts.orgId, orgId));
+    await db.delete(brandPersonStatements).where(eq(brandPersonStatements.orgId, orgId));
+    if (humanIds.length) {
+      await db.execute(sql`DELETE FROM human_fact_copies WHERE human_id = ANY(${sql.param(humanIds)}::uuid[])`);
+    }
     if (createdLeadIds.length) {
       await db.delete(leadContactMethods).where(inArray(leadContactMethods.leadId, createdLeadIds));
       await db.delete(leads).where(inArray(leads.id, createdLeadIds));
@@ -194,5 +210,73 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
       nowMs: nowMs + 1_000,
     });
     expect(claim.claimed?.id).toBe(filed.body.leadCampaignId);
+  });
+  it("files a STATED stranger (the brand's own org names them on a trigger occurrence): new lead, statement recorded, known from then on", async () => {
+    const eventId = randomUUID();
+    const res = await file(campaignId, addr("pushed"), { ...stated(eventId), name: "Ada Lovelace" });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ status: "filed", campaignId, brandId, email: addr("pushed"), knownBy: "statement" });
+    createdLeadIds.push(res.body.leadId);
+    const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+    expect(lead).toMatchObject({ name: "Ada Lovelace", firstName: "Ada", lastName: "Lovelace" });
+
+    const statements = await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.email, addr("pushed")));
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toMatchObject({ orgId, brandId, source: "trigger_event", sourceRef: eventId, triggerId: "email_pushed_via_api", campaignId });
+
+    // A retry of the same occurrence writes nothing new; a later filing WITHOUT a statement finds them known.
+    expect((await file(campaignId, addr("pushed"), stated(eventId))).body.status).toBe("already_filed");
+    expect(await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.email, addr("pushed")))).toHaveLength(1);
+    const later = await file(secondCampaignId, addr("pushed"));
+    expect(later.status).toBe(201);
+    expect(later.body.leadId).toBe(res.body.leadId);
+  });
+
+  it("a statement for one brand does not make the person known to another org's brand", async () => {
+    await file(campaignId, addr("scoped"), stated());
+    const other = await request(app)
+      .post(`/orgs/campaigns/${campaignId}/leads/by-email`)
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", randomUUID())
+      .send({ email: addr("scoped") });
+    expect(other.body.code).toBe("person_not_known");
+    const [row] = await db.select().from(leadContactMethods).where(eq(leadContactMethods.value, addr("scoped")));
+    createdLeadIds.push(row.leadId);
+  });
+
+  it("refuses a stated person the sender reports unsubscribed, by name, writing nothing", async () => {
+    unsubscribed.add(addr("unsub"));
+    const res = await file(campaignId, addr("unsub"), stated());
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "person_suppressed", reason: "unsubscribed" });
+    expect(await db.select().from(leadContactMethods).where(eq(leadContactMethods.value, addr("unsub")))).toHaveLength(0);
+    expect(await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.email, addr("unsub")))).toHaveLength(0);
+  });
+
+  it("refuses a stated person whose human carries a live do_not_contact fact", async () => {
+    await crmFact(addr("dnc"));
+    const filed = await file(campaignId, addr("dnc"));
+    createdLeadIds.push(filed.body.leadId);
+    const humanId = randomUUID();
+    humanIds.push(humanId);
+    await db.update(leads).set({ humanId }).where(eq(leads.id, filed.body.leadId));
+    await db.execute(sql`
+      INSERT INTO human_fact_copies (fact_id, human_id, kind, event_id)
+      VALUES (${randomUUID()}, ${humanId}, 'do_not_contact', 1)
+    `);
+    const res = await file(secondCampaignId, addr("dnc"), stated());
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: "person_suppressed", reason: "do_not_contact" });
+  });
+
+  it("without a statement the door is unchanged: no suppression read, the stranger still refused", async () => {
+    gatewayCalls.length = 0;
+    await crmFact(addr("plain"));
+    const res = await file(campaignId, addr("plain"));
+    expect(res.status).toBe(201);
+    expect(res.body.knownBy).toBe("crm_fact");
+    createdLeadIds.push(res.body.leadId);
+    expect(gatewayCalls).toEqual([]);
+    expect((await file(campaignId, addr("nobody"))).body.code).toBe("person_not_known");
   });
 });
