@@ -9139,6 +9139,562 @@
           "counts"
         ]
       },
+      "MeetingAttributionResponse": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "object",
+            "properties": {
+              "brandId": {
+                "type": "string",
+                "nullable": true
+              },
+              "since": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "brandId",
+              "since"
+            ]
+          },
+          "legKey": {
+            "type": "string",
+            "enum": [
+              "conversation_to_meeting_booked"
+            ]
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "positiveReplyPeople": {
+                "type": "integer",
+                "description": "People (per brand) who replied positively, first positive reply in the window."
+              },
+              "arms": {
+                "type": "object",
+                "properties": {
+                  "aiMeetingBooking": {
+                    "type": "object",
+                    "properties": {
+                      "handled": {
+                        "type": "integer",
+                        "description": "People who replied positively whose handler is on this side (the rate's population)."
+                      },
+                      "booked": {
+                        "type": "integer",
+                        "description": "Of them, people whose first meeting after the positive reply this side booked."
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true,
+                        "description": "booked / handled; null when nobody was handled."
+                      }
+                    },
+                    "required": [
+                      "handled",
+                      "booked",
+                      "rate"
+                    ],
+                    "description": "Handled by an AI Meeting Booking campaign (channel ai-meeting-booking, leg conversation_to_meeting_booked)."
+                  },
+                  "yourTeamMeetingBooking": {
+                    "type": "object",
+                    "properties": {
+                      "handled": {
+                        "type": "integer",
+                        "description": "People who replied positively whose handler is on this side (the rate's population)."
+                      },
+                      "booked": {
+                        "type": "integer",
+                        "description": "Of them, people whose first meeting after the positive reply this side booked."
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true,
+                        "description": "booked / handled; null when nobody was handled."
+                      }
+                    },
+                    "required": [
+                      "handled",
+                      "booked",
+                      "rate"
+                    ],
+                    "description": "Handled by a PERSON (the client's team): a human-sent reply, a Gmail answer Jev judged one, an answered-outside statement."
+                  },
+                  "unknown": {
+                    "type": "object",
+                    "properties": {
+                      "handled": {
+                        "type": "integer",
+                        "description": "People who replied positively whose handler is on this side (the rate's population)."
+                      },
+                      "booked": {
+                        "type": "integer",
+                        "description": "Of them, people whose first meeting after the positive reply this side booked."
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true,
+                        "description": "booked / handled; null when nobody was handled."
+                      }
+                    },
+                    "required": [
+                      "handled",
+                      "booked",
+                      "rate"
+                    ],
+                    "description": "Handled by an AI answer whose campaign nothing names."
+                  },
+                  "other": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "handled": {
+                          "type": "integer",
+                          "description": "People who replied positively whose handler is on this side (the rate's population)."
+                        },
+                        "booked": {
+                          "type": "integer",
+                          "description": "Of them, people whose first meeting after the positive reply this side booked."
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true,
+                          "description": "booked / handled; null when nobody was handled."
+                        },
+                        "featureSlug": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "legKey": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "handled",
+                        "booked",
+                        "rate",
+                        "featureSlug",
+                        "legKey"
+                      ]
+                    },
+                    "description": "Handled by an AI act of ANOTHER leg (AI Instant Call, a WhatsApp responder...): known, never folded into AI Meeting Booking."
+                  }
+                },
+                "required": [
+                  "aiMeetingBooking",
+                  "yourTeamMeetingBooking",
+                  "unknown",
+                  "other"
+                ]
+              },
+              "unhandled": {
+                "type": "object",
+                "properties": {
+                  "people": {
+                    "type": "integer"
+                  },
+                  "booked": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "people",
+                  "booked"
+                ],
+                "description": "Replied positively, no answer of ours before the meeting / to date: in no side's population. handled (all sides) + unhandled.people = positiveReplyPeople."
+              },
+              "meetings": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer"
+                  },
+                  "aiMeetingBooking": {
+                    "type": "integer"
+                  },
+                  "yourTeamMeetingBooking": {
+                    "type": "integer"
+                  },
+                  "other": {
+                    "type": "integer"
+                  },
+                  "unknown": {
+                    "type": "integer"
+                  },
+                  "unknownReasons": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "required": [
+                  "total",
+                  "aiMeetingBooking",
+                  "yourTeamMeetingBooking",
+                  "other",
+                  "unknown",
+                  "unknownReasons"
+                ]
+              }
+            },
+            "required": [
+              "positiveReplyPeople",
+              "arms",
+              "unhandled",
+              "meetings"
+            ]
+          },
+          "byBrand": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "positiveReplyPeople": {
+                  "type": "integer",
+                  "description": "People (per brand) who replied positively, first positive reply in the window."
+                },
+                "arms": {
+                  "type": "object",
+                  "properties": {
+                    "aiMeetingBooking": {
+                      "type": "object",
+                      "properties": {
+                        "handled": {
+                          "type": "integer",
+                          "description": "People who replied positively whose handler is on this side (the rate's population)."
+                        },
+                        "booked": {
+                          "type": "integer",
+                          "description": "Of them, people whose first meeting after the positive reply this side booked."
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true,
+                          "description": "booked / handled; null when nobody was handled."
+                        }
+                      },
+                      "required": [
+                        "handled",
+                        "booked",
+                        "rate"
+                      ],
+                      "description": "Handled by an AI Meeting Booking campaign (channel ai-meeting-booking, leg conversation_to_meeting_booked)."
+                    },
+                    "yourTeamMeetingBooking": {
+                      "type": "object",
+                      "properties": {
+                        "handled": {
+                          "type": "integer",
+                          "description": "People who replied positively whose handler is on this side (the rate's population)."
+                        },
+                        "booked": {
+                          "type": "integer",
+                          "description": "Of them, people whose first meeting after the positive reply this side booked."
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true,
+                          "description": "booked / handled; null when nobody was handled."
+                        }
+                      },
+                      "required": [
+                        "handled",
+                        "booked",
+                        "rate"
+                      ],
+                      "description": "Handled by a PERSON (the client's team): a human-sent reply, a Gmail answer Jev judged one, an answered-outside statement."
+                    },
+                    "unknown": {
+                      "type": "object",
+                      "properties": {
+                        "handled": {
+                          "type": "integer",
+                          "description": "People who replied positively whose handler is on this side (the rate's population)."
+                        },
+                        "booked": {
+                          "type": "integer",
+                          "description": "Of them, people whose first meeting after the positive reply this side booked."
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true,
+                          "description": "booked / handled; null when nobody was handled."
+                        }
+                      },
+                      "required": [
+                        "handled",
+                        "booked",
+                        "rate"
+                      ],
+                      "description": "Handled by an AI answer whose campaign nothing names."
+                    },
+                    "other": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "handled": {
+                            "type": "integer",
+                            "description": "People who replied positively whose handler is on this side (the rate's population)."
+                          },
+                          "booked": {
+                            "type": "integer",
+                            "description": "Of them, people whose first meeting after the positive reply this side booked."
+                          },
+                          "rate": {
+                            "type": "number",
+                            "nullable": true,
+                            "description": "booked / handled; null when nobody was handled."
+                          },
+                          "featureSlug": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "legKey": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "handled",
+                          "booked",
+                          "rate",
+                          "featureSlug",
+                          "legKey"
+                        ]
+                      },
+                      "description": "Handled by an AI act of ANOTHER leg (AI Instant Call, a WhatsApp responder...): known, never folded into AI Meeting Booking."
+                    }
+                  },
+                  "required": [
+                    "aiMeetingBooking",
+                    "yourTeamMeetingBooking",
+                    "unknown",
+                    "other"
+                  ]
+                },
+                "unhandled": {
+                  "type": "object",
+                  "properties": {
+                    "people": {
+                      "type": "integer"
+                    },
+                    "booked": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "people",
+                    "booked"
+                  ],
+                  "description": "Replied positively, no answer of ours before the meeting / to date: in no side's population. handled (all sides) + unhandled.people = positiveReplyPeople."
+                },
+                "meetings": {
+                  "type": "object",
+                  "properties": {
+                    "total": {
+                      "type": "integer"
+                    },
+                    "aiMeetingBooking": {
+                      "type": "integer"
+                    },
+                    "yourTeamMeetingBooking": {
+                      "type": "integer"
+                    },
+                    "other": {
+                      "type": "integer"
+                    },
+                    "unknown": {
+                      "type": "integer"
+                    },
+                    "unknownReasons": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "required": [
+                    "total",
+                    "aiMeetingBooking",
+                    "yourTeamMeetingBooking",
+                    "other",
+                    "unknown",
+                    "unknownReasons"
+                  ]
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "positiveReplyPeople",
+                "arms",
+                "unhandled",
+                "meetings",
+                "orgId",
+                "brandId"
+              ]
+            }
+          },
+          "attributedMeetings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "conversionEventId": {
+                  "type": "string"
+                },
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "event": {
+                  "type": "string",
+                  "description": "meeting_booked | meeting_attended"
+                },
+                "source": {
+                  "type": "string",
+                  "description": "tracker | crm | manual"
+                },
+                "email": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "occurredAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "leadId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "The person; null = the row names none (unmatched / held)."
+                },
+                "positiveReply": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "ref": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ref",
+                    "at"
+                  ],
+                  "description": "The latest positive reply at or before the meeting."
+                },
+                "bookedBy": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "ai",
+                        "person"
+                      ]
+                    },
+                    "campaignId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "featureSlug": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "legKey": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "answerRef": {
+                      "type": "string"
+                    },
+                    "answerVia": {
+                      "type": "string",
+                      "enum": [
+                        "followup_ledger",
+                        "reply_sent",
+                        "gmail_answer",
+                        "answered_outside"
+                      ]
+                    },
+                    "answeredAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "campaignId",
+                    "featureSlug",
+                    "legKey",
+                    "answerRef",
+                    "answerVia",
+                    "answeredAt"
+                  ]
+                },
+                "arm": {
+                  "type": "string",
+                  "enum": [
+                    "aiMeetingBooking",
+                    "yourTeamMeetingBooking",
+                    "other",
+                    "unknown"
+                  ]
+                },
+                "unknownReason": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "person_unknown",
+                    "match_needs_review",
+                    "undated",
+                    "no_positive_reply_before",
+                    "no_answer_before_meeting",
+                    "ai_campaign_unknown",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "conversionEventId",
+                "orgId",
+                "brandId",
+                "event",
+                "source",
+                "email",
+                "occurredAt",
+                "leadId",
+                "positiveReply",
+                "bookedBy",
+                "arm",
+                "unknownReason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "scope",
+          "legKey",
+          "summary",
+          "byBrand",
+          "attributedMeetings"
+        ]
+      },
       "SocialEngagementsSyncResponse": {
         "type": "object",
         "properties": {
@@ -16417,6 +16973,64 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "campaign-service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/meeting-attribution": {
+      "get": {
+        "summary": "Who booked each meeting (AI Meeting Booking or the client's team) and the Positive reply -> Meeting booked rate per side (internal, service-auth)",
+        "description": "Every live `meeting_booked` / `meeting_attended` (calendar tracker, CRM, a person's statement) tied to its PERSON and to WHAT BOOKED IT, derived on read from positive facts on the same person at the same brand, nothing stored, no meeting row rewritten. A meeting is booked by the LATEST answer of ours dated between the person's first positive reply and the meeting: an AI act of the follow-up ledger names its acting campaign (campaign-service states its channel and leg; an automation `reply_sent` takes the campaign of the ledger act it records, within 10 min), a PERSON's answer (human-sent reply, Gmail answer Jev judged one, answered-outside statement) is the client's team, with the brand's Your Team Meeting Booking campaign of the offer when one exists. The person's handler (the rate's population) is that answer when they booked, else their latest answer to date: sides PARTITION the people who replied positively (+ `unhandled`). A meeting the rule cannot answer is `unknown` with its reason, never given to a side. Fleet-wide without `brandId` (with `byBrand`); `since` keeps people whose first positive reply and meetings are at or after it. 502 when campaign-service cannot answer.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "One brand; absent = fleet-wide."
+            },
+            "required": false,
+            "description": "One brand; absent = fleet-wide.",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO instant: people whose first positive reply, and meetings, at or after it."
+            },
+            "required": false,
+            "description": "ISO instant: people whose first positive reply, and meetings, at or after it.",
+            "name": "since",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Meetings with who booked them, and the rate per side",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingAttributionResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Unparseable `since`"
           },
           "401": {
             "description": "Unauthorized"
