@@ -226,7 +226,10 @@ export async function serveThroughCandidates(audienceId: string, ctx: ServiceCon
       throw error;
     }
     if (next.status === "pending") return { status: "pending", person: null };
-    if (next.status === "exhausted" || !next.candidate) return { status: "exhausted", person: null };
+    if (next.status === "exhausted" || !next.candidate) {
+      // Carry human-service's own reason (no_recent_posts is not exhaustion); absent stays absent.
+      return next.reason ? { status: "exhausted", person: null, reason: next.reason } : { status: "exhausted", person: null };
+    }
     const candidate = next.candidate;
 
     if (mustPass === null) {

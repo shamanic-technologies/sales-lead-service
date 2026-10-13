@@ -72,6 +72,10 @@ describe("serveThroughCandidates", () => {
 
   it("passes exhausted and pending through unchanged", async () => {
     nextCandidate.mockResolvedValueOnce({ status: "exhausted", candidate: null, reason: "pool_exhausted", target });
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "exhausted", person: null, reason: "pool_exhausted" });
+    nextCandidate.mockResolvedValueOnce({ status: "exhausted", candidate: null, reason: "no_recent_posts", target });
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "exhausted", person: null, reason: "no_recent_posts" });
+    nextCandidate.mockResolvedValueOnce({ status: "exhausted", candidate: null, target });
     expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "exhausted", person: null });
     nextCandidate.mockResolvedValueOnce({ status: "pending", candidate: null, target });
     expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "pending", person: null });

@@ -25,6 +25,8 @@ import {
   SERVE_TIMED_OUT_REASON,
   SOURCE_STOCK_EMPTY_REASON,
   AUDIENCE_OFFER_MISMATCH_REASON,
+  NO_RECENT_POSTS_REASON,
+  isNoRecentPostsAnswer,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
@@ -491,6 +493,7 @@ export async function pullNext(
   // says so instead.
   if (mode.kind === "find") {
     let notServeable = 0;
+    let noRecentPosts = 0;
     for (const candidateAudienceId of mode.audienceIds) {
       if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
       const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
@@ -510,12 +513,19 @@ export async function pullNext(
         );
         return { found: false, reason: SERVE_TIMED_OUT_REASON };
       }
+      if (isNoRecentPostsAnswer(served)) {
+        noRecentPosts++;
+        continue;
+      }
       if (served.status === "exhausted" || !served.person) continue;
       return recordServed(served, candidateAudienceId);
     }
-    const reason = notServeable > 0 ? AUDIENCE_NOT_SERVEABLE_REASON : AUDIENCE_EXHAUSTED_REASON;
+    // An audience with nothing to read (competitor pages posted nothing) means the walk did NOT find everyone gone:
+    // it wins over the rest. Then an audience that could not be walked; only a full walk-out is exhaustion.
+    const reason =
+      noRecentPosts > 0 ? NO_RECENT_POSTS_REASON : notServeable > 0 ? AUDIENCE_NOT_SERVEABLE_REASON : AUDIENCE_EXHAUSTED_REASON;
     console.log(
-      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable}`,
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable} noRecentPosts=${noRecentPosts}`,
     );
     return { found: false, reason };
   }
@@ -554,6 +564,14 @@ export async function pullNext(
       `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId} serveNext=pending`,
     );
     return { found: false, reason: SERVE_TIMED_OUT_REASON };
+  }
+
+  if (isNoRecentPostsAnswer(served)) {
+    console.log(
+      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${NO_RECENT_POSTS_REASON} audienceId=${audienceId}`,
+    );
+    // Nothing to read engagers from yet: not a population that ran out.
+    return { found: false, reason: NO_RECENT_POSTS_REASON };
   }
 
   if (served.status === "exhausted" || !served.person) {
