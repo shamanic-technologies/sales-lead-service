@@ -6,13 +6,9 @@ const fetchCrmConnection = vi.fn();
 const fetchCrmContactsPage = vi.fn();
 const streamCrmContacts = vi.fn();
 const fetchCrmOpportunitiesByContact = vi.fn();
-const matchConversion = vi.fn();
-const judgeSamePerson = vi.fn();
+const matchesForContacts = vi.fn();
 
-const loadFrozenMatches = vi.fn();
-const freezeMatches = vi.fn();
 const loadJudgments = vi.fn();
-const saveJudgment = vi.fn();
 const loadRulings = vi.fn();
 const upsertRuling = vi.fn();
 const withdrawRuling = vi.fn();
@@ -40,24 +36,17 @@ vi.mock("../../src/lib/crm-client.js", async (orig) => {
   };
 });
 
-vi.mock("../../src/lib/conversions.js", async (orig) => {
+// "Same human?" is human-service's answer: the route reads it through matchesForContacts.
+vi.mock("../../src/lib/crm-matching.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, matchConversion: (...a: unknown[]) => matchConversion(...a) };
-});
-
-vi.mock("../../src/lib/judgment-client.js", async (orig) => {
-  const actual = (await orig()) as Record<string, unknown>;
-  return { ...actual, judgeSamePerson: (...a: unknown[]) => judgeSamePerson(...a) };
+  return { ...actual, matchesForContacts: (...a: unknown[]) => matchesForContacts(...a) };
 });
 
 vi.mock("../../src/lib/crm-pairing-store.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
     ...actual,
-    loadFrozenMatches: (...a: unknown[]) => loadFrozenMatches(...a),
-    freezeMatches: (...a: unknown[]) => freezeMatches(...a),
     loadJudgments: (...a: unknown[]) => loadJudgments(...a),
-    saveJudgment: (...a: unknown[]) => saveJudgment(...a),
     loadRulings: (...a: unknown[]) => loadRulings(...a),
     upsertRuling: (...a: unknown[]) => upsertRuling(...a),
     withdrawRuling: (...a: unknown[]) => withdrawRuling(...a),
@@ -127,6 +116,42 @@ function leadFacts() {
   ]);
 }
 
+/** What matchesForContacts answers: a contact human-service ties to a lead, or nothing. */
+function humanMatch(crmContactId: string, leadId: string | null) {
+  return leadId
+    ? {
+        crmContactId,
+        matchedLeadId: leadId,
+        matchMethod: "human",
+        matchConfidence: "deterministic",
+        candidateCount: 1,
+        matchedAt: null,
+      }
+    : {
+        crmContactId,
+        matchedLeadId: null,
+        matchMethod: null,
+        matchConfidence: "unmatched",
+        candidateCount: 0,
+        matchedAt: null,
+      };
+}
+
+/** human-service ties exactly these contacts to these leads; every other contact is unmatched. */
+function humansPair(leadByContact: Record<string, string>) {
+  matchesForContacts.mockImplementation(
+    async (_org: string, _brand: string, contacts: Array<{ id: string }>) =>
+      new Map(contacts.map((c) => [c.id, humanMatch(c.id, leadByContact[c.id] ?? null)])),
+  );
+}
+
+function rejection(crmContactId: string, note = "different person") {
+  return [
+    `${crmContactId}:${LEAD}`,
+    { ruling: "rejected", note, statedByUserId: "u1", statedAt: "2026-09-22T01:00:00.000Z" },
+  ] as const;
+}
+
 let app: express.Express;
 
 beforeAll(async () => {
@@ -142,12 +167,8 @@ beforeEach(() => {
     fetchCrmContactsPage,
     streamCrmContacts,
     fetchCrmOpportunitiesByContact,
-    matchConversion,
-    judgeSamePerson,
-    loadFrozenMatches,
-    freezeMatches,
+    matchesForContacts,
     loadJudgments,
-    saveJudgment,
     loadRulings,
     upsertRuling,
     withdrawRuling,
@@ -157,8 +178,8 @@ beforeEach(() => {
   ]) {
     m.mockReset();
   }
+  humansPair({});
   fetchCrmOpportunitiesByContact.mockResolvedValue(new Map());
-  loadFrozenMatches.mockResolvedValue(new Map());
   loadJudgments.mockResolvedValue(new Map());
   loadRulings.mockResolvedValue(new Map());
   fetchPairedLeadFacts.mockResolvedValue(new Map());
@@ -199,29 +220,6 @@ describe("GET /orgs/leads/crm-pairings", () => {
   it("serves a brand whose people come from tools other than GoHighLevel", async () => {
     fetchCrmConnection.mockResolvedValue(null);
     fetchCrmContactsPage.mockResolvedValue([contact()]);
-    matchConversion.mockResolvedValue({
-      matchedLeadId: null,
-      matchMethod: null,
-      matchConfidence: "unmatched",
-      attributionStatus: "unmatched",
-      candidateCount: 0,
-      candidates: [],
-    });
-    freezeMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: null,
-            matchMethod: null,
-            matchConfidence: "unmatched",
-            candidateCount: 0,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.crmConnected).toBe(true);
@@ -229,215 +227,63 @@ describe("GET /orgs/leads/crm-pairings", () => {
     expect(res.body.pairings).toHaveLength(1);
   });
 
-  it("answers an empty page for a CRM whose contacts nothing pairs", async () => {
+  it("serves a contact human-service ties to no lead as unpaired", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     fetchCrmContactsPage.mockResolvedValue([contact()]);
-    matchConversion.mockResolvedValue({
-      matchedLeadId: null,
-      matchMethod: null,
-      matchConfidence: "unmatched",
-      attributionStatus: "unmatched",
-      candidateCount: 0,
-      candidates: [],
-    });
-    freezeMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: null,
-            matchMethod: null,
-            matchConfidence: "unmatched",
-            candidateCount: 0,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
 
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.pairings).toHaveLength(1);
     expect(res.body.pairings[0].pairing.state).toBe("unpaired");
+    expect(res.body.pairings[0].pairing.decidedBy).toBeNull();
     expect(res.body.pairings[0].pairing.lead).toBeNull();
-    expect(judgeSamePerson).not.toHaveBeenCalled();
+    expect(matchesForContacts).toHaveBeenCalledWith("org-1", BRAND, [expect.objectContaining({ id: "crm-1" })]);
   });
 
-  it("serves a name-only pairing as unconfirmed and asks a judgment about it", async () => {
+  // The pairing is human-service's answer, nothing else: a shared NAME pairs nobody.
+  it("pairs a contact human-service ties to a lead, decided by that signal, with no judgment", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     fetchCrmContactsPage.mockResolvedValue([contact()]);
-    matchConversion.mockResolvedValue({
-      matchedLeadId: LEAD,
-      matchMethod: "last_name",
-      matchConfidence: "probabilistic",
-      attributionStatus: "attributed",
-      candidateCount: 12,
-      candidates: [{ leadId: LEAD }],
-    });
-    const frozen = new Map([
-      [
-        "crm-1",
-        {
-          crmContactId: "crm-1",
-          matchedLeadId: LEAD,
-          matchMethod: "last_name",
-          matchConfidence: "probabilistic",
-          candidateCount: 12,
-          matchedAt: "2026-09-22T00:00:00.000Z",
-        },
-      ],
-    ]);
-    freezeMatches.mockResolvedValue(frozen);
+    humansPair({ "crm-1": LEAD });
     fetchPairedLeadFacts.mockResolvedValue(leadFacts());
-    judgeSamePerson.mockResolvedValue({ probability: 0.93, model: "jev-1.13.0" });
 
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
-    expect(judgeSamePerson).toHaveBeenCalledTimes(1);
-    expect(saveJudgment).toHaveBeenCalledTimes(1);
-
     const row = res.body.pairings[0];
     expect(row.pairing.state).toBe("paired");
-    expect(row.pairing.decidedBy).toBe("judgment");
-    expect(row.pairing.judgment.model).toBe("jev-1.13.0");
-    expect(row.pairing.judgment.samePersonProbability).toBeCloseTo(0.93);
-    expect(row.pairing.evidence.matchMethod).toBe("last_name");
-    expect(row.pairing.evidence.candidateCount).toBe(12);
-  });
-
-  // The acceptance criterion: the vendor being unreachable can never merge or reject.
-  it("degrades to unconfirmed and says so when the judgment vendor is unreachable", async () => {
-    const { JudgmentUnavailableError } = await import("../../src/lib/judgment-client.js");
-    fetchCrmConnection.mockResolvedValue(CONNECTION);
-    fetchCrmContactsPage.mockResolvedValue([contact()]);
-    matchConversion.mockResolvedValue({
-      matchedLeadId: LEAD,
-      matchMethod: "last_name",
-      matchConfidence: "probabilistic",
-      attributionStatus: "attributed",
-      candidateCount: 12,
-      candidates: [{ leadId: LEAD }],
+    expect(row.pairing.decidedBy).toBe("signal");
+    expect(row.pairing.toConfirm).toBe(false);
+    expect(row.pairing.lead.leadId).toBe(LEAD);
+    expect(row.pairing.evidence).toEqual({
+      matchMethod: "human",
+      matchConfidence: "deterministic",
+      candidateCount: 1,
+      matchedAt: null,
     });
-    freezeMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: LEAD,
-            matchMethod: "last_name",
-            matchConfidence: "probabilistic",
-            candidateCount: 12,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
-    fetchPairedLeadFacts.mockResolvedValue(leadFacts());
-    judgeSamePerson.mockRejectedValue(
-      new JudgmentUnavailableError("judgment_service_unavailable", "chat-service unreachable"),
-    );
-
-    const res = await request(app).get(url).set(auth);
-    expect(res.status).toBe(200);
-    const row = res.body.pairings[0];
-    expect(row.pairing.state).toBe("unconfirmed");
-    expect(row.pairing.decidedBy).toBeNull();
-    expect(row.pairing.judgment.status).toBe("unavailable");
-    expect(row.pairing.judgment.unavailableReason).toBe("judgment_service_unavailable");
-    expect(saveJudgment).not.toHaveBeenCalled();
+    expect(row.pairing.judgment.status).toBe("not_needed");
+    expect(fetchPairedLeadFacts).toHaveBeenCalledWith(BRAND, [LEAD]);
   });
 
-  // Stability: a frozen match is never recomputed, so a second read is byte-identical.
-  it("re-reads a frozen pairing without re-matching or re-judging it", async () => {
+  // Stability: the same contact reads the same pairing twice.
+  it("re-reads a pairing byte-identically", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     fetchCrmContactsPage.mockResolvedValue([contact()]);
-    loadFrozenMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: LEAD,
-            matchMethod: "last_name",
-            matchConfidence: "probabilistic",
-            candidateCount: 12,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
-    loadJudgments.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            leadId: LEAD,
-            samePersonProbability: 0.93,
-            model: "jev-1.13.0",
-            judgedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
+    humansPair({ "crm-1": LEAD });
     fetchPairedLeadFacts.mockResolvedValue(leadFacts());
 
     const first = await request(app).get(url).set(auth);
     const second = await request(app).get(url).set(auth);
     expect(first.status).toBe(200);
     expect(second.body).toEqual(first.body);
-    expect(matchConversion).not.toHaveBeenCalled();
-    expect(freezeMatches).not.toHaveBeenCalled();
-    expect(judgeSamePerson).not.toHaveBeenCalled();
     expect(first.body.pairings[0].pairing.state).toBe("paired");
   });
 
-  // A human ruling survives the matcher proposing the same pairing again.
-  it("a human rejection outranks a confident judgment and a re-run of the matcher", async () => {
+  // A person's ruling outranks human-service's pairing.
+  it("a person's rejection outranks a human-service pairing", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     fetchCrmContactsPage.mockResolvedValue([contact()]);
-    loadFrozenMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: LEAD,
-            matchMethod: "last_name",
-            matchConfidence: "probabilistic",
-            candidateCount: 12,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
-    loadJudgments.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            leadId: LEAD,
-            samePersonProbability: 0.97,
-            model: "jev-1.13.0",
-            judgedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
-    loadRulings.mockResolvedValue(
-      new Map([
-        [
-          `crm-1:${LEAD}`,
-          {
-            ruling: "rejected",
-            note: "different person",
-            statedByUserId: "u1",
-            statedAt: "2026-09-22T01:00:00.000Z",
-          },
-        ],
-      ]),
-    );
+    humansPair({ "crm-1": LEAD });
+    loadRulings.mockResolvedValue(new Map([rejection("crm-1")]));
     fetchPairedLeadFacts.mockResolvedValue(leadFacts());
 
     const res = await request(app).get(url).set(auth);
@@ -445,28 +291,12 @@ describe("GET /orgs/leads/crm-pairings", () => {
     expect(row.pairing.state).toBe("rejected");
     expect(row.pairing.decidedBy).toBe("human");
     expect(row.pairing.ruling.note).toBe("different person");
-    // The judgment is still reported — the human overrode it, they did not erase it.
-    expect(row.pairing.judgment.samePersonProbability).toBeCloseTo(0.97);
   });
 
   it("serves their opportunities as a SET and never maps their stage names", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     fetchCrmContactsPage.mockResolvedValue([contact({ primaryEmail: "dana@acme.com" })]);
-    loadFrozenMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: LEAD,
-            matchMethod: "email",
-            matchConfidence: "deterministic",
-            candidateCount: 1,
-            matchedAt: "2026-09-22T00:00:00.000Z",
-          },
-        ],
-      ]),
-    );
+    humansPair({ "crm-1": LEAD });
     fetchPairedLeadFacts.mockResolvedValue(leadFacts());
     fetchCrmOpportunitiesByContact.mockResolvedValue(
       new Map([
@@ -511,7 +341,6 @@ describe("GET /orgs/leads/crm-pairings", () => {
     expect(row.theirStatus.states.sort()).toEqual(["open", "won"]);
     expect(row.theirStatus.stageNamesComparable).toBe(false);
     expect(row.theirStatus.stageComparabilityReason).toBe("stage_names_are_free_text_per_customer");
-    expect(judgeSamePerson).not.toHaveBeenCalled();
   });
 
   it("502s rather than pretending their CRM is empty", async () => {
@@ -522,44 +351,26 @@ describe("GET /orgs/leads/crm-pairings", () => {
   });
 });
 
-function frozen(id: string, over: Record<string, unknown> = {}) {
-  return {
-    crmContactId: id,
-    matchedLeadId: LEAD,
-    matchMethod: "email",
-    matchConfidence: "deterministic",
-    candidateCount: 1,
-    matchedAt: null,
-    ...over,
-  };
-}
-
 /**
  * Six of their contacts, in their list order:
- *   crm-a paired (email)   crm-b unpaired   crm-c unconfirmed (last name)
- *   crm-d paired (email)   crm-e unpaired   crm-f unconfirmed (last name)
+ *   crm-a paired (human)   crm-b unpaired   crm-c rejected (human-service paired it, a person denied it)
+ *   crm-d paired (human)   crm-e unpaired   crm-f rejected
  */
 function sixContactFixture() {
   const ids = ["crm-a", "crm-b", "crm-c", "crm-d", "crm-e", "crm-f"];
-  const matches = new Map<string, ReturnType<typeof frozen>>([
-    ["crm-a", frozen("crm-a")],
-    ["crm-b", frozen("crm-b", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
-    ["crm-c", frozen("crm-c", { matchMethod: "last_name", matchConfidence: "probabilistic", candidateCount: 9 })],
-    ["crm-d", frozen("crm-d")],
-    ["crm-e", frozen("crm-e", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
-    ["crm-f", frozen("crm-f", { matchMethod: "last_name", matchConfidence: "probabilistic", candidateCount: 9 })],
-  ]);
   fetchCrmConnection.mockResolvedValue(CONNECTION);
   // The walk honours its start position, exactly like crm-service's offset.
   streamCrmContacts.mockImplementation(async function* (_b: string, _c: unknown, start = 0) {
     yield ids.slice(start).map((id) => contact({ id }));
   });
-  loadFrozenMatches.mockImplementation(async (_b: string, wanted: string[]) =>
-    new Map(wanted.filter((id) => matches.has(id)).map((id) => [id, matches.get(id)!])),
-  );
+  humansPair({ "crm-a": LEAD, "crm-c": LEAD, "crm-d": LEAD, "crm-f": LEAD });
+  loadRulings.mockResolvedValue(new Map([rejection("crm-c"), rejection("crm-f")]));
   fetchPairedLeadFacts.mockResolvedValue(leadFacts());
   return ids;
 }
+
+const idsOf = (body: { pairings: Array<{ crmContact: { id: string } }> }) =>
+  body.pairings.map((p) => p.crmContact.id);
 
 describe("GET /orgs/leads/crm-pairings?state=", () => {
   const url = `/orgs/leads/crm-pairings?brandId=${BRAND}`;
@@ -573,38 +384,43 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
     expect(streamCrmContacts).not.toHaveBeenCalled();
   });
 
-  it("serves only the paired rows, judging candidates first (a judgment can pair them), and says there is no more", async () => {
+  it("serves only the paired rows and says there is no more", async () => {
     sixContactFixture();
-    // Both name-only candidates are judged different people, so they reject and stay out.
-    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const res = await request(app).get(`${url}&state=paired`).set(auth);
     expect(res.status).toBe(200);
-    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a", "crm-d"]);
+    expect(idsOf(res.body)).toEqual(["crm-a", "crm-d"]);
     expect(res.body.pairings.every((p: { pairing: { state: string } }) => p.pairing.state === "paired")).toBe(true);
     expect(res.body.nextOffset).toBeNull();
-    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
     expect(fetchCrmContactsPage).not.toHaveBeenCalled();
   });
 
-  it("an unpaired-only read never buys a judgment: no judgment can move a row into or out of it", async () => {
+  it("serves only the unpaired rows", async () => {
     sixContactFixture();
     const res = await request(app).get(`${url}&state=unpaired`).set(auth);
     expect(res.status).toBe(200);
-    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-b", "crm-e"]);
-    expect(judgeSamePerson).not.toHaveBeenCalled();
+    expect(idsOf(res.body)).toEqual(["crm-b", "crm-e"]);
+  });
+
+  it("serves only the rows a person rejected, decided by that person", async () => {
+    sixContactFixture();
+    const res = await request(app).get(`${url}&state=rejected`).set(auth);
+    expect(res.status).toBe(200);
+    expect(idsOf(res.body)).toEqual(["crm-c", "crm-f"]);
+    expect(res.body.pairings.every((p: { pairing: { decidedBy: string } }) => p.pairing.decidedBy === "human")).toBe(
+      true,
+    );
   });
 
   // The acceptance criterion: paging the filter visits exactly the set the counts report.
   it("pages the filtered set by position in their list, and the pages add up to the counts", async () => {
     sixContactFixture();
-    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const seen: string[] = [];
     let offset: number | null = 0;
     let pages = 0;
     while (offset !== null) {
       const page = await request(app).get(`${url}&state=paired,unpaired&limit=1&offset=${offset}`).set(auth);
       expect(page.status).toBe(200);
-      seen.push(...page.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id));
+      seen.push(...idsOf(page.body));
       offset = page.body.nextOffset;
       pages += 1;
       expect(pages).toBeLessThan(10);
@@ -613,45 +429,32 @@ describe("GET /orgs/leads/crm-pairings?state=", () => {
 
     const counts = await request(app).get(`/orgs/leads/crm-pairing-counts?brandId=${BRAND}`).set(auth);
     expect(counts.body.counts.byState.paired + counts.body.counts.byState.unpaired).toBe(seen.length);
+    expect(counts.body.counts.byState.rejected).toBe(2);
   });
 
   it("nextOffset is the position of the next matching contact, so a row ruled on meanwhile skips nobody", async () => {
     sixContactFixture();
-    judgeSamePerson.mockResolvedValue({ probability: 0.05, model: "jev-1.13.0" });
     const first = await request(app).get(`${url}&state=paired&limit=1`).set(auth);
-    expect(first.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-a"]);
+    expect(idsOf(first.body)).toEqual(["crm-a"]);
     // crm-d sits at position 3 in their list.
     expect(first.body.nextOffset).toBe(3);
     const second = await request(app).get(`${url}&state=paired&limit=1&offset=3`).set(auth);
-    expect(second.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-d"]);
+    expect(idsOf(second.body)).toEqual(["crm-d"]);
     expect(second.body.nextOffset).toBeNull();
   });
 
-  it("a to-confirm read judges what it walks and serves every name-only pairing a judgment paired", async () => {
+  // A pairing human-service decided is never "to confirm": nothing waits on a person.
+  it("a to-confirm read serves nothing; toConfirm=false serves the paired rows", async () => {
     sixContactFixture();
-    // crm-c is judged the same person confidently, crm-f hesitantly. Both are name-only, so both
-    // pair TO CONFIRM: a name is a hint until a person accepts it (owner, 2026-10-10).
-    judgeSamePerson
-      .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
-      .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
-    const res = await request(app).get(`${url}&toConfirm=true`).set(auth);
-    expect(res.status).toBe(200);
-    expect(judgeSamePerson).toHaveBeenCalledTimes(2);
-    expect(saveJudgment).toHaveBeenCalledTimes(2);
-    expect(res.body.pairings.map((p: { crmContact: { id: string } }) => p.crmContact.id)).toEqual(["crm-c", "crm-f"]);
-    expect(res.body.pairings.map((p: { pairing: { state: string } }) => p.pairing.state)).toEqual(["paired", "paired"]);
-    expect(res.body.pairings.every((p: { pairing: { toConfirm: boolean } }) => p.pairing.toConfirm)).toBe(true);
-    expect(res.body.pairings.map((p: { pairing: { judgment: { status: string } } }) => p.pairing.judgment.status)).toEqual([
-      "pair",
-      "undecided",
-    ]);
+    const toConfirm = await request(app).get(`${url}&toConfirm=true`).set(auth);
+    expect(toConfirm.status).toBe(200);
+    expect(toConfirm.body.pairings).toEqual([]);
+    const settled = await request(app).get(`${url}&toConfirm=false`).set(auth);
+    expect(idsOf(settled.body)).toEqual(["crm-a", "crm-d"]);
   });
 
-  it("an unconfirmed read after every candidate is judged serves nothing — doubt lean to us", async () => {
+  it("an unconfirmed read serves nothing: human-service pairs or does not", async () => {
     sixContactFixture();
-    judgeSamePerson
-      .mockResolvedValueOnce({ probability: 0.95, model: "jev-1.13.0" })
-      .mockResolvedValueOnce({ probability: 0.5, model: "jev-1.13.0" });
     const res = await request(app).get(`${url}&state=unconfirmed`).set(auth);
     expect(res.status).toBe(200);
     expect(res.body.pairings).toEqual([]);
@@ -695,12 +498,6 @@ describe("GET /orgs/leads/crm-pairings — where their record came from", () => 
       } as never),
       normalizeCrmContact(contact({ id: "crm-2" }) as never),
     ]);
-    loadFrozenMatches.mockResolvedValue(
-      new Map([
-        ["crm-1", frozen("crm-1", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
-        ["crm-2", frozen("crm-2", { matchedLeadId: null, matchMethod: null, matchConfidence: "unmatched", candidateCount: 0 })],
-      ]),
-    );
 
     const res = await request(app).get(url).set(auth);
     expect(res.status).toBe(200);
@@ -738,7 +535,7 @@ describe("GET /orgs/leads/crm-pairing-counts", () => {
     expect(res.body.ourLeadsNoCrmContactPointsAt).toBe(0);
   });
 
-  it("walks their contacts, partitions them, and never buys a judgment", async () => {
+  it("walks their contacts and partitions them by human-service's pairing", async () => {
     fetchCrmConnection.mockResolvedValue(CONNECTION);
     streamCrmContacts.mockImplementation(async function* () {
       yield [
@@ -746,32 +543,7 @@ describe("GET /orgs/leads/crm-pairing-counts", () => {
         contact({ id: "crm-2", primaryEmail: null }),
       ];
     });
-    loadFrozenMatches.mockResolvedValue(
-      new Map([
-        [
-          "crm-1",
-          {
-            crmContactId: "crm-1",
-            matchedLeadId: LEAD,
-            matchMethod: "email",
-            matchConfidence: "deterministic",
-            candidateCount: 1,
-            matchedAt: null,
-          },
-        ],
-        [
-          "crm-2",
-          {
-            crmContactId: "crm-2",
-            matchedLeadId: LEAD,
-            matchMethod: "last_name",
-            matchConfidence: "probabilistic",
-            candidateCount: 40,
-            matchedAt: null,
-          },
-        ],
-      ]),
-    );
+    humansPair({ "crm-1": LEAD });
     fetchCrmOpportunitiesByContact.mockResolvedValue(
       new Map([
         [
@@ -800,12 +572,12 @@ describe("GET /orgs/leads/crm-pairing-counts", () => {
     expect(res.body.counts.crmContacts).toBe(2);
     expect(res.body.counts.crmContactsWithEmail).toBe(1);
     expect(res.body.counts.byState.paired).toBe(1);
-    expect(res.body.counts.byState.unconfirmed).toBe(1);
+    expect(res.body.counts.byState.unpaired).toBe(1);
+    expect(res.body.counts.byState.unconfirmed).toBe(0);
     expect(res.body.counts.opportunitiesByState.won).toBe(1);
     expect(res.body.counts.opportunitiesWithUncomparableStage).toBe(1);
     expect(res.body.ourLeadsNoCrmContactPointsAt).toBe(53_212);
-    expect(judgeSamePerson).not.toHaveBeenCalled();
-    expect(matchConversion).not.toHaveBeenCalled();
+    expect(matchesForContacts).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,18 +1,16 @@
 /**
- * Every CRM candidate judged by the evidence pass, doubt leaning to us, and a form their prospect
- * submitted counting as a positive reply — executed against a REAL database. The siblings
- * (crm-service, email-gateway, campaign-service, chat-service's judgment) are mocked; every
- * statement is raw `sql` and runs for real here.
+ * CRM contacts paired by human-service's humanId (no matcher, no judgment since LEAD-REFONTE-1013),
+ * and a form their prospect submitted counting as a positive reply — executed against a REAL
+ * database. The siblings (crm-service, email-gateway, campaign-service) are mocked; every statement
+ * is raw `sql` and runs for real here.
  *
  * What it proves:
- *   - one pass judges every candidate, with no page ever opened: confident yes pairs, confident no
- *     rejects, a hesitant answer PAIRS but reads `toConfirm`, and a vendor failure stays
- *     unconfirmed and is asked again on the next pass (never re-asking what is already frozen)
- *   - a to-confirm pairing carries its CRM evidence exactly like a confident one
+ *   - a contact whose human is the lead's carries its CRM evidence; one whose human holds no lead
+ *     carries none, and no judgment is ever bought
  *   - a form dated after our first delivered email is a positive reply on the lead (ledger, bucket,
  *     standing); one dated before is not; a prospect who filled it before AND after answered us the
  *     second time
- *   - a person denying a to-confirm pairing removes everything it contributed on the next pass
+ *   - a person rejecting a pairing removes everything it contributed on the next pass
  */
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -22,6 +20,7 @@ import request from "supertest";
 const state = vi.hoisted(() => ({
   funnelContacts: [] as Array<{
     contactId: string;
+    humanId?: string | null;
     primaryEmail: string | null;
     fullName: string | null;
     events: Array<Record<string, unknown>>;
@@ -29,9 +28,6 @@ const state = vi.hoisted(() => ({
   contacts: [] as Array<Record<string, unknown>>,
   delivered: new Map<string, string | null>(),
   legByCampaign: new Map<string, string>(),
-  /** Probability per CRM last name; `fail` throws the vendor-failure error. */
-  answers: new Map<string, number | "fail">(),
-  judged: [] as string[],
 }));
 
 // The funnel events the sync reads (off the fact-feed copy since crm-fact-events.ts).
@@ -48,22 +44,6 @@ vi.mock("../../src/lib/crm-client.js", async (importOriginal) => {
       yield state.contacts.map((c) => actual.normalizeCrmContact(c as never));
     }),
     fetchCrmOpportunitiesByContact: vi.fn(async () => new Map()),
-  };
-});
-
-vi.mock("../../src/lib/judgment-client.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/lib/judgment-client.js")>();
-  return {
-    ...actual,
-    judgeSamePersonAsPlatform: vi.fn(async (sides: { crmContact: { lastName: string | null } }) => {
-      const key = sides.crmContact.lastName ?? "";
-      state.judged.push(key);
-      const answer = state.answers.get(key);
-      if (answer === undefined || answer === "fail") {
-        throw new actual.JudgmentUnavailableError("judgment_service_unavailable", "chat-service 502");
-      }
-      return { probability: answer, model: "jev-1.13.0" };
-    }),
   };
 });
 
@@ -98,9 +78,7 @@ vi.mock("../../src/lib/campaign-leg-client.js", async (importOriginal) => {
 const { db } = await import("../../src/db/index.js");
 const { sql } = await import("drizzle-orm");
 const { leads, leadsCampaigns, leadContactMethods } = await import("../../src/db/schema.js");
-const { freezeMatches, loadFrozenMatches, loadJudgments, loadRulings, rulingKey, upsertRuling } =
-  await import("../../src/lib/crm-pairing-store.js");
-const { resolveCrmPairing } = await import("../../src/lib/crm-pairing.js");
+const { upsertRuling } = await import("../../src/lib/crm-pairing-store.js");
 const { syncCrmEvidence } = await import("../../src/lib/crm-evidence-sync.js");
 const { fetchOutcomesByLead } = await import("../../src/lib/lead-index.js");
 const { bucketsForRow } = await import("../../src/lib/lead-buckets.js");
@@ -134,43 +112,16 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     state.delivered.set(email, FIRST_EMAIL);
   }
 
-  // Company domain + last name shared by two leads: the signal cannot decide, so a judgment does.
-  // (A name-only pairing would never carry evidence without a person; see crm-evidence-sync-sql.)
-  async function pairByDomainName(key: string) {
-    await freezeMatches(orgId, brandId, [
-      {
-        crmContactId: `c-${key}`,
-        result: {
-          matchedLeadId: ids[key].leadId,
-          matchMethod: "domain_name",
-          matchConfidence: "strong",
-          attributionStatus: "needs_review",
-          candidateCount: 2,
-          candidates: [{ leadId: ids[key].leadId }],
-        },
-      },
-    ]);
+  // human-service's answer: contact c-<key> IS this lead's human (crm-service states the humanId).
+  const humanOfContact = new Map<string, string>();
+  async function pairByHumanId(key: string) {
+    const humanId = randomUUID();
+    await db.execute(sql`UPDATE leads SET human_id = ${humanId}::uuid WHERE id = ${ids[key].leadId}::uuid`);
+    humanOfContact.set(`c-${key}`, humanId);
   }
 
   function form(occurredAt: string | null, source = "form_submission") {
     return { step: "form_submitted", occurredAt, dateBasis: "submitted_at", source, sourceId: randomUUID(), detail: null };
-  }
-
-  async function verdictOf(key: string) {
-    const contactId = `c-${key}`;
-    const [matches, judgments, rulings] = await Promise.all([
-      loadFrozenMatches(brandId, [contactId]),
-      loadJudgments(brandId, [contactId]),
-      loadRulings(brandId, [contactId]),
-    ]);
-    const match = matches.get(contactId)!;
-    const stored = judgments.get(contactId) ?? null;
-    return resolveCrmPairing({
-      signal: match,
-      judgment: stored && stored.leadId === match.matchedLeadId ? stored : null,
-      judgmentUnavailableReason: null,
-      ruling: rulings.get(rulingKey(contactId, match.matchedLeadId!)) ?? null,
-    });
   }
 
   async function crmRows(key: string) {
@@ -181,12 +132,14 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     `)) as unknown as Array<{ event: string; caused_by_outreach: boolean | null; received_at: unknown; withdrawn_at: unknown }>;
   }
 
-  const KEYS = ["yes", "maybe", "no", "flaky", "formafter", "formbefore", "formboth"];
+  const KEYS = ["maybe", "no", "formafter", "formbefore", "formboth"];
 
   beforeAll(async () => {
     for (const key of KEYS) {
       await seedLead(key);
-      await pairByDomainName(key);
+      // "no": its contact's human is somebody else (never one of our leads).
+      if (key === "no") humanOfContact.set("c-no", randomUUID());
+      else await pairByHumanId(key);
     }
     state.legByCampaign.set(campaign, "start_to_conversation");
     state.contacts = KEYS.map((key) => ({
@@ -200,12 +153,6 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
       lastName: key,
       unsubscribed: false,
     }));
-    state.answers.set("yes", 0.95);
-    state.answers.set("maybe", 0.5);
-    state.answers.set("no", 0.05);
-    state.answers.set("flaky", "fail");
-    for (const key of ["formafter", "formbefore", "formboth"]) state.answers.set(key, 0.6);
-
     const sale = { step: "sale", occurredAt: "2026-06-01T00:00:00.000Z", dateBasis: "status_changed_at", source: "won_status", sourceId: "opp", detail: null };
     state.funnelContacts = [
       { contactId: "c-maybe", primaryEmail: null, fullName: null, events: [sale] },
@@ -219,28 +166,16 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
         events: [form("2026-05-01T00:00:00.000Z"), form("2026-05-25T00:00:00.000Z"), form("2026-05-15T00:00:00.000Z")],
       },
     ];
+    for (const c of state.funnelContacts) c.humanId = humanOfContact.get(c.contactId) ?? null;
   }, 60_000);
 
-  it("one pass judges every candidate: yes pairs, no rejects, doubt pairs to confirm, failure waits", async () => {
+  it("pairs by humanId only and buys no judgment", async () => {
     const result = await syncCrmEvidence(orgId, brandId);
-    expect(result.judging).toMatchObject({ contacts: 7, judged: 6, judgmentFailed: 1, deferred: 0 });
-
-    expect(await verdictOf("yes")).toMatchObject({ state: "paired", toConfirm: false, decidedBy: "judgment" });
-    expect(await verdictOf("maybe")).toMatchObject({ state: "paired", toConfirm: true, decidedBy: "judgment" });
-    expect(await verdictOf("no")).toMatchObject({ state: "rejected", toConfirm: false });
-    // Never defaulted to paired or rejected.
-    expect(await verdictOf("flaky")).toMatchObject({ state: "unconfirmed", decidedBy: null });
-
-    // Next pass: only the failure is asked again; frozen judgments are never re-bought.
-    state.judged.length = 0;
-    state.answers.set("flaky", 0.9);
-    const again = await syncCrmEvidence(orgId, brandId);
-    expect(state.judged).toEqual(["flaky"]);
-    expect(again.judging.judged).toBe(1);
-    expect(await verdictOf("flaky")).toMatchObject({ state: "paired", toConfirm: false });
+    expect(result.judging).toMatchObject({ judged: 0, judgmentFailed: 0 });
+    expect(result).toMatchObject({ pairedByHuman: 4, neededMatcher: 0 });
   });
 
-  it("a to-confirm pairing carries its CRM evidence; a rejected one carries none", async () => {
+  it("a contact whose human is the lead's carries its CRM evidence; one whose human is not carries none", async () => {
     expect((await crmRows("maybe")).find((r) => r.event === "sale")).toMatchObject({ withdrawn_at: null });
     expect(await crmRows("no")).toHaveLength(0);
   });
@@ -302,18 +237,14 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     expect(bad.status).toBe(400);
   });
 
-  it("a person denying a to-confirm pairing removes everything it contributed", async () => {
+  it("a person rejecting a pairing removes everything it contributed", async () => {
     await upsertRuling({
       orgId, brandId, crmContactId: "c-maybe", leadId: ids.maybe.leadId, ruling: "rejected", note: "not them", statedByUserId: "u1",
     });
     await upsertRuling({
       orgId, brandId, crmContactId: "c-formafter", leadId: ids.formafter.leadId, ruling: "rejected", note: null, statedByUserId: "u1",
     });
-    state.judged.length = 0;
     await syncCrmEvidence(orgId, brandId);
-    // A re-run never resurrects or re-judges what a person rejected.
-    expect(state.judged).toEqual([]);
-    expect(await verdictOf("maybe")).toMatchObject({ state: "rejected", decidedBy: "human" });
     expect((await crmRows("maybe")).every((r) => r.withdrawn_at !== null)).toBe(true);
     expect((await crmRows("formafter")).every((r) => r.withdrawn_at !== null)).toBe(true);
     const outcomes = await fetchOutcomesByLead(orgId, brandId, [ids.formafter.leadId]);
