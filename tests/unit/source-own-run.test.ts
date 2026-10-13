@@ -88,6 +88,7 @@ vi.mock("../../src/db/schema.js", () => ({
 }));
 
 import { pullNext } from "../../src/lib/buffer.js";
+import { isAudienceExhaustedReason } from "../../src/lib/serve-reasons.js";
 
 const person: Person = {
   firstName: "Sara",
@@ -186,6 +187,45 @@ describe("pullNext find mode (a source unit's own run)", () => {
   it("an audience that cannot be walked yet is skipped; if the rest are empty it is NOT exhaustion", async () => {
     serveNext.mockRejectedValueOnce(new Error("not serveable")).mockResolvedValueOnce({ status: "exhausted" });
     await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "audience_not_serveable" });
+  });
+
+  it("13 linkedin_engagement audiences whose competitor pages posted nothing = no_recent_posts, NOT exhaustion", async () => {
+    // Doc Dinners 8d613bad (2026-10-13): ChiroCandy + MaxLiving had no post in the window.
+    serveNext.mockResolvedValue({ status: "exhausted", person: null, reason: "no_recent_posts" });
+    const ids = Array.from({ length: 13 }, (_, i) => `aud-${i + 1}`);
+    const result = await pullNext(findParams(ids));
+    expect(result).toEqual({ found: false, reason: "no_recent_posts" });
+    expect(isAudienceExhaustedReason(result.reason)).toBe(false);
+    expect(serveNext).toHaveBeenCalledTimes(13);
+    expect(insertValues).not.toHaveBeenCalled();
+  });
+
+  it("real exhaustion mixed with no_recent_posts = no_recent_posts (a look found nothing to read, so not all walked out)", async () => {
+    serveNext
+      .mockResolvedValueOnce({ status: "exhausted", person: null })
+      .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "no_recent_posts" })
+      .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "pool_exhausted" });
+    await expect(pullNext(findParams(["aud-1", "aud-2", "aud-3"]))).resolves.toEqual({ found: false, reason: "no_recent_posts" });
+  });
+
+  it("no_recent_posts beside an audience that cannot be walked = no_recent_posts", async () => {
+    serveNext.mockRejectedValueOnce(new Error("not serveable")).mockResolvedValueOnce({ status: "exhausted", person: null, reason: "no_recent_posts" });
+    await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "no_recent_posts" });
+  });
+
+  it("every audience exhausted with another reason or none = still audience_exhausted", async () => {
+    serveNext
+      .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "pool_exhausted" })
+      .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "yield_exhausted" })
+      .mockResolvedValueOnce({ status: "exhausted", person: null });
+    await expect(pullNext(findParams(["aud-1", "aud-2", "aud-3"]))).resolves.toEqual({ found: false, reason: "audience_exhausted" });
+  });
+
+  it("an audience with no recent posts is skipped and the next one still serves", async () => {
+    serveNext.mockResolvedValueOnce({ status: "exhausted", person: null, reason: "no_recent_posts" }).mockResolvedValueOnce({ status: "served", person });
+    const result = await pullNext(findParams(["aud-1", "aud-2"]));
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-2");
   });
 
   it("an unfinished look stops the walk: serve_timed_out", async () => {

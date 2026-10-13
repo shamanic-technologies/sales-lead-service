@@ -41,6 +41,12 @@
  *                            `audienceIds`, a hard subset) none of which is an active audience of its offer served
  *                            under its channel (src/lib/source-audiences.ts). It looked nowhere else, by design: the
  *                            customer's targeting is never widened. Says nothing about any audience's people.
+ *   no_recent_posts        — a linkedin_engagement audience human-service was asked to serve answered `exhausted`
+ *                            with its own reason `no_recent_posts`: the competitor pages it reads engagers from
+ *                            hold NO post inside its window, so there was nobody to read (owner 2026-10-13, Doc
+ *                            Dinners: ChiroCandy + MaxLiving had posted nothing). Not a population that ran out:
+ *                            the audience fills as soon as a competitor posts. Wins over every other empty answer
+ *                            of a walk that served nobody (a look found nothing to read, so not all walked out).
  *
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
@@ -58,6 +64,7 @@ export const SOURCE_STOCK_EMPTY_REASON = "source_stock_empty" as const;
 export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
 export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
 export const TARGETED_AUDIENCES_UNAVAILABLE_REASON = "targeted_audiences_unavailable" as const;
+export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -72,6 +79,7 @@ export const SERVE_EMPTY_REASONS = [
   ORIGIN_NOT_FED_REASON,
   AUDIENCE_OFFER_MISMATCH_REASON,
   TARGETED_AUDIENCES_UNAVAILABLE_REASON,
+  NO_RECENT_POSTS_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];
@@ -85,4 +93,13 @@ export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];
  */
 export function isAudienceExhaustedReason(reason: string | null | undefined): boolean {
   return reason === AUDIENCE_EXHAUSTED_REASON;
+}
+
+/**
+ * Did human-service answer "exhausted" because the audience had nothing to read yet (a
+ * linkedin_engagement audience whose competitor pages hold no post in its window)? That answer
+ * maps to `no_recent_posts`, never to `audience_exhausted`.
+ */
+export function isNoRecentPostsAnswer(result: { status: string; reason?: string | null }): boolean {
+  return result.status === "exhausted" && result.reason === NO_RECENT_POSTS_REASON;
 }

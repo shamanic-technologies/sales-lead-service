@@ -292,6 +292,13 @@ export interface ServeNextResult {
    * `readServedPersonId` (src/lib/served-person-id.ts), never derived.
    */
   personId?: unknown;
+  /**
+   * Why an `exhausted` answer is empty, when human-service states it. `no_recent_posts` = a
+   * linkedin_engagement audience whose competitor pages hold no post inside its window: nothing to
+   * read engagers from, NOT a population that ran out (read through `isNoRecentPostsAnswer` in serve-reasons.ts). Absent or
+   * any other value keeps today's meaning.
+   */
+  reason?: string;
 }
 
 export async function serveNext(audienceId: string, ctx: ServiceContext): Promise<ServeNextResult> {
@@ -340,7 +347,8 @@ export interface Candidate {
 export interface NextCandidateResult {
   status: "candidate" | "exhausted" | "pending";
   candidate: Candidate | null;
-  reason?: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider";
+  /** `no_recent_posts`: a linkedin_engagement audience whose competitor pages hold no post in its window. Not exhaustion. */
+  reason?: "pool_exhausted" | "yield_exhausted" | "unreachable_by_provider" | "no_recent_posts";
   /** The audience text the screen judges against; null when the audience states none. */
   target: { text: string; field: string } | null;
 }

@@ -1183,7 +1183,9 @@ export const BufferNextResponseSchema = z
           "`credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM " +
           "action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent " +
           "today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet " +
-          "(nothing is found on demand from them). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` " +
+          "(nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold " +
+          "no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that " +
+          "served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` " +
           "campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; " +
           "`audience_exhausted` there means every one of its audiences was walked and has nobody left. " +
           "Decide whether outreach may stop by testing for `audience_exhausted` " +
