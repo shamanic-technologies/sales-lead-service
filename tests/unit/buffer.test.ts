@@ -5,6 +5,7 @@ const serveNext = vi.fn();
 // The candidate path (qualify before paying) has its own suite: tests/unit/candidate-serve.test.ts.
 // Here every audience answers "not served through candidates", so pullNext uses serve-next.
 vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: vi.fn(async () => null) }));
+vi.mock("../../src/lib/serve-identity.js", () => ({ resolveServedIdentity: vi.fn(async () => null) }));
 
 vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
@@ -155,7 +156,7 @@ describe("pullNext (audience serve-next flow)", () => {
     // ...while the lead row keeps the OUTREACH channel it was served for
     expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "lead-finder-v1" }));
     // person persisted into silver
-    expect(upsertLeadFromPerson).toHaveBeenCalledWith(person, { enriched: true });
+    expect(upsertLeadFromPerson).toHaveBeenCalledWith(person, { enriched: true, identity: null });
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({ leadId: "lead-1", status: "served", audienceId: "aud-1" }),
     );
