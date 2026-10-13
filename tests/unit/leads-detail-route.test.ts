@@ -99,6 +99,8 @@ function storedRow(overrides: Record<string, unknown> = {}) {
     audience_id: "audience-1",
     created_at: "2026-01-01 00:00:00+00",
     lead_apollo_person_id: "apollo-person-1",
+    lead_human_id: null,
+    lead_company_id: null,
     ...overrides,
   };
 }
@@ -226,9 +228,9 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
     expect(Object.keys(detail).sort()).toEqual(
       [
         "activeGoalId", "apolloPersonId", "audience", "audienceId", "bounced", "brandIds",
-        "brandProfileId", "campaignId", "clicked", "closedDeal", "contacted", "delivered", "disqualification", "email", "emailStatus",
+        "brandProfileId", "campaignId", "clicked", "closedDeal", "companyId", "contacted", "delivered", "disqualification", "email", "emailStatus",
         "featureSlug", "firstBouncedAt", "firstClickedAt", "firstContactedAt", "firstDeliveredAt",
-        "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal",
+        "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal", "humanId",
         "id", "lastDeliveredAt", "lead", "leadId", "namespace", "offer", "opened", "orgId", "parentRunId",
         "replied", "replyClassification", "runId", "sent", "sentCount", "servedAt", "sources", "standing", "status",
         "statusDetails", "statusReason", "unsubscribed", "userId", "workflowSlug",

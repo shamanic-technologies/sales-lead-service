@@ -55,8 +55,17 @@ export const leads = pgTable(
     metadata: jsonb("metadata"),
     enrichedAt: timestamp("enriched_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // A lead is a HUMAN at a COMPANY (migration 0076, src/lib/lead-identity.ts). The human is
+    // human-service's (fleet view), the company brand-service's brand id; NULL = not resolved yet /
+    // no key / no safe company identity. Filled by the identity sweep, never derived here.
+    humanId: uuid("human_id"),
+    companyId: uuid("company_id"),
+    identityResolvedAt: timestamp("identity_resolved_at", { withTimezone: true }),
   },
-  (table) => [uniqueIndex("idx_leads_apollo_person_id").on(table.apolloPersonId)],
+  (table) => [
+    uniqueIndex("idx_leads_apollo_person_id").on(table.apolloPersonId),
+    index("idx_leads_human_company").on(table.humanId, table.companyId),
+  ],
 );
 
 // --- Lead contact methods — polymorphic (email, phone, twitter, etc.) ---
@@ -128,6 +137,11 @@ export const organizations = pgTable(
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    // The company this employer row is in brand-service (migration 0076): resolved once per row.
+    companyId: uuid("company_id"),
+    companyResolvedAt: timestamp("company_resolved_at", { withTimezone: true }),
+    companyUnresolvedReason: text("company_unresolved_reason"),
+    companyFactsPushedAt: timestamp("company_facts_pushed_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("idx_organizations_apollo_organization_id").on(table.apolloOrganizationId),

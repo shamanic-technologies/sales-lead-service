@@ -533,6 +533,13 @@
       "when": 1786333600000,
       "tag": "0075_lead_disqualification_marks",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1786420000000,
+      "tag": "0076_lead_human_company",
+      "breakpoints": true
     }
   ]
 }
