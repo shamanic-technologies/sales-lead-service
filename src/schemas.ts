@@ -6865,8 +6865,29 @@ const NamedPersonCampaignParam = z.object({
 const NamedPersonRequestSchema = z
   .object({
     email: z.string().min(3).openapi({
-      description: "The person's email address. Case-folded. Must already be known to the campaign's brand.",
+      description:
+        "The person's email address. Case-folded. Must already be known to the campaign's brand, unless `statedBy` states it.",
       example: "marie@example.com",
+    }),
+    statedBy: z
+      .object({
+        triggerEventId: z.string().min(1).max(200).openapi({
+          description: "The trigger occurrence (campaign-service event id) in which the brand's own organization named the person.",
+        }),
+        triggerId: z.string().min(1).max(200).nullish().openapi({
+          description: "The trigger type it was an occurrence of. Provenance only, never read for a decision.",
+        }),
+      })
+      .nullish()
+      .openapi({
+        description:
+          "The brand's OWN organization names this person (a trigger occurrence about them, reported for its own brand): positive " +
+          "evidence the brand knows them. Recorded (append-only) and the person is known to the brand from then on. The " +
+          "person first goes through the suppression a serve applies: 409 person_suppressed when unsubscribed, hard-bounced, or " +
+          "their human carries a live opt_out / do_not_contact fact. Absent = the door as before.",
+      }),
+    name: z.string().max(300).nullish().openapi({
+      description: "The person's full name as the statement carries it; used only for a lead created here with no CRM name.",
     }),
   })
   .openapi("NamedPersonRequest");
@@ -6883,6 +6904,10 @@ const NamedPersonResponseSchema = z
     brandId: z.string(),
     email: z.string(),
     servedAt: z.string().openapi({ description: "When the person became a lead of the brand on this campaign (ISO 8601)." }),
+    knownBy: z.enum(["crm_fact", "brand_lead", "statement"]).openapi({
+      description:
+        "Why the brand is known to know the person: a live fact of its CRM copy, a lead already filed under the brand, or the brand's own statement (`statedBy`, now or earlier).",
+    }),
   })
   .openapi("NamedPersonResponse");
 
@@ -6945,8 +6970,10 @@ registry.registerPath({
     "the Copilot's one-person follow-up is the first). No provider purchase, no human-service serve, no " +
     "never-cold-contact gate: nothing is bought and the person is not cold. The person must be KNOWN to the " +
     "campaign's brand: a live fact of the brand's CRM copy carrying the address (a signup, a message, a " +
-    "payment, any source), or a lead row of the org already filed under that brand; anything else is 404 " +
-    "person_not_known (this door never sources strangers). Writes what a serve writes: the lead (the lead " +
+    "payment, any source), or a lead row of the org already filed under that brand, or STATED by the brand's own " +
+    "organization (`statedBy`: a trigger occurrence of the org naming the person; recorded, then suppression-checked: " +
+    "409 person_suppressed with reason unsubscribed|bounced|opted_out|do_not_contact); anything else is 404 " +
+    "person_not_known (this door never sources strangers nobody stated). Writes what a serve writes: the lead (the lead " +
     "owning the address, else a new lead with the address registered) and ONE lead row on the campaign, " +
     "status served, served_at now, brand = the campaign's brand, run/user from x-run-id/x-user-id when sent. " +
     "So the person reads as a lead of the brand at once in every read (lists, standing `not_contacted` until " +
@@ -6974,7 +7001,7 @@ registry.registerPath({
     },
     409: {
       description:
-        "The campaign states no brand (code campaign_has_no_brand), or the address is registered on more than one lead (code ambiguous_lead, with leadIds). Nothing written.",
+        "The campaign states no brand (code campaign_has_no_brand), the address is registered on more than one lead (code ambiguous_lead, with leadIds), or a stated person may not be contacted (code person_suppressed, with reason). Nothing written.",
     },
     502: { description: "campaign-service or the database did not answer (code filing_unavailable). Nothing filed; retry." },
   },

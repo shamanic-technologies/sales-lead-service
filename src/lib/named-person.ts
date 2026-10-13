@@ -21,6 +21,17 @@
  * address at (org, brand), or a lead row of the org already filed under the brand. Anything else is
  * a named refusal: this door files people the brand knows, it never sources strangers.
  *
+ * OR STATED BY THE BRAND (PUSHED-PERSON-KNOWN-1014, owner 2026-10-14): a person the brand's OWN
+ * organization names to us is positive evidence the brand knows them. The caller carries the statement
+ * (`statedBy`: campaign-service, filing the person a trigger occurrence of the org names by identity,
+ * e.g. a client pushing an email it wrote with its own key). The statement is recorded
+ * (`brand_person_statements`, append-only) and the person is known to the brand from then on, for every
+ * later filing. Any trigger, any channel: nothing here reads which trigger it was. A stated person goes
+ * through the suppression a serve applies BEFORE anything is written: an address the brand's sender
+ * reports unsubscribed or hard-bounced (email-gateway, brand/campaign/global), or a human with a live
+ * opt_out / do_not_contact fact, is refused by name (`person_suppressed` + reason). The follow-up claim
+ * re-checks opt-outs at send time as for anyone.
+ *
  * Idempotent on (lead, campaign): the unique index `idx_lc_lead_campaign` makes a second filing
  * answer the same row (`already_filed`), never a second one.
  */
@@ -28,9 +39,25 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { leads } from "../db/schema.js";
 import { fetchCampaign } from "./campaign-client.js";
+import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
+import { loadHumanFacts } from "./human-opt-out-read.js";
 import { registerServedEmail } from "./leads-registry.js";
 
 export const NAMED_PERSON_SOURCE = "named_person";
+
+/** The brand's own organization named this person to us: the evidence the brand knows them. */
+export interface PersonStatement {
+  /** The trigger occurrence that named the person (campaign-service's event id). */
+  triggerEventId: string;
+  /** The trigger type it was an occurrence of: provenance only, never read for a decision. */
+  triggerId?: string | null;
+}
+
+/** How the brand is known to know the person. */
+export type KnownBy = "crm_fact" | "brand_lead" | "statement";
+
+/** Why a stated person is not filed: a protection a serve applies. */
+export type SuppressionReason = "unsubscribed" | "bounced" | "opted_out" | "do_not_contact";
 
 export interface NamedPersonFiling {
   status: "filed" | "already_filed";
@@ -40,6 +67,7 @@ export interface NamedPersonFiling {
   brandId: string;
   email: string;
   servedAt: string;
+  knownBy: KnownBy;
 }
 
 export type NamedPersonResult =
@@ -47,6 +75,7 @@ export type NamedPersonResult =
   | { ok: false; code: "campaign_not_found" }
   | { ok: false; code: "campaign_has_no_brand" }
   | { ok: false; code: "person_not_known" }
+  | { ok: false; code: "person_suppressed"; reason: SuppressionReason }
   | { ok: false; code: "ambiguous_lead"; leadIds: string[] };
 
 /** The brand a campaign row is about: its `brandId`, else the first of the legacy `brandIds`. */
@@ -74,6 +103,7 @@ export function splitFullName(fullName: string | null): { name: string | null; f
 
 interface KnownPerson {
   known: boolean;
+  knownBy: KnownBy | null;
   fullName: string | null;
 }
 
@@ -92,7 +122,7 @@ async function knownToBrand(orgId: string, brandId: string, email: string): Prom
     ORDER BY (f.full_name IS NULL), f.seq DESC
     LIMIT 1
   `)) as unknown as Array<{ full_name: string | null }>;
-  if (facts.length > 0) return { known: true, fullName: facts[0].full_name };
+  if (facts.length > 0) return { known: true, knownBy: "crm_fact", fullName: facts[0].full_name };
 
   const rows = (await db.execute(sql`
     SELECT 1
@@ -103,7 +133,83 @@ async function knownToBrand(orgId: string, brandId: string, email: string): Prom
       AND lower(cm.value) = ${email}
     LIMIT 1
   `)) as unknown as unknown[];
-  return { known: rows.length > 0, fullName: null };
+  if (rows.length > 0) return { known: true, knownBy: "brand_lead", fullName: null };
+
+  const stated = (await db.execute(sql`
+    SELECT full_name FROM brand_person_statements
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND email = ${email}
+    ORDER BY (full_name IS NULL), stated_at DESC
+    LIMIT 1
+  `)) as unknown as Array<{ full_name: string | null }>;
+  if (stated.length > 0) return { known: true, knownBy: "statement", fullName: stated[0].full_name };
+  return { known: false, knownBy: null, fullName: null };
+}
+
+/**
+ * What the brand's sender says about the address: unsubscribed (global, brand, this campaign) or
+ * hard-bounced fleet-wide. Pure.
+ */
+export function senderSuppression(result: StatusResult | undefined, campaignId: string): SuppressionReason | null {
+  if (!result) return null;
+  let bounced = false;
+  for (const provider of [result.broadcast, result.transactional]) {
+    if (!provider) continue;
+    if (provider.global?.email?.unsubscribed) return "unsubscribed";
+    for (const scope of [provider.campaign, provider.brand, provider.byCampaign?.[campaignId]]) {
+      if (scope?.unsubscribed) return "unsubscribed";
+    }
+    if (provider.global?.email?.bounced) bounced = true;
+  }
+  return bounced ? "bounced" : null;
+}
+
+/**
+ * The suppression a serve applies, for a person the brand states: the human's live opt_out /
+ * do_not_contact fact (when a lead already owns the address), then the sender's answer. THROWS when
+ * email-gateway cannot answer: a stated person is never filed on a guess about who opted out.
+ */
+async function suppressionOf(params: {
+  orgId: string;
+  brandId: string;
+  campaignId: string;
+  email: string;
+  ownerLeadIds: string[];
+  userId?: string | null;
+  runId?: string | null;
+}): Promise<SuppressionReason | null> {
+  if (params.ownerLeadIds.length > 0) {
+    const facts = await loadHumanFacts(params.ownerLeadIds);
+    for (const id of params.ownerLeadIds) {
+      const human = facts.get(id);
+      if (human?.optedOut) return "opted_out";
+      if (human?.doNotContact) return "do_not_contact";
+    }
+  }
+  const context: Record<string, string> = { orgId: params.orgId, campaignId: params.campaignId, brandId: params.brandId };
+  if (params.userId) context.userId = params.userId;
+  if (params.runId) context.runId = params.runId;
+  const status = await checkDeliveryStatus(params.brandId, params.campaignId, [{ email: params.email }], context);
+  const mine = status.results.find((r) => r.email.trim().toLowerCase() === params.email);
+  return senderSuppression(mine, params.campaignId);
+}
+
+/** Record the brand's statement. Idempotent on (org, brand, address, source, ref). */
+async function recordStatement(params: {
+  orgId: string;
+  brandId: string;
+  campaignId: string;
+  email: string;
+  statement: PersonStatement;
+  fullName: string | null;
+}): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO brand_person_statements
+      (org_id, brand_id, email, source, source_ref, trigger_id, campaign_id, full_name)
+    VALUES
+      (${params.orgId}, ${params.brandId}, ${params.email}, 'trigger_event', ${params.statement.triggerEventId},
+       ${params.statement.triggerId ?? null}, ${params.campaignId}, ${params.fullName})
+    ON CONFLICT (org_id, brand_id, email, source, source_ref) DO NOTHING
+  `);
 }
 
 /** The lead owning the address, case-folded. Several = a broken identity, refused by name. */
@@ -122,6 +228,10 @@ export async function fileNamedPerson(params: {
   email: string;
   userId?: string | null;
   runId?: string | null;
+  /** The brand's own organization names this person (see the module comment). */
+  statedBy?: PersonStatement | null;
+  /** The name the statement carries, used only for a lead created here with no CRM name. */
+  fullName?: string | null;
 }): Promise<NamedPersonResult> {
   const email = normalizeEmail(params.email);
 
@@ -140,11 +250,34 @@ export async function fileNamedPerson(params: {
   const brandId = campaignBrandOf(row);
   if (!brandId) return { ok: false, code: "campaign_has_no_brand" };
 
-  const person = await knownToBrand(params.orgId, brandId, email);
-  if (!person.known) return { ok: false, code: "person_not_known" };
+  let person = await knownToBrand(params.orgId, brandId, email);
+  if (!person.known && !params.statedBy) return { ok: false, code: "person_not_known" };
 
   const owners = await leadsOwningEmail(email);
   if (owners.length > 1) return { ok: false, code: "ambiguous_lead", leadIds: owners };
+
+  if (params.statedBy) {
+    const suppressed = await suppressionOf({
+      orgId: params.orgId,
+      brandId,
+      campaignId: params.campaignId,
+      email,
+      ownerLeadIds: owners,
+      userId: params.userId,
+      runId: params.runId,
+    });
+    if (suppressed) return { ok: false, code: "person_suppressed", reason: suppressed };
+    const statedName = params.fullName?.trim() || null;
+    await recordStatement({
+      orgId: params.orgId,
+      brandId,
+      campaignId: params.campaignId,
+      email,
+      statement: params.statedBy,
+      fullName: statedName,
+    });
+    if (!person.known) person = { known: true, knownBy: "statement", fullName: statedName };
+  }
 
   let leadId: string;
   if (owners.length === 1) {
@@ -199,5 +332,6 @@ export async function fileNamedPerson(params: {
     brandId,
     email,
     servedAt: new Date(existing[0].served_at).toISOString(),
+    knownBy: person.knownBy as KnownBy,
   };
 }
