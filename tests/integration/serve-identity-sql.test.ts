@@ -53,6 +53,26 @@ describe.skipIf(!hasRealDatabase)("serve identity: a known human at a new compan
     if (made.length) await db.delete(leads).where(inArray(leads.id, [...new Set(made)]));
   });
 
+  it("splits on a name-only employer too (the local row is the company key), never on the same name", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const h = randomUUID();
+    const pid = `pn-${tag}`;
+    const at = (email: string, orgName: string) =>
+      upsertLeadFromPerson(
+        { ...person(email), providerPersonId: pid, organization: { name: orgName } } as unknown as Person,
+        { enriched: true, identity: { humanId: h, companyId: null } },
+      ).then(async (id) => {
+        const leadId = await registerServedEmail({ leadId: id, email, status: null, source: "apollo" });
+        made.push(leadId);
+        return leadId;
+      });
+    const befco = await at(`a1-${tag}@befco.example`, `Constructora BeFco ${tag}`);
+    expect(await at(`a2-${tag}@befco.example`, `constructora befco ${tag}`)).toBe(befco);
+    const y = await at(`a3-${tag}@y.example`, `Company Y ${tag}`);
+    expect(y).not.toBe(befco);
+    expect(await at(`a4-${tag}@y.example`, `Company Y ${tag}`)).toBe(y);
+  });
+
   it("splits by company, keeps the provider id on the first lead, and finds each lead again", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const atA = await serve(`americo-${tag}@a.example`, companyA);

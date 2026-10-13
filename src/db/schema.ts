@@ -60,6 +60,9 @@ export const leads = pgTable(
     // no key / no safe company identity. Filled by the identity sweep, never derived here.
     humanId: uuid("human_id"),
     companyId: uuid("company_id"),
+    // The lead's LOCAL company row (organizations.id): the company key when brand-service has no safe
+    // identity for it (name-only employer). Migration 0077.
+    organizationId: uuid("organization_id"),
     identityResolvedAt: timestamp("identity_resolved_at", { withTimezone: true }),
   },
   (table) => [
