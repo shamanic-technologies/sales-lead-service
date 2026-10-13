@@ -33,6 +33,7 @@ import {
   companyInputOf,
   hasAnyKey,
   humanKeysOf,
+  workEmailDomain,
   type LeadKeyRow,
   type OrganizationRow,
 } from "./lead-identity.js";
@@ -257,6 +258,46 @@ export async function adoptResolvedCompanies(limit = 5000): Promise<number> {
     UPDATE leads l SET company_id = pick.company_id FROM pick WHERE l.id = pick.id
     RETURNING l.id
   `)) as unknown as unknown[];
+  // A company mark stated on the local key follows the company to its brand id (one already on the
+  // brand id for the same brand/offer wins; the local one stays, read by nobody).
+  await db.execute(sql`
+    UPDATE company_disqualification_marks m SET company_key = o.company_id::text, updated_at = now()
+    FROM organizations o
+    WHERE m.company_key = 'org:' || o.id::text AND o.company_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM company_disqualification_marks t
+        WHERE t.org_id = m.org_id AND t.brand_id = m.brand_id AND t.offer_key = m.offer_key AND t.company_key = o.company_id::text)
+  `);
+  return rows.length;
+}
+
+/**
+ * Pass 6: a resolved lead with NO employer is at the company its work address names (a signup, a named
+ * person): brand-service resolves the address's domain, once per lead (`email_company_checked_at`). A
+ * free-mail address names no company: checked, nothing set.
+ */
+export async function resolveEmailCompanies(limit = MAX_COMPANIES_PER_REQUEST): Promise<number> {
+  const rows = (await db.execute(sql`
+    SELECT l.id::text AS lead_id,
+      (SELECT c.value FROM lead_contact_methods c WHERE c.lead_id = l.id AND c.channel = 'email'
+        ORDER BY c.created_at, c.value LIMIT 1) AS email
+    FROM leads l
+    WHERE l.identity_resolved_at IS NOT NULL AND l.email_company_checked_at IS NULL
+      AND l.company_id IS NULL AND l.organization_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM leads_organizations lo WHERE lo.lead_id = l.id AND lo.current = true)
+    ORDER BY l.id
+    LIMIT ${limit}
+  `)) as unknown as Array<{ lead_id: string; email: string | null }>;
+  if (rows.length === 0) return 0;
+  const withDomain = rows.map((r) => ({ ...r, domain: workEmailDomain(r.email) })).filter((r) => r.domain);
+  const results = await resolveCompanies(withDomain.map((r) => ({ ref: r.lead_id, domain: r.domain })));
+  const companyOf = new Map(results.map((r) => [withDomain[r.index].lead_id, r.brandId ?? ""]));
+  await db.execute(sql`
+    UPDATE leads l
+    SET company_id = COALESCE(l.company_id, NULLIF(v.company_id, '')::uuid), email_company_checked_at = now()
+    FROM unnest(${sql.param(rows.map((r) => r.lead_id))}::uuid[], ${sql.param(rows.map((r) => companyOf.get(r.lead_id) ?? ""))}::text[])
+      AS v(id, company_id)
+    WHERE l.id = v.id
+  `);
   return rows.length;
 }
 
@@ -325,13 +366,14 @@ export async function sweepLeadIdentityOnce(): Promise<boolean> {
   const people = await resolveLeads();
   const organized = await fillLeadOrganizations();
   const adopted = await adoptResolvedCompanies();
-  if (employers + facts + people.resolved + organized + adopted > 0) {
+  const byEmail = await resolveEmailCompanies();
+  if (employers + facts + people.resolved + organized + adopted + byEmail > 0) {
     console.log(
       `[lead-service] identity sweep: employers=${employers} facts=${facts} leads=${people.resolved} failed=${people.failed} ` +
-        `organized=${organized} adopted=${adopted}`,
+        `organized=${organized} adopted=${adopted} byEmail=${byEmail}`,
     );
   }
-  return employers > 0 || facts > 0 || people.resolved > 0 || organized > 0 || adopted > 0;
+  return employers > 0 || facts > 0 || people.resolved > 0 || organized > 0 || adopted > 0 || byEmail > 0;
 }
 
 let running = false;

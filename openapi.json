@@ -1635,6 +1635,40 @@
             "format": "uuid",
             "description": "The COMPANY this lead is at: brand-service's brand id of the current employer (same domain = same id). null = no safe company identity (name-only or no employer), or not resolved yet. A known human at a new company is a new lead."
           },
+          "company": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "nullable": true,
+                "description": "brand-service company id; null for a name-only employer (keyed on our local row)."
+              },
+              "key": {
+                "type": "string",
+                "description": "The company key: `id`, else `org:<local organization id>`."
+              },
+              "isClient": {
+                "type": "boolean",
+                "description": "A lead of this company holds a live sale at the row's brand: the COMPANY is a client."
+              },
+              "signedUp": {
+                "type": "boolean",
+                "description": "A lead of this company holds a live signup at the row's brand."
+              },
+              "disqualification": {
+                "$ref": "#/components/schemas/LeadDisqualification"
+              }
+            },
+            "required": [
+              "id",
+              "key",
+              "isClient",
+              "signedUp",
+              "disqualification"
+            ],
+            "description": "The company this lead is at, with what is true of the company as a BUYER of the brand (client, signed up, not our target). null = no company known (no employer and no work address, or not resolved yet). Not on view=compact."
+          },
           "emailStatus": {
             "type": "string",
             "nullable": true,
@@ -1658,7 +1692,14 @@
             "$ref": "#/components/schemas/LeadClosedDeal"
           },
           "disqualification": {
-            "$ref": "#/components/schemas/LeadDisqualification"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeadDisqualification"
+              },
+              {
+                "description": "Disqualified, as its own mark beside `standing` (never folded into it): present = this person is disqualified for this conversation (the row campaign's offer x brand, or every offer of the brand), with the optional note, who and when. null = not disqualified. Set and removed with PUT/DELETE /orgs/leads/{id}/disqualification; set automatically from a reply judged not our target."
+              }
+            ]
           },
           "contacted": {
             "type": "boolean",
@@ -1822,6 +1863,7 @@
           "apolloPersonId",
           "humanId",
           "companyId",
+          "company",
           "emailStatus",
           "lead",
           "standing",
@@ -1849,6 +1891,57 @@
           "global"
         ],
         "description": "One leads_campaigns row enriched with the full canonical lead payload (FullLead) and delivery status from email-gateway."
+      },
+      "LeadDisqualification": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "level": {
+            "type": "string",
+            "enum": [
+              "lead",
+              "company"
+            ],
+            "description": "`lead` = this person at this company (\"not the right contact\", \"left the role\"): never follows them to another company. `company` = their whole company for the brand (\"not our target\"): covers every lead of that company. A lead's own mark answers before its company's."
+          },
+          "offerId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The offer the mark is about, or null = every offer of the brand."
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "The optional free note: why, in the words of whoever set it (or the reply's reading when set automatically). No closed list of reasons.",
+            "example": "Runs a construction company, we sell to supermarkets."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "reply"
+            ],
+            "description": "`manual` = a person (staff, customer, agent) set it. `reply` = set automatically from a reply judged \"not the right contact\" or \"left the role\"."
+          },
+          "statedByUserId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Who set it; null when set automatically."
+          },
+          "statedAt": {
+            "type": "string",
+            "description": "When it was set (ISO 8601)."
+          }
+        },
+        "required": [
+          "level",
+          "offerId",
+          "note",
+          "source",
+          "statedByUserId",
+          "statedAt"
+        ],
+        "description": "The COMPANY-level Disqualified mark (\"not our target\") for the row's conversation, or null. Covers every lead of the company."
       },
       "LeadStanding": {
         "type": "object",
@@ -1901,9 +1994,10 @@
               "stated_never",
               "bounced",
               "unsubscribed",
-              "opt_out_reply"
+              "opt_out_reply",
+              "human_opt_out"
             ],
-            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `negative_reply` = they declined; that leaves them in play. `stated_never` = somebody stated they will never buy. `opt_out_reply` = they asked us to stop in a reply, under this brand — opted out on every offer of it.",
+            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `negative_reply` = they declined; that leaves them in play. `stated_never` = somebody stated they will never buy. `opt_out_reply` = they asked us to stop in a reply, under this brand — opted out on every offer of it. `human_opt_out` = human-service carries an opt-out / do-not-contact fact on the HUMAN this lead is: it follows them to every company and brand.",
             "example": "measured_visit"
           },
           "origin": {
@@ -2414,48 +2508,6 @@
           "source"
         ],
         "description": "The deal on this lead — worth, cost to the customer, and WHOSE win it was — or null when nobody has stated one. It is here so a table can render a column per lead over pages of rows without a request per lead, and so a consumer can hold the deals our outreach caused apart from the ones the brand closed some other way. Present at every scope this read supports. Derived on read: nothing is stored, so withdrawing or restating the statement moves it with no write."
-      },
-      "LeadDisqualification": {
-        "type": "object",
-        "nullable": true,
-        "properties": {
-          "offerId": {
-            "type": "string",
-            "nullable": true,
-            "description": "The offer the mark is about, or null = every offer of the brand."
-          },
-          "note": {
-            "type": "string",
-            "nullable": true,
-            "description": "The optional free note: why, in the words of whoever set it (or the reply's reading when set automatically). No closed list of reasons.",
-            "example": "Runs a construction company, we sell to supermarkets."
-          },
-          "source": {
-            "type": "string",
-            "enum": [
-              "manual",
-              "reply"
-            ],
-            "description": "`manual` = a person (staff, customer, agent) set it. `reply` = set automatically from a reply judged \"not the right contact\" or \"left the role\"."
-          },
-          "statedByUserId": {
-            "type": "string",
-            "nullable": true,
-            "description": "Who set it; null when set automatically."
-          },
-          "statedAt": {
-            "type": "string",
-            "description": "When it was set (ISO 8601)."
-          }
-        },
-        "required": [
-          "offerId",
-          "note",
-          "source",
-          "statedByUserId",
-          "statedAt"
-        ],
-        "description": "Disqualified, as its own mark beside `standing` (never folded into it): present = this person is disqualified for this conversation (the row campaign's offer x brand, or every offer of the brand), with the optional note, who and when. null = not disqualified. Set and removed with PUT/DELETE /orgs/leads/{id}/disqualification; set automatically from a reply judged not our target."
       },
       "LeadCampaignEvidence": {
         "type": "object",
@@ -3002,9 +3054,21 @@
             "nullable": true,
             "description": "The offer named, or null = every offer of the brand."
           },
+          "level": {
+            "type": "string",
+            "enum": [
+              "lead",
+              "company"
+            ],
+            "description": "The level the call wrote or removed."
+          },
+          "companyKey": {
+            "type": "string",
+            "description": "PUT with level company: the company marked (brand-service company id, or `org:<id>` for a name-only employer)."
+          },
           "disqualified": {
             "type": "boolean",
-            "description": "Whether the person reads Disqualified for that conversation after the call."
+            "description": "Whether the person reads Disqualified for that conversation after the call (their own mark or their company's)."
           },
           "disqualification": {
             "allOf": [
@@ -3026,6 +3090,7 @@
           "leadId",
           "brandId",
           "offerId",
+          "level",
           "disqualified",
           "disqualification"
         ]
@@ -3046,6 +3111,14 @@
             "maxLength": 2000,
             "description": "Why, in your words. Optional.",
             "example": "Runs a construction company, we sell to supermarkets."
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "lead",
+              "company"
+            ],
+            "description": "`lead` (default) = this person at this company. `company` = the lead's whole company for the brand (\"not our target\"), covering every lead of it; 409 `lead_has_no_company` when the lead has no known company."
           }
         }
       },
@@ -3102,13 +3175,67 @@
                 "disqualification"
               ]
             }
+          },
+          "companyTotal": {
+            "type": "integer",
+            "description": "Length of `companies`."
+          },
+          "companies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "companyKey": {
+                  "type": "string",
+                  "description": "brand-service company id, or `org:<id>` for a name-only employer."
+                },
+                "companyId": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "brand-service company id; null for a name-only employer."
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "domain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "leadCount": {
+                  "type": "integer",
+                  "description": "Leads of that company the brand holds (each reads Disqualified)."
+                },
+                "disqualification": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/LeadDisqualification"
+                    },
+                    {
+                      "description": "The Disqualified MARK: its own tag, BESIDE the step tags and the standing, never instead of them. A disqualified lead keeps everything that happened with them (contacted, delivered, positive reply, website visit...) and no step standing or step count moves."
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "companyKey",
+                "companyId",
+                "name",
+                "domain",
+                "leadCount",
+                "disqualification"
+              ]
+            },
+            "description": "Companies marked Disqualified at the brand (\"not our target\"), newest first."
           }
         },
         "required": [
           "brandId",
           "offerId",
           "total",
-          "leads"
+          "leads",
+          "companyTotal",
+          "companies"
         ]
       },
       "LeadBucketCountsResponse": {
@@ -10108,13 +10235,16 @@
             }
           },
           "400": {
-            "description": "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters)"
+            "description": "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters, unknown level)"
           },
           "401": {
             "description": "Unauthorized"
           },
           "404": {
             "description": "Lead not found (or not part of the named brand)"
+          },
+          "409": {
+            "description": "lead_has_no_company: level company on a lead with no known company"
           },
           "500": {
             "description": "Write failed"
@@ -10248,6 +10378,19 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "in": "query",
+            "name": "level",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "lead",
+                "company"
+              ]
+            },
+            "description": "lead (default) or company: which mark to remove."
           },
           {
             "schema": {

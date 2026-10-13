@@ -14,6 +14,11 @@ interface SqlNode {
 let storedRows: Array<Record<string, unknown>> = [];
 let lookups: Array<{ id: unknown; orgId: unknown }> = [];
 
+// What sits above the lead (company marks and status, the human's opt-out): none here (level-tags.ts).
+vi.mock("../../src/lib/level-tags.js", () => ({
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set() }),
+}));
+
 vi.mock("../../src/db/index.js", () => ({
   sql: (strings: readonly string[], ...values: unknown[]) => {
     const text = strings.join(" ");
@@ -228,7 +233,7 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
     expect(Object.keys(detail).sort()).toEqual(
       [
         "activeGoalId", "apolloPersonId", "audience", "audienceId", "bounced", "brandIds",
-        "brandProfileId", "campaignId", "clicked", "closedDeal", "companyId", "contacted", "delivered", "disqualification", "email", "emailStatus",
+        "brandProfileId", "campaignId", "clicked", "closedDeal", "company", "companyId", "contacted", "delivered", "disqualification", "email", "emailStatus",
         "featureSlug", "firstBouncedAt", "firstClickedAt", "firstContactedAt", "firstDeliveredAt",
         "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal", "humanId",
         "id", "lastDeliveredAt", "lead", "leadId", "namespace", "offer", "opened", "orgId", "parentRunId",

@@ -457,6 +457,9 @@ function serializeLeadItem(
     // present, with the optional note, who and when. Null = not disqualified for this conversation
     // (the row's offer x brand). See lib/lead-disqualification.ts.
     disqualification: facts.disqualification,
+    // The COMPANY this lead is at (human x company), with what is true of the company as a buyer of the
+    // brand: client, signed up, Disqualified "not our target". null = no company known. lib/company-status.ts.
+    company: facts.company ?? null,
     // The person's campaigns of this brand, each stating what happened IN THAT CAMPAIGN — present
     // only when the caller asked for it with `?include=campaigns`. Every field above stays exactly
     // what it was: the brand-wide roll-up several dashboard surfaces already read.
@@ -1142,6 +1145,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             standing: facts.standing,
             closedDeal: facts.closedDeal,
             disqualification: facts.disqualification,
+            company: facts.company ?? null,
             // Same field, same resolver as the full path — see serializeLeadItem.
             ...(breakdownMap ? { campaigns: breakdownMap.get(r.id) ?? [] } : {}),
             ...deliveryStatus,
