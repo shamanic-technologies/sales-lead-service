@@ -24,6 +24,10 @@ import { reachClauses } from "./reach-sql.js";
  * audience kind alike. No longer fits = the row is SET ASIDE (`source_set_aside_at` + the owner's reason, verbatim),
  * never handed again, and the next row is tried. The owner unreachable or unreadable = the serve fails (the claim rolls
  * back, nothing handed, nothing set aside): never "fits" by default.
+ *
+ * NOT THIS SOURCE'S (LEAK-1012 part 2): the same question first asks whether the find belongs to the source holding it
+ * at all (its funnel's targeted audiences, its origin, its offer: src/lib/source-stock-belongs.ts). A find made before
+ * those rules held is set aside the same way, with that reason.
  */
 
 export const SOURCE_FOUND_STATUS_REASON = "source_found" as const;
@@ -43,6 +47,8 @@ export interface StockedLead {
 export type AudienceFitVerdict = { fits: true } | { fits: false; reason: string };
 
 export type AskAudienceFit = (question: {
+  /** The source unit holding the find: a find outside its funnel's audiences, origin or offer is not its own. */
+  sourceCampaignId: string;
   audienceId: string;
   email: string;
   personId: string | null;
@@ -143,7 +149,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
       throw new Error(`[source-stock] found row ${row.id} (source campaign ${row.campaign_id}) carries no audience`);
     }
 
-    const verdict = await params.askFit({ audienceId: row.audience_id, email: email.value, personId: row.person_id });
+    const verdict = await params.askFit({ sourceCampaignId: row.campaign_id, audienceId: row.audience_id, email: email.value, personId: row.person_id });
     if (!verdict.fits) {
       await tx.execute(sql`
         UPDATE leads_campaigns

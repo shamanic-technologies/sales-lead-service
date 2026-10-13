@@ -29,6 +29,7 @@ import {
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
 import { askAudienceFit } from "./audience-fit-client.js";
+import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 
 /**
@@ -429,6 +430,7 @@ export async function pullNext(
 
   // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
   if (mode.kind === "stock") {
+    const judgeSourceAudience = createSourceAudienceJudge({ orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
     const claim = await claimStockedLead({
       orgId: params.orgId,
       sourceCampaignIds: mode.sourceCampaignIds,
@@ -443,9 +445,13 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
-      // The audience's owner says whether a find still fits it now (STILL-FITS-1012); never re-graded here.
-      askFit: (q) =>
-        askAudienceFit({ ...q, brandId: params.brandId }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null }),
+      // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
+      // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
+      askFit: async ({ sourceCampaignId, ...q }) => {
+        const belongs = await judgeSourceAudience(sourceCampaignId, q.audienceId);
+        if (!belongs.belongs) return { fits: false, reason: belongs.reason };
+        return askAudienceFit({ ...q, brandId: params.brandId }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
+      },
     });
     const stocked = claim.lead;
     if (!stocked) {
