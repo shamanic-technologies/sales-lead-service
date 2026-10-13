@@ -7,6 +7,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
 import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
 import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
@@ -7795,6 +7796,104 @@ registry.registerPath({
         },
       },
     },
+    401: { description: "Unauthorized" },
+    502: { description: "campaign-service could not answer" },
+  },
+});
+
+const MeetingArmCounts = z.object({
+  handled: z.number().int().openapi({ description: "People who replied positively whose handler is on this side (the rate's population)." }),
+  booked: z.number().int().openapi({ description: "Of them, people whose first meeting after the positive reply this side booked." }),
+  rate: z.number().nullable().openapi({ description: "booked / handled; null when nobody was handled." }),
+});
+
+const MeetingAttributionSummary = z.object({
+  positiveReplyPeople: z.number().int().openapi({ description: "People (per brand) who replied positively, first positive reply in the window." }),
+  arms: z.object({
+    aiMeetingBooking: MeetingArmCounts.openapi({ description: "Handled by an AI Meeting Booking campaign (channel ai-meeting-booking, leg conversation_to_meeting_booked)." }),
+    yourTeamMeetingBooking: MeetingArmCounts.openapi({ description: "Handled by a PERSON (the client's team): a human-sent reply, a Gmail answer Jev judged one, an answered-outside statement." }),
+    unknown: MeetingArmCounts.openapi({ description: "Handled by an AI answer whose campaign nothing names." }),
+    other: z.array(MeetingArmCounts.extend({ featureSlug: z.string().nullable(), legKey: z.string().nullable() })).openapi({
+      description: "Handled by an AI act of ANOTHER leg (AI Instant Call, a WhatsApp responder...): known, never folded into AI Meeting Booking.",
+    }),
+  }),
+  unhandled: z.object({ people: z.number().int(), booked: z.number().int() }).openapi({
+    description: "Replied positively, no answer of ours before the meeting / to date: in no side's population. handled (all sides) + unhandled.people = positiveReplyPeople.",
+  }),
+  meetings: z.object({
+    total: z.number().int(),
+    aiMeetingBooking: z.number().int(),
+    yourTeamMeetingBooking: z.number().int(),
+    other: z.number().int(),
+    unknown: z.number().int(),
+    unknownReasons: z.record(z.string(), z.number().int()),
+  }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/meeting-attribution",
+  summary: "Who booked each meeting (AI Meeting Booking or the client's team) and the Positive reply -> Meeting booked rate per side (internal, service-auth)",
+  description:
+    "Every live `meeting_booked` / `meeting_attended` (calendar tracker, CRM, a person's statement) tied to its PERSON and to WHAT BOOKED IT, derived " +
+    "on read from positive facts on the same person at the same brand, nothing stored, no meeting row rewritten. A meeting is booked by the LATEST " +
+    "answer of ours dated between the person's first positive reply and the meeting: an AI act of the follow-up ledger names its acting campaign " +
+    "(campaign-service states its channel and leg; an automation `reply_sent` takes the campaign of the ledger act it records, within 10 min), a " +
+    "PERSON's answer (human-sent reply, Gmail answer Jev judged one, answered-outside statement) is the client's team, with the brand's Your Team " +
+    "Meeting Booking campaign of the offer when one exists. The person's handler (the rate's population) is that answer when they booked, else " +
+    "their latest answer to date: sides PARTITION the people who replied positively (+ `unhandled`). A meeting the rule cannot answer is `unknown` " +
+    "with its reason, never given to a side. Fleet-wide without `brandId` (with `byBrand`); `since` keeps people whose first positive reply and " +
+    "meetings are at or after it. 502 when campaign-service cannot answer.",
+  request: {
+    query: z.object({
+      brandId: z.string().optional().openapi({ description: "One brand; absent = fleet-wide." }),
+      since: z.string().optional().openapi({ description: "ISO instant: people whose first positive reply, and meetings, at or after it." }),
+    }),
+  },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Meetings with who booked them, and the rate per side",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              scope: z.object({ brandId: z.string().nullable(), since: z.string().nullable() }),
+              legKey: z.literal("conversation_to_meeting_booked"),
+              summary: MeetingAttributionSummary,
+              byBrand: z.array(MeetingAttributionSummary.extend({ orgId: z.string(), brandId: z.string() })),
+              attributedMeetings: z.array(
+                z.object({
+                  conversionEventId: z.string(),
+                  orgId: z.string(),
+                  brandId: z.string(),
+                  event: z.string().openapi({ description: "meeting_booked | meeting_attended" }),
+                  source: z.string().openapi({ description: "tracker | crm | manual" }),
+                  email: z.string().nullable(),
+                  occurredAt: z.string().nullable(),
+                  leadId: z.string().nullable().openapi({ description: "The person; null = the row names none (unmatched / held)." }),
+                  positiveReply: z.object({ ref: z.string(), at: z.string() }).nullable().openapi({ description: "The latest positive reply at or before the meeting." }),
+                  bookedBy: z
+                    .object({
+                      kind: z.enum(["ai", "person"]),
+                      campaignId: z.string().nullable(),
+                      featureSlug: z.string().nullable(),
+                      legKey: z.string().nullable(),
+                      answerRef: z.string(),
+                      answerVia: z.enum(MEETING_ANSWER_VIAS),
+                      answeredAt: z.string(),
+                    })
+                    .nullable(),
+                  arm: z.enum(MEETING_ARMS),
+                  unknownReason: z.enum(MEETING_UNKNOWN_REASONS).nullable(),
+                }),
+              ),
+            })
+            .openapi("MeetingAttributionResponse"),
+        },
+      },
+    },
+    400: { description: "Unparseable `since`" },
     401: { description: "Unauthorized" },
     502: { description: "campaign-service could not answer" },
   },
