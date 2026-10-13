@@ -135,6 +135,28 @@ describe("attributeMeetings", () => {
     expect(alone.summary.arms.unknown).toEqual({ handled: 1, booked: 1, rate: 1 });
   });
 
+  it("a queued automation send takes the ONE campaign whose earlier acts it delivers; two campaigns = unknown", () => {
+    const one = attributeMeetings({
+      meetings: [meeting("m1", "L1", "2026-10-05T10:00:00.000Z")],
+      positiveReplies: [reply("L1", "2026-10-01T10:00:00.000Z")],
+      answers: [ai("L1", "2026-10-01T11:00:00.000Z", "ai-mb"), ai("L1", "2026-10-01T15:00:00.000Z", null, "reply_sent")],
+      campaigns,
+    });
+    expect(one.attributedMeetings[0]).toMatchObject({ arm: "aiMeetingBooking", bookedBy: { answerVia: "reply_sent", campaignId: "ai-mb" } });
+
+    const two = attributeMeetings({
+      meetings: [meeting("m1", "L1", "2026-10-05T10:00:00.000Z")],
+      positiveReplies: [reply("L1", "2026-10-01T10:00:00.000Z")],
+      answers: [
+        ai("L1", "2026-10-01T11:00:00.000Z", "ai-mb"),
+        ai("L1", "2026-10-01T11:30:00.000Z", "instant-call"),
+        ai("L1", "2026-10-01T15:00:00.000Z", null, "reply_sent"),
+      ],
+      campaigns,
+    });
+    expect(two.attributedMeetings[0]).toMatchObject({ arm: "unknown", unknownReason: "ai_campaign_unknown" });
+  });
+
   it("an AI act of another leg is reported as other, never as AI Meeting Booking", () => {
     const r = attributeMeetings({
       meetings: [meeting("m1", "L1", "2026-10-05T10:00:00.000Z")],

@@ -19,7 +19,8 @@
  *                       campaign (campaign-service says its channel and leg); an outreach
  *                       `reply_sent` the sender states `sentBy: automation` is the same act seen
  *                       from the mailbox: it takes the campaign of the ledger act it records
- *                       (same person, within `SAME_ACT_WINDOW_MS`), else the campaign is unknown;
+ *                       (same person, within `SAME_ACT_WINDOW_MS`), else, for a queued send, the
+ *                       ONE campaign every earlier AI act on that person names; else unknown;
  *                     - a PERSON (the client's team): an outreach `reply_sent` stated
  *                       `sentBy: human` (Unibox, replies route, staff client), an email from their
  *                       own Gmail Jev judged an answer (`outside_answer_judgments`), or an
@@ -265,7 +266,22 @@ export function attributeMeetings(input: {
           Math.abs(ms(l.occurredAt) - ms(a.occurredAt)) <= SAME_ACT_WINDOW_MS,
       )
       .sort((x, y) => Math.abs(ms(x.occurredAt) - ms(a.occurredAt)) - Math.abs(ms(y.occurredAt) - ms(a.occurredAt)))[0];
-    return twin ? { ...a, campaignId: twin.campaignId } : a;
+    if (twin) return { ...a, campaignId: twin.campaignId };
+    // A queued send goes out hours after the act that wrote it: the campaign is still named when
+    // every AI act on that person before the send names the same one (several = unknown).
+    const earlier = new Set(
+      ledger
+        .filter(
+          (l) =>
+            l.orgId === a.orgId &&
+            l.leadId === a.leadId &&
+            l.campaignId !== null &&
+            l.brandIds.some((b) => a.brandIds.includes(b)) &&
+            ms(l.occurredAt) <= ms(a.occurredAt),
+        )
+        .map((l) => l.campaignId as string),
+    );
+    return earlier.size === 1 ? { ...a, campaignId: [...earlier][0] } : a;
   });
 
   const answersByPerson = new Map<string, AnswerFact[]>();
