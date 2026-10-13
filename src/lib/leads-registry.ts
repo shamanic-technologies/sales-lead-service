@@ -145,34 +145,73 @@ export async function upsertLeadFromPerson(
   person: Person,
   options: { enriched: boolean; identity?: ServedIdentity | null },
 ): Promise<string> {
-  const leadId = await pickAndUpsertLead(person, options);
-  if (options.identity) await stampIdentity(leadId, options.identity);
+  // The served person's local company row (keyed on domain, then name), read before picking the lead.
+  const servedCompany: CompanyRef | null = options.identity
+    ? {
+        companyId: options.identity.companyId,
+        organizationId: await upsertOrganizationFromPerson(person),
+        name: person.organization?.name ?? null,
+      }
+    : null;
+  const leadId = await pickAndUpsertLead(person, options, servedCompany);
+  if (options.identity) await stampIdentity(leadId, options.identity, servedCompany?.organizationId ?? null);
   return leadId;
 }
 
-/** The lead's company (brand-service id), null when unknown. */
-async function leadCompanyId(leadId: string): Promise<string | null> {
-  const rows = (await db.execute(sql`SELECT company_id::text AS company_id FROM leads WHERE id = ${leadId}`)) as unknown as Array<{
-    company_id: string | null;
-  }>;
-  return rows[0]?.company_id ?? null;
+/**
+ * Where a lead or a served person works: the brand-service company when it has a safe identity, and
+ * the LOCAL organization row (the company key of a name-only employer, which brand-service never
+ * identifies), with its name.
+ */
+export interface CompanyRef {
+  companyId: string | null;
+  organizationId: string | null;
+  name: string | null;
+}
+
+async function leadCompanyOf(leadId: string): Promise<CompanyRef> {
+  const rows = (await db.execute(sql`
+    SELECT l.company_id::text AS company_id, l.organization_id::text AS organization_id, o.name
+    FROM leads l LEFT JOIN organizations o ON o.id = l.organization_id
+    WHERE l.id = ${leadId}
+  `)) as unknown as Array<{ company_id: string | null; organization_id: string | null; name: string | null }>;
+  const r = rows[0];
+  return { companyId: r?.company_id ?? null, organizationId: r?.organization_id ?? null, name: r?.name ?? null };
+}
+
+/**
+ * Is this ANOTHER company? true only on evidence: two different brand ids, or two different local
+ * rows whose names differ too (a name spelled the same is the same employer). Unknown = false: a
+ * lead is never split on a guess.
+ */
+export function isOtherCompany(lead: CompanyRef, served: CompanyRef): boolean {
+  if (lead.companyId && served.companyId) return lead.companyId !== served.companyId;
+  if (!lead.organizationId || !served.organizationId || lead.organizationId === served.organizationId) return false;
+  if (!lead.name || !served.name) return false;
+  return !sameOrganizationName(lead.name, served.name);
 }
 
 /** The human's lead at this company (oldest first when the same pair is held twice). */
-export async function findLeadByHumanCompany(humanId: string, companyId: string): Promise<string | null> {
-  const rows = (await db.execute(sql`
-    SELECT id::text AS id FROM leads WHERE human_id = ${humanId} AND company_id = ${companyId}
-    ORDER BY created_at, id LIMIT 1
-  `)) as unknown as Array<{ id: string }>;
+export async function findLeadByHumanCompany(humanId: string, company: CompanyRef): Promise<string | null> {
+  if (!company.companyId && !company.organizationId) return null;
+  const rows = (await db.execute(
+    company.companyId
+      ? sql`SELECT id::text AS id FROM leads WHERE human_id = ${humanId} AND company_id = ${company.companyId}
+            ORDER BY created_at, id LIMIT 1`
+      : sql`SELECT id::text AS id FROM leads WHERE human_id = ${humanId} AND company_id IS NULL
+              AND organization_id = ${company.organizationId}
+            ORDER BY created_at, id LIMIT 1`,
+  )) as unknown as Array<{ id: string }>;
   return rows[0]?.id ?? null;
 }
 
 /** First answer wins: a lead's stored human/company is never overwritten here (merges are followed elsewhere). */
-async function stampIdentity(leadId: string, identity: ServedIdentity): Promise<void> {
+async function stampIdentity(leadId: string, identity: ServedIdentity, organizationId: string | null): Promise<void> {
   await db.execute(sql`
     UPDATE leads SET
       human_id = COALESCE(human_id, ${identity.humanId}::uuid),
       company_id = COALESCE(company_id, ${identity.companyId}::uuid),
+      organization_id = COALESCE(organization_id, ${organizationId}::uuid),
       identity_resolved_at = COALESCE(identity_resolved_at, now())
     WHERE id = ${leadId}
   `);
@@ -181,6 +220,7 @@ async function stampIdentity(leadId: string, identity: ServedIdentity): Promise<
 async function pickAndUpsertLead(
   person: Person,
   options: { enriched: boolean; identity?: ServedIdentity | null },
+  servedCompany: CompanyRef | null,
 ): Promise<string> {
   const fields = pickPersonFields(person);
   const metadata = person as unknown;
@@ -203,26 +243,25 @@ async function pickAndUpsertLead(
   // address their old lead holds is logged `identity.address_held_at_other_company` (measured).
   const identity = options.identity ?? null;
   let providerIdHeldElsewhere = false;
-  if (identity && emailOwnerId) {
-    const ownerCompany = await leadCompanyId(emailOwnerId);
-    if (ownerCompany && identity.companyId && ownerCompany !== identity.companyId) {
+  if (identity && servedCompany && emailOwnerId) {
+    const owner = await leadCompanyOf(emailOwnerId);
+    if (isOtherCompany(owner, servedCompany)) {
       console.warn(
         `[lead-service] identity.address_held_at_other_company email=${person.email} leadId=${emailOwnerId} ` +
-          `leadCompany=${ownerCompany} servedCompany=${identity.companyId}`,
+          `leadCompany=${owner.companyId ?? `org:${owner.organizationId}`} servedCompany=${servedCompany.companyId ?? `org:${servedCompany.organizationId}`}`,
       );
     }
   }
-  if (identity && !emailOwnerId) {
-    const atPair =
-      identity.humanId && identity.companyId ? await findLeadByHumanCompany(identity.humanId, identity.companyId) : null;
+  if (identity && servedCompany && !emailOwnerId) {
+    const atPair = identity.humanId ? await findLeadByHumanCompany(identity.humanId, servedCompany) : null;
     if (atPair) {
       providerOwnerId = atPair;
-    } else if (providerOwnerId && identity.companyId) {
-      const providerCompany = await leadCompanyId(providerOwnerId);
-      if (providerCompany && providerCompany !== identity.companyId) {
+    } else if (providerOwnerId) {
+      const held = await leadCompanyOf(providerOwnerId);
+      if (isOtherCompany(held, servedCompany)) {
         console.log(
-          `[lead-service] identity: job change, new lead at company ${identity.companyId} (provider id ${person.providerPersonId} ` +
-            `is held by lead ${providerOwnerId} at company ${providerCompany})`,
+          `[lead-service] identity: job change, new lead (provider id ${person.providerPersonId} is held by lead ${providerOwnerId} ` +
+            `at ${held.companyId ?? `org:${held.organizationId}`}, served at ${servedCompany.companyId ?? `org:${servedCompany.organizationId}`})`,
         );
         providerOwnerId = null;
         providerIdHeldElsewhere = true;

@@ -24,6 +24,7 @@ import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
 import { startSocialEngagementsWorker } from "./lib/social-engagements.js";
 import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
 import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
+import { startHumanEventsWorker } from "./lib/human-events.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -55,12 +56,15 @@ startTriggerEventOutboxWorker();
 // A lead is a human (human-service) at a company (brand-service): resolves both for every lead and
 // writes every employer's firmographics to brand-service (lead-identity-sweep.ts).
 startLeadIdentityWorker();
+// Follows human-service's fleet identity events: merges move leads to the canonical human, facts
+// (opt-out) are copied for the standing (human-events.ts).
+startHumanEventsWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);
