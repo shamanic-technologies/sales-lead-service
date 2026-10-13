@@ -18,6 +18,10 @@ vi.mock("../../src/lib/source-stock.js", () => ({
   SOURCE_FOUND_STATUS_REASON: "source_found",
   claimStockedLead: (...args: unknown[]) => claimStockedLead(...args),
 }));
+const judgeSourceAudience = vi.fn();
+vi.mock("../../src/lib/source-stock-belongs.js", () => ({
+  createSourceAudienceJudge: () => (...args: unknown[]) => judgeSourceAudience(...args),
+}));
 const askAudienceFit = vi.fn();
 vi.mock("../../src/lib/audience-fit-client.js", () => ({
   askAudienceFit: (...args: unknown[]) => askAudienceFit(...args),
@@ -237,14 +241,28 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
 
   it("asks human-service, for the brand and org of the serve, whether each stocked find still fits its audience", async () => {
     claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    judgeSourceAudience.mockResolvedValueOnce({ belongs: true });
     askAudienceFit.mockResolvedValueOnce({ fits: false, reason: "Answered on WhatsApp" });
     await pullNext(stockParams());
     const { askFit } = claimStockedLead.mock.calls[0][0] as { askFit: (q: unknown) => Promise<unknown> };
-    await expect(askFit({ audienceId: "aud-7", email: "x@acme.com", personId: "p-1" })).resolves.toEqual({ fits: false, reason: "Answered on WhatsApp" });
+    await expect(askFit({ sourceCampaignId: UNIT, audienceId: "aud-7", email: "x@acme.com", personId: "p-1" })).resolves.toEqual({ fits: false, reason: "Answered on WhatsApp" });
+    expect(judgeSourceAudience).toHaveBeenCalledWith(UNIT, "aud-7");
     expect(askAudienceFit).toHaveBeenCalledWith(
       { audienceId: "aud-7", email: "x@acme.com", personId: "p-1", brandId: "brand-1" },
       expect.objectContaining({ orgId: "org-1", runId: "run-1" }),
     );
+  });
+
+  it("a find that is not the holding source's own (another offer, origin or funnel audience) is set aside, human-service never asked", async () => {
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    judgeSourceAudience.mockResolvedValueOnce({ belongs: false, reason: "Found in audience aud-apollo, whose own list is sourcing-apollo-cold-filters" });
+    await pullNext(stockParams());
+    const { askFit } = claimStockedLead.mock.calls[0][0] as { askFit: (q: unknown) => Promise<unknown> };
+    await expect(askFit({ sourceCampaignId: UNIT, audienceId: "aud-apollo", email: "x@acme.com", personId: null })).resolves.toEqual({
+      fits: false,
+      reason: "Found in audience aud-apollo, whose own list is sourcing-apollo-cold-filters",
+    });
+    expect(askAudienceFit).not.toHaveBeenCalled();
   });
 
   it("drains the outreach campaign's own paid pool FIRST, like every serve", async () => {

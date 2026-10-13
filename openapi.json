@@ -8397,6 +8397,201 @@
           "gaps"
         ]
       },
+      "SourceStockRecheckResponse": {
+        "type": "object",
+        "properties": {
+          "sourceCampaignId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "before": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "inStock": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "inStock"
+              ]
+            }
+          },
+          "setAside": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "rows": {
+                  "type": "integer"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "audienceId",
+                "rows",
+                "reason"
+              ]
+            }
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "inStock": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "inStock"
+              ]
+            }
+          }
+        },
+        "required": [
+          "sourceCampaignId",
+          "dryRun",
+          "before",
+          "setAside",
+          "after"
+        ]
+      },
+      "SourceStockRecheckBody": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean",
+            "description": "true = report what would be set aside, write nothing."
+          }
+        },
+        "required": [
+          "dryRun"
+        ]
+      },
+      "SourceStockAdoptResponse": {
+        "type": "object",
+        "properties": {
+          "sourceCampaignId": {
+            "type": "string"
+          },
+          "fromSourceCampaignId": {
+            "type": "string"
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "audiences": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string"
+                },
+                "candidates": {
+                  "type": "integer"
+                },
+                "adopted": {
+                  "type": "integer"
+                },
+                "refusedReason": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "audienceId",
+                "candidates",
+                "adopted",
+                "refusedReason"
+              ]
+            }
+          },
+          "before": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "inStock": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "inStock"
+              ]
+            }
+          },
+          "after": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "audienceId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "inStock": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "audienceId",
+                "inStock"
+              ]
+            }
+          }
+        },
+        "required": [
+          "sourceCampaignId",
+          "fromSourceCampaignId",
+          "dryRun",
+          "audiences",
+          "before",
+          "after"
+        ]
+      },
+      "SourceStockAdoptBody": {
+        "type": "object",
+        "properties": {
+          "fromSourceCampaignId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The source campaign that set the finds aside."
+          },
+          "dryRun": {
+            "type": "boolean",
+            "description": "true = report what would be adopted, write nothing."
+          }
+        },
+        "required": [
+          "fromSourceCampaignId",
+          "dryRun"
+        ]
+      },
       "SourceLeadsFoundResponse": {
         "type": "object",
         "properties": {
@@ -15046,6 +15241,162 @@
           },
           "409": {
             "description": "Not a lead source campaign"
+          },
+          "502": {
+            "description": "A sibling service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/source-campaigns/{campaignId}/stock/recheck": {
+      "post": {
+        "summary": "Set aside every find in a source's stock that is not its own (internal, service-auth)",
+        "description": "Asks, per audience of the source's stock (finds never handed, never set aside), the same question the handover asks: does the audience belong to the source's offer, is its own list the source's origin, and, when the source's campaign targets audiences, is it one of them. Every find of an audience that fails is set aside with that reason (`source_set_aside_reason`), never handed. `before`/`after` count the stock per audience. 404 = not a source campaign of this org; 502 = campaign-service or human-service could not answer (nothing written).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The source campaign."
+            },
+            "required": true,
+            "description": "The source campaign.",
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceStockRecheckBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Rechecked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceStockRecheckResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id or dryRun missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not a source campaign of this org"
+          },
+          "502": {
+            "description": "A sibling service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/source-campaigns/{campaignId}/stock/adopt": {
+      "post": {
+        "summary": "Take the finds another source set aside that belong to this source (internal, service-auth)",
+        "description": "For finds another source of the org set aside and never handed (nobody contacted them through it): per audience, when this source's judge accepts the audience (its offer, its origin, its targeted audiences), every such find is filed under this source as its own find, keeping its original find time; the original row stays set aside. A person this source already holds is skipped. The handover's still-fits question still applies. 404 = not a source campaign of this org; 502 = a sibling could not answer (nothing written).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The source campaign taking the finds."
+            },
+            "required": true,
+            "description": "The source campaign taking the finds.",
+            "name": "campaignId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceStockAdoptBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Adopted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceStockAdoptResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id, fromSourceCampaignId or dryRun missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not a source campaign of this org"
           },
           "502": {
             "description": "A sibling service could not answer"
