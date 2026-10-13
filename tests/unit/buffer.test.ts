@@ -271,6 +271,15 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(upsertLeadFromPerson).not.toHaveBeenCalled();
   });
 
+  it("reads an exhausted serve-next whose competitor pages posted nothing as no_recent_posts, never exhausted", async () => {
+    serveNext.mockResolvedValueOnce({ status: "exhausted", person: null, reason: "no_recent_posts" });
+
+    const result = await pullNext(baseParams);
+
+    expect(result).toEqual({ found: false, reason: "no_recent_posts" });
+    expect(upsertLeadFromPerson).not.toHaveBeenCalled();
+  });
+
   it("reads a pending serve-next (producer budget spent mid-walk) as timed out, never exhausted", async () => {
     // Shockwavecenters 2026-10-04: the teaser screen rejected ~99.7% of an audience, so
     // one serve-next walked 700+ teasers and outran our 300s client timeout. human-service
