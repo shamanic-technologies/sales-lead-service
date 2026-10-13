@@ -561,6 +561,13 @@
       "when": 1786679200000,
       "tag": "0079_brand_person_statements",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1786765600000,
+      "tag": "0080_followup_handover_withdrawal",
+      "breakpoints": true
     }
   ]
 }

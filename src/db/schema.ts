@@ -278,6 +278,14 @@ export const leadsCampaigns = pgTable(
     followupStoppedReason: text("followup_stopped_reason"),
     followupHandedAt: timestamp("followup_handed_at", { withTimezone: true }),
     followupHandedReason: text("followup_handed_reason"),
+    // followup_handed_reasons — every hand-over's reason in order (migration 0080); a withdrawal lifts the
+    //                           row only when every one of them names the withdrawn reason.
+    // followup_handover_withdrawn_* — trace of the last lifted hand-over: when, why, and what it lifted.
+    followupHandedReasons: text("followup_handed_reasons").array(),
+    followupHandoverWithdrawnAt: timestamp("followup_handover_withdrawn_at", { withTimezone: true }),
+    followupHandoverWithdrawnReason: text("followup_handover_withdrawn_reason"),
+    followupHandoverWithdrawnHandedAt: timestamp("followup_handover_withdrawn_handed_at", { withTimezone: true }),
+    followupHandoverWithdrawnHandedReasons: text("followup_handover_withdrawn_handed_reasons").array(),
     // followup_due_set_by_campaign_id — WHO the current due date is for, by who set it (migration 0071):
     //                           the writer's x-campaign-id. Equal to campaign_id = the holding campaign's own
     //                           debt (its own follow-up, a ladder on its own person): only it claims the row.

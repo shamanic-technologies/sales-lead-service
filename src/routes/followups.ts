@@ -19,6 +19,7 @@ import {
   parseDueDate,
   pickFollowupCandidate,
   readFollowupState,
+  withdrawHandover,
   writeFollowupStatement,
 } from "../lib/followup-queue.js";
 import { readFollowupActions, recordActedByEmail } from "../lib/followup-actions.js";
@@ -43,6 +44,11 @@ const FollowupStatementBodySchema = z.object({
   dueAt: z.string().optional(),
   nextDueAt: z.string().optional(),
   reason: z.string().optional(),
+});
+
+const WithdrawHandoverBodySchema = z.object({
+  handedReason: z.string(),
+  reason: z.string(),
 });
 
 const ActedByEmailBodySchema = z.object({
@@ -470,6 +476,47 @@ router.post(
     }
 
     res.json({ followup: state });
+  }),
+);
+
+/**
+ * Withdraw a hand-over the caller stated, because its verdict turned out wrong (the same reply
+ * re-judged positive). `handedReason` names the hand-over exactly as the caller wrote it; lifted only
+ * if every hand-over on the row names it (see `withdrawHandover`). 200 either way, `outcome` says
+ * which: `lifted` (a later `scheduled` re-enters the person) or `nothing_to_lift` (+ `cause`).
+ */
+router.post(
+  "/orgs/leads/:id/followups/handover/withdraw",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const id = req.params.id;
+    if (!UUID_RE.test(id)) {
+      res.status(400).json({ error: "id must be a leads_campaigns row uuid" });
+      return;
+    }
+    const parsed = WithdrawHandoverBodySchema.safeParse(req.body);
+    const handedReason = parsed.success ? parsed.data.handedReason.trim() : "";
+    const reason = parsed.success ? parsed.data.reason.trim() : "";
+    if (!handedReason || !reason) {
+      res.status(400).json({
+        error: "handedReason (the hand-over's reason, exactly as stated) and reason (why it is withdrawn) are required",
+        code: "reason_required",
+      });
+      return;
+    }
+
+    const out = await withdrawHandover({ orgId: req.orgId as string, id, handedReason, reason, nowMs: Date.now() });
+    if (out.outcome === "row_not_found") {
+      res.status(404).json({ error: "No such lead row for this org" });
+      return;
+    }
+    if (out.outcome === "lifted") {
+      console.log(`[lead-service] followup handover withdrawn id=${id} org=${req.orgId} reason=${JSON.stringify(reason)}`);
+      res.json({ outcome: "lifted", followup: out.state });
+      return;
+    }
+    res.json({ outcome: "nothing_to_lift", cause: out.cause, followup: out.state });
   }),
 );
 

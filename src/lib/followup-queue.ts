@@ -31,7 +31,9 @@
  *
  *  - STATED: whoever hands the thread over (instantly-service: the client is asked to answer, the
  *    reply is escalated, a person already answered) sends `kind:"handed"`. Unlike a stop it is
- *    permanent: a later `scheduled` (the prospect writes again) does not re-enter the row.
+ *    permanent: a later `scheduled` (the prospect writes again) does not re-enter the row. The ONE
+ *    way out: the observer that stated it WITHDRAWS it by the reason it wrote, when its verdict was
+ *    wrong (`withdrawHandover`); lifted only if every hand-over on the row names that reason.
  *  - OWED BEFORE ANY RESPONDER: a never-answered debt whose due date predates the earliest responder
  *    known on this held campaign (campaign-service `createdAt` of the acting campaign) was a
  *    human's reply to answer, because no responder existed when it arrived. The claim hands those
@@ -521,6 +523,7 @@ export async function handOverPreResponderDebts(params: {
     UPDATE leads_campaigns
        SET followup_handed_at = ${now},
            followup_handed_reason = ${OWED_BEFORE_RESPONDER_REASON},
+           followup_handed_reasons = ARRAY[${OWED_BEFORE_RESPONDER_REASON}]::text[],
            followup_stopped_reason = ${OWED_BEFORE_RESPONDER_REASON},
            followup_due_at = NULL,
            followup_claimed_at = NULL,
@@ -665,6 +668,16 @@ export interface FollowupState {
   handedAt: string | null;
   handedReason: string | null;
   /**
+   * The last hand-over that was WITHDRAWN by the observer that stated it (its verdict turned out wrong),
+   * kept as history; null = none ever was. A withdrawn hand-over no longer holds the row.
+   */
+  handoverWithdrawal: {
+    withdrawnAt: string;
+    reason: string | null;
+    handedAt: string | null;
+    handedReasons: string[];
+  } | null;
+  /**
    * Who set the current due date (the writer's x-campaign-id), which decides who may claim it: the row's
    * own campaign = only it; another campaign = anyone but the holder; null = an observer, anyone.
    */
@@ -683,6 +696,10 @@ interface RawStateRow {
   followup_handed_at?: Date | string | null;
   followup_handed_reason?: string | null;
   followup_due_set_by_campaign_id?: string | null;
+  followup_handover_withdrawn_at?: Date | string | null;
+  followup_handover_withdrawn_reason?: string | null;
+  followup_handover_withdrawn_handed_at?: Date | string | null;
+  followup_handover_withdrawn_handed_reasons?: string[] | null;
 }
 
 /**
@@ -709,6 +726,18 @@ function toState(row: RawStateRow): FollowupState {
     handedAt: toIso(row.followup_handed_at ?? null),
     handedReason: row.followup_handed_reason ?? null,
     dueSetByCampaignId: row.followup_due_set_by_campaign_id ?? null,
+    handoverWithdrawal: withdrawalOf(row),
+  };
+}
+
+function withdrawalOf(row: RawStateRow): FollowupState["handoverWithdrawal"] {
+  const withdrawnAt = toIso(row.followup_handover_withdrawn_at ?? null);
+  if (!withdrawnAt) return null;
+  return {
+    withdrawnAt,
+    reason: row.followup_handover_withdrawn_reason ?? null,
+    handedAt: toIso(row.followup_handover_withdrawn_handed_at ?? null),
+    handedReasons: row.followup_handover_withdrawn_handed_reasons ?? [],
   };
 }
 
@@ -716,7 +745,9 @@ const STATE_COLUMNS = sql`
   id, lead_id, campaign_id, followup_due_at, followup_claimed_at,
   COALESCE(followup_count, 0) AS followup_count,
   followup_last_action_at, followup_stopped_reason,
-  followup_handed_at, followup_handed_reason, followup_due_set_by_campaign_id
+  followup_handed_at, followup_handed_reason, followup_due_set_by_campaign_id,
+  followup_handover_withdrawn_at, followup_handover_withdrawn_reason,
+  followup_handover_withdrawn_handed_at, followup_handover_withdrawn_handed_reasons
 `;
 
 /**
@@ -789,6 +820,12 @@ export async function writeFollowupStatement(params: {
              followup_due_set_by_campaign_id = ${setsDue ? sql`${params.actingCampaignId ?? null}` : sql`followup_due_set_by_campaign_id`},
              followup_handed_at = ${handed ? sql`COALESCE(followup_handed_at, ${now}::timestamptz)` : sql`followup_handed_at`},
              followup_handed_reason = ${handed ? sql`COALESCE(followup_handed_reason, ${params.reason})` : sql`followup_handed_reason`},
+             followup_handed_reasons = ${
+               handed
+                 ? sql`CASE WHEN followup_handed_at IS NULL THEN ARRAY[${params.reason}]::text[]
+                            ELSE array_append(COALESCE(followup_handed_reasons, ARRAY[followup_handed_reason]::text[]), ${params.reason}::text) END`
+                 : sql`followup_handed_reasons`
+             },
              followup_claimed_at = NULL,
              followup_count = COALESCE(followup_count, 0) + ${acted ? 1 : 0},
              followup_last_action_at = ${acted ? now : sql`followup_last_action_at`},
@@ -811,6 +848,65 @@ export async function writeFollowupStatement(params: {
   `)) as unknown as RawStateRow[];
 
   return rows[0] ? toState(rows[0]) : null;
+}
+
+/**
+ * Withdraw a hand-over whose verdict turned out WRONG (2026-10-13, DefiniteJobs: a positive reply was
+ * judged off topic and handed over; the classifier was fixed and the reply re-judged positive).
+ *
+ * The caller names the hand-over it stated by the REASON it wrote. The row is lifted only when every
+ * hand-over on it named exactly that reason (`followup_handed_reasons`), so a hand-over anyone else
+ * stated (a person answered by hand, the client was asked, the claim's own pre-responder hand-over)
+ * is never lifted by it: the Shockwavecenters guarantee holds. The pre-responder hand-over is the
+ * claim's, never an observer's, and is never withdrawable by naming it.
+ *
+ * Lifted = the row is as if never handed (no due date, claim released, stop reason = why it was
+ * withdrawn) and the lifted hand-over is kept as history; a later `scheduled` re-enters it like a
+ * fresh row. Nothing re-enters the queue by itself. Anything else is a no-op, named.
+ */
+export type HandoverWithdrawalOutcome =
+  | { outcome: "lifted"; state: FollowupState }
+  | {
+      outcome: "nothing_to_lift";
+      /** not_handed: the row holds no hand-over. reason_mismatch: a hand-over on it names another reason. */
+      cause: "not_handed" | "reason_mismatch";
+      state: FollowupState;
+    }
+  | { outcome: "row_not_found" };
+
+export async function withdrawHandover(params: {
+  orgId: string;
+  id: string;
+  handedReason: string;
+  reason: string;
+  nowMs: number;
+}): Promise<HandoverWithdrawalOutcome> {
+  const now = new Date(params.nowMs).toISOString();
+  const rows = (await db.execute(sql`
+    UPDATE leads_campaigns
+       SET followup_handover_withdrawn_at = ${now},
+           followup_handover_withdrawn_reason = ${params.reason},
+           followup_handover_withdrawn_handed_at = followup_handed_at,
+           followup_handover_withdrawn_handed_reasons = followup_handed_reasons,
+           followup_handed_at = NULL,
+           followup_handed_reason = NULL,
+           followup_handed_reasons = NULL,
+           followup_due_at = NULL,
+           followup_claimed_at = NULL,
+           followup_stopped_reason = ${params.reason},
+           updated_at = ${now}
+     WHERE id = ${params.id} AND org_id = ${params.orgId}
+       AND followup_handed_at IS NOT NULL
+       AND ${params.handedReason}::text <> ${OWED_BEFORE_RESPONDER_REASON}
+       AND cardinality(followup_handed_reasons) > 0
+       AND ${params.handedReason}::text = ALL(followup_handed_reasons)
+    RETURNING ${STATE_COLUMNS}
+  `)) as unknown as RawStateRow[];
+  if (rows[0]) return { outcome: "lifted", state: toState(rows[0]) };
+
+  const state = await readFollowupState(params.orgId, params.id);
+  if (!state) return { outcome: "row_not_found" };
+  return { outcome: "nothing_to_lift", cause: state.handedAt ? "reason_mismatch" : "not_handed", state };
 }
 
 /**
