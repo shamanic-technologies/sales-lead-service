@@ -1623,6 +1623,18 @@
             "description": "Apollo person ID — convenience copy of lead.apolloPersonId.",
             "example": "5f2a3b4c5d6e7f8a9b0c1d2e"
           },
+          "humanId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The HUMAN this lead is: human-service's fleet-wide human id (GET /internal/human-identities/{humanId}). A lead is a human at a company. null until the identity sweep resolved it, or when the lead holds no key human-service accepts."
+          },
+          "companyId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "The COMPANY this lead is at: brand-service's brand id of the current employer (same domain = same id). null = no safe company identity (name-only or no employer), or not resolved yet. A known human at a new company is a new lead."
+          },
           "emailStatus": {
             "type": "string",
             "nullable": true,
@@ -1808,6 +1820,8 @@
           "sources",
           "servedAt",
           "apolloPersonId",
+          "humanId",
+          "companyId",
           "emailStatus",
           "lead",
           "standing",
@@ -8790,6 +8804,57 @@
         "required": [
           "fromSourceCampaignId",
           "dryRun"
+        ]
+      },
+      "LeadIdentityStatus": {
+        "type": "object",
+        "properties": {
+          "leads": {
+            "type": "integer"
+          },
+          "resolved": {
+            "type": "integer"
+          },
+          "pending": {
+            "type": "integer"
+          },
+          "withHuman": {
+            "type": "integer"
+          },
+          "withCompany": {
+            "type": "integer"
+          },
+          "noEmployer": {
+            "type": "integer"
+          },
+          "noSafeCompanyIdentity": {
+            "type": "integer"
+          },
+          "employersResolved": {
+            "type": "integer"
+          },
+          "employersPending": {
+            "type": "integer"
+          },
+          "employersFactsPending": {
+            "type": "integer"
+          },
+          "duplicateHumanCompanyPairs": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "leads",
+          "resolved",
+          "pending",
+          "withHuman",
+          "withCompany",
+          "noEmployer",
+          "noSafeCompanyIdentity",
+          "employersResolved",
+          "employersPending",
+          "employersFactsPending",
+          "duplicateHumanCompanyPairs"
         ]
       },
       "SourceLeadsFoundResponse": {
@@ -16077,6 +16142,38 @@
           },
           "502": {
             "description": "A sibling service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/lead-identity/status": {
+      "get": {
+        "summary": "How far the lead identity sweep is: leads with a human and a company (internal, service-auth)",
+        "description": "A lead is a HUMAN (human-service) at a COMPANY (brand-service). The background sweep resolves every lead's human (fleet view) and its current employer's company, and writes every employer's firmographics to brand-service. `noSafeCompanyIdentity` = an employer brand-service cannot identify (name only); `noEmployer` = no current employer; `duplicateHumanCompanyPairs` = the same human held by several leads at one company.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Sweep counts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadIdentityStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

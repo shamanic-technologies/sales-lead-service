@@ -34,6 +34,7 @@ import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
 import sourceStockRoutes from "./routes/source-stock.js";
 import socialEngagementsRoutes from "./routes/social-engagements.js";
+import leadIdentityRoutes from "./routes/lead-identity.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { withRequestContext } from "./lib/request-context.js";
 
@@ -92,6 +93,7 @@ app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
 app.use(sourceStockRoutes);
 app.use(socialEngagementsRoutes);
+app.use(leadIdentityRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });

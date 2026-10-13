@@ -144,6 +144,8 @@ interface RawLeadCampaignRow {
   // Full-precision text of the same column, for the keyset cursor (see LeadListCursor).
   created_at_cursor: string;
   lead_apollo_person_id: string | null;
+  lead_human_id: string | null;
+  lead_company_id: string | null;
 }
 
 interface LeadCampaignRow {
@@ -169,6 +171,10 @@ interface LeadCampaignRow {
   /** `created_at::text` — what a cursor is built from; keeps the microseconds a Date drops. */
   cursorCreatedAt: string;
   leadApolloPersonId: string | null;
+  /** The human this lead is (human-service, fleet view); null until resolved. */
+  leadHumanId: string | null;
+  /** The company this lead is at (brand-service brand id); null = no safe company identity / not resolved. */
+  leadCompanyId: string | null;
 }
 
 // Brand/org scope collapses leads_campaigns to one row per lead_id (see
@@ -196,7 +202,9 @@ async function fetchLeadCampaignRowById(
       lc.served_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
       lc.brand_profile_id, lc.audience_id, lc.created_at,
       lc.created_at::text AS created_at_cursor,
-      l.apollo_person_id AS lead_apollo_person_id
+      l.apollo_person_id AS lead_apollo_person_id,
+      l.human_id::text AS lead_human_id,
+      l.company_id::text AS lead_company_id
     FROM leads_campaigns lc
     LEFT JOIN leads l ON l.id = lc.lead_id
     WHERE lc.id = ${id} AND lc.org_id = ${orgId}
@@ -229,6 +237,8 @@ function mapLeadCampaignRows(rows: RawLeadCampaignRow[]): LeadCampaignRow[] {
     createdAt: r.created_at,
     cursorCreatedAt: r.created_at_cursor,
     leadApolloPersonId: r.lead_apollo_person_id,
+    leadHumanId: r.lead_human_id,
+    leadCompanyId: r.lead_company_id,
   }));
 }
 
@@ -245,7 +255,9 @@ async function fetchLeadCampaignChunk(
       lc.served_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
       lc.brand_profile_id, lc.audience_id, lc.created_at,
       lc.created_at::text AS created_at_cursor,
-      l.apollo_person_id AS lead_apollo_person_id
+      l.apollo_person_id AS lead_apollo_person_id,
+      l.human_id::text AS lead_human_id,
+      l.company_id::text AS lead_company_id
     FROM ${leadCampaignBaseRelation(scope)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     WHERE lc.org_id = ${scope.orgId}
@@ -402,6 +414,10 @@ function serializeLeadItem(
     namespace: "apollo",
     email: email?.value ?? "",
     apolloPersonId: row.leadApolloPersonId ?? null,
+    // A lead is a HUMAN (human-service) at a COMPANY (brand-service brand id). null until the identity
+    // sweep resolved it; companyId null = no safe company identity. See lib/lead-identity-sweep.ts.
+    humanId: row.leadHumanId ?? null,
+    companyId: row.leadCompanyId ?? null,
     parentRunId: row.parentRunId,
     runId: row.runId,
     brandIds: row.brandIds,
@@ -1095,6 +1111,8 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             namespace: "apollo",
             email: emailValue,
             apolloPersonId: r.leadApolloPersonId ?? null,
+            humanId: r.leadHumanId ?? null,
+            companyId: r.leadCompanyId ?? null,
             parentRunId: r.parentRunId,
             runId: r.runId,
             brandIds: r.brandIds,
