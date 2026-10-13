@@ -35,7 +35,7 @@ import {
   setDisqualification,
 } from "../../src/lib/lead-disqualification.js";
 import { companyBlockFor, loadCompanyStatus } from "../../src/lib/company-status.js";
-import { loadHumanOptOuts } from "../../src/lib/human-opt-out-read.js";
+import { loadHumanFacts, loadHumanOptOuts } from "../../src/lib/human-opt-out-read.js";
 import { stateObservedOptOuts } from "../../src/lib/human-opt-outs.js";
 import { resolveEmailCompanies } from "../../src/lib/lead-identity-sweep.js";
 
@@ -126,6 +126,7 @@ describe.skipIf(!hasRealDatabase)("tag levels: human / lead / company", () => {
     const out = await loadHumanOptOuts([atA, atB, other]);
     expect(out.has(atA) && out.has(atB)).toBe(true);
     expect(out.has(other)).toBe(false);
+    expect((await loadHumanFacts([atA])).get(atA)).toEqual({ optedOut: true, doNotContact: false });
   });
 
   it("states an observed opt-out on the human once, and withdraws it when the timeline takes it back", async () => {

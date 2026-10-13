@@ -52,6 +52,7 @@ import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
 import { companyBlockFor, type LeadCompanyBlock } from "./company-status.js";
 import { loadLevelTags } from "./level-tags.js";
+import type { LeadHumanBlock } from "./human-opt-out-read.js";
 import {
   anyMarkNamesOffer,
   effectiveLeadOrCompanyMark,
@@ -137,6 +138,11 @@ export interface ResolvedLeadFacts {
   disqualification: LeadDisqualification | null;
   /** The COMPANY this lead is at, with its company-level tags (company-status.ts). null = no company known. */
   company?: LeadCompanyBlock | null;
+  /**
+   * What human-service carries on the lead's HUMAN, independent of which rung decided the standing
+   * (an unsubscribe under this brand decides `opted_out/unsubscribed` while the human fact holds too).
+   */
+  human?: LeadHumanBlock;
 }
 
 export interface LeadStandingResolver {
@@ -437,6 +443,7 @@ export function createLeadStandingResolver(
           // Off the SAME step states, in the same pass — never a second read of the same ledger.
           closedDeal: closedDealFrom(steps),
           disqualification: markFor(row, marks, markOffers),
+          human: levels.humanFacts.get(row.leadId) ?? { optedOut: false, doNotContact: false },
           company: companyBlockFor(row.leadId, row.brandIds, markOffers?.get(row.campaignId) ?? null, marks, companyStatus),
         });
       }
