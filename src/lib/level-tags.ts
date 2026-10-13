@@ -6,13 +6,15 @@
  */
 import { leadCompanyKeys, loadLiveCompanyMarks, type LeadDisqualification } from "./lead-disqualification.js";
 import { loadCompanyStatus, type CompanyStatus } from "./company-status.js";
-import { loadHumanOptOuts } from "./human-opt-out-read.js";
+import { loadHumanFacts, type LeadHumanBlock } from "./human-opt-out-read.js";
 
 export interface LevelTags {
   companyKeyOf: Map<string, string>;
   companyMarks: Map<string, Map<string, LeadDisqualification>>;
   companyStatus: CompanyStatus;
   humanOptOuts: Set<string>;
+  /** Per lead with any: the human-level facts (served as `human` on rows). */
+  humanFacts: Map<string, LeadHumanBlock>;
 }
 
 export async function loadLevelTags(input: {
@@ -20,11 +22,12 @@ export async function loadLevelTags(input: {
   brandIds: readonly string[];
   leadIds: readonly string[];
 }): Promise<LevelTags> {
-  const [companyKeyOf, humanOptOuts] = await Promise.all([leadCompanyKeys(input.leadIds), loadHumanOptOuts(input.leadIds)]);
+  const [companyKeyOf, humanFacts] = await Promise.all([leadCompanyKeys(input.leadIds), loadHumanFacts(input.leadIds)]);
+  const humanOptOuts = new Set(humanFacts.keys());
   const keys = [...companyKeyOf.values()];
   const [companyMarks, companyStatus] = await Promise.all([
     loadLiveCompanyMarks({ orgId: input.orgId, brandIds: input.brandIds, companyKeys: keys }),
     loadCompanyStatus({ orgId: input.orgId, brandIds: input.brandIds, companyKeys: keys }),
   ]);
-  return { companyKeyOf, companyMarks, companyStatus, humanOptOuts };
+  return { companyKeyOf, companyMarks, companyStatus, humanOptOuts, humanFacts };
 }

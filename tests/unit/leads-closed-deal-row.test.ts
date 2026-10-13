@@ -19,7 +19,7 @@ const executed: string[] = [];
 
 // What sits above the lead (company marks and status, the human's opt-out): none here (level-tags.ts).
 vi.mock("../../src/lib/level-tags.js", () => ({
-  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set() }),
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set(), humanFacts: new Map() }),
 }));
 
 vi.mock("../../src/db/index.js", () => ({

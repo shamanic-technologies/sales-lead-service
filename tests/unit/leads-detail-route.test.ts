@@ -16,7 +16,7 @@ let lookups: Array<{ id: unknown; orgId: unknown }> = [];
 
 // What sits above the lead (company marks and status, the human's opt-out): none here (level-tags.ts).
 vi.mock("../../src/lib/level-tags.js", () => ({
-  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set() }),
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set(), humanFacts: new Map() }),
 }));
 
 vi.mock("../../src/db/index.js", () => ({
@@ -235,7 +235,7 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
         "activeGoalId", "apolloPersonId", "audience", "audienceId", "bounced", "brandIds",
         "brandProfileId", "campaignId", "clicked", "closedDeal", "company", "companyId", "contacted", "delivered", "disqualification", "email", "emailStatus",
         "featureSlug", "firstBouncedAt", "firstClickedAt", "firstContactedAt", "firstDeliveredAt",
-        "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal", "humanId",
+        "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal", "human", "humanId",
         "id", "lastDeliveredAt", "lead", "leadId", "namespace", "offer", "opened", "orgId", "parentRunId",
         "replied", "replyClassification", "runId", "sent", "sentCount", "servedAt", "sources", "standing", "status",
         "statusDetails", "statusReason", "unsubscribed", "userId", "workflowSlug",
