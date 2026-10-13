@@ -1991,6 +1991,18 @@ const LeadDetailSchema = z
           "The company this lead is at, with what is true of the company as a BUYER of the brand (client, signed up, not our " +
           "target). null = no company known (no employer and no work address, or not resolved yet). Not on view=compact.",
       }),
+    human: z
+      .object({
+        optedOut: z.boolean().openapi({ description: "human-service carries a live opt_out fact on this lead's human: never write to them again, at any company." }),
+        doNotContact: z.boolean().openapi({ description: "A live do_not_contact fact on the human (e.g. a CRM's DND)." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The HUMAN level, read off human-service's facts, independent of which evidence decided `standing` (an " +
+          "unsubscribe under this brand reads `opted_out/unsubscribed` while `human.optedOut` is true too). null only " +
+          "when the row's standing could not be resolved. Not on view=compact.",
+      }),
     emailStatus: z
       .string()
       .nullable()

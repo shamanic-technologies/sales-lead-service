@@ -460,6 +460,9 @@ function serializeLeadItem(
     // The COMPANY this lead is at (human x company), with what is true of the company as a buyer of the
     // brand: client, signed up, Disqualified "not our target". null = no company known. lib/company-status.ts.
     company: facts.company ?? null,
+    // The HUMAN this lead is (wherever they work): opt-out / do-not-contact facts human-service carries.
+    // null only when the standing could not be resolved for the row.
+    human: facts.human ?? null,
     // The person's campaigns of this brand, each stating what happened IN THAT CAMPAIGN — present
     // only when the caller asked for it with `?include=campaigns`. Every field above stays exactly
     // what it was: the brand-wide roll-up several dashboard surfaces already read.
@@ -1146,6 +1149,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             closedDeal: facts.closedDeal,
             disqualification: facts.disqualification,
             company: facts.company ?? null,
+            human: facts.human ?? null,
             // Same field, same resolver as the full path — see serializeLeadItem.
             ...(breakdownMap ? { campaigns: breakdownMap.get(r.id) ?? [] } : {}),
             ...deliveryStatus,
