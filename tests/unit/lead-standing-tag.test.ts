@@ -115,8 +115,9 @@ describe("the tag a conversation carries", () => {
       delivery: { clicked: true, replied: true, replyClassification: "negative", disqualified: false },
     });
     expect(visited.tag).toBe("website_visit");
+    // A wrong-contact "no" is a no on the tag; Disqualified is its own mark beside it.
     const wrong = stand({ leg: "start_to_conversation", delivery: { replied: true, replyClassification: "negative", disqualified: true } });
-    expect(wrong.tag).toBe("disqualified");
+    expect(wrong.tag).toBe("not_interested");
   });
 
   it("serves a closed vocabulary: every state plus website_visit and not_interested", () => {

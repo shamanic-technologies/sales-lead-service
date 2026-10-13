@@ -526,6 +526,13 @@
       "when": 1786247200000,
       "tag": "0074_email_verification_verdict",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1786333600000,
+      "tag": "0075_lead_disqualification_marks",
+      "breakpoints": true
     }
   ]
 }

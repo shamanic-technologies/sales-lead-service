@@ -132,10 +132,15 @@ describe("where a lead stands on the campaign it was served under", () => {
     expect(stand({ entry: leg(REPLY), delivery: click, outcomes: { sale: "manual" } }).state).toBe(
       "customer",
     );
-    expect(stand({ entry: leg(REPLY), delivery: click, nevers: ["sale"] }).state).toBe("disqualified");
+    // A never on the sale is a "no" that outranks the visit: engaged, tagged not_interested.
+    const never = stand({ entry: leg(REPLY), delivery: click, nevers: ["sale"] });
+    expect(never.state).toBe("engaged");
+    expect(never.tag).toBe("not_interested");
+    // A reply judged not our target no longer moves the standing (the Disqualified mark does that,
+    // beside it): the visit still reads as interest.
     expect(
       stand({ entry: leg(REPLY), delivery: { ...click, replied: true, disqualified: true } }).state,
-    ).toBe("disqualified");
+    ).toBe("sales_interest");
     // A positive reply is the leg's own entry, so it keeps naming itself.
     const both = stand({
       entry: leg(REPLY),
@@ -199,16 +204,16 @@ describe("where a lead stands on the campaign it was served under", () => {
       );
     });
 
-    // The board draws an opt-out and a disqualification as two columns with different copy and
-    // different moves, so the two must never collapse into one state.
-    it("keeps an opt-out apart from a commercial disqualification", () => {
+    // An opt-out is a standing; a disqualification is a MARK beside the standing (owner
+    // 2026-10-13), so a wrong-contact reply keeps the standing its steps give: a "no" here.
+    it("keeps an opt-out a standing and a wrong-contact reply out of the standing", () => {
       const optedOut = stand({ delivery: { contacted: true, unsubscribed: true } });
       const wrongContact = stand({
         delivery: { contacted: true, replied: true, replyClassification: "negative", disqualified: true },
       });
       expect(optedOut.state).toBe("opted_out");
-      expect(wrongContact.state).toBe("disqualified");
-      expect(optedOut.state).not.toBe(wrongContact.state);
+      expect(wrongContact.state).toBe("engaged");
+      expect(wrongContact.tag).toBe("not_interested");
     });
 
     it("puts a human statement above every machine signal", () => {
@@ -238,9 +243,12 @@ describe("where a lead stands on the campaign it was served under", () => {
       expect(s.deepestStep).toBe("signup");
     });
 
-    it("reads a never on the sale as disqualified", () => {
+    // "Will never buy" is a no, exactly as a negative reply: in play, tagged not_interested.
+    // Disqualified is its own mark beside the standing, never a reading of a step statement.
+    it("reads a never on the sale as a no: engaged, tagged not_interested", () => {
       const late = stand({ delivery: { contacted: true }, nevers: ["sale"] });
-      expect(late.state).toBe("disqualified");
+      expect(late.state).toBe("engaged");
+      expect(late.tag).toBe("not_interested");
       expect(late.signal).toBe("stated_never");
       expect(late.origin).toBe("stated");
     });
@@ -265,10 +273,10 @@ describe("where a lead stands on the campaign it was served under", () => {
       expect(s.signal).toBe("measured_visit");
     });
 
-    // Disqualified means ONE thing: we realised this person is not our target — the wrong
-    // contact, or gone from the role. It is ordinary sales qualification, and it is the only
-    // reading of a reply that takes a lead out of play.
-    it("disqualifies a reply the provider reads as permanently about the PERSON", () => {
+    // A reply saying they are not our target (the wrong contact, or gone from the role) sets the
+    // Disqualified MARK beside the standing (lead-disqualification.ts); the standing itself reads
+    // the reply like any other "no".
+    it("does not move the standing on a reply the provider reads as permanently about the PERSON", () => {
       const s = stand({
         entry: leg(VISIT),
         delivery: {
@@ -278,9 +286,9 @@ describe("where a lead stands on the campaign it was served under", () => {
           disqualified: true,
         },
       });
-      expect(s.state).toBe("disqualified");
-      expect(s.signal).toBe("disqualifying_reply");
-      expect(s.origin).toBe("measured");
+      expect(s.state).toBe("engaged");
+      expect(s.signal).toBe("negative_reply");
+      expect(s.tag).toBe("not_interested");
     });
 
     // A decline is a judgement about the MOMENT. The person is still reachable and the lead is
@@ -388,8 +396,8 @@ describe("where a lead stands on the campaign it was served under", () => {
           bounced: true,
         },
       });
-      expect(said.state).toBe("disqualified");
-      expect(said.signal).toBe("disqualifying_reply");
+      expect(said.state).toBe("engaged");
+      expect(said.signal).toBe("negative_reply");
     });
 
     it("still reads an OPT-OUT as opted_out, which is the prospect's own binding act", () => {

@@ -13,6 +13,7 @@ import bufferRoutes from "./routes/buffer.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
 import awaitingReplyRoutes from "./routes/awaiting-reply.js";
+import disqualificationRoutes from "./routes/disqualifications.js";
 import qualificationRoutes from "./routes/qualification.js";
 import wonLeadsRoutes from "./routes/won-leads.js";
 import neverColdContactRoutes from "./routes/never-cold-contact.js";
@@ -70,6 +71,8 @@ app.use(crmEvidenceRoutes);
 app.use(qualificationRoutes);
 // Before leadsRoutes: `/orgs/leads/awaiting-reply` must not be read as a lead id.
 app.use(awaitingReplyRoutes);
+// Before the leads router too: `/orgs/leads/disqualifications` must not be read as a lead id.
+app.use(disqualificationRoutes);
 app.use(leadsRoutes);
 app.use(wonLeadsRoutes);
 app.use(neverColdContactRoutes);
