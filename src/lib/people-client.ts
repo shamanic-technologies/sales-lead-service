@@ -226,17 +226,17 @@ export interface ServiceContext {
    */
   reachableBy?: ReachMethod[];
   /**
-   * Which verified emails the serving workflow accepts (src/lib/email-policy.ts), sent as `emailPolicy` on every
+   * Which verified emails the serving workflow accepts (src/lib/email-policy.ts), sent as `acceptedEmails` on every
    * serve, candidate and reveal body: human-service owns "deliverable". Absent = no key on the wire (valid only).
    */
-  emailPolicy?: EmailPolicy;
+  acceptedEmails?: EmailPolicy;
 }
 
-/** The serve body: `{ reachableBy, emailPolicy }` for what the pipe states, else `{}` (today's bytes). */
+/** The serve body: `{ reachableBy, acceptedEmails }` for what the pipe states, else `{}` (today's bytes). */
 export function serveBody(ctx: ServiceContext): Record<string, unknown> {
   return {
     ...(ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {}),
-    ...(ctx.emailPolicy ? { emailPolicy: ctx.emailPolicy } : {}),
+    ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
   };
 }
 
@@ -397,7 +397,7 @@ export interface RevealResult {
 export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext): Promise<RevealResult> {
   return callHuman<RevealResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/reveal`,
-    { method: "POST", body: { basis, ...(ctx.emailPolicy ? { emailPolicy: ctx.emailPolicy } : {}) }, ctx },
+    { method: "POST", body: { basis, ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}) }, ctx },
   );
 }
 

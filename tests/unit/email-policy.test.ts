@@ -25,14 +25,14 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
   it("serve body: no option = today's bytes; option rides beside reachableBy", () => {
     expect(serveBody({ orgId: "o" })).toEqual({});
     expect(serveBody({ orgId: "o", reachableBy: ["email"] })).toEqual({ reachableBy: ["email"] });
-    expect(serveBody({ orgId: "o", emailPolicy: "valid_and_catch_all" })).toEqual({ emailPolicy: "valid_and_catch_all" });
+    expect(serveBody({ orgId: "o", acceptedEmails: "valid_and_catch_all" })).toEqual({ acceptedEmails: "valid_and_catch_all" });
   });
 
   it("buffer/next body: empty stays valid, the two values parse, anything else is a 400", () => {
     expect(BufferNextRequestSchema.safeParse({}).success).toBe(true);
-    expect(BufferNextRequestSchema.safeParse({ emailPolicy: "valid_only" }).success).toBe(true);
-    expect(BufferNextRequestSchema.safeParse({ emailPolicy: "valid_and_catch_all" }).success).toBe(true);
-    expect(BufferNextRequestSchema.safeParse({ emailPolicy: "unknown" }).success).toBe(false);
+    expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_only" }).success).toBe(true);
+    expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_and_catch_all" }).success).toBe(true);
+    expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "unknown" }).success).toBe(false);
   });
 
   it("reads a verdict as stated, null when absent, fails loud on garbage", () => {

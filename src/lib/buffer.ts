@@ -87,7 +87,7 @@ interface PullNextParams {
    * Which verified emails the workflow accepts (src/lib/email-policy.ts). Sent to human-service on every fresh serve
    * and applied to every pool. Absent = valid only (today, and nothing on the wire).
    */
-  emailPolicy?: EmailPolicy;
+  acceptedEmails?: EmailPolicy;
   /**
    * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
    * campaign's retry / released pools still drain, then the answer names this reason.
@@ -195,7 +195,7 @@ export async function pullNext(
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId: audienceId ?? undefined,
     ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
-    ...(params.emailPolicy ? { emailPolicy: params.emailPolicy } : {}),
+    ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
   };
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
@@ -261,7 +261,7 @@ export async function pullNext(
     parentRunId: params.parentRunId ?? null,
     context: ctx,
     reachableBy: params.reachableBy ?? null,
-    emailPolicy: params.emailPolicy ?? null,
+    acceptedEmails: params.acceptedEmails ?? null,
   });
 
   if (retry) {
@@ -403,7 +403,7 @@ export async function pullNext(
       brandIds: params.brandIds,
       featureSlug: params.featureSlug,
       reachableBy: params.reachableBy ?? [],
-      emailPolicy: params.emailPolicy ?? null,
+      acceptedEmails: params.acceptedEmails ?? null,
       offerId,
       runId: params.runId ?? null,
       parentRunId: params.parentRunId ?? null,
@@ -458,7 +458,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
-      emailPolicy: params.emailPolicy ?? null,
+      acceptedEmails: params.acceptedEmails ?? null,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
       askFit: async ({ sourceCampaignId, ...q }) => {

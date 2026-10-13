@@ -12,7 +12,7 @@ import { emailPolicyClause, type EmailPolicy } from "./email-policy.js";
 export function reachClauses(
   leadId: SQL,
   reachableBy: readonly ReachMethod[] | null | undefined,
-  emailPolicy?: EmailPolicy | null,
+  acceptedEmails?: EmailPolicy | null,
 ): SQL {
   const methods = [...new Set<ReachMethod>(["email", ...(reachableBy ?? [])])].sort();
   return sql.join(
@@ -20,7 +20,7 @@ export function reachClauses(
       ...methods.map(
         (m) => sql`AND EXISTS (SELECT 1 FROM lead_contact_methods cm_r WHERE cm_r.lead_id = ${leadId} AND cm_r.channel = ${m})`,
       ),
-      emailPolicyClause(leadId, emailPolicy),
+      emailPolicyClause(leadId, acceptedEmails),
     ],
     sql` `,
   );

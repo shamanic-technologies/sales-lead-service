@@ -384,7 +384,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         audienceId: req.audienceId ?? null,
         ...(pullMode ? { mode: pullMode } : {}),
         ...(reachableBy ? { reachableBy } : {}),
-        ...(parsed.data.emailPolicy ? { emailPolicy: parsed.data.emailPolicy } : {}),
+        ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,

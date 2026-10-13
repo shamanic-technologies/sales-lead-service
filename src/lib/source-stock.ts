@@ -91,7 +91,7 @@ export async function claimStockedLead(params: {
   /** The outreach pipe's contact methods (src/lib/channel-reach.ts): a found lead missing one stays in the stock. */
   reachableBy?: readonly ReachMethod[] | null;
   /** The outreach pipe's email policy (src/lib/email-policy.ts): a find whose address it refuses stays in the stock. */
-  emailPolicy?: EmailPolicy | null;
+  acceptedEmails?: EmailPolicy | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */
   askFit: AskAudienceFit;
 }): Promise<StockClaim> {
@@ -124,7 +124,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
          AND NOT EXISTS (
            SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
          )
-         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.emailPolicy)}
+         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails)}
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED

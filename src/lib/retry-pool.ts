@@ -324,7 +324,7 @@ export async function loadRetryCandidates(params: {
    */
   reachableBy?: readonly ReachMethod[] | null;
   /** The pipe's email policy (src/lib/email-policy.ts): absent = valid only, a catch-all person is never handed back. */
-  emailPolicy?: EmailPolicy | null;
+  acceptedEmails?: EmailPolicy | null;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
   const nowIso = new Date(params.nowMs).toISOString();
@@ -350,7 +350,7 @@ export async function loadRetryCandidates(params: {
       AND lc.sender_closed_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.emailPolicy)}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails)}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -517,7 +517,7 @@ export async function pickRetryCandidate(params: {
   context: RetryPoolContext;
   nowMs?: number;
   reachableBy?: readonly ReachMethod[] | null;
-  emailPolicy?: EmailPolicy | null;
+  acceptedEmails?: EmailPolicy | null;
 }): Promise<RetryCandidate | null> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -526,7 +526,7 @@ export async function pickRetryCandidate(params: {
     campaignId: params.campaignId,
     nowMs,
     reachableBy: params.reachableBy ?? null,
-    emailPolicy: params.emailPolicy ?? null,
+    acceptedEmails: params.acceptedEmails ?? null,
   });
   if (candidates.length === 0) return null;
 

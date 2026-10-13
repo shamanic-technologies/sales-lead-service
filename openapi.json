@@ -1344,7 +1344,7 @@
       "BufferNextRequest": {
         "type": "object",
         "properties": {
-          "emailPolicy": {
+          "acceptedEmails": {
             "type": "string",
             "enum": [
               "valid_only",
@@ -1354,7 +1354,7 @@
             "example": "valid_and_catch_all"
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both. The only body field is the optional `emailPolicy`; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both. The only body field is the optional `acceptedEmails`; an empty body is today's serve."
       },
       "LeadsResponse": {
         "type": "object",

@@ -64,7 +64,7 @@ describe.skipIf(!hasRealDatabase)("email policy on the pools, against a real dat
   });
 
   it("valid_and_catch_all gets everyone", async () => {
-    const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), emailPolicy: "valid_and_catch_all" });
+    const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), acceptedEmails: "valid_and_catch_all" });
     expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.legacy].sort());
   });
 

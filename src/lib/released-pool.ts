@@ -118,7 +118,7 @@ export async function claimReleasedLead(params: {
   featureSlug: string;
   reachableBy: ReachMethod[];
   /** The taking campaign's email policy (src/lib/email-policy.ts): absent = valid only. */
-  emailPolicy?: EmailPolicy | null;
+  acceptedEmails?: EmailPolicy | null;
   offerId: string | null;
   runId: string | null;
   parentRunId: string | null;
@@ -130,7 +130,7 @@ export async function claimReleasedLead(params: {
 }): Promise<ReleasedLead | null> {
   if (params.brandIds.length === 0) return null;
   const brands = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
-  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.emailPolicy);
+  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails);
   const candidates = (await db.execute(sql`
     SELECT s.id, s.campaign_id, s.lead_id, s.audience_id
       FROM leads_campaigns s
