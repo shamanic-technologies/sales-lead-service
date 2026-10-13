@@ -10,6 +10,7 @@ import {
 } from "../db/schema.js";
 import type { Person } from "./people-client.js";
 import { findLeadBySocialLinkedin, foldSocialLead } from "./social-identity.js";
+import type { ServedIdentity } from "./serve-identity.js";
 
 // Person fields the gateway's neutral Person provides that map 1:1 to lead columns.
 // (departments / functions / twitter / github / facebook are NOT in the neutral
@@ -142,7 +143,44 @@ export function pickOrgFields(
  */
 export async function upsertLeadFromPerson(
   person: Person,
-  options: { enriched: boolean },
+  options: { enriched: boolean; identity?: ServedIdentity | null },
+): Promise<string> {
+  const leadId = await pickAndUpsertLead(person, options);
+  if (options.identity) await stampIdentity(leadId, options.identity);
+  return leadId;
+}
+
+/** The lead's company (brand-service id), null when unknown. */
+async function leadCompanyId(leadId: string): Promise<string | null> {
+  const rows = (await db.execute(sql`SELECT company_id::text AS company_id FROM leads WHERE id = ${leadId}`)) as unknown as Array<{
+    company_id: string | null;
+  }>;
+  return rows[0]?.company_id ?? null;
+}
+
+/** The human's lead at this company (oldest first when the same pair is held twice). */
+export async function findLeadByHumanCompany(humanId: string, companyId: string): Promise<string | null> {
+  const rows = (await db.execute(sql`
+    SELECT id::text AS id FROM leads WHERE human_id = ${humanId} AND company_id = ${companyId}
+    ORDER BY created_at, id LIMIT 1
+  `)) as unknown as Array<{ id: string }>;
+  return rows[0]?.id ?? null;
+}
+
+/** First answer wins: a lead's stored human/company is never overwritten here (merges are followed elsewhere). */
+async function stampIdentity(leadId: string, identity: ServedIdentity): Promise<void> {
+  await db.execute(sql`
+    UPDATE leads SET
+      human_id = COALESCE(human_id, ${identity.humanId}::uuid),
+      company_id = COALESCE(company_id, ${identity.companyId}::uuid),
+      identity_resolved_at = COALESCE(identity_resolved_at, now())
+    WHERE id = ${leadId}
+  `);
+}
+
+async function pickAndUpsertLead(
+  person: Person,
+  options: { enriched: boolean; identity?: ServedIdentity | null },
 ): Promise<string> {
   const fields = pickPersonFields(person);
   const metadata = person as unknown;
@@ -155,9 +193,42 @@ export async function upsertLeadFromPerson(
   }
 
   const emailOwnerId = person.email ? await findLeadByEmail(person.email) : null;
-  const providerOwnerId = person.providerPersonId
+  let providerOwnerId = person.providerPersonId
     ? await findLeadByApolloPersonId(person.providerPersonId)
     : null;
+  // A lead is a HUMAN at a COMPANY (lead-identity.ts): with the serve's identity known, a provider
+  // id held by the human's lead at ANOTHER company is not this lead (job change = new lead, clean
+  // slate), and the human's lead at THIS company is. The address stays the strongest key: a lead
+  // owning it is still the lead (one email = one lead); a person served at a new company with the
+  // address their old lead holds is logged `identity.address_held_at_other_company` (measured).
+  const identity = options.identity ?? null;
+  let providerIdHeldElsewhere = false;
+  if (identity && emailOwnerId) {
+    const ownerCompany = await leadCompanyId(emailOwnerId);
+    if (ownerCompany && identity.companyId && ownerCompany !== identity.companyId) {
+      console.warn(
+        `[lead-service] identity.address_held_at_other_company email=${person.email} leadId=${emailOwnerId} ` +
+          `leadCompany=${ownerCompany} servedCompany=${identity.companyId}`,
+      );
+    }
+  }
+  if (identity && !emailOwnerId) {
+    const atPair =
+      identity.humanId && identity.companyId ? await findLeadByHumanCompany(identity.humanId, identity.companyId) : null;
+    if (atPair) {
+      providerOwnerId = atPair;
+    } else if (providerOwnerId && identity.companyId) {
+      const providerCompany = await leadCompanyId(providerOwnerId);
+      if (providerCompany && providerCompany !== identity.companyId) {
+        console.log(
+          `[lead-service] identity: job change, new lead at company ${identity.companyId} (provider id ${person.providerPersonId} ` +
+            `is held by lead ${providerOwnerId} at company ${providerCompany})`,
+        );
+        providerOwnerId = null;
+        providerIdHeldElsewhere = true;
+      }
+    }
+  }
 
   if (emailOwnerId && providerOwnerId && emailOwnerId !== providerOwnerId) {
     // Provider id churn: the same human exists twice in silver. The email owner
@@ -198,7 +269,8 @@ export async function upsertLeadFromPerson(
   const inserted = await db
     .insert(leads)
     .values({
-      apolloPersonId: person.providerPersonId ?? null,
+      // A job change: the provider id stays on the human's lead at the old company (it is unique).
+      apolloPersonId: providerIdHeldElsewhere ? null : (person.providerPersonId ?? null),
       ...fields,
       metadata,
       enrichedAt,

@@ -1,3 +1,4 @@
+import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy } from "./email-policy.js";
@@ -322,7 +323,10 @@ export async function pullNext(
     // unresolvable — invisible in the dashboard funnel, in outreach counts, and
     // in conversion attribution. `registerServedEmail` returns the owning lead,
     // and fails loud if the email cannot be registered at all.
-    const resolvedLeadId = await upsertLeadFromPerson(person, { enriched: true });
+    // Who the person is and where they work, from their owners (serve-identity.ts): a known human at a
+    // new company lands on a NEW lead. null (an owner did not answer) = today's email-first pick.
+    const identity = await resolveServedIdentity(person);
+    const resolvedLeadId = await upsertLeadFromPerson(person, { enriched: true, identity });
     const leadId = await registerServedEmail({
       leadId: resolvedLeadId,
       email: person.email,
