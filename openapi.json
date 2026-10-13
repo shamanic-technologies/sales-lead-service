@@ -6013,6 +6013,39 @@
             "description": "To whom / why, as the first hand-over stated it. `owed_before_responder_started` = a never-answered debt due before the earliest responder on this held campaign started (campaign-service createdAt), handed over by the claim instead of answered.",
             "example": null
           },
+          "handoverWithdrawal": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "withdrawnAt": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "nullable": true,
+                "description": "Why the hand-over was withdrawn, as the caller stated it."
+              },
+              "handedAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "When the lifted hand-over had been stated."
+              },
+              "handedReasons": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Every reason the lifted hand-over carried, in order."
+              }
+            },
+            "required": [
+              "withdrawnAt",
+              "reason",
+              "handedAt",
+              "handedReasons"
+            ],
+            "description": "History: the last hand-over WITHDRAWN on this row (POST /orgs/leads/{id}/followups/handover/withdraw), when, why and what it lifted. null = none ever was. A withdrawn hand-over no longer holds the row."
+          },
           "dueSetByCampaignId": {
             "type": "string",
             "nullable": true,
@@ -6031,6 +6064,7 @@
           "stoppedReason",
           "handedAt",
           "handedReason",
+          "handoverWithdrawal",
           "dueSetByCampaignId"
         ],
         "description": "What we owe one person on one campaign, and when.",
@@ -6045,6 +6079,7 @@
           "stoppedReason": null,
           "handedAt": null,
           "handedReason": null,
+          "handoverWithdrawal": null,
           "dueSetByCampaignId": null
         }
       },
@@ -6102,6 +6137,25 @@
           "kind"
         ],
         "description": "What we owe one person on one campaign next."
+      },
+      "WithdrawHandoverRequest": {
+        "type": "object",
+        "properties": {
+          "handedReason": {
+            "type": "string",
+            "description": "The hand-over being withdrawn, named by the reason it was stated with, EXACTLY as written (trimmed). The row is lifted only when every hand-over on it carries this reason; a hand-over anyone else stated (a person answered, the client was asked, owed_before_responder_started) is never lifted.",
+            "example": "The reply is about something other than the offer; handed to a person, the automated responder does not answer it"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it is withdrawn (stored as history and as the row's stop reason until a scheduled statement).",
+            "example": "reply re-judged positive"
+          }
+        },
+        "required": [
+          "handedReason",
+          "reason"
+        ]
       },
       "LeadHistoryResponse": {
         "type": "object",
@@ -14065,6 +14119,109 @@
           },
           "400": {
             "description": "Invalid id"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "No such lead row for this org"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/followups/handover/withdraw": {
+      "post": {
+        "summary": "Withdraw a hand-over to a person whose verdict turned out wrong",
+        "description": "For the observer that stated kind=handed when the verdict behind it was wrong (the same reply re-judged). outcome=lifted: the row is no longer handed (no due date, claim released, the lifted hand-over kept under followup.handoverWithdrawal); nothing is due until a later scheduled statement, which re-enters the person like a fresh row. outcome=nothing_to_lift: nothing changed; cause=not_handed (the row holds no hand-over) or reason_mismatch (a hand-over on it names another reason, it stays handed for good). Idempotent: a second withdrawal answers nothing_to_lift/not_handed.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Run the claim belongs to, forwarded to the delivery layer for tracing."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+              "example": "40000000-0000-0000-0000-000000000001"
+            },
+            "required": true,
+            "description": "The `id` a list row already carries (the leads_campaigns membership row) — so a caller states an outcome for a lead it has already resolved without re-supplying any identity field.",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WithdrawHandoverRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the withdrawal did, and the resulting state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "lifted",
+                        "nothing_to_lift"
+                      ]
+                    },
+                    "cause": {
+                      "type": "string",
+                      "enum": [
+                        "not_handed",
+                        "reason_mismatch"
+                      ],
+                      "description": "Present on nothing_to_lift only."
+                    },
+                    "followup": {
+                      "$ref": "#/components/schemas/FollowupState"
+                    }
+                  },
+                  "required": [
+                    "outcome",
+                    "followup"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid id; handedReason or reason missing or blank (code reason_required)"
           },
           "401": {
             "description": "Unauthorized"

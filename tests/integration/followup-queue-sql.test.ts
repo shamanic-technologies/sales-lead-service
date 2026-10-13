@@ -38,6 +38,7 @@ const {
   readFollowupState,
   lookupFollowupRowByEmail,
   stopFollowups,
+  withdrawHandover,
   writeFollowupStatement,
 } = await import("../../src/lib/followup-queue.js");
 
@@ -298,6 +299,117 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     ).toBeNull();
     // Even a direct claim of the row is refused.
     expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId })).toBe(false);
+  });
+
+  describe("withdrawing a hand-over whose verdict was wrong", () => {
+    const OFF_TOPIC = "The reply is about something other than the offer; handed to a person, the automated responder does not answer it";
+
+    async function hand(id: string, reason: string) {
+      return writeFollowupStatement({ orgId, id, kind: "handed", dueAtIso: null, reason, nowMs: Date.now() });
+    }
+    async function schedule(id: string) {
+      return writeFollowupStatement({
+        orgId,
+        id,
+        kind: "scheduled",
+        dueAtIso: new Date(Date.now() - 1_000).toISOString(),
+        reason: null,
+        nowMs: Date.now(),
+      });
+    }
+    async function claimedIds(campaign: string): Promise<string[]> {
+      const out: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const r = await pickFollowupCandidate({ orgId, campaignId: campaign, runId: null, actingCampaignId, context: { orgId } });
+        if (r.claimed) out.push(r.claimed.id);
+      }
+      return out;
+    }
+
+    it("handed with R, withdrawn naming R, then scheduled: the responder's claim hands the person out", async () => {
+      const held = `itest-withdraw-${randomUUID()}`;
+      try {
+        const id = await seedDueRow(new Date(Date.now() - 60_000), held);
+        const handed = await hand(id, OFF_TOPIC);
+
+        const out = await withdrawHandover({ orgId, id, handedReason: OFF_TOPIC, reason: "reply re-judged positive", nowMs: Date.now() });
+        expect(out.outcome).toBe("lifted");
+        if (out.outcome !== "lifted") throw new Error("unreachable");
+        expect(out.state).toMatchObject({ handedAt: null, handedReason: null, dueAt: null, stoppedReason: "reply re-judged positive" });
+        expect(out.state.handoverWithdrawal).toMatchObject({
+          reason: "reply re-judged positive",
+          handedAt: handed?.handedAt,
+          handedReasons: [OFF_TOPIC],
+        });
+        // Nothing re-enters by itself.
+        expect(await claimedIds(held)).toEqual([]);
+
+        expect(await schedule(id)).toMatchObject({ handedAt: null, stoppedReason: null });
+        expect(await claimedIds(held)).toEqual([id]);
+
+        // Withdrawing again: nothing left to lift, told apart.
+        const again = await withdrawHandover({ orgId, id, handedReason: OFF_TOPIC, reason: "again", nowMs: Date.now() });
+        expect(again).toMatchObject({ outcome: "nothing_to_lift", cause: "not_handed" });
+      } finally {
+        await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+      }
+    });
+
+    it("a withdrawal naming another reason lifts nothing, and a later schedule does not re-enter", async () => {
+      const held = `itest-withdraw-${randomUUID()}`;
+      try {
+        const id = await seedDueRow(new Date(Date.now() - 60_000), held);
+        await hand(id, OFF_TOPIC);
+
+        const out = await withdrawHandover({ orgId, id, handedReason: "client asked to answer", reason: "x", nowMs: Date.now() });
+        expect(out).toMatchObject({ outcome: "nothing_to_lift", cause: "reason_mismatch" });
+        await schedule(id);
+        expect(await claimedIds(held)).toEqual([]);
+        expect((await readFollowupState(orgId, id))?.handedReason).toBe(OFF_TOPIC);
+      } finally {
+        await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+      }
+    });
+
+    it("a person's hand-over stated after the caller's is never lifted by naming the caller's reason", async () => {
+      const held = `itest-withdraw-${randomUUID()}`;
+      try {
+        const id = await seedDueRow(new Date(Date.now() - 60_000), held);
+        await hand(id, OFF_TOPIC);
+        await hand(id, "A person answered this thread by hand");
+
+        const out = await withdrawHandover({ orgId, id, handedReason: OFF_TOPIC, reason: "x", nowMs: Date.now() });
+        expect(out).toMatchObject({ outcome: "nothing_to_lift", cause: "reason_mismatch" });
+        await schedule(id);
+        expect(await claimedIds(held)).toEqual([]);
+      } finally {
+        await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+      }
+    });
+
+    it("the claim's own pre-responder hand-over is never withdrawable", async () => {
+      const held = `itest-withdraw-${randomUUID()}`;
+      const responder = `itest-responder-${randomUUID()}`;
+      responderCreatedAt.set(responder, new Date(Date.now() - 10 * 60_000).toISOString());
+      try {
+        const id = await seedDueRow(new Date(Date.now() - 35 * 24 * 3600_000), held);
+        await pickFollowupCandidate({ orgId, campaignId: held, runId: null, actingCampaignId: responder, context: { orgId } });
+        expect((await readFollowupState(orgId, id))?.handedReason).toBe(OWED_BEFORE_RESPONDER_REASON);
+
+        const out = await withdrawHandover({ orgId, id, handedReason: OWED_BEFORE_RESPONDER_REASON, reason: "x", nowMs: Date.now() });
+        expect(out).toMatchObject({ outcome: "nothing_to_lift", cause: "reason_mismatch" });
+      } finally {
+        await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, held));
+        await db.delete(followupResponders).where(eq(followupResponders.heldCampaignId, held));
+      }
+    });
+
+    it("another org's row is absent", async () => {
+      const id = await seedDueRow(new Date(Date.now() - 60_000));
+      await hand(id, OFF_TOPIC);
+      const out = await withdrawHandover({ orgId: randomUUID(), id, handedReason: OFF_TOPIC, reason: "x", nowMs: Date.now() });
+      expect(out).toEqual({ outcome: "row_not_found" });
+    });
   });
 
   it("switching a responder on hands over the never-answered backlog instead of answering it", async () => {
