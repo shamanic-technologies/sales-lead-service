@@ -89,6 +89,8 @@ export interface BasicLeadRow {
   /** `created_at::text` — what a cursor is built from; keeps the microseconds a Date drops. */
   cursorCreatedAt: string;
   leadApolloPersonId: string | null;
+  leadHumanId: string | null;
+  leadCompanyId: string | null;
   lead: BasicSlimLead | null;
   email: { value: string; status: string | null } | null;
 }
@@ -127,6 +129,8 @@ interface RawBasicRow {
   created_at_cursor: string;
   l_id: string | null;
   apollo_person_id: string | null;
+  human_id: string | null;
+  company_id: string | null;
   first_name: string | null;
   last_name: string | null;
   name: string | null;
@@ -246,6 +250,8 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     createdAt: toDateTimestamp(r.created_at),
     cursorCreatedAt: r.created_at_cursor,
     leadApolloPersonId: r.apollo_person_id,
+    leadHumanId: r.human_id ?? null,
+    leadCompanyId: r.company_id ?? null,
     lead,
     email: r.email_value != null ? { value: r.email_value, status: r.email_status } : null,
   };
@@ -273,7 +279,7 @@ function basicLeadQuery(
       COALESCE(lc.retry_claimed_at, lc.served_at) AS last_served_at,
       lc.created_at,
       lc.created_at::text AS created_at_cursor,
-      l.id AS l_id, l.apollo_person_id, l.first_name, l.last_name, l.name,
+      l.id AS l_id, l.apollo_person_id, l.human_id::text AS human_id, l.company_id::text AS company_id, l.first_name, l.last_name, l.name,
       l.headline, l.linkedin_url, l.photo_url,
       l.seniority, l.departments, l.functions,
       l.city AS l_city, l.state AS l_state, l.country AS l_country,

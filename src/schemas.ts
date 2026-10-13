@@ -1949,6 +1949,24 @@ const LeadDetailSchema = z
         description: "Apollo person ID — convenience copy of lead.apolloPersonId.",
         example: "5f2a3b4c5d6e7f8a9b0c1d2e",
       }),
+    humanId: z
+      .string()
+      .uuid()
+      .nullable()
+      .openapi({
+        description:
+          "The HUMAN this lead is: human-service's fleet-wide human id (GET /internal/human-identities/{humanId}). A lead is a " +
+          "human at a company. null until the identity sweep resolved it, or when the lead holds no key human-service accepts.",
+      }),
+    companyId: z
+      .string()
+      .uuid()
+      .nullable()
+      .openapi({
+        description:
+          "The COMPANY this lead is at: brand-service's brand id of the current employer (same domain = same id). null = no " +
+          "safe company identity (name-only or no employer), or not resolved yet. A known human at a new company is a new lead.",
+      }),
     emailStatus: z
       .string()
       .nullable()
@@ -7611,6 +7629,43 @@ registry.registerPath({
     401: { description: "Unauthorized" },
     404: { description: "Not a source campaign of this org" },
     502: { description: "A sibling service could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/lead-identity/status",
+  summary: "How far the lead identity sweep is: leads with a human and a company (internal, service-auth)",
+  description:
+    "A lead is a HUMAN (human-service) at a COMPANY (brand-service). The background sweep resolves every lead's human " +
+    "(fleet view) and its current employer's company, and writes every employer's firmographics to brand-service. " +
+    "`noSafeCompanyIdentity` = an employer brand-service cannot identify (name only); `noEmployer` = no current employer; " +
+    "`duplicateHumanCompanyPairs` = the same human held by several leads at one company.",
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Sweep counts",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              leads: z.number().int(),
+              resolved: z.number().int(),
+              pending: z.number().int(),
+              withHuman: z.number().int(),
+              withCompany: z.number().int(),
+              noEmployer: z.number().int(),
+              noSafeCompanyIdentity: z.number().int(),
+              employersResolved: z.number().int(),
+              employersPending: z.number().int(),
+              employersFactsPending: z.number().int(),
+              duplicateHumanCompanyPairs: z.number().int(),
+            })
+            .openapi("LeadIdentityStatus"),
+        },
+      },
+    },
+    401: { description: "Unauthorized" },
   },
 });
 
