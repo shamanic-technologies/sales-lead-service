@@ -301,6 +301,8 @@ export async function upsertContactMethod(params: {
   value: string;
   status?: string | null;
   source: string;
+  /** The address's verification verdict (src/lib/email-policy.ts). Absent = left as stored. */
+  verificationVerdict?: string;
 }): Promise<UpsertContactResult> {
   try {
     await db
@@ -311,12 +313,14 @@ export async function upsertContactMethod(params: {
         value: params.value,
         status: params.status ?? null,
         source: params.source,
+        ...(params.verificationVerdict ? { verificationVerdict: params.verificationVerdict } : {}),
       })
       .onConflictDoUpdate({
         target: [leadContactMethods.leadId, leadContactMethods.channel, leadContactMethods.value],
         set: {
           status: params.status ?? null,
           source: params.source,
+          ...(params.verificationVerdict ? { verificationVerdict: params.verificationVerdict } : {}),
         },
       });
     return { inserted: true };
@@ -346,6 +350,7 @@ export async function registerServedEmail(params: {
   email: string;
   status: string | null;
   source: string;
+  verificationVerdict?: string;
 }): Promise<string> {
   const result = await upsertContactMethod({
     leadId: params.leadId,
@@ -353,6 +358,7 @@ export async function registerServedEmail(params: {
     value: params.email,
     status: params.status,
     source: params.source,
+    ...(params.verificationVerdict ? { verificationVerdict: params.verificationVerdict } : {}),
   });
   if (result.inserted) return params.leadId;
 

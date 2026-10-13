@@ -519,6 +519,13 @@
       "when": 1786160800000,
       "tag": "0073_followup_due_setter_backfill_rescheduled",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1786247200000,
+      "tag": "0074_email_verification_verdict",
+      "breakpoints": true
     }
   ]
 }
