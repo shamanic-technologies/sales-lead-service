@@ -28,7 +28,16 @@ import {
   type CrmContact,
   type CrmIdentityContext,
 } from "./crm-client.js";
-import { loadFrozenMatches, loadJudgments, loadRulings, rulingKey, type FrozenMatch } from "./crm-pairing-store.js";
+import {
+  loadFrozenMatches,
+  loadJudgments,
+  loadRulings,
+  rulingKey,
+  upgradeToDeterministic,
+  type FrozenMatch,
+} from "./crm-pairing-store.js";
+import { matchConversion } from "./conversions.js";
+import type { CrmContactFunnelEvents } from "./crm-fact-events.js";
 import { pairingCarriesEvidence, resolveCrmPairing } from "./crm-pairing.js";
 import { matchesForContacts } from "./crm-matching.js";
 import { awaitsJudgment, judgeCandidates } from "./crm-judging.js";
@@ -126,10 +135,49 @@ export async function judgeEveryCandidate(
   return out;
 }
 
+/**
+ * A frozen match that is not deterministic, for a contact whose email a lead of the brand now
+ * carries, is re-run through the matcher on that email and replaced when the answer is
+ * deterministic. One indexed read finds the candidates; the matcher runs only for them.
+ */
+async function upgradeFrozenMatches(
+  brandId: string,
+  contacts: readonly CrmContactFunnelEvents[],
+  matches: Map<string, FrozenMatch>,
+): Promise<number> {
+  const weak = contacts.filter(
+    (c) => c.primaryEmail && matches.get(c.contactId)?.matchConfidence !== "deterministic",
+  );
+  if (weak.length === 0) return 0;
+  const emails = [...new Set(weak.map((c) => c.primaryEmail!.trim().toLowerCase()))];
+  const found = (await db.execute(sql`
+    SELECT DISTINCT lower(cm.value) AS email
+    FROM leads_campaigns lc
+    JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
+    WHERE lc.status = 'served' AND ${brandId} = ANY(lc.brand_ids)
+      AND lower(cm.value) = ANY(${sql.param(emails)}::text[])
+  `)) as unknown as Array<{ email: string }>;
+  const leadEmails = new Set(found.map((r) => r.email));
+  const candidates = weak.filter((c) => leadEmails.has(c.primaryEmail!.trim().toLowerCase()));
+  if (candidates.length === 0) return 0;
+  const results: Array<{ crmContactId: string; result: Awaited<ReturnType<typeof matchConversion>> }> = [];
+  for (const c of candidates) {
+    results.push({ crmContactId: c.contactId, result: await matchConversion({ brandId, email: c.primaryEmail }) });
+  }
+  const upgraded = await upgradeToDeterministic(brandId, results);
+  if (upgraded > 0) {
+    const reloaded = await loadFrozenMatches(brandId, candidates.map((c) => c.contactId));
+    for (const [id, m] of reloaded) matches.set(id, m);
+  }
+  return upgraded;
+}
+
 export interface CrmEvidenceSyncResult {
   brandId: string;
   judging: CrmJudgingResult;
   contactsWithEvents: number;
+  /** Frozen matches replaced this pass by a deterministic one (crm-pairing-store.ts). */
+  upgradedMatches: number;
   pairedContacts: number;
   leads: number;
   outcomes: number;
@@ -202,6 +250,10 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     const matched = await matchesForContacts(orgId, brandId, toMatch);
     for (const [id, m] of matched) matches.set(id, m);
   }
+
+  // A match frozen before the person was a lead (unmatched, or only a name guess) is replaced by a
+  // deterministic one once a lead of the brand carries the contact's email (crm-pairing-store.ts).
+  const upgraded = await upgradeFrozenMatches(brandId, contacts, matches);
 
   const [judgments, rulings] = await Promise.all([
     loadJudgments(brandId, contactIds),
@@ -398,6 +450,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     brandId,
     judging,
     contactsWithEvents: contacts.length,
+    upgradedMatches: upgraded,
     pairedContacts,
     leads: leadIds.length,
     outcomes,
