@@ -56,7 +56,7 @@ export async function sweepCrmEvidence(): Promise<void> {
         console.log(
           `[crm-evidence] brand=${brandId} walked=${r.judging.contacts} judged=${r.judging.judged} ` +
             `judgmentFailed=${r.judging.judgmentFailed} deferred=${r.judging.deferred} ` +
-            `withoutLead=${r.judging.withoutLead} contactsWithEvents=${r.contactsWithEvents} ` +
+            `withoutLead=${r.judging.withoutLead} contactsWithEvents=${r.contactsWithEvents} upgraded=${r.upgradedMatches} ` +
             `paired=${r.pairedContacts} leads=${r.leads} outcomes=${r.outcomes} nevers=${r.nevers} ` +
             `setAside=${r.withdrawnOutcomes}/${r.withdrawnNevers}`,
         );

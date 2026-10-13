@@ -55,6 +55,29 @@ describe("forwarding a request to an HTTP thread", () => {
     expect(error.mock.calls.map((c) => String(c[0])).join("\n")).toContain("did not answer");
   });
 
+  it("a GET that dies on a stale pooled socket is sent once more on a fresh one, never a 502", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const served = new WeakSet<object>();
+    // Answers the first request of each connection; a SECOND request on the same connection finds it
+    // closed (what a thread's keep-alive idle timeout does to a socket the router's pool still holds).
+    const threadPort = await listen(
+      http.createServer((req, res) => {
+        if (served.has(req.socket)) {
+          req.socket.destroy();
+          return;
+        }
+        served.add(req.socket);
+        res.end(`ok ${req.url}`);
+      }),
+    );
+    const port = await routerTo(threadPort);
+    expect(await (await fetch(`http://127.0.0.1:${port}/a`)).text()).toBe("ok /a");
+    const second = await fetch(`http://127.0.0.1:${port}/b`);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe("ok /b");
+    expect(error).not.toHaveBeenCalled();
+  });
+
   it("a caller who leaves is logged as the caller leaving, never as the thread not answering", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
