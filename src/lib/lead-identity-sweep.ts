@@ -15,7 +15,10 @@
  *  3. LEADS: every lead never resolved (`identity_resolved_at IS NULL`) whose current employer is
  *     resolved (or who has none) gets `human_id` (human-service, create:true, FLEET view: a lead row
  *     is global, orgs share it) and `company_id` (the employer's company, NULL = no safe identity
- *     or no employer: still a lead). `HUMAN_RESOLVE_CONCURRENCY` calls in flight.
+ *     or no employer: still a lead) and `organization_id` (the employer's LOCAL row: the company key when
+ *     brand-service has no safe identity for it). `HUMAN_RESOLVE_CONCURRENCY` calls in flight.
+ *  4./5. Fill `organization_id` on leads resolved before it existed; move a lead from its local key to
+ *     the brand id once its employer row gets one.
  *
  * Writes only the 0076 columns, which no read-model / change-feed trigger watches (0042 triggers are
  * column-guarded): the backfill moves no lead row any consumer holds. A human-service or brand-service
@@ -148,6 +151,7 @@ export async function pushEmployerFacts(limit = MAX_COMPANIES_PER_REQUEST): Prom
 
 interface PendingLead extends LeadKeyRow {
   has_employer: boolean;
+  organization_id: string | null;
   company_id: string | null;
 }
 
@@ -160,6 +164,7 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
       (SELECT array_agg(c.value ORDER BY c.created_at, c.value) FROM lead_contact_methods c
         WHERE c.lead_id = l.id AND c.channel = 'phone') AS phones,
       (cur.organization_id IS NOT NULL) AS has_employer,
+      cur.organization_id::text AS organization_id,
       o.company_id::text AS company_id
     FROM leads l
     LEFT JOIN LATERAL (${CURRENT_ORG}) cur ON true
@@ -171,7 +176,7 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
   `)) as unknown as PendingLead[];
   if (rows.length === 0) return { resolved: 0, failed: 0 };
 
-  const done: Array<{ id: string; humanId: string; companyId: string }> = [];
+  const done: Array<{ id: string; humanId: string; companyId: string; organizationId: string }> = [];
   let failed = 0;
   let next = 0;
   const worker = async () => {
@@ -194,7 +199,7 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
           }
         }
       }
-      done.push({ id: row.lead_id, humanId: humanId ?? "", companyId: row.company_id ?? "" });
+      done.push({ id: row.lead_id, humanId: humanId ?? "", companyId: row.company_id ?? "", organizationId: row.organization_id ?? "" });
     }
   };
   await Promise.all(Array.from({ length: Math.min(HUMAN_RESOLVE_CONCURRENCY, rows.length) }, worker));
@@ -204,14 +209,55 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
       UPDATE leads l
       SET human_id = NULLIF(v.human_id, '')::uuid,
           company_id = NULLIF(v.company_id, '')::uuid,
+          organization_id = NULLIF(v.organization_id, '')::uuid,
           identity_resolved_at = now()
       FROM unnest(${sql.param(done.map((d) => d.id))}::uuid[],
                   ${sql.param(done.map((d) => d.humanId))}::text[],
-                  ${sql.param(done.map((d) => d.companyId))}::text[]) AS v(id, human_id, company_id)
+                  ${sql.param(done.map((d) => d.companyId))}::text[],
+                  ${sql.param(done.map((d) => d.organizationId))}::text[]) AS v(id, human_id, company_id, organization_id)
       WHERE l.id = v.id AND l.identity_resolved_at IS NULL
     `);
   }
   return { resolved: done.length, failed };
+}
+
+/**
+ * Pass 4: a lead resolved before 0077 carries no local company row: fill it with the current employer
+ * the sweep resolved it at (same winner), 5000 at a time. Leads without an employer are not selected.
+ */
+export async function fillLeadOrganizations(limit = 5000): Promise<number> {
+  const rows = (await db.execute(sql`
+    WITH pick AS (
+      SELECT l.id, (${CURRENT_ORG}) AS org_id
+      FROM leads l
+      WHERE l.identity_resolved_at IS NOT NULL AND l.organization_id IS NULL
+        AND EXISTS (SELECT 1 FROM leads_organizations lo WHERE lo.lead_id = l.id AND lo.current = true)
+      ORDER BY l.id
+      LIMIT ${limit}
+    )
+    UPDATE leads l SET organization_id = pick.org_id FROM pick
+    WHERE l.id = pick.id AND pick.org_id IS NOT NULL
+    RETURNING l.id
+  `)) as unknown as unknown[];
+  return rows.length;
+}
+
+/**
+ * Pass 5: a name-only employer that later got a safe identity (a serve brought its domain) moves its
+ * leads from the local key to the brand id: `company_id` filled where the lead's local row now has one.
+ */
+export async function adoptResolvedCompanies(limit = 5000): Promise<number> {
+  const rows = (await db.execute(sql`
+    WITH pick AS (
+      SELECT l.id, o.company_id
+      FROM leads l JOIN organizations o ON o.id = l.organization_id
+      WHERE l.company_id IS NULL AND o.company_id IS NOT NULL
+      LIMIT ${limit}
+    )
+    UPDATE leads l SET company_id = pick.company_id FROM pick WHERE l.id = pick.id
+    RETURNING l.id
+  `)) as unknown as unknown[];
+  return rows.length;
 }
 
 export interface LeadIdentityCounts {
@@ -277,12 +323,15 @@ export async function sweepLeadIdentityOnce(): Promise<boolean> {
   const employers = await resolveEmployers();
   const facts = await pushEmployerFacts();
   const people = await resolveLeads();
-  if (employers + facts + people.resolved > 0) {
+  const organized = await fillLeadOrganizations();
+  const adopted = await adoptResolvedCompanies();
+  if (employers + facts + people.resolved + organized + adopted > 0) {
     console.log(
-      `[lead-service] identity sweep: employers=${employers} facts=${facts} leads=${people.resolved} failed=${people.failed}`,
+      `[lead-service] identity sweep: employers=${employers} facts=${facts} leads=${people.resolved} failed=${people.failed} ` +
+        `organized=${organized} adopted=${adopted}`,
     );
   }
-  return employers > 0 || facts > 0 || people.resolved > 0;
+  return employers > 0 || facts > 0 || people.resolved > 0 || organized > 0 || adopted > 0;
 }
 
 let running = false;
