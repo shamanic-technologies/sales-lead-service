@@ -7,7 +7,11 @@
  *   - A MATCH IS WRITTEN ONCE. `freezeMatches` inserts `ON CONFLICT DO NOTHING`, so a contact
  *     already matched keeps the answer it was matched with. That is the whole reason reading the
  *     view twice returns the same pairings — it is structural, not a coincidence of the matcher
- *     being deterministic.
+ *     being deterministic. ONE exception, positive evidence only: a match that was NOT
+ *     deterministic (unmatched, or a name/domain guess) is replaced by a DETERMINISTIC one (same
+ *     email or phone) once such a lead exists (`upgradeToDeterministic`). A contact frozen before
+ *     the person became a lead otherwise stayed unmatched forever: distribute.you's own signups,
+ *     2026-10-13, 1 of 98 paired.
  *   - A RULING IS NEVER DELETED. Withdrawing marks the row; restating clears the mark through the
  *     same upsert. Every read filters `withdrawn_at IS NULL`.
  */
@@ -104,6 +108,37 @@ export async function freezeMatches(
   `);
 
   return await loadFrozenMatches(brandId, contactIds);
+}
+
+/**
+ * Replace frozen matches that were not deterministic by the deterministic ones the waterfall now
+ * finds. The UPDATE re-checks the stored confidence, so a deterministic match is never touched and
+ * a concurrent writer cannot be overwritten with a weaker answer. Judgments and rulings are keyed
+ * on the (contact, lead) PAIR, so the old pair's stay with it and say nothing about the new one.
+ */
+export async function upgradeToDeterministic(
+  brandId: string,
+  upgrades: Array<{ crmContactId: string; result: MatchResult }>,
+): Promise<number> {
+  const deterministic = upgrades.filter(
+    (u) => u.result.matchConfidence === "deterministic" && u.result.matchedLeadId !== null,
+  );
+  if (deterministic.length === 0) return 0;
+  const rows = (await db.execute(sql`
+    UPDATE crm_pairing_matches m
+    SET matched_lead_id = c.lead_id, match_method = c.method, match_confidence = 'deterministic',
+        candidate_count = c.candidate_count, matched_at = now()
+    FROM unnest(
+      ${sql.param(deterministic.map((u) => u.crmContactId))}::text[],
+      ${sql.param(deterministic.map((u) => u.result.matchedLeadId))}::uuid[],
+      ${sql.param(deterministic.map((u) => u.result.matchMethod))}::text[],
+      ${sql.param(deterministic.map((u) => u.result.candidateCount))}::int[]
+    ) AS c(contact_id, lead_id, method, candidate_count)
+    WHERE m.brand_id = ${brandId} AND m.crm_contact_id = c.contact_id
+      AND m.match_confidence <> 'deterministic'
+    RETURNING m.crm_contact_id
+  `)) as unknown as Array<{ crm_contact_id: string }>;
+  return rows.length;
 }
 
 // ---------------------------------------------------------------------------

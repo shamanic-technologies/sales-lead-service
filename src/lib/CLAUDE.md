@@ -37,6 +37,8 @@ features-service keeps a scope's compact rows and fetches only what changed. Per
 8. **Their contacts = EVERY source crm-service mirrors** (`/orgs/contacts`: GoHighLevel, PostHog, Stripe, CSV, chat; never the GHL-only list), and the evidence pass runs for EVERY brand with a fact on the `crm_facts` copy or a pairing (`listCrmBrands`), never only brands someone opened the view for (2026-10-10: one brand paired fleet-wide, 0 of distribute.you's 32 PostHog signups / 22 Stripe payers). A brand with contacts but no GHL connection is `crmConnected: true, connection: null`. Gmail facts carry no contact row: not pairable here.
 9. `crmContact.record` = their provenance verbatim (type, lead source, tags, created/updated, origin medium/url/referrer; null when absent). crm-service serves company NESTED (`company: {name, website}`): `normalizeCrmContact` (`crm-client.ts`) reads it and the older flat `companyName`, and feeds `company.website` to the matcher's domain tier.
 
+10. **A frozen match is replaced ONLY by a deterministic one** (`upgradeToDeterministic`, run by the evidence pass): a contact frozen `unmatched` or on a name guess before the person was a lead of the brand is re-matched on its email once a served lead carries it (2026-10-13: 1 of distribute.you's 98 signups was paired, the rest frozen before they became leads). A deterministic match is never touched; judgments/rulings stay with their old pair.
+
 Do NOT write back to their CRM, re-ask a frozen judgment on read, or change what attribution does with the shared matcher. Needs `CRM_SERVICE_URL`/`CRM_SERVICE_API_KEY`.
 
 ## CRM evidence on paired leads: `source = 'crm'` (`crm-evidence*.ts`, migration 0040)
