@@ -1103,3 +1103,27 @@ export const triggerEventOutbox = pgTable(
   },
   (table) => [index("idx_trigger_event_outbox_due").on(table.nextAttemptAt)],
 );
+
+/**
+ * A person the brand's own organization named to us (migration 0079, PUSHED-PERSON-KNOWN-1014):
+ * the evidence that the brand knows them, read by the named-person door. Append-only.
+ */
+export const brandPersonStatements = pgTable(
+  "brand_person_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    email: text("email").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    triggerId: text("trigger_id"),
+    campaignId: text("campaign_id").notNull(),
+    fullName: text("full_name"),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_bps_key").on(table.orgId, table.brandId, table.email, table.source, table.sourceRef),
+    index("idx_bps_brand_email").on(table.orgId, table.brandId, table.email),
+  ],
+);
