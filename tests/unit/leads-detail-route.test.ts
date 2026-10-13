@@ -226,7 +226,7 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
     expect(Object.keys(detail).sort()).toEqual(
       [
         "activeGoalId", "apolloPersonId", "audience", "audienceId", "bounced", "brandIds",
-        "brandProfileId", "campaignId", "clicked", "closedDeal", "contacted", "delivered", "email", "emailStatus",
+        "brandProfileId", "campaignId", "clicked", "closedDeal", "contacted", "delivered", "disqualification", "email", "emailStatus",
         "featureSlug", "firstBouncedAt", "firstClickedAt", "firstContactedAt", "firstDeliveredAt",
         "firstOpenedAt", "firstRepliedAt", "firstSentAt", "firstUnsubscribedAt", "global", "goal",
         "id", "lastDeliveredAt", "lead", "leadId", "namespace", "offer", "opened", "orgId", "parentRunId",

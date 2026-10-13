@@ -13,7 +13,8 @@
  * thread logs it loudly and starts a new one.
  */
 import { enableCrossThreadLocks } from "./lib/scope-lock.js";
-import { startCrmEvidenceWorker } from "./lib/crm-evidence-worker.js";
+import { startCrmEvidenceWorker, syncBrandOnce } from "./lib/crm-evidence-worker.js";
+import { startBrandSignupsWorker } from "./lib/brand-signups.js";
 import { startCrmFactFeedWorker } from "./lib/crm-fact-feed.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
@@ -45,6 +46,9 @@ startOutreachFactFeedWorker();
 startTimelineFactsWorker();
 // The people who engage with our social posts: leads of the post's brand, the fact on their timeline.
 startSocialEngagementsWorker();
+// Every person a brand's CRM says signed up is a lead of the brand (brand-signups.ts); the brand's CRM
+// evidence pass then writes their Signup fact.
+startBrandSignupsWorker(({ orgId, brandId }) => syncBrandOnce(orgId, brandId));
 // Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
 
@@ -52,7 +56,7 @@ startTriggerEventOutboxWorker();
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, trigger-event-outbox");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);

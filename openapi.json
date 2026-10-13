@@ -1645,6 +1645,9 @@
           "closedDeal": {
             "$ref": "#/components/schemas/LeadClosedDeal"
           },
+          "disqualification": {
+            "$ref": "#/components/schemas/LeadDisqualification"
+          },
           "contacted": {
             "type": "boolean",
             "description": "Lead has been contacted at least once in this scope (campaign or brand depending on query).",
@@ -1809,6 +1812,7 @@
           "lead",
           "standing",
           "closedDeal",
+          "disqualification",
           "contacted",
           "sent",
           "sentCount",
@@ -1847,7 +1851,7 @@
               "disqualified",
               "opted_out"
             ],
-            "description": "Where this person stands on THIS campaign, decided by lead-service and by nobody else. `sales_interest` = they reached the step this campaign's LEG puts leads on (a visit where the leg enters at the site, a positive reply where it enters at a conversation) or a step reachable from it on the leg graph — OR they visited the brand's website, on ANY leg (a visit is interest whatever the leg; off the leg it is not the entry, so `reachedEntryStep` stays false and the stage is `website_visit`). `customer` = the sale is reached. `opted_out` = the person asked not to be contacted (an unsubscribe, at this scope or globally); it is their own act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. `disqualified` = a commercial judgement of OURS: we realised they are not our target at all (the wrong contact, or gone from the role), or somebody stated they never will buy. The two are separate states, never folded together, because a board draws them as two columns with different copy and different moves and has to be able to count them apart. A prospect who simply DECLINES is not disqualified: that is a judgement about the moment, they stay reachable and the lead stays recyclable, so they read as `engaged` with `signal: \"negative_reply\"`. `engaged` = something happened that is not the step this campaign sells. `contacted` = written to, nothing since — INCLUDING a lead whose mail bounced, which is a failure of delivery rather than an opinion about the person, and is named by `signal: \"bounced\"` rather than used as a verdict. `not_contacted` = never written to. `unresolved` = a signal could not be resolved and is stated as such rather than defaulted — read `reason`. A consumer needs to know none of the reply kinds or step names to use this.",
+            "description": "Where this person stands on THIS campaign, decided by lead-service and by nobody else. `sales_interest` = they reached the step this campaign's LEG puts leads on (a visit where the leg enters at the site, a positive reply where it enters at a conversation) or a step reachable from it on the leg graph — OR they visited the brand's website, on ANY leg (a visit is interest whatever the leg; off the leg it is not the entry, so `reachedEntryStep` stays false and the stage is `website_visit`). `customer` = the sale is reached. `opted_out` = the person asked not to be contacted (an unsubscribe, at this scope or globally); it is their own act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. `disqualified` is no longer produced (2026-10-13; kept in the vocabulary, always counted 0): \"Disqualified\" is its OWN mark beside the standing (`disqualification` on the lead row), so a disqualified person keeps the standing their steps give them. A prospect who DECLINES, or of whom somebody stated they will never buy (`sale` never), stays in play as `engaged` with `signal: \"negative_reply\"` / `\"stated_never\"`, tagged `not_interested`. `engaged` = something happened that is not the step this campaign sells. `contacted` = written to, nothing since — INCLUDING a lead whose mail bounced, which is a failure of delivery rather than an opinion about the person, and is named by `signal: \"bounced\"` rather than used as a verdict. `not_contacted` = never written to. `unresolved` = a signal could not be resolved and is stated as such rather than defaulted — read `reason`. A consumer needs to know none of the reply kinds or step names to use this.",
             "example": "sales_interest"
           },
           "tag": {
@@ -1864,7 +1868,7 @@
               "website_visit",
               "not_interested"
             ],
-            "description": "The label this conversation carries, for a surface that shows a person what the lead did (the Unibox). This service owns it; relay it, never re-derive it. It is `state`, except a `sales_interest` lead whose only interest is a website visit (a click on our email, or a visit stated by hand): that lead stays `sales_interest` in every count and board and is tagged `website_visit`, because a click alone is not somebody saying they want to buy. A positive reply or any deeper step keeps `sales_interest`. A lead whose latest real reply is a no stays `engaged` (engaged = the person reacted, whichever way) and is tagged `not_interested`.",
+            "description": "The label this conversation carries, for a surface that shows a person what the lead did (the Unibox). This service owns it; relay it, never re-derive it. It is `state`, except a `sales_interest` lead whose only interest is a website visit (a click on our email, or a visit stated by hand): that lead stays `sales_interest` in every count and board and is tagged `website_visit`, because a click alone is not somebody saying they want to buy. A positive reply or any deeper step keeps `sales_interest`. A lead whose latest real reply is a no stays `engaged` (engaged = the person reacted, whichever way) and is tagged `not_interested`, and so is one of whom somebody stated they will never buy. \"Disqualified\" is not a tag value: it is its own mark (`disqualification`), shown BESIDE this tag.",
             "example": "website_visit"
           },
           "signal": {
@@ -1877,7 +1881,6 @@
               "click",
               "reply",
               "negative_reply",
-              "disqualifying_reply",
               "positive_reply",
               "measured_visit",
               "stated_outcome",
@@ -1886,7 +1889,7 @@
               "unsubscribed",
               "opt_out_reply"
             ],
-            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `disqualifying_reply` = the delivery layer reports this person as permanently out (the wrong contact, or gone from the role). `negative_reply` = they declined; that leaves them in play. `opt_out_reply` = they asked us to stop in a reply, under this brand — opted out on every offer of it.",
+            "description": "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own act and never shares a state with a commercial judgement of ours — it decides `opted_out`, which is its own countable, pageable standing rather than a shade of `disqualified`. `negative_reply` = they declined; that leaves them in play. `stated_never` = somebody stated they will never buy. `opt_out_reply` = they asked us to stop in a reply, under this brand — opted out on every offer of it.",
             "example": "measured_visit"
           },
           "origin": {
@@ -2397,6 +2400,48 @@
           "source"
         ],
         "description": "The deal on this lead — worth, cost to the customer, and WHOSE win it was — or null when nobody has stated one. It is here so a table can render a column per lead over pages of rows without a request per lead, and so a consumer can hold the deals our outreach caused apart from the ones the brand closed some other way. Present at every scope this read supports. Derived on read: nothing is stored, so withdrawing or restating the statement moves it with no write."
+      },
+      "LeadDisqualification": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "offerId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The offer the mark is about, or null = every offer of the brand."
+          },
+          "note": {
+            "type": "string",
+            "nullable": true,
+            "description": "The optional free note: why, in the words of whoever set it (or the reply's reading when set automatically). No closed list of reasons.",
+            "example": "Runs a construction company, we sell to supermarkets."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "manual",
+              "reply"
+            ],
+            "description": "`manual` = a person (staff, customer, agent) set it. `reply` = set automatically from a reply judged \"not the right contact\" or \"left the role\"."
+          },
+          "statedByUserId": {
+            "type": "string",
+            "nullable": true,
+            "description": "Who set it; null when set automatically."
+          },
+          "statedAt": {
+            "type": "string",
+            "description": "When it was set (ISO 8601)."
+          }
+        },
+        "required": [
+          "offerId",
+          "note",
+          "source",
+          "statedByUserId",
+          "statedAt"
+        ],
+        "description": "Disqualified, as its own mark beside `standing` (never folded into it): present = this person is disqualified for this conversation (the row campaign's offer x brand, or every offer of the brand), with the optional note, who and when. null = not disqualified. Set and removed with PUT/DELETE /orgs/leads/{id}/disqualification; set automatically from a reply judged not our target."
       },
       "LeadCampaignEvidence": {
         "type": "object",
@@ -2922,6 +2967,134 @@
         "required": [
           "statement",
           "awaitingReply"
+        ]
+      },
+      "DisqualificationWriteResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The lead row id the call named."
+          },
+          "leadId": {
+            "type": "string",
+            "description": "The person (leads.id)."
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The offer named, or null = every offer of the brand."
+          },
+          "disqualified": {
+            "type": "boolean",
+            "description": "Whether the person reads Disqualified for that conversation after the call."
+          },
+          "disqualification": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeadDisqualification"
+              },
+              {
+                "description": "The mark that answers for that conversation now, or null."
+              }
+            ]
+          },
+          "withdrawn": {
+            "type": "integer",
+            "description": "DELETE only: how many live marks were removed (0 = nothing was set)."
+          }
+        },
+        "required": [
+          "id",
+          "leadId",
+          "brandId",
+          "offerId",
+          "disqualified",
+          "disqualification"
+        ]
+      },
+      "DisqualifyLeadRequest": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string",
+            "description": "The brand. Absent = x-brand-id, else the row's own brand."
+          },
+          "offerId": {
+            "type": "string",
+            "description": "One offer of the brand. Absent = every offer."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "Why, in your words. Optional.",
+            "example": "Runs a construction company, we sell to supermarkets."
+          }
+        }
+      },
+      "BrandDisqualificationsResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "total": {
+            "type": "integer"
+          },
+          "leads": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "A lead row id of the person under the brand (newest)."
+                },
+                "leadId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "email": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "disqualification": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/LeadDisqualification"
+                    },
+                    {
+                      "description": "The Disqualified MARK: its own tag, BESIDE the step tags and the standing, never instead of them. A disqualified lead keeps everything that happened with them (contacted, delivered, positive reply, website visit...) and no step standing or step count moves."
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "leadId",
+                "name",
+                "email",
+                "disqualification"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "offerId",
+          "total",
+          "leads"
         ]
       },
       "LeadBucketCountsResponse": {
@@ -6251,6 +6424,16 @@
           },
           "tags": {
             "$ref": "#/components/schemas/ConversationTags"
+          },
+          "disqualification": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeadDisqualification"
+              },
+              {
+                "description": "The Disqualified mark answering for this conversation (note, who, when, by hand or from a reply), or null."
+              }
+            ]
           }
         },
         "required": [
@@ -6258,7 +6441,8 @@
           "brandId",
           "offerId",
           "items",
-          "tags"
+          "tags",
+          "disqualification"
         ]
       },
       "TimelineItem": {
@@ -6430,13 +6614,18 @@
             "type": "boolean",
             "nullable": true,
             "description": "Whether the fact that put the conversation on furthestStep is ours (an existing client reads paid_client, false)."
+          },
+          "disqualified": {
+            "type": "boolean",
+            "description": "Disqualified, its OWN tag beside the step tags above (never instead of them): true when the person is marked Disqualified for this conversation (this offer, or every offer of the brand). The mark and its note: `disqualification`."
           }
         },
         "required": [
           "lastWord",
           "lastWordAt",
           "furthestStep",
-          "furthestStepAttributable"
+          "furthestStepAttributable",
+          "disqualified"
         ]
       },
       "CrmPairingRow": {
@@ -9704,6 +9893,483 @@
           },
           "503": {
             "description": "The outreach fact copy has not caught up yet"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/disqualification": {
+      "put": {
+        "summary": "Mark a lead Disqualified, with an optional note",
+        "description": "Disqualified is its OWN mark beside the step tags (Contacted, Delivered, Positive reply, Website visit...): setting it changes no standing, no step tag and no step count. A yes/no mark + an OPTIONAL free note (no list of reasons), with who (x-user-id, required) and when. A fact about the PERSON at the brand: `offerId` names one offer, absent = every offer of the brand. Restating replaces the note. The brand is `brandId` (body) or x-brand-id when named (a brand the row is not part of is 404), else the row's own brand. A person's mark (set or removed) always outranks the automatic one set from a reply judged not our target.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The lead row id (leads_campaigns.id), as every row of GET /orgs/leads carries."
+            },
+            "required": true,
+            "description": "The lead row id (leads_campaigns.id), as every row of GET /orgs/leads carries.",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisqualifyLeadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Marked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisqualificationWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters)"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Lead not found (or not part of the named brand)"
+          },
+          "500": {
+            "description": "Write failed"
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove the Disqualified mark",
+        "description": "Removes the mark (kept on record as withdrawn, never deleted). With `offerId`: that offer's mark; without: every mark of the person at the brand. The removal is the person's word: the automatic reply reading never puts it back. Idempotent (`withdrawn: 0` when nothing was set). The answer states whether the person still reads Disqualified for the conversation named (an offer's mark removed while a brand-wide one stands).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offerId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The lead row id (leads_campaigns.id), as every row of GET /orgs/leads carries."
+            },
+            "required": true,
+            "description": "The lead row id (leads_campaigns.id), as every row of GET /orgs/leads carries.",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Removed (or nothing to remove)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisqualificationWriteResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "id is not a uuid, or x-user-id missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Lead not found (or not part of the named brand)"
+          },
+          "500": {
+            "description": "Write failed"
+          }
+        }
+      }
+    },
+    "/orgs/leads/disqualifications": {
+      "get": {
+        "summary": "Every disqualified lead of a brand, with the notes",
+        "description": "The people marked Disqualified at the brand (for one offer when `offerId` is named: its own mark or a brand-wide one), newest first, each with the mark (note, who, when, set by hand or from a reply) and one lead row id to open them by. `total` is the length of the same list. Step tags and standings are not read here and not moved.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offerId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The disqualified people",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrandDisqualificationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "brandId missing"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Read failed"
           }
         }
       }

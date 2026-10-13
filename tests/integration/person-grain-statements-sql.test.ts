@@ -172,7 +172,7 @@ describe.skipIf(!hasRealDatabase)("a statement is about the person, not the row"
     const lost = await seedPerson();
     expect((await post(lost.rowA, { step: "sale", kind: "never", costCents: 100 })).status).toBe(201);
 
-    expect((await standingOf(lost)).standing.state).toBe("disqualified");
+    expect((await standingOf(lost)).standing.tag).toBe("not_interested");
 
     expect((await post(lost.rowB, { step: "sale", kind: "never", costCents: 200 })).status).toBe(201);
     const live = await liveManual("nevers", lost.leadId, "sale");
@@ -199,6 +199,6 @@ describe.skipIf(!hasRealDatabase)("a statement is about the person, not the row"
       .set("x-user-id", "u1");
     expect(withdrawn.status).toBe(200);
     expect(withdrawn.body.restoredNeverSteps).toContain("sale");
-    expect((await standingOf(lost)).standing.state).toBe("disqualified");
+    expect((await standingOf(lost)).standing.tag).toBe("not_interested");
   });
 });

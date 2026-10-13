@@ -50,6 +50,7 @@ import { entryOfLeg, legOf, type LegEntry } from "./step-graph.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-states.js";
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
+import { effectiveMark, loadLiveMarks, type LeadDisqualification } from "./lead-disqualification.js";
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { deriveWentCold, earlierInstant, type CrmColdEligibility } from "./lead-cold.js";
 import {
@@ -121,6 +122,11 @@ export interface ResolvedLeadFacts {
   standing: LeadStanding;
   /** The deal on this lead, or null when nobody has stated one. See closed-deal.ts. */
   closedDeal: ClosedDeal | null;
+  /**
+   * The Disqualified MARK on this person for the row's conversation (offer of the row's campaign x
+   * brand), or null. Beside the standing, never inside it: it moves no state (lead-disqualification.ts).
+   */
+  disqualification: LeadDisqualification | null;
 }
 
 export interface LeadStandingResolver {
@@ -255,6 +261,12 @@ export function createLeadStandingResolver(
           AND withdrawn_at IS NULL
         ORDER BY (source = 'crm') ASC, updated_at DESC NULLS LAST
       `)) as unknown as NeverRow[]);
+
+      // The Disqualified mark: one indexed read. Only a mark naming an OFFER needs the campaign ->
+      // offer map; a brand-wide mark answers on every row of the person at the brand.
+      const marks = await loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds });
+      const marksNameOffers = [...marks.values()].some((byOffer) => [...byOffer.keys()].some((k) => k !== ""));
+      const markOffers = marksNameOffers ? (offers ?? (await offersFor())) : null;
 
       // The went-cold rule reads the row's PRIMARY brand's CRM. Nothing below costs anything for a
       // brand whose CRM is not usable.
@@ -406,12 +418,27 @@ export function createLeadStandingResolver(
           }),
           // Off the SAME step states, in the same pass — never a second read of the same ledger.
           closedDeal: closedDealFrom(steps),
+          disqualification: markFor(row, marks, markOffers),
         });
       }
 
       return out;
     },
   };
+}
+
+/** The mark answering for the row's conversation, under the first of its brands that holds one. */
+function markFor(
+  row: StandingRow,
+  marks: Map<string, Map<string, LeadDisqualification>>,
+  offers: Map<string, string | null> | null,
+): LeadDisqualification | null {
+  const offerId = offers?.get(row.campaignId) ?? null;
+  for (const brandId of row.brandIds) {
+    const mark = effectiveMark(marks.get(`${row.leadId}|${brandId}`), offerId);
+    if (mark) return mark;
+  }
+  return null;
 }
 
 /**

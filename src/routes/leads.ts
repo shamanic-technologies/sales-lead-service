@@ -437,6 +437,10 @@ function serializeLeadItem(
     // ones the brand closed some other way. Null when nobody has stated a sale. See
     // lib/closed-deal.ts.
     closedDeal: facts.closedDeal,
+    // DISQUALIFIED, its own mark beside the standing (never inside it): yes when this object is
+    // present, with the optional note, who and when. Null = not disqualified for this conversation
+    // (the row's offer x brand). See lib/lead-disqualification.ts.
+    disqualification: facts.disqualification,
     // The person's campaigns of this brand, each stating what happened IN THAT CAMPAIGN — present
     // only when the caller asked for it with `?include=campaigns`. Every field above stays exactly
     // what it was: the brand-wide roll-up several dashboard surfaces already read.
@@ -594,6 +598,7 @@ function unresolvedFacts(
       replies: null,
     },
     closedDeal: null,
+    disqualification: null,
   };
 }
 
@@ -1118,6 +1123,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             // whether that person bought and whose win it was.
             standing: facts.standing,
             closedDeal: facts.closedDeal,
+            disqualification: facts.disqualification,
             // Same field, same resolver as the full path — see serializeLeadItem.
             ...(breakdownMap ? { campaigns: breakdownMap.get(r.id) ?? [] } : {}),
             ...deliveryStatus,

@@ -48,3 +48,16 @@ for (const [key, value] of Object.entries(TEST_ENV_VARS)) {
     process.env[key] = value;
   }
 }
+
+// UNIT tests only: the Disqualified mark read (lead-disqualification.ts) is one extra statement in
+// every lead read, and the unit suites fake the database per statement shape. They read "nobody is
+// marked" unless a test mocks the module itself; the mark's SQL is covered against real Postgres in
+// tests/integration/lead-disqualification-sql.test.ts.
+import { expect, vi } from "vitest";
+
+if (!(expect.getState().testPath ?? "").includes("/tests/integration/")) {
+  vi.doMock("../src/lib/lead-disqualification.js", async (importOriginal) => ({
+    ...(await importOriginal<typeof import("../src/lib/lead-disqualification.js")>()),
+    loadLiveMarks: async () => new Map(),
+  }));
+}

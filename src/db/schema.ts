@@ -337,6 +337,35 @@ export const answeredOutsideStatements = pgTable(
   (table) => [index("idx_answered_outside_brand_lead").on(table.orgId, table.brandId, table.leadId, table.statedAt)],
 );
 
+// --- "Disqualified": its own mark beside the step tags (src/lib/lead-disqualification.ts, migration 0075) ---
+// One row per (org, brand, lead, offer_key); offer_key '' = every offer of the brand. source 'manual'
+// (a person) or 'reply' (a reply judged not our target, note filled by the sync). Withdrawn, never deleted.
+export const leadDisqualificationMarks = pgTable(
+  "lead_disqualification_marks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    offerKey: text("offer_key").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("source_ref"),
+    note: text("note"),
+    leadCampaignId: uuid("lead_campaign_id"),
+    statedByUserId: text("stated_by_user_id"),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+    withdrawnByUserId: text("withdrawn_by_user_id"),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_ldm_key").on(table.orgId, table.brandId, table.leadId, table.offerKey),
+    index("idx_ldm_lead").on(table.leadId),
+  ],
+);
+
 // --- "Did our email answer them?" Jev verdicts (src/lib/outside-answers.ts, migration 0067) ---
 // One later email of ours from a mirrored Gmail (org's own or staff), judged once: answers=true is
 // read as an answer of ours dated `sent_at`; answers=false is kept so it is never judged again.
