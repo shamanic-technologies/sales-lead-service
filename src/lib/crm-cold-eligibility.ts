@@ -21,9 +21,6 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { fetchCrmConnection, fetchCrmStageMeanings } from "./crm-client.js";
-import { loadJudgments, loadRulings, rulingKey } from "./crm-pairing-store.js";
-import { resolveCrmPairing } from "./crm-pairing.js";
-import type { MatchConfidence, MatchMethod } from "./conversions.js";
 import {
   CRM_COLD_INELIGIBLE,
   type CrmColdEligibility,
@@ -58,8 +55,10 @@ export async function loadCrmColdEligibility(
   let value: CrmColdEligibility;
   // A cheap local gate first, so a brand without a CRM costs no network call: with no CRM contact
   // ever paired against our leads, no CRM evidence can reach any of them.
+  // Pairing is by human-service's humanId on the brand's CRM facts (crm-matching.ts): a brand whose
+  // CRM never stated a person cannot pair anyone.
   const paired = (await db.execute(sql`
-    SELECT 1 AS hit FROM crm_pairing_matches WHERE brand_id = ${brandId} AND org_id = ${orgId} LIMIT 1
+    SELECT 1 AS hit FROM crm_facts WHERE brand_id = ${brandId} AND org_id = ${orgId} LIMIT 1
   `)) as unknown as Array<{ hit: number }>;
   if (paired.length === 0) {
     value = CRM_COLD_INELIGIBLE("crm_never_paired");
@@ -115,61 +114,19 @@ export async function loadCrmColdEligibility(
 /** The orgs whose CRM was ever paired against this brand's leads. */
 export async function crmPairedOrgs(brandId: string): Promise<string[]> {
   const rows = (await db.execute(sql`
-    SELECT DISTINCT org_id FROM crm_pairing_matches WHERE brand_id = ${brandId}
+    SELECT DISTINCT org_id FROM crm_facts WHERE brand_id = ${brandId}
   `)) as unknown as Array<{ org_id: string }>;
   return rows.map((r) => r.org_id);
 }
 
 /**
- * The subset of `leadIds` that some CRM contact of `brandId` is a candidate for, with that pairing
- * still `unconfirmed` (no judgment yet, or one that could not be had).
+ * The subset of `leadIds` with a CRM pairing still waiting on a decision. Since pairing is
+ * human-service's humanId (deterministic or nothing; LEAD-REFONTE-1013) no pairing waits: always
+ * empty. Kept as the resolver's seam; the frozen matcher rows it used to read are records only.
  */
 export async function loadUnconfirmedPairingLeads(
-  brandId: string,
-  leadIds: string[],
+  _brandId: string,
+  _leadIds: string[],
 ): Promise<Set<string>> {
-  const out = new Set<string>();
-  if (leadIds.length === 0) return out;
-  const rows = (await db.execute(sql`
-    SELECT crm_contact_id, matched_lead_id, match_method, match_confidence, candidate_count
-    FROM crm_pairing_matches
-    WHERE brand_id = ${brandId}
-      AND matched_lead_id = ANY(${sql.param(leadIds)}::uuid[])
-  `)) as unknown as Array<{
-    crm_contact_id: string;
-    matched_lead_id: string;
-    match_method: string | null;
-    match_confidence: MatchConfidence;
-    candidate_count: number;
-  }>;
-  if (rows.length === 0) return out;
-
-  const contactIds = rows.map((r) => r.crm_contact_id);
-  const [judgments, rulings] = await Promise.all([
-    loadJudgments(brandId, contactIds),
-    loadRulings(brandId, contactIds),
-  ]);
-  for (const r of rows) {
-    const stored = judgments.get(r.crm_contact_id) ?? null;
-    const verdict = resolveCrmPairing({
-      signal: {
-        matchedLeadId: r.matched_lead_id,
-        matchMethod: r.match_method as MatchMethod,
-        matchConfidence: r.match_confidence,
-        candidateCount: Number(r.candidate_count) || 0,
-      },
-      judgment:
-        stored && stored.leadId === r.matched_lead_id
-          ? {
-              samePersonProbability: stored.samePersonProbability,
-              model: stored.model,
-              judgedAt: stored.judgedAt,
-            }
-          : null,
-      judgmentUnavailableReason: null,
-      ruling: rulings.get(rulingKey(r.crm_contact_id, r.matched_lead_id)) ?? null,
-    });
-    if (verdict.state === "unconfirmed") out.add(r.matched_lead_id);
-  }
-  return out;
+  return new Set();
 }
