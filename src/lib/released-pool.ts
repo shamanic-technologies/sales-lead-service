@@ -3,6 +3,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses } from "./reach-sql.js";
+import type { EmailPolicy } from "./email-policy.js";
 import { fetchAudienceOfferId, fetchAudienceOriginSlug, loadOriginsByChannelSlug } from "./sourcing-origin.js";
 
 /**
@@ -116,6 +117,8 @@ export async function claimReleasedLead(params: {
   /** The outreach channel the lead is served for (feature_slug of the new row; decides the origins it takes). */
   featureSlug: string;
   reachableBy: ReachMethod[];
+  /** The taking campaign's email policy (src/lib/email-policy.ts): absent = valid only. */
+  emailPolicy?: EmailPolicy | null;
   offerId: string | null;
   runId: string | null;
   parentRunId: string | null;
@@ -127,7 +130,7 @@ export async function claimReleasedLead(params: {
 }): Promise<ReleasedLead | null> {
   if (params.brandIds.length === 0) return null;
   const brands = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
-  const reach = reachClauses(sql`s.lead_id`, params.reachableBy);
+  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.emailPolicy);
   const candidates = (await db.execute(sql`
     SELECT s.id, s.campaign_id, s.lead_id, s.audience_id
       FROM leads_campaigns s

@@ -5,6 +5,7 @@ import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses } from "./reach-sql.js";
+import type { EmailPolicy } from "./email-policy.js";
 
 /**
  * Drain the already-paid pool before buying more people.
@@ -322,6 +323,8 @@ export async function loadRetryCandidates(params: {
    * back (owner 2026-10-12: a WhatsApp campaign re-served an email-only person from this pool). Absent = email only.
    */
   reachableBy?: readonly ReachMethod[] | null;
+  /** The pipe's email policy (src/lib/email-policy.ts): absent = valid only, a catch-all person is never handed back. */
+  emailPolicy?: EmailPolicy | null;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
   const nowIso = new Date(params.nowMs).toISOString();
@@ -347,7 +350,7 @@ export async function loadRetryCandidates(params: {
       AND lc.sender_closed_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy)}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.emailPolicy)}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -514,6 +517,7 @@ export async function pickRetryCandidate(params: {
   context: RetryPoolContext;
   nowMs?: number;
   reachableBy?: readonly ReachMethod[] | null;
+  emailPolicy?: EmailPolicy | null;
 }): Promise<RetryCandidate | null> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -522,6 +526,7 @@ export async function pickRetryCandidate(params: {
     campaignId: params.campaignId,
     nowMs,
     reachableBy: params.reachableBy ?? null,
+    emailPolicy: params.emailPolicy ?? null,
   });
   if (candidates.length === 0) return null;
 

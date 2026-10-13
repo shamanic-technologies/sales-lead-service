@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { EMAIL_POLICIES } from "./lib/email-policy.js";
 import {
   OpenAPIRegistry,
   extendZodWithOpenApi,
@@ -970,10 +971,16 @@ export const FullLeadSchema = z
 // --- Buffer Next ---
 
 export const BufferNextRequestSchema = z
-  .object({})
+  .object({
+    emailPolicy: z.enum(EMAIL_POLICIES).optional().openapi({
+      description:
+        "Which verified emails this workflow accepts. `valid_only` (what a body without this field gets: unchanged behaviour) hands out only addresses the verifier confirmed. `valid_and_catch_all` also hands out addresses on a catch-all domain (the verifier cannot confirm the mailbox; ~7% bounce measured vs <1% for valid), including people of the brand already revealed and dropped as catch-all, without paying for them again. unknown, invalid and risky addresses are never handed out, whatever the option. Applies to the fresh serve and to every already-paid pool (a catch-all person is never handed to a campaign asking valid only).",
+      example: "valid_and_catch_all",
+    }),
+  })
   .openapi("BufferNextRequest", {
     description:
-      "Empty body. The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both. The only body field is the optional `emailPolicy`; an empty body is today's serve.",
   });
 
 export const ServedBuyingSignalSchema = z
