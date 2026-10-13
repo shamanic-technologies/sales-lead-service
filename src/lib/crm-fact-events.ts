@@ -27,6 +27,11 @@ export interface CrmContactFunnelEvents {
   contactId: string;
   /** The person's first email on the fact (crm-service lists the contact's own first). */
   primaryEmail: string | null;
+  /**
+   * The human-service human crm-service says this person IS (`humanId` on its facts, crm-service#125,
+   * org view); null when not known yet. A fact with no contact row but a human is keyed `human:<id>`.
+   */
+  humanId: string | null;
   fullName: string | null;
   events: CrmFunnelEvent[];
 }
@@ -58,6 +63,7 @@ export class CrmFactFeedNotCaughtUpError extends Error {
 
 export interface CrmFunnelFactRow {
   crm_contact_id: string;
+  human_id?: string | null;
   emails: string[];
   full_name: string | null;
   type: string;
@@ -92,11 +98,13 @@ export function contactsFromFactRows(rows: readonly CrmFunnelFactRow[]): CrmCont
       contact = {
         contactId: row.crm_contact_id,
         primaryEmail: row.emails[0] ?? null,
+        humanId: row.human_id ?? null,
         fullName: row.full_name,
         events: [],
       };
       byContact.set(row.crm_contact_id, contact);
     }
+    if (!contact.humanId && row.human_id) contact.humanId = row.human_id;
     contact.events.push(funnelEventFromFact(row));
   }
   return Array.from(byContact.values());
@@ -110,11 +118,12 @@ export async function loadCrmFunnelEvents(orgId: string, brandId: string): Promi
   if (cursor.length === 0 || cursor[0].caught_up_at === null) throw new CrmFactFeedNotCaughtUpError();
 
   const rows = (await db.execute(sql`
-    SELECT f.crm_contact_id, f.emails, f.full_name, f.type, f.occurred_at, f.date_basis, f.source_ref, f.payload
+    SELECT COALESCE(f.crm_contact_id, 'human:' || (f.raw->>'humanId')) AS crm_contact_id, f.raw->>'humanId' AS human_id,
+      f.emails, f.full_name, f.type, f.occurred_at, f.date_basis, f.source_ref, f.payload
     FROM crm_facts f
     WHERE f.org_id = ${orgId}
       AND f.brand_id = ${brandId}
-      AND f.crm_contact_id IS NOT NULL
+      AND (f.crm_contact_id IS NOT NULL OR f.raw->>'humanId' IS NOT NULL)
       AND f.type = ANY(${sql.param([...CRM_FUNNEL_FACT_TYPES])}::text[])
       AND NOT EXISTS (
         SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id

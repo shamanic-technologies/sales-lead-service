@@ -3055,6 +3055,7 @@ registry.registerPath({
                     name: z.string().nullable(),
                     domain: z.string().nullable(),
                     leadCount: z.number().int().openapi({ description: "Leads of that company the brand holds (each reads Disqualified)." }),
+                    leadIds: z.array(z.string()).openapi({ description: "Those leads (leads.id), the set `leadCount` counts: each reads Disqualified for the brand." }),
                     disqualification: LeadDisqualificationSchema,
                   }),
                 )
@@ -6171,7 +6172,7 @@ const CrmPairingRowSchema = z
         })
         .nullable(),
       evidence: z.object({
-        matchMethod: z.enum(["email", "phone", "domain_name", "full_name", "last_name"]).nullable(),
+        matchMethod: z.enum(["email", "phone", "domain_name", "full_name", "last_name", "human"]).nullable(),
         matchConfidence: z.enum(["deterministic", "strong", "probabilistic", "unmatched"]),
         candidateCount: z.number().openapi({
           description: "How many candidates the winning tier surfaced. More than one on a weak tier IS the ambiguity.",

@@ -3206,6 +3206,13 @@
                   "type": "integer",
                   "description": "Leads of that company the brand holds (each reads Disqualified)."
                 },
+                "leadIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Those leads (leads.id), the set `leadCount` counts: each reads Disqualified for the brand."
+                },
                 "disqualification": {
                   "allOf": [
                     {
@@ -3223,6 +3230,7 @@
                 "name",
                 "domain",
                 "leadCount",
+                "leadIds",
                 "disqualification"
               ]
             },
@@ -6973,6 +6981,7 @@
                       "domain_name",
                       "full_name",
                       "last_name",
+                      "human",
                       null
                     ]
                   },
@@ -13937,6 +13946,9 @@
                               "type": "number"
                             },
                             "last_name": {
+                              "type": "number"
+                            },
+                            "human": {
                               "type": "number"
                             },
                             "none": {
