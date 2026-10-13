@@ -50,7 +50,15 @@ import { entryOfLeg, legOf, type LegEntry } from "./step-graph.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { resolveStepStates, type StatedNever, type StatedOutcome } from "./step-states.js";
 import { closedDealFrom, type ClosedDeal } from "./closed-deal.js";
-import { effectiveMark, loadLiveMarks, type LeadDisqualification } from "./lead-disqualification.js";
+import { companyBlockFor, type LeadCompanyBlock } from "./company-status.js";
+import { loadLevelTags } from "./level-tags.js";
+import {
+  anyMarkNamesOffer,
+  effectiveLeadOrCompanyMark,
+  loadLiveMarks,
+  type LeadAndCompanyMarks,
+  type LeadDisqualification,
+} from "./lead-disqualification.js";
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { deriveWentCold, earlierInstant, type CrmColdEligibility } from "./lead-cold.js";
 import {
@@ -127,6 +135,8 @@ export interface ResolvedLeadFacts {
    * brand), or null. Beside the standing, never inside it: it moves no state (lead-disqualification.ts).
    */
   disqualification: LeadDisqualification | null;
+  /** The COMPANY this lead is at, with its company-level tags (company-status.ts). null = no company known. */
+  company?: LeadCompanyBlock | null;
 }
 
 export interface LeadStandingResolver {
@@ -264,8 +274,15 @@ export function createLeadStandingResolver(
 
       // The Disqualified mark: one indexed read. Only a mark naming an OFFER needs the campaign ->
       // offer map; a brand-wide mark answers on every row of the person at the brand.
-      const marks = await loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds });
-      const marksNameOffers = [...marks.values()].some((byOffer) => [...byOffer.keys()].some((k) => k !== ""));
+      // The lead's own marks, then what sits above the lead (level-tags.ts): its COMPANY's marks ("not
+      // our target" covers every lead of the company) and buyer status, and its HUMAN's opt-out
+      // (human-service fact, copied by human-events.ts), which follows them everywhere.
+      const leadMarks = await loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds });
+      const levels = await loadLevelTags({ orgId: ctx.orgId, brandIds, leadIds });
+      const humanOptOuts = levels.humanOptOuts;
+      const companyStatus = levels.companyStatus;
+      const marks: LeadAndCompanyMarks = { lead: leadMarks, company: levels.companyMarks, companyKeyOf: levels.companyKeyOf };
+      const marksNameOffers = anyMarkNamesOffer(marks);
       const markOffers = marksNameOffers ? (offers ?? (await offersFor())) : null;
 
       // The went-cold rule reads the row's PRIMARY brand's CRM. Nothing below costs anything for a
@@ -415,10 +432,12 @@ export function createLeadStandingResolver(
             entry,
             entryUnresolvedReason: unresolvedReason,
             steps,
+            humanOptOut: humanOptOuts.has(row.leadId),
           }),
           // Off the SAME step states, in the same pass — never a second read of the same ledger.
           closedDeal: closedDealFrom(steps),
           disqualification: markFor(row, marks, markOffers),
+          company: companyBlockFor(row.leadId, row.brandIds, markOffers?.get(row.campaignId) ?? null, marks, companyStatus),
         });
       }
 
@@ -430,12 +449,12 @@ export function createLeadStandingResolver(
 /** The mark answering for the row's conversation, under the first of its brands that holds one. */
 function markFor(
   row: StandingRow,
-  marks: Map<string, Map<string, LeadDisqualification>>,
+  marks: LeadAndCompanyMarks,
   offers: Map<string, string | null> | null,
 ): LeadDisqualification | null {
   const offerId = offers?.get(row.campaignId) ?? null;
   for (const brandId of row.brandIds) {
-    const mark = effectiveMark(marks.get(`${row.leadId}|${brandId}`), offerId);
+    const mark = effectiveLeadOrCompanyMark(marks, row.leadId, brandId, offerId);
     if (mark) return mark;
   }
   return null;

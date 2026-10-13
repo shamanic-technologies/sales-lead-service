@@ -192,3 +192,28 @@ export function companyFactsOf(org: OrganizationRow): Record<string, unknown> {
   for (const k of Object.keys(facts)) if (facts[k] === undefined) delete facts[k];
   return facts;
 }
+
+/**
+ * Free-mail domains name no company (same list as human-service's own-company rule). A personal
+ * address is the HUMAN's, never a company identity.
+ */
+export const FREE_MAIL_DOMAINS: ReadonlySet<string> = new Set([
+  "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "hotmail.fr",
+  "live.com", "msn.com", "yahoo.com", "yahoo.fr", "icloud.com", "me.com",
+  "mac.com", "aol.com", "proton.me", "protonmail.com", "gmx.com", "gmx.de",
+  "gmx.net", "web.de", "orange.fr", "free.fr", "laposte.net", "yandex.com",
+  "yandex.ru", "mail.ru", "zoho.com", "hey.com", "fastmail.com", "qq.com",
+  "163.com",
+]);
+
+/** The domain of a WORK address, lowercased; null for a free-mail or unreadable address. */
+export function workEmailDomain(email: string | null | undefined): string | null {
+  if (!email) return null;
+  const at = email.trim().toLowerCase().lastIndexOf("@");
+  if (at < 0) return null;
+  const domain = email.trim().toLowerCase().slice(at + 1);
+  if (!/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain)) return null;
+  if (FREE_MAIL_DOMAINS.has(domain)) return null;
+  for (const free of FREE_MAIL_DOMAINS) if (domain.endsWith(`.${free}`)) return null;
+  return domain;
+}

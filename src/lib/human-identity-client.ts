@@ -137,3 +137,11 @@ export async function listHumanEvents(after: string, limit = 500): Promise<Human
   const q = new URLSearchParams({ after, limit: String(limit) });
   return call<HumanEventsPage>("GET", `/internal/human-identities/events?${q.toString()}`);
 }
+
+/** Withdraw a fact this service stated (its source was taken back). Idempotent at human-service. */
+export async function withdrawHumanFact(factId: string, reason: string): Promise<void> {
+  await call("POST", `/internal/human-identities/facts/${encodeURIComponent(factId)}/withdraw`, {
+    withdrawnBy: HUMAN_IDENTITY_SOURCE,
+    reason,
+  });
+}

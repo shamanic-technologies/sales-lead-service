@@ -16,6 +16,11 @@ let outcomeRows: Array<Record<string, unknown>> = [];
 let neverRows: Array<Record<string, unknown>> = [];
 const executed: string[] = [];
 
+// What sits above the lead (company marks and status, the human's opt-out): none here (level-tags.ts).
+vi.mock("../../src/lib/level-tags.js", () => ({
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set() }),
+}));
+
 vi.mock("../../src/db/index.js", () => ({
   sql: (_strings: readonly string[], ..._values: unknown[]) => ({
     then: (resolve: (rows: unknown[]) => void) => {

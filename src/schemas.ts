@@ -1320,6 +1320,12 @@ export const BufferNextResponseSchema = z
  */
 export const LeadDisqualificationSchema = z
   .object({
+    level: z.enum(["lead", "company"]).openapi({
+      description:
+        "`lead` = this person at this company (\"not the right contact\", \"left the role\"): never follows them to another " +
+        "company. `company` = their whole company for the brand (\"not our target\"): covers every lead of that company. " +
+        "A lead's own mark answers before its company's.",
+    }),
     offerId: z.string().nullable().openapi({
       description: "The offer the mark is about, or null = every offer of the brand.",
     }),
@@ -1517,7 +1523,9 @@ export const LeadStandingSchema = z
         "`opted_out`, which is its own countable, pageable standing rather than a shade of " +
         "`disqualified`. `negative_reply` = they declined; that leaves them in play. `stated_never` = " +
         "somebody stated they will never buy. `opt_out_reply` = " +
-        "they asked us to stop in a reply, under this brand — opted out on every offer of it.",
+        "they asked us to stop in a reply, under this brand — opted out on every offer of it. `human_opt_out` = " +
+        "human-service carries an opt-out / do-not-contact fact on the HUMAN this lead is: it follows them to every " +
+        "company and brand.",
       example: "measured_visit",
     }),
     origin: z
@@ -1966,6 +1974,22 @@ const LeadDetailSchema = z
         description:
           "The COMPANY this lead is at: brand-service's brand id of the current employer (same domain = same id). null = no " +
           "safe company identity (name-only or no employer), or not resolved yet. A known human at a new company is a new lead.",
+      }),
+    company: z
+      .object({
+        id: z.string().nullable().openapi({ description: "brand-service company id; null for a name-only employer (keyed on our local row)." }),
+        key: z.string().openapi({ description: "The company key: `id`, else `org:<local organization id>`." }),
+        isClient: z.boolean().openapi({ description: "A lead of this company holds a live sale at the row's brand: the COMPANY is a client." }),
+        signedUp: z.boolean().openapi({ description: "A lead of this company holds a live signup at the row's brand." }),
+        disqualification: LeadDisqualificationSchema.nullable().openapi({
+          description: "The COMPANY-level Disqualified mark (\"not our target\") for the row's conversation, or null. Covers every lead of the company.",
+        }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The company this lead is at, with what is true of the company as a BUYER of the brand (client, signed up, not our " +
+          "target). null = no company known (no employer and no work address, or not resolved yet). Not on view=compact.",
       }),
     emailStatus: z
       .string()
@@ -2905,7 +2929,11 @@ const DisqualificationWriteResponseSchema = z
     leadId: z.string().openapi({ description: "The person (leads.id)." }),
     brandId: z.string(),
     offerId: z.string().nullable().openapi({ description: "The offer named, or null = every offer of the brand." }),
-    disqualified: z.boolean().openapi({ description: "Whether the person reads Disqualified for that conversation after the call." }),
+    level: z.enum(["lead", "company"]).openapi({ description: "The level the call wrote or removed." }),
+    companyKey: z.string().optional().openapi({
+      description: "PUT with level company: the company marked (brand-service company id, or `org:<id>` for a name-only employer).",
+    }),
+    disqualified: z.boolean().openapi({ description: "Whether the person reads Disqualified for that conversation after the call (their own mark or their company's)." }),
     disqualification: LeadDisqualificationSchema.nullable().openapi({
       description: "The mark that answers for that conversation now, or null.",
     }),
@@ -2939,6 +2967,11 @@ registry.registerPath({
               brandId: z.string().optional().openapi({ description: "The brand. Absent = x-brand-id, else the row's own brand." }),
               offerId: z.string().optional().openapi({ description: "One offer of the brand. Absent = every offer." }),
               note: z.string().max(2000).optional().openapi({ description: "Why, in your words. Optional.", example: "Runs a construction company, we sell to supermarkets." }),
+              level: z.enum(["lead", "company"]).optional().openapi({
+                description:
+                  "`lead` (default) = this person at this company. `company` = the lead's whole company for the brand (\"not our " +
+                  "target\"), covering every lead of it; 409 `lead_has_no_company` when the lead has no known company.",
+              }),
             })
             .openapi("DisqualifyLeadRequest"),
         },
@@ -2948,9 +2981,10 @@ registry.registerPath({
   parameters: [...AuthHeaders],
   responses: {
     200: { description: "Marked", content: { "application/json": { schema: DisqualificationWriteResponseSchema } } },
-    400: { description: "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters)" },
+    400: { description: "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters, unknown level)" },
     401: { description: "Unauthorized" },
     404: { description: "Lead not found (or not part of the named brand)" },
+    409: { description: "lead_has_no_company: level company on a lead with no known company" },
     500: { description: "Write failed" },
   },
 });
@@ -2969,6 +3003,7 @@ registry.registerPath({
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: false, schema: { type: "string" as const } },
     { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "level", required: false, schema: { type: "string" as const, enum: ["lead", "company"] }, description: "lead (default) or company: which mark to remove." },
   ],
   responses: {
     200: { description: "Removed (or nothing to remove)", content: { "application/json": { schema: DisqualificationWriteResponseSchema } } },
@@ -3011,6 +3046,19 @@ registry.registerPath({
                   disqualification: LeadDisqualificationSchema,
                 }),
               ),
+              companyTotal: z.number().int().openapi({ description: "Length of `companies`." }),
+              companies: z
+                .array(
+                  z.object({
+                    companyKey: z.string().openapi({ description: "brand-service company id, or `org:<id>` for a name-only employer." }),
+                    companyId: z.string().nullable().openapi({ description: "brand-service company id; null for a name-only employer." }),
+                    name: z.string().nullable(),
+                    domain: z.string().nullable(),
+                    leadCount: z.number().int().openapi({ description: "Leads of that company the brand holds (each reads Disqualified)." }),
+                    disqualification: LeadDisqualificationSchema,
+                  }),
+                )
+                .openapi({ description: "Companies marked Disqualified at the brand (\"not our target\"), newest first." }),
             })
             .openapi("BrandDisqualificationsResponse"),
         },

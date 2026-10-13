@@ -3,6 +3,11 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 
 const execute = vi.fn();
+// What sits above the lead (company marks and status, the human's opt-out): none here (level-tags.ts).
+vi.mock("../../src/lib/level-tags.js", () => ({
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set() }),
+}));
+
 vi.mock("../../src/db/index.js", () => ({
   db: { execute: (...args: unknown[]) => execute(...args) },
 }));
