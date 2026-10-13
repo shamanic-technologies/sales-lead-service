@@ -29,8 +29,17 @@ export type DisqualificationSource = (typeof DISQUALIFICATION_SOURCES)[number];
 /** A free note is free, not unbounded. */
 export const DISQUALIFICATION_NOTE_MAX = 2000;
 
+/**
+ * Which level the mark is at (owner 2026-10-13, LEAD-REFONTE-1013): `lead` = this person at this
+ * company ("not the right contact", "left the role"; never follows them elsewhere); `company` = the
+ * whole company for the brand ("not our target"; covers every lead of the company).
+ */
+export const DISQUALIFICATION_LEVELS = ["lead", "company"] as const;
+export type DisqualificationLevel = (typeof DISQUALIFICATION_LEVELS)[number];
+
 /** The mark as every surface serves it. Null wherever the person is not disqualified. */
 export interface LeadDisqualification {
+  level: DisqualificationLevel;
   /** The offer it is about, or null = every offer of the brand. */
   offerId: string | null;
   note: string | null;
@@ -55,6 +64,7 @@ function toMark(r: MarkRow): LeadDisqualification {
     throw new Error(`lead_disqualification_marks.source '${r.source}' is not a known source`);
   }
   return {
+    level: "lead",
     offerId: r.offer_key === "" ? null : r.offer_key,
     note: r.note,
     source: r.source,
@@ -275,4 +285,192 @@ export async function syncReplyDisqualifications(
       AND (lead_id::text || '|' || offer_key) NOT IN (SELECT jsonb_array_elements_text(${JSON.stringify([...byKey.keys()])}::jsonb))
   `;
   return written + withdrawn.count;
+}
+
+// --- Company level ("not our target"): company_disqualification_marks (migration 0078) ------------
+
+/**
+ * A lead's company KEY: the brand-service company id, else `org:<local organization id>` (name-only
+ * employer). null = the lead has neither yet (no employer, or not swept yet): no company mark applies.
+ */
+export async function leadCompanyKeys(leadIds: readonly string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (leadIds.length === 0) return out;
+  const rows = (await sql`
+    SELECT id::text AS lead_id,
+      COALESCE(company_id::text, CASE WHEN organization_id IS NULL THEN NULL ELSE 'org:' || organization_id::text END) AS company_key
+    FROM leads WHERE id IN (SELECT jsonb_array_elements_text(${JSON.stringify(leadIds)}::jsonb)::uuid)
+  `) as unknown as Array<{ lead_id: string; company_key: string | null }>;
+  for (const r of rows) if (r.company_key) out.set(r.lead_id, r.company_key);
+  return out;
+}
+
+interface CompanyMarkRow {
+  company_key: string;
+  brand_id: string;
+  offer_key: string;
+  source: string;
+  note: string | null;
+  stated_by_user_id: string | null;
+  stated_at: Date | string;
+}
+
+function toCompanyMark(r: CompanyMarkRow): LeadDisqualification {
+  if (r.source !== "manual") throw new Error(`company_disqualification_marks.source '${r.source}' is not a known source`);
+  return {
+    level: "company",
+    offerId: r.offer_key === "" ? null : r.offer_key,
+    note: r.note,
+    source: "manual",
+    statedByUserId: r.stated_by_user_id,
+    statedAt: toIsoTimestamp(r.stated_at)!,
+  };
+}
+
+/** The live company marks of these companies at these brands, keyed `companyKey|brandId`. */
+export async function loadLiveCompanyMarks(input: {
+  orgId: string;
+  brandIds: readonly string[];
+  companyKeys: readonly string[];
+}): Promise<Map<string, Map<string, LeadDisqualification>>> {
+  const out = new Map<string, Map<string, LeadDisqualification>>();
+  if (input.brandIds.length === 0 || input.companyKeys.length === 0) return out;
+  const rows = (await sql`
+    SELECT company_key, brand_id, offer_key, source, note, stated_by_user_id, stated_at
+    FROM company_disqualification_marks
+    WHERE org_id = ${input.orgId}
+      AND brand_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(input.brandIds)}::jsonb))
+      AND company_key IN (SELECT jsonb_array_elements_text(${JSON.stringify([...new Set(input.companyKeys)])}::jsonb))
+      AND withdrawn_at IS NULL
+  `) as unknown as CompanyMarkRow[];
+  for (const r of rows) {
+    const key = `${r.company_key}|${r.brand_id}`;
+    let byOffer = out.get(key);
+    if (!byOffer) out.set(key, (byOffer = new Map()));
+    byOffer.set(r.offer_key, toCompanyMark(r));
+  }
+  return out;
+}
+
+/** Every mark that can answer for these leads at these brands: their own, and their company's. */
+export interface LeadAndCompanyMarks {
+  lead: Map<string, Map<string, LeadDisqualification>>;
+  company: Map<string, Map<string, LeadDisqualification>>;
+  companyKeyOf: Map<string, string>;
+}
+
+export async function loadLeadAndCompanyMarks(input: {
+  orgId: string;
+  brandIds: readonly string[];
+  leadIds: readonly string[];
+}): Promise<LeadAndCompanyMarks> {
+  const [lead, companyKeyOf] = await Promise.all([loadLiveMarks(input), leadCompanyKeys(input.leadIds)]);
+  const company = await loadLiveCompanyMarks({ orgId: input.orgId, brandIds: input.brandIds, companyKeys: [...companyKeyOf.values()] });
+  return { lead, company, companyKeyOf };
+}
+
+/** True when any mark held names an offer (the caller then needs the campaign -> offer map). */
+export function anyMarkNamesOffer(m: LeadAndCompanyMarks): boolean {
+  return [...m.lead.values(), ...m.company.values()].some((byOffer) => [...byOffer.keys()].some((k) => k !== ""));
+}
+
+/**
+ * The mark answering for one conversation: the lead's own (offer, then brand-wide), else its
+ * company's (offer, then brand-wide). A lead-level mark is the more specific statement.
+ */
+export function effectiveLeadOrCompanyMark(
+  m: LeadAndCompanyMarks,
+  leadId: string,
+  brandId: string,
+  offerId: string | null,
+): LeadDisqualification | null {
+  const own = effectiveMark(m.lead.get(`${leadId}|${brandId}`), offerId);
+  if (own) return own;
+  const key = m.companyKeyOf.get(leadId);
+  return key ? effectiveMark(m.company.get(`${key}|${brandId}`), offerId) : null;
+}
+
+/** A person marks the lead's whole COMPANY disqualified for the brand (offer). */
+export async function setCompanyDisqualification(input: {
+  orgId: string;
+  brandId: string;
+  companyKey: string;
+  offerId: string | null;
+  note: string | null;
+  statedByUserId: string;
+  statedFromLeadId: string;
+  leadCampaignId: string | null;
+}): Promise<LeadDisqualification> {
+  const rows = (await sql`
+    INSERT INTO company_disqualification_marks
+      (org_id, brand_id, company_key, offer_key, source, note, stated_from_lead_id, lead_campaign_id, stated_by_user_id)
+    VALUES (${input.orgId}, ${input.brandId}, ${input.companyKey}, ${input.offerId ?? ""}, 'manual', ${input.note},
+      ${input.statedFromLeadId}::uuid, ${input.leadCampaignId}::uuid, ${input.statedByUserId})
+    ON CONFLICT (org_id, brand_id, company_key, offer_key) DO UPDATE SET
+      source = 'manual', note = EXCLUDED.note, stated_from_lead_id = EXCLUDED.stated_from_lead_id,
+      lead_campaign_id = EXCLUDED.lead_campaign_id, stated_by_user_id = EXCLUDED.stated_by_user_id, stated_at = now(),
+      withdrawn_at = NULL, withdrawn_by_user_id = NULL, updated_at = now()
+    RETURNING company_key, brand_id, offer_key, source, note, stated_by_user_id, stated_at
+  `) as unknown as CompanyMarkRow[];
+  return toCompanyMark(rows[0]);
+}
+
+/** A person removes the company mark (that offer's, or every one at the brand). Returns how many were live. */
+export async function withdrawCompanyDisqualification(input: {
+  orgId: string;
+  brandId: string;
+  companyKey: string;
+  offerId: string | null;
+  withdrawnByUserId: string;
+}): Promise<number> {
+  const result = await sql`
+    UPDATE company_disqualification_marks
+    SET withdrawn_at = now(), withdrawn_by_user_id = ${input.withdrawnByUserId}, updated_at = now()
+    WHERE org_id = ${input.orgId} AND brand_id = ${input.brandId} AND company_key = ${input.companyKey}
+      AND (${input.offerId}::text IS NULL OR offer_key = ${input.offerId ?? ""})
+      AND withdrawn_at IS NULL
+  `;
+  return result.count;
+}
+
+/** One live company mark of the brand, with the company's name and how many of its leads it covers. */
+export interface BrandDisqualifiedCompany {
+  companyKey: string;
+  /** brand-service company id; null for a name-only employer (keyed on our local row). */
+  companyId: string | null;
+  name: string | null;
+  domain: string | null;
+  leadCount: number;
+  disqualification: LeadDisqualification;
+}
+
+export async function listBrandCompanyDisqualifications(input: {
+  orgId: string;
+  brandId: string;
+  offerId: string | null;
+}): Promise<BrandDisqualifiedCompany[]> {
+  const rows = (await sql`
+    SELECT DISTINCT ON (m.company_key)
+      m.company_key, m.brand_id, m.offer_key, m.source, m.note, m.stated_by_user_id, m.stated_at,
+      o.name, o.primary_domain,
+      (SELECT count(DISTINCT l.id)::int FROM leads l
+        JOIN leads_campaigns lc ON lc.lead_id = l.id AND lc.org_id = m.org_id AND m.brand_id = ANY(lc.brand_ids)
+        WHERE COALESCE(l.company_id::text, 'org:' || l.organization_id::text) = m.company_key) AS lead_count
+    FROM company_disqualification_marks m
+    LEFT JOIN leads src ON src.id = m.stated_from_lead_id
+    LEFT JOIN organizations o ON o.id = src.organization_id
+    WHERE m.org_id = ${input.orgId} AND m.brand_id = ${input.brandId} AND m.withdrawn_at IS NULL
+      AND (${input.offerId}::text IS NULL OR m.offer_key IN ('', ${input.offerId ?? ""}))
+    ORDER BY m.company_key, (m.offer_key = '') ASC, m.stated_at DESC
+  `) as unknown as Array<CompanyMarkRow & { name: string | null; primary_domain: string | null; lead_count: number }>;
+  return rows
+    .map((r) => ({
+      companyKey: r.company_key,
+      companyId: r.company_key.startsWith("org:") ? null : r.company_key,
+      name: r.name,
+      domain: r.primary_domain,
+      leadCount: r.lead_count,
+      disqualification: toCompanyMark(r),
+    }))
+    .sort((a, b) => Date.parse(b.disqualification.statedAt) - Date.parse(a.disqualification.statedAt) || a.companyKey.localeCompare(b.companyKey));
 }

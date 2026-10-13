@@ -21,8 +21,8 @@ import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
 import { getBrandSite } from "./brand-client.js";
 import { loadOutreachFeedState } from "./outreach-fact-feed.js";
 import {
-  effectiveMark,
-  loadLiveMarks,
+  effectiveLeadOrCompanyMark,
+  loadLeadAndCompanyMarks,
   syncReplyDisqualifications,
   type LeadDisqualification,
   type ReplyDisqualification,
@@ -539,7 +539,7 @@ export async function readTimeline(input: {
     withdrawnAt: toIsoTimestamp(r.withdrawn_at),
     detail: r.detail,
   }));
-  const marks = await loadLiveMarks({ orgId: input.orgId, brandIds: [input.brandId], leadIds: [input.leadId] });
-  const disqualification = effectiveMark(marks.get(`${input.leadId}|${input.brandId}`), input.offerId);
+  const marks = await loadLeadAndCompanyMarks({ orgId: input.orgId, brandIds: [input.brandId], leadIds: [input.leadId] });
+  const disqualification = effectiveLeadOrCompanyMark(marks, input.leadId, input.brandId, input.offerId);
   return { items, tags: { ...conversationTags(items), disqualified: disqualification !== null }, disqualification };
 }

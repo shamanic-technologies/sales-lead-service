@@ -153,6 +153,7 @@ export const LEAD_STANDING_SIGNALS = [
   "bounced",
   "unsubscribed",
   "opt_out_reply",
+  "human_opt_out",
 ] as const;
 export type LeadStandingSignal = (typeof LEAD_STANDING_SIGNALS)[number];
 
@@ -260,6 +261,12 @@ export interface LeadStandingInput {
   wentCold?: WentCold | null;
   /** The reply outcome the delivery facts above were read off, served beside the state. */
   replies?: LeadReplyOutcome | null;
+  /**
+   * human-service carries a live `opt_out` / `do_not_contact` fact on the HUMAN this lead is
+   * (human_fact_copies): they said "never write to me again", which follows them to every company and
+   * every brand. Absent reads as false.
+   */
+  humanOptOut?: boolean;
 }
 
 function base(input: LeadStandingInput): Omit<LeadStanding, "state" | "tag" | "signal" | "origin" | "reason"> {
@@ -358,6 +365,17 @@ function resolveStandingState(input: LeadStandingInput): Omit<LeadStanding, "tag
       state: "opted_out",
       signal: "opt_out_reply",
       origin: "measured",
+      reason: null,
+    };
+  }
+  // 2c. The HUMAN said never write to me again (a fact human-service carries on them, whoever heard
+  //     it, under whichever company): opted out here too.
+  if (input.humanOptOut === true) {
+    return {
+      ...shared,
+      state: "opted_out",
+      signal: "human_opt_out",
+      origin: "stated",
       reason: null,
     };
   }
