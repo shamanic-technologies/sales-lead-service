@@ -68,8 +68,6 @@ import {
   type CrmContact,
   type CrmOpportunity,
 } from "../lib/crm-client.js";
-import { judgeSamePerson } from "../lib/judgment-client.js";
-import { judgeCandidates } from "../lib/crm-judging.js";
 import { resyncBrand } from "../lib/crm-evidence-worker.js";
 import {
   fetchPairedLeadFacts,
@@ -224,24 +222,8 @@ async function resolveContacts(
   );
   const leadFacts = await fetchPairedLeadFacts(brandId, leadIds);
 
-  // Judge only what the deterministic signals could not decide, that nobody has ruled on and
-  // that carries no frozen judgment already. Bounded, and every failure degrades to a stated
-  // reason rather than to a merge or a rejection.
-  let judgmentFailures = new Map<string, CrmJudgmentUnavailableReason>();
-  if (opts.judge && opts.budget.remaining > 0) {
-    ({ failures: judgmentFailures } = await judgeCandidates({
-      orgId,
-      brandId,
-      contacts,
-      matches,
-      judgments,
-      rulings,
-      leadFacts,
-      budget: opts.budget,
-      judge: (sides) => judgeSamePerson(sides, identity),
-      logPrefix: "[crm-pairings]",
-    }));
-  }
+  // "Same human?" is human-service's answer (crm-matching.ts): no judgment is bought here any more.
+  const judgmentFailures = new Map<string, CrmJudgmentUnavailableReason>();
 
   return contacts.map((contact) => {
     const match: FrozenMatch = matches.get(contact.id) ?? {
