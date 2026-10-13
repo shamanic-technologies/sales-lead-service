@@ -106,7 +106,10 @@ describe.skipIf(!hasRealDatabase)("labelled timeline against a real database", (
       lastWordAt: "2026-10-07T22:13:00.000Z",
       furthestStep: "contacted",
       furthestStepAttributable: true,
+      // A "no" is not a disqualification: that is its own mark, beside these tags.
+      disqualified: false,
     });
+    expect(t.disqualification).toBeNull();
 
     expect((await syncTimelineFacts(org, brand)).written).toBe(0);
   });

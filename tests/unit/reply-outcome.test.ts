@@ -255,8 +255,8 @@ describe("the standing reads it", () => {
     expect(standing.reachedEntryStep).toBe(false);
   });
 
-  it("the wrong person is disqualified on the offer; a later 'not now' is not", () => {
-    expect(standingFor([reply("2026-09-22T00:00:00Z", ...WRONG_PERSON)]).standing.state).toBe("disqualified");
+  it("the wrong person moves no standing (Disqualified is its own mark); a later 'not now' reads the same", () => {
+    expect(standingFor([reply("2026-09-22T00:00:00Z", ...WRONG_PERSON)]).standing.state).not.toBe("disqualified");
     const later = standingFor([
       reply("2026-09-22T00:00:00Z", ...WRONG_PERSON),
       reply("2026-09-23T00:00:00Z", ...NOT_NOW),

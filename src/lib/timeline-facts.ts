@@ -21,6 +21,13 @@ import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
 import { getBrandSite } from "./brand-client.js";
 import { loadOutreachFeedState } from "./outreach-fact-feed.js";
 import {
+  effectiveMark,
+  loadLiveMarks,
+  syncReplyDisqualifications,
+  type LeadDisqualification,
+  type ReplyDisqualification,
+} from "./lead-disqualification.js";
+import {
   clickLabel,
   conversationTags,
   hostOf,
@@ -393,6 +400,15 @@ export async function syncTimelineFacts(orgId: string, brandId: string): Promise
   const written =
     (await upsertTimelineFacts([...outcomes.rows, ...nevers, ...outreach.rows])) +
     (await markWithdrawn(orgId, brandId, outreach.withdrawn));
+  // A reply judged "not the right contact" / "left the role" sets the Disqualified MARK on its
+  // conversation (lead-disqualification.ts), beside the reply's own item: the item says what they
+  // answered, the mark says they are out. A withdrawn reply backs nothing.
+  const withdrawnSubjects = new Set(outreach.withdrawn);
+  const disqualified = await syncReplyDisqualifications(
+    orgId,
+    brandId,
+    replyDisqualifications(outreach.rows.filter((r) => !withdrawnSubjects.has(r.id))),
+  );
   return {
     outcomes: outcomes.rows.length,
     nevers: nevers.length,
@@ -400,8 +416,27 @@ export async function syncTimelineFacts(orgId: string, brandId: string): Promise
     unjudgedReplies: outreach.unjudged,
     unplacedOutcomes: outcomes.unplaced,
     unplacedOutreach: outreach.unplaced,
-    written,
+    written: written + disqualified,
   };
+}
+
+/** The note the reply sync writes, in the reply's own terms. Product data: English. */
+const REPLY_DISQUALIFICATION_NOTES: Partial<Record<TimelineItemLabel, string>> = {
+  wrong_contact: "Their reply says they are not the right contact.",
+  changed_job: "Their reply says they left the role.",
+};
+
+/** Every reply row that judged the person not our target, oldest first (the earliest one is the reason). */
+export function replyDisqualifications(rows: readonly TimelineFactRow[]): ReplyDisqualification[] {
+  return rows
+    .filter((r) => r.source === "reply" && r.withdrawn_at === null && REPLY_DISQUALIFICATION_NOTES[r.label])
+    .sort((a, b) => (a.occurred_at ?? "~").localeCompare(b.occurred_at ?? "~") || a.id.localeCompare(b.id))
+    .map((r) => ({
+      leadId: r.lead_id,
+      offerId: r.offer_id,
+      replyRef: r.source_ref,
+      note: REPLY_DISQUALIFICATION_NOTES[r.label]!,
+    }));
 }
 
 /** Every brand that worked somebody, or holds an outcome. */
@@ -466,7 +501,10 @@ interface StoredRow {
 
 export interface TimelineRead {
   items: Array<TimelineItem & { detail: Record<string, unknown> }>;
-  tags: ConversationTags;
+  /** The step tags derived from the items, plus Disqualified BESIDE them (never instead of them). */
+  tags: ConversationTags & { disqualified: boolean };
+  /** The Disqualified mark answering for this conversation, with its note, or null. */
+  disqualification: LeadDisqualification | null;
 }
 
 /**
@@ -501,5 +539,7 @@ export async function readTimeline(input: {
     withdrawnAt: toIsoTimestamp(r.withdrawn_at),
     detail: r.detail,
   }));
-  return { items, tags: conversationTags(items) };
+  const marks = await loadLiveMarks({ orgId: input.orgId, brandIds: [input.brandId], leadIds: [input.leadId] });
+  const disqualification = effectiveMark(marks.get(`${input.leadId}|${input.brandId}`), input.offerId);
+  return { items, tags: { ...conversationTags(items), disqualified: disqualification !== null }, disqualification };
 }

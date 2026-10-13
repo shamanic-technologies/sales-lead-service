@@ -94,6 +94,13 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
     }),
 }));
 
+// The Disqualified mark (lead-disqualification.ts), keyed `leadId|brandId` -> offer key -> mark.
+let mockMarks = new Map<string, Map<string, Record<string, unknown>>>();
+vi.mock("../../src/lib/lead-disqualification.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../src/lib/lead-disqualification.js")>()),
+  loadLiveMarks: async () => mockMarks,
+}));
+
 vi.mock("../../src/lib/campaign-identity-client.js", () => ({
   resolveCampaignFamily: (id: string) => Promise.resolve([id]),
 }));
@@ -233,7 +240,31 @@ describe("a lead row carries where that person stands", () => {
     neverRows = [];
     executed.length = 0;
     clickedEmails = new Set();
+    mockMarks = new Map();
     app = await buildApp();
+  });
+
+  // Owner 2026-10-13: Disqualified is its own mark BESIDE the standing. Américo replied positively
+  // (here: clicked through) AND was disqualified: the row reads both, the standing does not move.
+  it("serves the Disqualified mark beside the standing, which keeps reading the person's steps", async () => {
+    mockRows = [rawRow(1)];
+    clickedEmails = new Set(["lead-1@example.com"]);
+    const mark = {
+      offerId: null,
+      note: "Runs a construction company, we sell to supermarkets.",
+      source: "manual",
+      statedByUserId: "user-1",
+      statedAt: "2026-10-13T10:00:00.000Z",
+    };
+    mockMarks = new Map([[`lead-1|${BRAND}`, new Map([["", mark]])]]);
+
+    const res = await get(app, `/orgs/leads?brandId=${BRAND}&view=basic`);
+    expect(res.body.leads[0].standing.state).toBe("sales_interest");
+    expect(res.body.leads[0].disqualification).toEqual(mark);
+
+    const full = await get(app, `/orgs/leads?brandId=${BRAND}`);
+    expect(full.body.leads[0].standing.state).toBe("sales_interest");
+    expect(full.body.leads[0].disqualification).toEqual(mark);
   });
 
   afterEach(() => {
@@ -309,7 +340,7 @@ describe("a lead row carries where that person stands", () => {
     expect(standing.at).toBe("2026-02-02T00:00:00.000Z");
   });
 
-  it("reads a live 'never' as disqualified", async () => {
+  it("reads a live 'never' on the sale as a no: engaged, tagged not_interested (not disqualified)", async () => {
     mockRows = [rawRow(1)];
     neverRows = [
       {
@@ -325,8 +356,10 @@ describe("a lead row carries where that person stands", () => {
 
     const res = await get(app, `/orgs/leads?brandId=${BRAND}&view=basic`);
 
-    expect(res.body.leads[0].standing.state).toBe("disqualified");
+    expect(res.body.leads[0].standing.state).toBe("engaged");
+    expect(res.body.leads[0].standing.tag).toBe("not_interested");
     expect(res.body.leads[0].standing.signal).toBe("stated_never");
+    expect(res.body.leads[0].disqualification).toBeNull();
   });
 
   // NO SILENT FALLBACK. campaign-service down does not make everybody "contacted".

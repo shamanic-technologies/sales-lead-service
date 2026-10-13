@@ -20,7 +20,7 @@
  * `start_to_website_visit` puts leads on the site, so somebody landing there has reached the step
  * it works; a campaign working `start_to_conversation` works a positive REPLY, and the same person
  * visiting the site reached a step off that leg — interest all the same (9a), but not its entry, so
- * `reachedEntryStep` stays false and a disqualifying reply still outranks it there.
+ * `reachedEntryStep` stays false.
  * The grain makes that expressible: the row is `(lead, campaign)`, so the same person can
  * legitimately stand differently under two campaigns (a positive reply off a site leg is `engaged`).
  *
@@ -50,15 +50,17 @@
  *                              the question has no answer here rather than a plausible one.
  *   5. `sale` reached        -> customer.
  *   6. any step reachable from the entry reached -> sales_interest.
- *   7. `sale` reads "never"  -> disqualified. Somebody stated they will not buy (or closed the
- *                              only way to it).
+ *   7. `sale` reads "never"  -> engaged, tagged `not_interested`. Somebody stated they will not buy
+ *                              (or closed the only way to it): a "no", exactly as a negative reply.
  *   8. entry step reached    -> sales_interest. The measured half: a click on a campaign entering
  *                              at the site, a positive reply on one entering at a conversation.
- *   9. permanently out       -> disqualified. The delivery layer reports this person as not the
- *                              right contact, or gone from the role — ordinary sales
- *                              qualification, and the ONLY reading of a reply that takes a lead
- *                              out of play. We sell pears to supermarkets and wrote to somebody
- *                              in construction.
+ *   9. (retired 2026-10-13) a reply judging the person NOT OUR TARGET no longer moves the standing.
+ *                              "Disqualified" is its own mark beside the step tags
+ *                              (lead-disqualification.ts, owner 2026-10-13): the timeline sync
+ *                              sets it from that reply, and the person keeps the standing their
+ *                              steps give them. No rung produces `disqualified` any more; the
+ *                              state stays in the vocabulary (always counted 0) so a reader
+ *                              keyed on it keeps its shape.
  *  9b. negative reply, known NOT to be that -> engaged. A decline is a judgement about the
  *                              MOMENT: the person is still reachable, the lead is still
  *                              recyclable, and the "no" is named as the evidence rather than
@@ -115,6 +117,8 @@ export const LEAD_STANDING_STATES = [
   "engaged",
   "sales_interest",
   "customer",
+  // No rung produces it since 2026-10-13: "Disqualified" is its own mark beside the standing
+  // (lead-disqualification.ts). Kept so every count keyed on it keeps its shape (always 0).
   "disqualified",
   "opted_out",
 ] as const;
@@ -142,7 +146,6 @@ export const LEAD_STANDING_SIGNALS = [
   "click",
   "reply",
   "negative_reply",
-  "disqualifying_reply",
   "positive_reply",
   "measured_visit",
   "stated_outcome",
@@ -304,7 +307,9 @@ export function resolveLeadStanding(input: LeadStandingInput): LeadStanding {
 
 function tagOf(standing: Omit<LeadStanding, "tag">): LeadStandingTag {
   if (salesInterestStage(standing) === WEBSITE_VISIT_STEP) return WEBSITE_VISIT_STEP;
-  if (standing.state === "engaged" && standing.signal === "negative_reply") return "not_interested";
+  if (standing.state === "engaged" && (standing.signal === "negative_reply" || standing.signal === "stated_never")) {
+    return "not_interested";
+  }
   return standing.state;
 }
 
@@ -409,11 +414,13 @@ function resolveStandingState(input: LeadStandingInput): Omit<LeadStanding, "tag
   }
 
   // 7. The terminal step reads "never" (stated, or closed by a never every path to it goes
-  //    through): this person will not buy.
+  //    through): this person will not buy. A "no", the same reading as a negative reply: they stay
+  //    in play as `engaged`, tagged `not_interested`. Not a disqualification (that is its own mark,
+  //    lead-disqualification.ts), and never the step standing of somebody who is not our target.
   if (lastState?.state === "never") {
     return {
       ...shared,
-      state: "disqualified",
+      state: "engaged",
       signal: "stated_never",
       origin: lastState.origin === "implied" ? "implied" : "stated",
       reason: null,
@@ -439,27 +446,16 @@ function resolveStandingState(input: LeadStandingInput): Omit<LeadStanding, "tag
     };
   }
 
-  // 10. The provider says this person is PERMANENTLY out: the wrong contact, or gone from the
-  //     role. That is ordinary sales qualification — we realised they are not who we sell to —
-  //     and it is the ONE thing that takes a lead out of play on the strength of a reply.
-  if (delivery.disqualified === true) {
-    return {
-      ...shared,
-      state: "disqualified",
-      signal: "disqualifying_reply",
-      origin: "measured",
-      reason: null,
-    };
-  }
+  // 10. (retired 2026-10-13) A reply saying they are not the right contact, or gone from the role,
+  //     no longer takes the person out of their standing: it sets the Disqualified MARK beside it
+  //     (lead-disqualification.ts), and the standing keeps reading their steps below.
 
   // 9a. They VISITED the brand's website, on a campaign whose leg does not enter there. A visit is
   //     interest whatever the leg (owner-decided 2026-09-28): the dashboard defines interested as
   //     "a website visit or a positive reply", and filing a visitor under `engaged` put them in
   //     Contacted beneath a heading that says otherwise. Measured (a click on our email, folded in
   //     by the caller as the tracker's `website_visit`) or stated by a person, both read here as
-  //     the step's outcome. It sits BELOW a disqualifying reply on purpose: off the leg, the visit
-  //     is interest and not the step being worked, so a reply saying they are the wrong contact
-  //     still takes them out. It sits ABOVE a negative reply, exactly as the entry step does.
+  //     the step's outcome. It sits ABOVE a negative reply, exactly as the entry step does.
   //     The click is read here too, not only through the caller's fold, so the rule does not
   //     depend on every caller remembering to fold it.
   const visit = byStep.get(WEBSITE_VISIT_STEP);

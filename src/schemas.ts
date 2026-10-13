@@ -1311,6 +1311,26 @@ export const BufferNextResponseSchema = z
  * Where one lead stands on the campaign it was served under — the SERVED answer to "is this
  * person still a live prospect", so a consumer renders a value instead of deriving one of its own.
  */
+export const LeadDisqualificationSchema = z
+  .object({
+    offerId: z.string().nullable().openapi({
+      description: "The offer the mark is about, or null = every offer of the brand.",
+    }),
+    note: z.string().nullable().openapi({
+      description: "The optional free note: why, in the words of whoever set it (or the reply's reading when set automatically). No closed list of reasons.",
+      example: "Runs a construction company, we sell to supermarkets.",
+    }),
+    source: z.enum(["manual", "reply"]).openapi({
+      description: "`manual` = a person (staff, customer, agent) set it. `reply` = set automatically from a reply judged \"not the right contact\" or \"left the role\".",
+    }),
+    statedByUserId: z.string().nullable().openapi({ description: "Who set it; null when set automatically." }),
+    statedAt: z.string().openapi({ description: "When it was set (ISO 8601)." }),
+  })
+  .openapi("LeadDisqualification", {
+    description:
+      "The Disqualified MARK: its own tag, BESIDE the step tags and the standing, never instead of them. A disqualified lead keeps everything that happened with them (contacted, delivered, positive reply, website visit...) and no step standing or step count moves.",
+  });
+
 const ClosedDealSchema = z
   .object({
     occurredAt: z.string().nullable().openapi({
@@ -1455,13 +1475,11 @@ export const LeadStandingSchema = z
         "stays false and the stage is `website_visit`). `customer` = the sale is reached. `opted_out` = the person " +
         "asked not to be contacted (an unsubscribe, at this scope or globally); it is their own " +
         "act, it is legally binding, and NOTHING overrides it — not a click, not a stated sale. " +
-        "`disqualified` = a commercial judgement of OURS: we realised they are not our target at " +
-        "all (the wrong contact, or gone from the role), or somebody stated they never will buy. " +
-        "The two are separate states, never folded together, because a board draws them as two " +
-        "columns with different copy and different moves and has to be able to count them apart. " +
-        "A prospect who simply DECLINES " +
-        "is not disqualified: that is a judgement about the moment, they stay reachable and the " +
-        "lead stays recyclable, so they read as `engaged` with `signal: \"negative_reply\"`. " +
+        "`disqualified` is no longer produced (2026-10-13; kept in the vocabulary, always counted " +
+        "0): \"Disqualified\" is its OWN mark beside the standing (`disqualification` on the lead " +
+        "row), so a disqualified person keeps the standing their steps give them. A prospect who " +
+        "DECLINES, or of whom somebody stated they will never buy (`sale` never), stays in play as " +
+        "`engaged` with `signal: \"negative_reply\"` / `\"stated_never\"`, tagged `not_interested`. " +
         "`engaged` = something " +
         "happened that is not the step this campaign sells. `contacted` = written to, nothing " +
         "since — INCLUDING a lead whose mail bounced, which is a failure of delivery rather than " +
@@ -1480,7 +1498,9 @@ export const LeadStandingSchema = z
         "board and is tagged `website_visit`, because a click alone is not somebody saying they " +
         "want to buy. A positive reply or any deeper step keeps `sales_interest`. A lead whose " +
         "latest real reply is a no stays `engaged` (engaged = the person reacted, whichever way) " +
-        "and is tagged `not_interested`.",
+        "and is tagged `not_interested`, and so is one of whom somebody stated they will never " +
+        "buy. \"Disqualified\" is not a tag value: it is its own mark (`disqualification`), " +
+        "shown BESIDE this tag.",
       example: "website_visit",
     }),
     signal: z.enum(LEAD_STANDING_SIGNALS as unknown as [string, ...string[]]).openapi({
@@ -1488,9 +1508,8 @@ export const LeadStandingSchema = z
         "Which single piece of evidence decided the state. `unsubscribed` is the prospect's own " +
         "act and never shares a state with a commercial judgement of ours — it decides " +
         "`opted_out`, which is its own countable, pageable standing rather than a shade of " +
-        "`disqualified`. `disqualifying_reply` = the " +
-        "delivery layer reports this person as permanently out (the wrong contact, or gone from " +
-        "the role). `negative_reply` = they declined; that leaves them in play. `opt_out_reply` = " +
+        "`disqualified`. `negative_reply` = they declined; that leaves them in play. `stated_never` = " +
+        "somebody stated they will never buy. `opt_out_reply` = " +
         "they asked us to stop in a reply, under this brand — opted out on every offer of it.",
       example: "measured_visit",
     }),
@@ -1946,6 +1965,14 @@ const LeadDetailSchema = z
         "apart from the ones the brand closed some other way. Present at every scope this read " +
         "supports. Derived on read: nothing is stored, so withdrawing or restating the statement " +
         "moves it with no write.",
+    }),
+    disqualification: LeadDisqualificationSchema.nullable().openapi({
+      description:
+        "Disqualified, as its own mark beside `standing` (never folded into it): present = this " +
+        "person is disqualified for this conversation (the row campaign's offer x brand, or every " +
+        "offer of the brand), with the optional note, who and when. null = not disqualified. Set " +
+        "and removed with PUT/DELETE /orgs/leads/{id}/disqualification; set automatically from a " +
+        "reply judged not our target.",
     }),
     contacted: z
       .boolean()
@@ -2844,6 +2871,129 @@ registry.registerPath({
     404: { description: "Lead not found (or not part of the named brand)" },
     503: { description: "The outreach fact copy has not caught up yet" },
     500: { description: "Write failed" },
+  },
+});
+
+const DisqualificationWriteResponseSchema = z
+  .object({
+    id: z.string().openapi({ description: "The lead row id the call named." }),
+    leadId: z.string().openapi({ description: "The person (leads.id)." }),
+    brandId: z.string(),
+    offerId: z.string().nullable().openapi({ description: "The offer named, or null = every offer of the brand." }),
+    disqualified: z.boolean().openapi({ description: "Whether the person reads Disqualified for that conversation after the call." }),
+    disqualification: LeadDisqualificationSchema.nullable().openapi({
+      description: "The mark that answers for that conversation now, or null.",
+    }),
+    withdrawn: z.number().int().optional().openapi({ description: "DELETE only: how many live marks were removed (0 = nothing was set)." }),
+  })
+  .openapi("DisqualificationWriteResponse");
+
+const LeadRowIdParams = z.object({
+  id: z.string().openapi({ param: { name: "id", in: "path" }, description: "The lead row id (leads_campaigns.id), as every row of GET /orgs/leads carries." }),
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/leads/{id}/disqualification",
+  summary: "Mark a lead Disqualified, with an optional note",
+  description:
+    "Disqualified is its OWN mark beside the step tags (Contacted, Delivered, Positive reply, Website visit...): " +
+    "setting it changes no standing, no step tag and no step count. A yes/no mark + an OPTIONAL free note (no list " +
+    "of reasons), with who (x-user-id, required) and when. A fact about the PERSON at the brand: `offerId` names one " +
+    "offer, absent = every offer of the brand. Restating replaces the note. The brand is `brandId` (body) or " +
+    "x-brand-id when named (a brand the row is not part of is 404), else the row's own brand. A person's mark (set " +
+    "or removed) always outranks the automatic one set from a reply judged not our target.",
+  request: {
+    params: LeadRowIdParams,
+    body: {
+      required: false,
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string().optional().openapi({ description: "The brand. Absent = x-brand-id, else the row's own brand." }),
+              offerId: z.string().optional().openapi({ description: "One offer of the brand. Absent = every offer." }),
+              note: z.string().max(2000).optional().openapi({ description: "Why, in your words. Optional.", example: "Runs a construction company, we sell to supermarkets." }),
+            })
+            .openapi("DisqualifyLeadRequest"),
+        },
+      },
+    },
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: { description: "Marked", content: { "application/json": { schema: DisqualificationWriteResponseSchema } } },
+    400: { description: "id is not a uuid, x-user-id missing, or a field is malformed (note over 2000 characters)" },
+    401: { description: "Unauthorized" },
+    404: { description: "Lead not found (or not part of the named brand)" },
+    500: { description: "Write failed" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/leads/{id}/disqualification",
+  summary: "Remove the Disqualified mark",
+  description:
+    "Removes the mark (kept on record as withdrawn, never deleted). With `offerId`: that offer's mark; without: every " +
+    "mark of the person at the brand. The removal is the person's word: the automatic reply reading never puts it " +
+    "back. Idempotent (`withdrawn: 0` when nothing was set). The answer states whether the person still reads " +
+    "Disqualified for the conversation named (an offer's mark removed while a brand-wide one stands).",
+  request: { params: LeadRowIdParams },
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: { description: "Removed (or nothing to remove)", content: { "application/json": { schema: DisqualificationWriteResponseSchema } } },
+    400: { description: "id is not a uuid, or x-user-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Lead not found (or not part of the named brand)" },
+    500: { description: "Write failed" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/disqualifications",
+  summary: "Every disqualified lead of a brand, with the notes",
+  description:
+    "The people marked Disqualified at the brand (for one offer when `offerId` is named: its own mark or a brand-wide " +
+    "one), newest first, each with the mark (note, who, when, set by hand or from a reply) and one lead row id to " +
+    "open them by. `total` is the length of the same list. Step tags and standings are not read here and not moved.",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    { in: "query" as const, name: "offerId", required: false, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: {
+      description: "The disqualified people",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              offerId: z.string().nullable(),
+              total: z.number().int(),
+              leads: z.array(
+                z.object({
+                  id: z.string().nullable().openapi({ description: "A lead row id of the person under the brand (newest)." }),
+                  leadId: z.string(),
+                  name: z.string().nullable(),
+                  email: z.string().nullable(),
+                  disqualification: LeadDisqualificationSchema,
+                }),
+              ),
+            })
+            .openapi("BrandDisqualificationsResponse"),
+        },
+      },
+    },
+    400: { description: "brandId missing" },
+    401: { description: "Unauthorized" },
+    500: { description: "Read failed" },
   },
 });
 
@@ -5734,6 +5884,11 @@ const ConversationTagsSchema = z
     furthestStepAttributable: z.boolean().nullable().openapi({
       description: "Whether the fact that put the conversation on furthestStep is ours (an existing client reads paid_client, false).",
     }),
+    disqualified: z.boolean().openapi({
+      description:
+        "Disqualified, its OWN tag beside the step tags above (never instead of them): true when the person is " +
+        "marked Disqualified for this conversation (this offer, or every offer of the brand). The mark and its note: `disqualification`.",
+    }),
   })
   .openapi("ConversationTags");
 
@@ -5744,6 +5899,9 @@ const LeadTimelineResponseSchema = z
     offerId: z.string().nullable(),
     items: z.array(TimelineItemSchema),
     tags: ConversationTagsSchema,
+    disqualification: LeadDisqualificationSchema.nullable().openapi({
+      description: "The Disqualified mark answering for this conversation (note, who, when, by hand or from a reply), or null.",
+    }),
   })
   .openapi("LeadTimelineResponse");
 
