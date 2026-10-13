@@ -1,5 +1,6 @@
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
+import { readEmailVerdict, type EmailPolicy } from "./email-policy.js";
 import { serveNext, type Person, type ReachMethod, type ServiceContext } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
@@ -82,6 +83,11 @@ interface PullNextParams {
    * (human-service `reachableBy`) and applied to every pool (retry, stock, released). Absent = no requirement.
    */
   reachableBy?: ReachMethod[];
+  /**
+   * Which verified emails the workflow accepts (src/lib/email-policy.ts). Sent to human-service on every fresh serve
+   * and applied to every pool. Absent = valid only (today, and nothing on the wire).
+   */
+  acceptedEmails?: EmailPolicy;
   /**
    * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
    * campaign's retry / released pools still drain, then the answer names this reason.
@@ -189,6 +195,7 @@ export async function pullNext(
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId: audienceId ?? undefined,
     ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
+    ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
   };
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
@@ -254,6 +261,7 @@ export async function pullNext(
     parentRunId: params.parentRunId ?? null,
     context: ctx,
     reachableBy: params.reachableBy ?? null,
+    acceptedEmails: params.acceptedEmails ?? null,
   });
 
   if (retry) {
@@ -289,13 +297,14 @@ export async function pullNext(
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
 
   // Record the served person into silver and answer. One definition for a serve and a find.
-  async function recordServed(served: { person?: Person | null; personId?: unknown }, servedAudienceId: string): Promise<PullNextResult> {
+  async function recordServed(served: { person?: Person | null; personId?: unknown; emailVerdict?: unknown }, servedAudienceId: string): Promise<PullNextResult> {
     if (!served.person) throw new Error(`[lead-service] recordServed called without a person (audience=${servedAudienceId})`);
     const person: Person = served.person;
     // Read BEFORE any write: a malformed signal is a producer contract break and must
     // fail the serve loudly rather than half-record it.
     const buyingSignal = readBuyingSignal(person.buyingSignal);
     const personId = readServedPersonId(served.personId);
+    const verificationVerdict = readEmailVerdict(served.emailVerdict);
     if (!person.email) {
       // serve-next promised a contactable person but gave no email — a producer
       // contract violation, not an empty result. Fail loud.
@@ -319,6 +328,7 @@ export async function pullNext(
       email: person.email,
       status: person.emailStatus ?? null,
       source: person.provider,
+      ...(verificationVerdict ? { verificationVerdict } : {}),
     });
     await recordEmploymentHistory({ leadId, person });
     // The phone the provider holds (crm only): what tells a phone pipe's pools who it can reach.
@@ -393,6 +403,7 @@ export async function pullNext(
       brandIds: params.brandIds,
       featureSlug: params.featureSlug,
       reachableBy: params.reachableBy ?? [],
+      acceptedEmails: params.acceptedEmails ?? null,
       offerId,
       runId: params.runId ?? null,
       parentRunId: params.parentRunId ?? null,
@@ -447,6 +458,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
+      acceptedEmails: params.acceptedEmails ?? null,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
       askFit: async ({ sourceCampaignId, ...q }) => {

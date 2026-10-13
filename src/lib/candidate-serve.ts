@@ -250,7 +250,7 @@ export async function serveThroughCandidates(audienceId: string, ctx: ServiceCon
 
     const revealed = await revealCandidate(audienceId, candidate.candidateId, basis, ctx);
     if (revealed.status === "served" && revealed.person) {
-      return { status: "served", person: revealed.person, personId: revealed.personId };
+      return { status: "served", person: revealed.person, personId: revealed.personId, emailVerdict: revealed.emailVerdict };
     }
     // Revealed but nobody servable came out (no deliverable email): the next candidate.
     console.log(`[lead-service] candidate ${candidate.candidateId} revealed but not served; asking the next one`);
