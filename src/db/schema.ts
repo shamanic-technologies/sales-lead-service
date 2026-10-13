@@ -71,6 +71,9 @@ export const leadContactMethods = pgTable(
     value: text("value").notNull(),
     status: text("status"),
     source: text("source").notNull(),
+    // The verifier's verdict on this address as human-service handed it (valid | catch_all | ...), NULL when the serve
+    // carried none. Read by every pool through the pipe's email policy (src/lib/email-policy.ts). Migration 0074.
+    verificationVerdict: text("verification_verdict"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

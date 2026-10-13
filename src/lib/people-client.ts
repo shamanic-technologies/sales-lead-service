@@ -1,4 +1,5 @@
 import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
+import type { EmailPolicy } from "./email-policy.js";
 import { isCreditInsufficientError } from "./credit-errors.js";
 
 /**
@@ -224,11 +225,19 @@ export interface ServiceContext {
    * without them. Absent / empty = no key on the wire (bytes unchanged).
    */
   reachableBy?: ReachMethod[];
+  /**
+   * Which verified emails the serving workflow accepts (src/lib/email-policy.ts), sent as `acceptedEmails` on every
+   * serve, candidate and reveal body: human-service owns "deliverable". Absent = no key on the wire (valid only).
+   */
+  acceptedEmails?: EmailPolicy;
 }
 
-/** The serve body: `{ reachableBy }` when the pipe states one, else `{}` (today's bytes). */
+/** The serve body: `{ reachableBy, acceptedEmails }` for what the pipe states, else `{}` (today's bytes). */
 export function serveBody(ctx: ServiceContext): Record<string, unknown> {
-  return ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {};
+  return {
+    ...(ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {}),
+    ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
+  };
 }
 
 function buildHeaders(ctx: ServiceContext): Record<string, string> {
@@ -299,6 +308,12 @@ export interface ServeNextResult {
    * any other value keeps today's meaning.
    */
   reason?: string;
+  /**
+   * The verification verdict of the address handed (`valid`, `catch_all`...), null/absent when the serve had none
+   * (CRM, apify). Read through `readEmailVerdict` and recorded on the email, so a pool never hands a catch-all
+   * person to a valid-only campaign.
+   */
+  emailVerdict?: unknown;
 }
 
 export async function serveNext(audienceId: string, ctx: ServiceContext): Promise<ServeNextResult> {
@@ -374,13 +389,15 @@ export interface RevealResult {
   status: "served" | "not_served";
   person: Person | null;
   personId?: unknown;
+  /** As on serve-next: the verdict of the address handed. */
+  emailVerdict?: unknown;
   replayed: boolean;
 }
 
 export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext): Promise<RevealResult> {
   return callHuman<RevealResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/reveal`,
-    { method: "POST", body: { basis }, ctx },
+    { method: "POST", body: { basis, ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}) }, ctx },
   );
 }
 
