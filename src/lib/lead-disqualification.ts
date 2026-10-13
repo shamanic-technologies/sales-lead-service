@@ -441,6 +441,8 @@ export interface BrandDisqualifiedCompany {
   name: string | null;
   domain: string | null;
   leadCount: number;
+  /** Every lead of the brand at this company (the set `leadCount` counts): each reads Disqualified. */
+  leadIds: string[];
   disqualification: LeadDisqualification;
 }
 
@@ -453,23 +455,26 @@ export async function listBrandCompanyDisqualifications(input: {
     SELECT DISTINCT ON (m.company_key)
       m.company_key, m.brand_id, m.offer_key, m.source, m.note, m.stated_by_user_id, m.stated_at,
       o.name, o.primary_domain,
-      (SELECT count(DISTINCT l.id)::int FROM leads l
+      (SELECT COALESCE(array_agg(DISTINCT l.id::text), '{}') FROM leads l
         JOIN leads_campaigns lc ON lc.lead_id = l.id AND lc.org_id = m.org_id AND m.brand_id = ANY(lc.brand_ids)
-        WHERE COALESCE(l.company_id::text, 'org:' || l.organization_id::text) = m.company_key) AS lead_count
+        WHERE CASE WHEN m.company_key LIKE 'org:%'
+                THEN l.company_id IS NULL AND l.organization_id::text = substr(m.company_key, 5)
+                ELSE l.company_id::text = m.company_key END) AS lead_ids
     FROM company_disqualification_marks m
     LEFT JOIN leads src ON src.id = m.stated_from_lead_id
     LEFT JOIN organizations o ON o.id = src.organization_id
     WHERE m.org_id = ${input.orgId} AND m.brand_id = ${input.brandId} AND m.withdrawn_at IS NULL
       AND (${input.offerId}::text IS NULL OR m.offer_key IN ('', ${input.offerId ?? ""}))
     ORDER BY m.company_key, (m.offer_key = '') ASC, m.stated_at DESC
-  `) as unknown as Array<CompanyMarkRow & { name: string | null; primary_domain: string | null; lead_count: number }>;
+  `) as unknown as Array<CompanyMarkRow & { name: string | null; primary_domain: string | null; lead_ids: string[] }>;
   return rows
     .map((r) => ({
       companyKey: r.company_key,
       companyId: r.company_key.startsWith("org:") ? null : r.company_key,
       name: r.name,
       domain: r.primary_domain,
-      leadCount: r.lead_count,
+      leadCount: r.lead_ids.length,
+      leadIds: [...r.lead_ids].sort(),
       disqualification: toCompanyMark(r),
     }))
     .sort((a, b) => Date.parse(b.disqualification.statedAt) - Date.parse(a.disqualification.statedAt) || a.companyKey.localeCompare(b.companyKey));

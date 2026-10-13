@@ -336,6 +336,7 @@ export const CRM_MATCH_METHOD_KEYS = [
   "domain_name",
   "full_name",
   "last_name",
+  "human",
   "none",
 ] as const;
 export type CrmMatchMethodKey = (typeof CRM_MATCH_METHOD_KEYS)[number];
@@ -379,6 +380,7 @@ export function zeroCrmPairingCounts(): CrmPairingCounts {
       domain_name: 0,
       full_name: 0,
       last_name: 0,
+      human: 0,
       none: 0,
     },
     opportunities: 0,
