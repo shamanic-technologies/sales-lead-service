@@ -8,6 +8,12 @@
  *     which surfaces on the upstream request as a "socket hang up". That is not the thread failing.
  *     Logged as "did not answer", it made a healthy service read as a hanging one (2026-10-08:
  *     ~10 lines an hour, every one a caller that had left), and would have hidden a real hang.
+ *
+ * A third one is neither: a pooled keep-alive socket the thread already closed (its idle timeout) is
+ * picked for the next request, which dies with ECONNRESET / "socket hang up" before the thread saw it
+ * (2026-10-13: bursts of 4 such 502s on parallel GETs, a minute apart). An idempotent request
+ * (GET/HEAD with no body) that died on a REUSED socket before any answer is sent once more on a fresh
+ * connection; anything else keeps the rules above.
  */
 import http from "node:http";
 import type { Request, Response } from "express";
@@ -29,6 +35,10 @@ const HOP_BY_HOP = new Set([
 ]);
 
 const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: Infinity });
+/** The retry's connection: never a pooled one, so it cannot be stale. */
+const freshAgent = new http.Agent({ keepAlive: false });
+
+const RETRYABLE_METHODS = new Set(["GET", "HEAD"]);
 
 function forwardableRequestHeaders(headers: http.IncomingHttpHeaders): http.OutgoingHttpHeaders {
   const out: http.OutgoingHttpHeaders = {};
@@ -50,22 +60,52 @@ function forwardableResponseHeaders(raw: string[]): string[] {
 export function forward(req: Request, res: Response, thread: ForwardTarget): void {
   const startedAt = Date.now();
   let callerLeft = false;
-  const upstream = http.request(
-    {
-      host: "127.0.0.1",
-      port: thread.port,
-      method: req.method,
-      path: req.originalUrl,
-      headers: forwardableRequestHeaders(req.headers),
-      agent: upstreamAgent,
-    },
-    (upstreamRes) => {
-      res.writeHead(upstreamRes.statusCode ?? 502, forwardableResponseHeaders(upstreamRes.rawHeaders));
-      upstreamRes.pipe(res);
-      upstreamRes.on("error", (err) => res.destroy(err));
-    },
-  );
-  upstream.on("error", (err) => {
+  let upstream = send(upstreamAgent);
+  // The caller left: stop the work it asked for (the thread's own client-abort checks see it).
+  res.on("close", () => {
+    if (res.writableFinished) return;
+    callerLeft = true;
+    upstream.destroy();
+  });
+  req.pipe(upstream);
+  const retryable =
+    RETRYABLE_METHODS.has(req.method) &&
+    !req.headers["transfer-encoding"] &&
+    (req.headers["content-length"] === undefined || req.headers["content-length"] === "0");
+
+  function send(agent: http.Agent): http.ClientRequest {
+    const out = http.request(
+      {
+        host: "127.0.0.1",
+        port: thread.port,
+        method: req.method,
+        path: req.originalUrl,
+        headers: forwardableRequestHeaders(req.headers),
+        agent,
+      },
+      (upstreamRes) => {
+        res.writeHead(upstreamRes.statusCode ?? 502, forwardableResponseHeaders(upstreamRes.rawHeaders));
+        upstreamRes.pipe(res);
+        upstreamRes.on("error", (err) => res.destroy(err));
+      },
+    );
+    out.on("error", (err) => onError(out, agent, err));
+    return out;
+  }
+
+  function onError(out: http.ClientRequest, agent: http.Agent, err: Error): void {
+    if (
+      !callerLeft &&
+      !res.headersSent &&
+      agent === upstreamAgent &&
+      out.reusedSocket &&
+      retryable &&
+      (err as NodeJS.ErrnoException).code === "ECONNRESET"
+    ) {
+      upstream = send(freshAgent);
+      upstream.end();
+      return;
+    }
     if (callerLeft) {
       console.log(
         `[lead-service] caller left ${req.method} ${req.originalUrl} after ${Date.now() - startedAt}ms; ` +
@@ -79,12 +119,5 @@ export function forward(req: Request, res: Response, thread: ForwardTarget): voi
     }
     console.error(`[lead-service] ${thread.name} HTTP thread did not answer ${req.method} ${req.originalUrl}:`, err);
     res.status(502).json({ error: `lead-service ${thread.name} HTTP thread unavailable` });
-  });
-  // The caller left: stop the work it asked for (the thread's own client-abort checks see it).
-  res.on("close", () => {
-    if (res.writableFinished) return;
-    callerLeft = true;
-    upstream.destroy();
-  });
-  req.pipe(upstream);
+  }
 }
