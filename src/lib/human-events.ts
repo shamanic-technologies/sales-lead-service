@@ -4,8 +4,9 @@
  * pages of 1000 from `GET /internal/human-identities/events` under cursor feed `human_events`
  * (`crm_feed_cursors`), page + cursor in ONE transaction (a failed page moves nothing).
  *
- * Only FLEET events (orgId null) are applied: a lead row is global (orgs share it), so an org's own
- * judgment merge cannot move it.
+ * Only FLEET events (orgId null) move leads: a lead row is global (orgs share it), so an org's own
+ * judgment merge cannot move it. An org's links / splits only re-map that org's relationship rows
+ * (`org_human_aliases`, relationship-merges.ts `refreshOrgAliases`).
  *   - human.fact_stated / human.fact_withdrawn: copied into `human_fact_copies` (statedAt and source
  *     read from the human's view, once per fact). The standing reads a live opt_out / do_not_contact on
  *     the lead's human as an opt-out at EVERY company (lead-standing.ts, rung 2c).
@@ -21,6 +22,7 @@
 import { sql as dsql } from "drizzle-orm";
 import { db, sql } from "../db/index.js";
 import { getHuman, listHumanEvents, type HumanEvent } from "./human-identity-client.js";
+import { refreshOrgAliases } from "./relationship-merges.js";
 
 export const HUMAN_EVENTS_FEED = "human_events";
 export const HUMAN_EVENTS_INTERVAL_MS = 60_000;
@@ -89,7 +91,13 @@ async function copyFact(tx: Tx, event: HumanEvent): Promise<void> {
 }
 
 async function applyEvent(tx: Tx, event: HumanEvent): Promise<void> {
-  if (event.orgId !== null) return;
+  if (event.orgId !== null) {
+    // An org's own judgment link (RELATIONSHIP-TAGS-1014): only that org's relationship rows follow it.
+    if (event.type === "human.linked" || event.type === "human.separated" || event.type === "human.link_withdrawn") {
+      await refreshOrgAliases(event.orgId, event.humanIds);
+    }
+    return;
+  }
   switch (event.type) {
     case "human.fact_stated":
       await copyFact(tx, event);

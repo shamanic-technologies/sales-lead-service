@@ -27,6 +27,7 @@ import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
 import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
+import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -67,6 +68,9 @@ startHumanOptOutsWorker();
 // Every lead with no timezone gets one inferred from what we hold (phone, location, company, email
 // domain), never over a stated or enriched zone (lead-timezone.ts).
 startLeadTimezoneWorker();
+// Who each person is to each brand: leads from the CRM feed, Jev's tags on the whole thread, suggested
+// merges, unknown companies looked up (relationship-sweep.ts, RELATIONSHIP-TAGS-1014).
+startRelationshipSweepWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
