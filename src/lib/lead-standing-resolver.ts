@@ -43,6 +43,7 @@ import {
 import {
   fetchReplyVerdicts,
   ReplyVerdictsUnavailableError,
+  type ReplyVerdictsMemo,
   type ReplyVerdictView,
 } from "./reply-verdicts-client.js";
 import { leadReplyOutcome, type LeadReplyOutcome } from "./reply-outcome.js";
@@ -155,6 +156,11 @@ export interface LeadStandingResolverOptions extends CampaignLegContext {
    * overlay is the all-false default and "nothing happened" is not something the read knows.
    */
   deliveryQueried: boolean;
+  /**
+   * The request's shared reply-verdict reads (reply-verdicts-client.ts `createReplyVerdictsMemo`),
+   * when several resolvers of ONE request ask about the same people. Absent = each resolve asks.
+   */
+  replyVerdicts?: ReplyVerdictsMemo;
 }
 
 /**
@@ -180,7 +186,7 @@ async function loadCampaignLegs(
 export function createLeadStandingResolver(
   options: LeadStandingResolverOptions,
 ): LeadStandingResolver {
-  const { deliveryQueried, ...ctx } = options;
+  const { deliveryQueried, replyVerdicts, ...ctx } = options;
   // Which offer each campaign sells, read only once a reply needs placing on an offer.
   let campaignOffers: Promise<Map<string, string | null>> | null = null;
   const offersFor = () => {
@@ -226,28 +232,28 @@ export function createLeadStandingResolver(
       const replyEmails = deliveryQueried && legs !== null
         ? rows.filter((r) => r.status === "served" && r.email).map((r) => r.email!.toLowerCase())
         : [];
-      if (replyEmails.length > 0) {
-        const replies = await fetchReplyVerdicts(replyEmails, {
-          orgId: ctx.orgId,
-          userId: ctx.userId ?? null,
-          runId: ctx.runId ?? null,
-        });
-        for (const r of replies) {
-          const key = r.leadEmail.toLowerCase();
-          const list = repliesByEmail.get(key);
-          if (list) list.push(r);
-          else repliesByEmail.set(key, [r]);
-        }
-      }
-      const offers = repliesByEmail.size > 0 ? await offersFor() : null;
+      const verdictCtx = {
+        orgId: ctx.orgId,
+        userId: ctx.userId ?? null,
+        runId: ctx.runId ?? null,
+      };
       const brandIds = Array.from(new Set(rows.flatMap((r) => r.brandIds)));
 
-      // Outcomes credited to these people for these brands — hand-stated, tracker-reported or
-      // CRM-evidenced alike, all matched on the PERSON and the brand, exactly as the panel reads.
-      const outcomeRows =
+      // The replies (instantly-service) and the four statement reads (this database) are independent,
+      // so they are asked AT ONCE rather than one after the other: the chunk waits for the slowest,
+      // not their sum (DASH-LATENCY-1014). Failures are reported in the order they always were, the
+      // replies first, so the reason a chunk reads `unresolved` under is unchanged.
+      const [repliesRead, outcomeRead, neverRead, leadMarksRead, levelsRead] = await Promise.allSettled([
+        replyEmails.length > 0
+          ? (replyVerdicts
+              ? replyVerdicts.fetch(replyEmails, verdictCtx)
+              : fetchReplyVerdicts(replyEmails, verdictCtx))
+          : Promise.resolve([] as ReplyVerdictView[]),
+        // Outcomes credited to these people for these brands — hand-stated, tracker-reported or
+        // CRM-evidenced alike, all matched on the PERSON and the brand, exactly as the panel reads.
         brandIds.length === 0
-          ? []
-          : ((await db.execute(sql`
+          ? Promise.resolve([] as OutcomeRow[])
+          : (db.execute(sql`
               SELECT brand_id, matched_lead_id, event, source, value_cents, cost_cents,
                      caused_by_outreach, note, stated_by_user_id, received_at
               FROM conversion_events
@@ -258,15 +264,13 @@ export function createLeadStandingResolver(
               -- What the customer's CRM evidences answers a step only when nobody and nothing
               -- else of ours did: a person's statement and the tracker's report come first.
               ORDER BY (source = 'crm') ASC, received_at DESC NULLS LAST
-            `)) as unknown as OutcomeRow[]);
-
-      // Retracted and withdrawn statements are excluded: kept for the record, not read as live.
-      // Keyed on the person and the brand, like the outcomes: a "never" stated from any row of the
-      // person answers for all of them. A person's own statement answers before their CRM's.
-      const neverRows =
+            `) as unknown as Promise<OutcomeRow[]>),
+        // Retracted and withdrawn statements are excluded: kept for the record, not read as live.
+        // Keyed on the person and the brand, like the outcomes: a "never" stated from any row of the
+        // person answers for all of them. A person's own statement answers before their CRM's.
         brandIds.length === 0
-          ? []
-          : ((await db.execute(sql`
+          ? Promise.resolve([] as NeverRow[])
+          : (db.execute(sql`
         SELECT lead_id, brand_id, step, source, cost_cents, note, stated_by_user_id,
                -- A CRM "never" is dated by the CRM or not at all — never by when we synced it.
                CASE WHEN source = 'crm' THEN occurred_at ELSE updated_at END AS updated_at
@@ -276,15 +280,30 @@ export function createLeadStandingResolver(
           AND retracted_at IS NULL
           AND withdrawn_at IS NULL
         ORDER BY (source = 'crm') ASC, updated_at DESC NULLS LAST
-      `)) as unknown as NeverRow[]);
-
-      // The Disqualified mark: one indexed read. Only a mark naming an OFFER needs the campaign ->
-      // offer map; a brand-wide mark answers on every row of the person at the brand.
-      // The lead's own marks, then what sits above the lead (level-tags.ts): its COMPANY's marks ("not
-      // our target" covers every lead of the company) and buyer status, and its HUMAN's opt-out
-      // (human-service fact, copied by human-events.ts), which follows them everywhere.
-      const leadMarks = await loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds });
-      const levels = await loadLevelTags({ orgId: ctx.orgId, brandIds, leadIds });
+      `) as unknown as Promise<NeverRow[]>),
+        // The Disqualified mark: one indexed read. Only a mark naming an OFFER needs the campaign ->
+        // offer map; a brand-wide mark answers on every row of the person at the brand.
+        // The lead's own marks, then what sits above the lead (level-tags.ts): its COMPANY's marks ("not
+        // our target" covers every lead of the company) and buyer status, and its HUMAN's opt-out
+        // (human-service fact, copied by human-events.ts), which follows them everywhere.
+        loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds }),
+        loadLevelTags({ orgId: ctx.orgId, brandIds, leadIds }),
+      ]);
+      for (const read of [repliesRead, outcomeRead, neverRead, leadMarksRead, levelsRead]) {
+        if (read.status === "rejected") throw read.reason;
+      }
+      const settled = <T,>(read: PromiseSettledResult<T>): T => (read as PromiseFulfilledResult<T>).value;
+      for (const r of settled(repliesRead)) {
+        const key = r.leadEmail.toLowerCase();
+        const list = repliesByEmail.get(key);
+        if (list) list.push(r);
+        else repliesByEmail.set(key, [r]);
+      }
+      const offers = repliesByEmail.size > 0 ? await offersFor() : null;
+      const outcomeRows = settled(outcomeRead);
+      const neverRows = settled(neverRead);
+      const leadMarks = settled(leadMarksRead);
+      const levels = settled(levelsRead);
       const humanOptOuts = levels.humanOptOuts;
       const companyStatus = levels.companyStatus;
       const marks: LeadAndCompanyMarks = { lead: leadMarks, company: levels.companyMarks, companyKeyOf: levels.companyKeyOf };

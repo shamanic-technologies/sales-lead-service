@@ -188,3 +188,56 @@ export async function fetchReplyVerdicts(
   }
   return out;
 }
+
+/**
+ * One request's reply-verdict reads, shared by every standing resolver that request builds.
+ *
+ * A Leads page with `include=campaigns` resolves each person's standing twice: once for the row and
+ * once for the campaign cards nested under it (campaign-breakdown.ts), and both ask instantly-service
+ * about the SAME addresses. That second `POST /orgs/reply-verdicts/query` (0.2-1.5s each under load,
+ * the largest single wait of the page, DASH-LATENCY-1014) returned exactly the first one's answer.
+ * Here each address is asked ONCE per request: an address already asked (or being asked) is served
+ * from that answer, only the others go out, in one batch. Same replies, same per-person order.
+ *
+ * Scope is one request (one org, one caller identity), never longer: a verdict changes when a reply
+ * is re-judged, and a cache across requests would serve a stale one. A failed read is not
+ * remembered: whoever was waiting on it fails as before, a later ask goes out again.
+ */
+export interface ReplyVerdictsMemo {
+  fetch(emails: readonly string[], ctx: ReplyVerdictsContext): Promise<ReplyVerdictView[]>;
+}
+
+export function createReplyVerdictsMemo(): ReplyVerdictsMemo {
+  const byEmail = new Map<string, Promise<ReplyVerdictView[]>>();
+  return {
+    async fetch(emails, ctx) {
+      const unique = Array.from(
+        new Set(emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0)),
+      );
+      const missing = unique.filter((e) => !byEmail.has(e));
+      if (missing.length > 0) {
+        const batch = fetchReplyVerdicts(missing, ctx).then((replies) => {
+          const grouped = new Map<string, ReplyVerdictView[]>();
+          for (const reply of replies) {
+            const key = reply.leadEmail.trim().toLowerCase();
+            const list = grouped.get(key);
+            if (list) list.push(reply);
+            else grouped.set(key, [reply]);
+          }
+          return grouped;
+        });
+        for (const email of missing) {
+          const own = batch.then((grouped) => grouped.get(email) ?? []);
+          byEmail.set(email, own);
+          // Not remembered when it fails; this handler also keeps the rejection from going unhandled
+          // for an address nobody else awaits.
+          own.catch(() => {
+            if (byEmail.get(email) === own) byEmail.delete(email);
+          });
+        }
+      }
+      const lists = await Promise.all(unique.map((e) => byEmail.get(e)!));
+      return lists.flat();
+    },
+  };
+}

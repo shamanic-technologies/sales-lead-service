@@ -631,6 +631,13 @@
       "when": 1787397700000,
       "tag": "0089_channel_sent",
       "breakpoints": true
+    },
+    {
+      "idx": 90,
+      "version": "7",
+      "when": 1787397800000,
+      "tag": "0090_pg_trgm",
+      "breakpoints": true
     }
   ]
 }
