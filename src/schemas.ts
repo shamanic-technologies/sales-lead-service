@@ -8466,10 +8466,17 @@ export const ProspectFollowupVerdictSchema = z
     leadId: z.string(),
     brandId: z.string(),
     owed: z.boolean().openapi({ description: "true = this brand still owes the person a prospect follow-up: write it." }),
+    kind: z.enum(["owed", "stop", "not_yet"]).openapi({
+      description:
+        "`owed` = write it now. `stop` = never owed again (opted out, do-not-contact, unsubscribed, bounced, disqualified, customer, meeting, positive reply, not a pure prospect, never emailed): record no next date. `not_yet` = still owed, just not now (in_conversation, sequence_running, relationship_not_judged, same_person_question_open, identity_unresolved): write nothing, ask again at `retryAfter`. A stop beside a not-yet is a stop.",
+    }),
+    retryAfter: z.string().nullable().openapi({
+      description: "ISO instant a `not_yet` is worth asking again (the latest wait of its reasons: conversation 48h, sequence 72h, relationship / identity 24h); null otherwise.",
+    }),
     reason: z.string().nullable().openapi({ description: "The strongest stop when not owed (first of `reasons`), null when owed." }),
     reasons: z.array(z.string()).openapi({
       description:
-        "Every stop, strongest first: opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, in_conversation (a reply waiting on an answer: the responder's), not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet), not_contacted (the brand never emailed them), sequence_running (the sender still has a step to send them for this brand). Empty when owed. A plain \"no thanks\" is not a stop.",
+        "Every reason, strongest first (stops before not-yets): opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), not_contacted (the brand never emailed them); not yet: in_conversation (their question / referral / proposal / hand-over is newer than our latest answer: the responder's), sequence_running (the sender still has a step to send them for this brand), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet). Empty when owed. A plain \"no thanks\" is not a stop.",
     }),
     relationshipTags: z.array(z.string()).openapi({ description: "The tags that make the person more than a prospect, when that is a reason." }),
   })

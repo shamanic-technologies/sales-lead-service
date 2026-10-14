@@ -23,6 +23,7 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 
 const { db } = await import("../../src/db/index.js");
 const { claimContactedProspect, loadProspectFollowupVerdicts, handoutOfSourceRow } = await import("../../src/lib/prospect-followup.js");
+const { claimStockedLead } = await import("../../src/lib/source-stock.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -78,7 +79,7 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
   afterAll(async () => {
     await db.execute(sql`DELETE FROM prospect_followup_handouts WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
-    for (const t of ["lead_timeline_facts", "conversion_events", "lead_disqualification_marks", "relationship_subjects", "relationship_judgments"]) {
+    for (const t of ["lead_timeline_facts", "conversion_events", "answered_outside_statements", "lead_disqualification_marks", "relationship_subjects", "relationship_judgments"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(leads)}::uuid[])`);
@@ -125,7 +126,15 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
     expect(v.get(neverSent.leadId)?.reason).toBe("not_contacted");
 
     queued.add(pure.email);
-    expect((await loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [pure.leadId] })).get(pure.leadId)?.reason).toBe("sequence_running");
+    expect((await loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [pure.leadId] })).get(pure.leadId)).toMatchObject({ kind: "not_yet", reason: "sequence_running" });
+    queued.clear();
+
+    // A question newer than our latest answer holds them (not yet); our answer after it makes them owed again.
+    const asked = await person("asked", { labels: ["question"] });
+    expect((await loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [asked.leadId] })).get(asked.leadId)).toMatchObject({ kind: "not_yet", reason: "in_conversation" });
+    await db.execute(sql`INSERT INTO answered_outside_statements (org_id, brand_id, lead_id, stated_by_user_id, stated_at) VALUES (${orgId}, ${brandId}, ${asked.leadId}::uuid, 'itest', '2026-09-06T10:00:00Z')`);
+    expect((await loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [asked.leadId] })).get(asked.leadId)).toMatchObject({ kind: "owed" });
+    await db.execute(sql`UPDATE lead_timeline_facts SET withdrawn_at = now() WHERE lead_id = ${asked.leadId}::uuid`);
 
     gatewayDown = true;
     await expect(loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [pure.leadId] })).rejects.toThrow("email-gateway 503");
@@ -158,6 +167,50 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
     // The sequence finished: the mid-sequence person is owed now, and served once.
     queued.clear();
     expect((await serve())?.leadId).toBe(midSequence.leadId);
+    expect(await serve()).toBeNull();
+  });
+
+  it("a stocked find NOT YET owed at handover is released (find + handout removed, findable again); a stopped one is set aside", async () => {
+    const later = await person("later", { sentAt: "2026-06-01T10:00:00Z" });
+    const found = await serve();
+    expect(found?.leadId).toBe(later.leadId);
+    const outreachCampaignId = randomUUID();
+    const claim = (verdict: { fits: false; reason: string; release?: true }) =>
+      claimStockedLead({
+        orgId,
+        sourceCampaignIds: [sourceCampaignId],
+        outreachCampaignId,
+        brandIds: [brandId],
+        featureSlug: "ai-prospect-followup",
+        runId: null,
+        parentRunId: null,
+        userId: null,
+        workflowSlug: null,
+        goal: null,
+        activeGoalId: null,
+        brandProfileId: null,
+        acceptedEmails: "as_found",
+        askFit: async () => {
+          throw new Error("no audience to ask about");
+        },
+        askStillOwed: async () => verdict as never,
+      });
+
+    // Every other find of this source was already handed: only `later` is in stock.
+    await db.execute(sql`UPDATE leads_campaigns SET source_handed_at = now() WHERE campaign_id = ${sourceCampaignId} AND lead_id <> ${later.leadId}::uuid`);
+    const released = await claim({ fits: false, reason: "not yet", release: true });
+    expect(released.lead).toBeNull();
+    expect(released.setAside.map((r) => r.leadId)).toEqual([later.leadId]);
+    expect(await handoutOfSourceRow(found!.leadCampaignId)).toBeNull();
+    const left = (await db.execute(sql`SELECT count(*)::int AS n FROM leads_campaigns WHERE id = ${found!.leadCampaignId}::uuid`)) as unknown as Array<{ n: number }>;
+    expect(left[0].n).toBe(0);
+
+    // Owed again: the source finds them again, once; a stop then sets the find aside for good.
+    const again = await serve();
+    expect(again?.leadId).toBe(later.leadId);
+    const stopped = await claim({ fits: false, reason: "no longer owed: opted_out" });
+    expect(stopped.lead).toBeNull();
+    expect(await handoutOfSourceRow(again!.leadCampaignId)).toEqual({ orgId, brandId, leadId: later.leadId });
     expect(await serve()).toBeNull();
   });
 });

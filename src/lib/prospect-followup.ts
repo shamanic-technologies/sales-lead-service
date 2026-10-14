@@ -1,6 +1,7 @@
 import { sql as dsql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
+import { toIsoTimestamp } from "./basic-leads.js";
 import { loadHumanFacts, type LeadHumanBlock } from "./human-opt-out-read.js";
 import { loadLeadAndCompanyMarks } from "./lead-disqualification.js";
 import { loadRelationships, type RelationshipBlock } from "./relationship-read.js";
@@ -30,12 +31,20 @@ import type { PoolEmailPolicy } from "./email-policy.js";
  *   bounced          a live `bounced` fact, or the sender's brand/global status.
  *   disqualified     any live disqualification mark of the lead or of its company at the brand, any offer.
  *   positive reply / meeting / customer   live outcomes (`conversion_events`) and the timeline's reply labels.
- *   in conversation  a reply waiting on an ANSWER (question, referral, proposal, hand-over): the responder's, not ours.
+ *   in conversation  their latest question / referral / proposal / hand-over came AFTER our latest answer (an outreach
+ *                    `reply_sent`, or a person's "answered outside" statement): waiting on the responder, not on us.
  *   sequence running the sender still holds a step to send this person for the brand (`queued`): never two emails
  *                    racing each other; owed once the sequence is done.
  *   relationship     `policies.pure_prospect` (relationship-tags.ts `pureProspectAllows`).
  * A plain "no thanks" (`not_interested`) is NOT a stop: the owner's list names unsubscribe, unqualified, opt-out and
  * a positive reply only.
+ *
+ * A "no" is either a STOP (the owner's list, plus never emailed / not a pure prospect: for good) or a NOT YET (the
+ * person is owed, just not now: a sequence still sending, a conversation waiting on the responder, a relationship or
+ * identity not settled yet), and a not-yet says WHEN to ask again (`retryAfter`). The reactive pipe's only state is
+ * the next dated occurrence (campaign-service), so a not-yet read as a stop would drop the person for good: the
+ * opposite of the owner's rule. The serve likewise never consumes a person on a not-yet (no handout written; a stocked
+ * find found not-yet at handover is RELEASED, its handout removed, so the source can find them again).
  */
 
 export const PROSPECT_FOLLOWUP_STOP_REASONS = [
@@ -48,18 +57,37 @@ export const PROSPECT_FOLLOWUP_STOP_REASONS = [
   "meeting_attended",
   "meeting_booked",
   "positive_reply",
-  "in_conversation",
   "not_pure_prospect",
+  "not_contacted",
+  // Not yet (NOT_YET_REASONS): owed, just not now.
+  "in_conversation",
+  "sequence_running",
   "relationship_not_judged",
   "same_person_question_open",
   "identity_unresolved",
-  "not_contacted",
-  "sequence_running",
 ] as const;
 export type ProspectFollowupStop = (typeof PROSPECT_FOLLOWUP_STOP_REASONS)[number];
 
+/** The temporary reasons, and how long until the fact they wait on is worth reading again. */
+export const NOT_YET_RETRY_HOURS: Readonly<Partial<Record<ProspectFollowupStop, number>>> = {
+  // The responder answers within the day; give the conversation two days to settle.
+  in_conversation: 48,
+  // A cold sequence spaces its steps by days: look again after a typical step gap.
+  sequence_running: 72,
+  // The relationship sweep (5 min) and human-service identity resolution catch up within hours.
+  relationship_not_judged: 24,
+  same_person_question_open: 24,
+  identity_unresolved: 24,
+};
+
+export type ProspectFollowupKind = "owed" | "stop" | "not_yet";
+
 export interface ProspectFollowupVerdict {
   owed: boolean;
+  /** owed; stop = never owed again (record no next date); not_yet = owed later, ask again at `retryAfter`. */
+  kind: ProspectFollowupKind;
+  /** When a not-yet is worth asking again (ISO), null otherwise: the LATEST of its reasons' waits. */
+  retryAfter: string | null;
   /** The strongest stop (first of `reasons`), null when owed. */
   reason: ProspectFollowupStop | null;
   reasons: ProspectFollowupStop[];
@@ -79,13 +107,9 @@ const LABEL_STOPS: ReadonlyArray<[string, ProspectFollowupStop]> = [
   ["meeting_attended", "meeting_attended"],
   ["meeting_booked", "meeting_booked"],
   ["interested", "positive_reply"],
-  ["question_answerable", "in_conversation"],
-  ["question_to_escalate", "in_conversation"],
-  ["question", "in_conversation"],
-  ["referral", "in_conversation"],
-  ["other_proposal", "in_conversation"],
-  ["hand_over", "in_conversation"],
 ];
+/** A reply that waits on an ANSWER of ours: not yet while it is newer than our latest answer. */
+export const CONVERSATION_LABELS = ["question_answerable", "question_to_escalate", "question", "referral", "other_proposal", "hand_over"] as const;
 export const STOP_LABELS: readonly string[] = LABEL_STOPS.map(([l]) => l);
 /** Live outcomes (conversion_events.event) that stop it. */
 const OUTCOME_STOPS: ReadonlyArray<[string, ProspectFollowupStop]> = [
@@ -107,10 +131,12 @@ export interface ProspectFollowupFacts {
   sender: { queued: boolean; unsubscribed: boolean; bounced: boolean };
   /** Who the person is to the brand; null = the lead has no human yet (identity not resolved). */
   relationship: RelationshipBlock | null;
+  /** Their latest word waiting on an answer is newer than our latest answer. */
+  waitingOnAnswer: boolean;
 }
 
 /** Pure: is the person still owed a prospect follow-up, and if not, every reason (strongest first). */
-export function decideProspectFollowup(f: ProspectFollowupFacts): ProspectFollowupVerdict {
+export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new Date()): ProspectFollowupVerdict {
   const stops = new Set<ProspectFollowupStop>();
   if (f.human?.optedOut) stops.add("opted_out");
   if (f.human?.doNotContact) stops.add("do_not_contact");
@@ -129,8 +155,13 @@ export function decideProspectFollowup(f: ProspectFollowupFacts): ProspectFollow
   }
   if (!SENT_LABELS.some((l) => f.labels.has(l))) stops.add("not_contacted");
   if (f.sender.queued) stops.add("sequence_running");
+  if (f.waitingOnAnswer) stops.add("in_conversation");
   const reasons = PROSPECT_FOLLOWUP_STOP_REASONS.filter((r) => stops.has(r));
-  return { owed: reasons.length === 0, reason: reasons[0] ?? null, reasons, relationshipTags };
+  if (reasons.length === 0) return { owed: true, kind: "owed", retryAfter: null, reason: null, reasons, relationshipTags };
+  const waits = reasons.map((r) => NOT_YET_RETRY_HOURS[r]);
+  if (waits.some((h) => h === undefined)) return { owed: false, kind: "stop", retryAfter: null, reason: reasons[0], reasons, relationshipTags };
+  const hours = Math.max(...(waits as number[]));
+  return { owed: false, kind: "not_yet", retryAfter: new Date(now.getTime() + hours * 3_600_000).toISOString(), reason: reasons[0], reasons, relationshipTags };
 }
 
 /**
@@ -172,6 +203,40 @@ export async function loadProspectFollowupVerdicts(input: {
     loadHumanFacts(leadIds),
     loadLeadAndCompanyMarks({ orgId, brandIds: [brandId], leadIds }),
   ]);
+
+  // Is their latest word waiting on an answer newer than our latest answer (outreach `reply_sent`, or a person's
+  // "answered outside" statement)? Undated facts cannot be ordered and are left out (awaiting-reply.ts does the same).
+  const addresses = [...new Set(emailRows.flatMap((r) => [r.email]))];
+  const [conversationRows, answerRows, outsideRows] = await Promise.all([
+    db.execute(dsql`
+      SELECT lead_id::text AS lead_id, max(occurred_at) AS at FROM lead_timeline_facts
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ANY(${ids}::uuid[]) AND withdrawn_at IS NULL
+        AND occurred_at IS NOT NULL AND label = ANY(${dsql.param([...CONVERSATION_LABELS])}::text[])
+      GROUP BY lead_id
+    `) as unknown as Promise<Array<{ lead_id: string; at: Date | string }>>,
+    addresses.length === 0
+      ? Promise.resolve([] as Array<{ email: string; at: Date | string }>)
+      : (db.execute(dsql`
+          SELECT lower(lead_email) AS email, max(occurred_at) AS at FROM outreach_facts
+          WHERE org_id = ${orgId} AND type = 'reply_sent' AND ${brandId} = ANY(brand_ids) AND occurred_at IS NOT NULL
+            AND lower(lead_email) = ANY(${dsql.param(addresses)}::text[])
+          GROUP BY lower(lead_email)
+        `) as unknown as Promise<Array<{ email: string; at: Date | string }>>),
+    db.execute(dsql`
+      SELECT lead_id::text AS lead_id, max(stated_at) AS at FROM answered_outside_statements
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ANY(${ids}::uuid[])
+      GROUP BY lead_id
+    `) as unknown as Promise<Array<{ lead_id: string; at: Date | string }>>,
+  ]);
+  const ms = (v: Date | string) => new Date(toIsoTimestamp(v)!).getTime();
+  const answeredAt = new Map<string, number>();
+  for (const r of outsideRows) answeredAt.set(r.lead_id, ms(r.at));
+  const answerByEmail = new Map(answerRows.map((r) => [r.email, ms(r.at)]));
+  for (const e of emailRows) {
+    const at = answerByEmail.get(e.email);
+    if (at !== undefined) answeredAt.set(e.lead_id, Math.max(answeredAt.get(e.lead_id) ?? 0, at));
+  }
+  const waitingOnAnswer = new Set(conversationRows.filter((r) => ms(r.at) > (answeredAt.get(r.lead_id) ?? 0)).map((r) => r.lead_id));
 
   const humanOf = new Map(humanRows.map((r) => [r.lead_id, r.human_id]));
   const humanIds = [...new Set(humanRows.map((r) => r.human_id).filter((h): h is string => !!h))];
@@ -223,6 +288,7 @@ export async function loadProspectFollowupVerdicts(input: {
         disqualified,
         sender,
         relationship: human ? (relationships.get(human) ?? null) : null,
+        waitingOnAnswer: waitingOnAnswer.has(leadId),
       }),
     );
   }

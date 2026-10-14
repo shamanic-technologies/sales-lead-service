@@ -47,6 +47,12 @@ export interface StockedLead {
 /** human-service's verdict on one found person, at handover (src/lib/audience-fit-client.ts). */
 export type AudienceFitVerdict = { fits: true } | { fits: false; reason: string };
 
+/**
+ * A contacted pure prospect at handover: owed (hand), stopped (set aside for good), or NOT YET (`release`: the find
+ * and its handout are removed, so the source can find the person again once owed; never consumed on a not-yet).
+ */
+export type StillOwedVerdict = AudienceFitVerdict | { fits: false; reason: string; release: true };
+
 export type AskAudienceFit = (question: {
   /** The source unit holding the find: a find outside its funnel's audiences, origin or offer is not its own. */
   sourceCampaignId: string;
@@ -101,7 +107,7 @@ export async function claimStockedLead(params: {
    * A find with NO audience is a contacted pure prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts): is the
    * person still owed a prospect follow-up NOW? null = the row is not such a find (a bug: it throws).
    */
-  askStillOwed?: (sourceRowId: string) => Promise<AudienceFitVerdict | null>;
+  askStillOwed?: (sourceRowId: string) => Promise<StillOwedVerdict | null>;
 }): Promise<StockClaim> {
   const setAside: SetAsideLead[] = [];
   if (params.sourceCampaignIds.length === 0) return { lead: null, setAside };
@@ -162,8 +168,16 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
       throw new Error(`[source-stock] found row ${row.id} (source campaign ${row.campaign_id}) carries no audience`);
     }
 
-    const verdict =
+    const verdict: StillOwedVerdict =
       owed ?? (await params.askFit({ sourceCampaignId: row.campaign_id, audienceId: row.audience_id as string, email: email.value, personId: row.person_id }));
+    if (!verdict.fits && "release" in verdict) {
+      await tx.execute(sql`DELETE FROM prospect_followup_handouts WHERE lead_campaign_id = ${row.id}::uuid`);
+      await tx.execute(sql`DELETE FROM leads_campaigns WHERE id = ${row.id}`);
+      return {
+        kind: "set_aside",
+        row: { sourceRowId: row.id, sourceCampaignId: row.campaign_id, leadId: row.lead_id, email: email.value, audienceId: null, reason: verdict.reason },
+      };
+    }
     if (!verdict.fits) {
       await tx.execute(sql`
         UPDATE leads_campaigns
