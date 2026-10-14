@@ -20,8 +20,10 @@ import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_DELAY_MS = 150_000;
-export const JUDGE_PER_TICK = 160;
-const JUDGE_CONCURRENCY = 6;
+export const JUDGE_PER_TICK = 60;
+const JUDGE_CONCURRENCY = 3;
+/** Consecutive-or-not judgment failures after which a brand's tick stops asking Jev (vendor down / out of credit). */
+const MAX_JUDGE_FAILURES = 3;
 
 export interface ScopeTick {
   scope: Scope;
@@ -64,13 +66,14 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
           } catch (err) {
             if (err instanceof InsufficientCreditError) throw err;
             tick.judgeFailed++;
+            if (tick.judgeFailed >= MAX_JUDGE_FAILURES) next = todo.length;
             console.error(`[lead-service] relationship judgment failed for human ${s.humanId} (brand ${scope.brandId}):`, err);
           }
         }
       };
       await Promise.all(Array.from({ length: JUDGE_CONCURRENCY }, worker));
     }
-    if (opts.merges !== false) tick.merges = await suggestMerges(scope, (await identity()).runId);
+    if (opts.merges !== false && tick.judgeFailed < MAX_JUDGE_FAILURES) tick.merges = await suggestMerges(scope, (await identity()).runId);
     if (opts.companies !== false) {
       tick.companies = await lookUpCompanies(scope, async () => {
         if (!platformRun) platformRun = await createPlatformRun("relationship-company-lookup");

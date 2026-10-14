@@ -181,10 +181,19 @@ async function cardsOf(orgId: string, brandId: string, ids: string[]): Promise<M
 }
 
 export async function readReview(orgId: string, brandId: string): Promise<RelationshipReview> {
+  // Only leads something speaks about can carry a tag or a question (a group roster lurker nobody judged has an empty
+  // block): read those, count the rest.
   const subjects = (await db.execute(sql`
-    SELECT human_id::text AS human, name FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId}
-    ORDER BY has_messages DESC, thread_seq DESC
+    SELECT s.human_id::text AS human, s.name FROM relationship_subjects s
+    WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId}
+      AND (EXISTS (SELECT 1 FROM relationship_judgments j WHERE j.org_id = s.org_id AND j.human_id = s.human_id)
+        OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id AND e.human_id = s.human_id)
+        OR EXISTS (SELECT 1 FROM relationship_statements t WHERE t.org_id = s.org_id AND t.human_id = s.human_id AND t.withdrawn_at IS NULL))
+    ORDER BY s.has_messages DESC, s.thread_seq DESC
   `)) as unknown as Array<{ human: string; name: string | null }>;
+  const total = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId}
+  `)) as unknown as Array<{ n: number }>;
   const blocks = new Map<string, RelationshipBlock>();
   for (let i = 0; i < subjects.length; i += 1000) {
     const part = await loadRelationships(orgId, brandId, subjects.slice(i, i + 1000).map((s) => s.human));
@@ -234,7 +243,7 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
         .map((q) => ({ linkId: q.link_id!, humanIds: [q.a, q.b], names: [cards.get(q.a)?.name ?? null, cards.get(q.b)?.name ?? null], judgedBy: q.answered_by ?? "jev", at: iso(q.answered_at) ?? "" })),
       people,
     },
-    counts: { subjects: subjects.length, judged, byTag, unsureMerges: open.length, unsureTags: tagQuestions.length, companyQuestions: companyRows.length },
+    counts: { subjects: Number(total[0]?.n ?? 0), judged, byTag, unsureMerges: open.length, unsureTags: tagQuestions.length, companyQuestions: companyRows.length },
   };
 }
 

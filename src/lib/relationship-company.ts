@@ -8,8 +8,9 @@
  *   2. FREE: a website / company the feed's facts state (a signup that named its site);
  *   3. treg `treg.people.enrich` (owner-approved, ~$0.0026 per success, capped per call at
  *      ENRICH_MAX_MICRO through `X-Treg-Route-Max-Cost`): the person's current company;
- *   4. treg `treg.people.identity.resolve` ($0.02 per success, capped) ONLY when enrich knew nobody: email ->
- *      LinkedIn profile, then enrich again on that profile.
+ *   (`treg.people.identity.resolve`, $0.02 per success, is NOT called: it answers a LinkedIn URL, never a company,
+ *   and the enrich that would read that profile finds nobody under the approved ceiling: measured 2026-10-14, 15
+ *   identity hits bought, 0 companies. A higher enrich ceiling is the owner's call.)
  * No org request starts the sweep, so treg is PLATFORM-billed (platform keys, a platform run, `actual` cost).
  * Two different companies found at the same step (two work domains) = a QUESTION on the review page
  * (`conflict`), nothing chosen. Every treg call is declared (`treg-micro-usd`) on the sweep's platform run, summed per human
@@ -23,9 +24,7 @@ import { toSubject, type Scope, type Subject } from "./relationship-subjects.js"
 import { PlatformTregMeter } from "./treg-client.js";
 
 export const ENRICH_ENDPOINT = "treg.people.enrich";
-export const IDENTITY_ENDPOINT = "treg.people.identity.resolve";
 export const ENRICH_MAX_MICRO = 3_000;
-export const IDENTITY_MAX_MICRO = 20_000;
 const LOOKUPS_PER_TICK = 60;
 const RECHECK_AFTER = "30 days";
 
@@ -158,24 +157,13 @@ export async function lookUpCompanies(scope: Scope, platformRunId: () => Promise
       tick.none++;
       continue;
     }
-    // 3. treg enrich, 4. identity resolve only when enrich knew nobody
+    // 3. treg enrich (the approved ceiling)
     let micro = 0;
     try {
       const first = await (await treg()).call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email, ...(s.name ? { full_name: s.name } : {}) }, maxMicro: ENRICH_MAX_MICRO });
       micro += first.chargedMicro;
-      let enrich = first.status < 300 ? companyOfEnrich(first.body) : { found: false, company: null, linkedinUrl: null };
-      let source: CompanySource = "treg_enrich";
-      if (!enrich.found) {
-        const ident = await (await treg()).call({ endpointId: IDENTITY_ENDPOINT, method: "POST", params: { email }, maxMicro: IDENTITY_MAX_MICRO });
-        micro += ident.chargedMicro;
-        const li = ident.status < 300 ? str((ident.body as { output?: Record<string, unknown> } | null)?.output?.linkedin_url) : null;
-        if (li) {
-          const second = await (await treg()).call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { linkedin_url: li }, maxMicro: ENRICH_MAX_MICRO });
-          micro += second.chargedMicro;
-          enrich = second.status < 300 ? companyOfEnrich(second.body) : enrich;
-          source = "treg_identity";
-        }
-      }
+      const enrich = first.status < 300 ? companyOfEnrich(first.body) : { found: false, company: null, linkedinUrl: null };
+      const source: CompanySource = "treg_enrich";
       tick.tregMicro += micro;
       if (enrich.company && (await settle(s, [{ ...enrich.company, source }], micro))) {
         tick.treg++;
