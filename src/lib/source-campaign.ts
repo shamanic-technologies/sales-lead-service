@@ -7,7 +7,7 @@ import {
   HUMAN_SERVICE_URL,
 } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
-import { SOURCE_BUDGET_REACHED_REASON, SOURCE_CAMPAIGN_OFF_REASON, type TARGETED_AUDIENCES_UNAVAILABLE_REASON } from "./serve-reasons.js";
+import { SOURCE_BUDGET_REACHED_REASON, SOURCE_CAMPAIGN_OFF_REASON } from "./serve-reasons.js";
 
 /**
  * WHICH SOURCE CAMPAIGN A SERVE IS FILED UNDER (owner 2026-10-07: "the sources ARE campaigns").
@@ -60,7 +60,7 @@ export type ServeSource =
   | { kind: "source"; campaignId: string; originSlug: string; sourceSlug: string; offerId: string }
   | {
       kind: "refused";
-      reason: typeof SOURCE_CAMPAIGN_OFF_REASON | typeof SOURCE_BUDGET_REACHED_REASON | typeof TARGETED_AUDIENCES_UNAVAILABLE_REASON;
+      reason: typeof SOURCE_CAMPAIGN_OFF_REASON | typeof SOURCE_BUDGET_REACHED_REASON;
       campaignId: string | null;
       detail: string;
     };
