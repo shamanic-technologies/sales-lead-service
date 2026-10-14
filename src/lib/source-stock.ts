@@ -60,7 +60,8 @@ export interface SetAsideLead {
   sourceCampaignId: string;
   leadId: string;
   email: string;
-  audienceId: string;
+  /** null = a contacted pure prospect (no audience). */
+  audienceId: string | null;
   reason: string;
 }
 
@@ -96,6 +97,11 @@ export async function claimStockedLead(params: {
   relationships?: RelationshipScope | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */
   askFit: AskAudienceFit;
+  /**
+   * A find with NO audience is a contacted pure prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts): is the
+   * person still owed a prospect follow-up NOW? null = the row is not such a find (a bug: it throws).
+   */
+  askStillOwed?: (sourceRowId: string) => Promise<AudienceFitVerdict | null>;
 }): Promise<StockClaim> {
   const setAside: SetAsideLead[] = [];
   if (params.sourceCampaignIds.length === 0) return { lead: null, setAside };
@@ -149,12 +155,15 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
        LIMIT 1
     `)) as unknown as Array<{ value: string }>;
     if (!email) throw new Error(`[source-stock] found lead ${row.lead_id} (row ${row.id}) has no registered email`);
-    if (!row.audience_id) {
-      // Every find is recorded under the audience that found it (src/lib/buffer.ts): without one, nobody can say it fits.
+    // Every audience find is recorded under the audience that found it (src/lib/buffer.ts); the one find with none is a
+    // contacted pure prospect, re-asked whether still owed. Anything else: nobody can say it fits.
+    const owed = row.audience_id ? null : ((await params.askStillOwed?.(row.id)) ?? null);
+    if (!row.audience_id && !owed) {
       throw new Error(`[source-stock] found row ${row.id} (source campaign ${row.campaign_id}) carries no audience`);
     }
 
-    const verdict = await params.askFit({ sourceCampaignId: row.campaign_id, audienceId: row.audience_id, email: email.value, personId: row.person_id });
+    const verdict =
+      owed ?? (await params.askFit({ sourceCampaignId: row.campaign_id, audienceId: row.audience_id as string, email: email.value, personId: row.person_id }));
     if (!verdict.fits) {
       await tx.execute(sql`
         UPDATE leads_campaigns

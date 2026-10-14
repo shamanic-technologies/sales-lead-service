@@ -18,6 +18,7 @@ import {
   isRelationshipTag,
   levelOf,
   policyAllows,
+  pureProspectAllows,
   tagsIn,
   type RelationshipTag,
   type TagDetail,
@@ -38,8 +39,13 @@ export interface RelationshipBlock {
   unsureTags: RelationshipTag[];
   judgedAt: string | null;
   details: TagDetail[];
-  /** May a pipe stating each policy hand this person out? The one answer every server of people reads. */
-  policies: { business_only: boolean };
+  /** Is the person a relationship subject of the brand (some source of the org knows them outside our outreach)? */
+  subject: boolean;
+  /**
+   * May a pipe stating each policy hand this person out? The one answer every server of people reads.
+   * `pure_prospect`: no tag but prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts).
+   */
+  policies: { business_only: boolean; pure_prospect: boolean };
   /** Every merge stated from here that made this person (judge or person): undo one with its `linkId`. */
   merges: SettledMerge[];
 }
@@ -60,7 +66,8 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   unsureTags: [],
   judgedAt: null,
   details: [],
-  policies: { business_only: false },
+  subject: false,
+  policies: { business_only: false, pure_prospect: false },
   merges: [],
 };
 
@@ -183,7 +190,11 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       unsureTags,
       judgedAt,
       details,
-      policies: { business_only: policyAllows("business_only", { tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }) },
+      subject: companyKeyOf.has(h),
+      policies: {
+        business_only: policyAllows("business_only", { tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }),
+        pure_prospect: pureProspectAllows({ subject: companyKeyOf.has(h), tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }),
+      },
       merges: mergesOf.get(h) ?? [],
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);

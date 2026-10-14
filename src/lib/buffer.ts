@@ -29,10 +29,12 @@ import {
   SOURCE_STOCK_EMPTY_REASON,
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
+  CONTACTED_PROSPECTS_NONE_OWED_REASON,
   isNoRecentPostsAnswer,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
+import { claimContactedProspect, handoutOfSourceRow, loadProspectFollowupVerdicts } from "./prospect-followup.js";
 import type { RelationshipScope } from "./reach-sql.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 import { askAudienceFit } from "./audience-fit-client.js";
@@ -47,10 +49,14 @@ import { isAudienceNotServeableError } from "./people-client.js";
  *           no Bonus check (writer context, paid when an outreach campaign takes the lead).
  *   stock — an outreach campaign fed by sources that find on their own: retry pool first, then the oldest lead
  *           those sources found that nobody worked yet; nothing is found on demand.
+ *   find_contacted — a source unit's own run whose lead strategy is the brand's CONTACTED PURE PROSPECTS
+ *           (body `population: "contacted_pure_prospects"`, NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts):
+ *           like `find`, but from people the brand already emailed, each at most once per brand; nothing is bought.
  */
 export type PullNextMode =
   | { kind: "serve" }
   | { kind: "find"; audienceIds: string[] }
+  | { kind: "find_contacted" }
   | { kind: "stock"; sourceCampaignIds: string[] };
 
 interface PullNextParams {
@@ -169,6 +175,8 @@ export async function pullNext(
 ): Promise<PullNextResult> {
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
   const mode: PullNextMode = params.mode ?? { kind: "serve" };
+  // A source unit's own run: stores what it finds under itself, contacts nobody (no retry/released pool, no Bonus).
+  const finding = mode.kind === "find" || mode.kind === "find_contacted";
 
   // A source unit's own run with no audience of its origin: it looked at nobody (never exhaustion).
   if (mode.kind === "find" && mode.audienceIds.length === 0) {
@@ -256,7 +264,7 @@ export async function pullNext(
         }
       : null;
     // A find hands the lead to nobody's writer: only the Hard filters are read back, no Bonus check is paid.
-    return checksForWriter(fullLead, mode.kind === "find" ? checks.filter((c) => c.mode !== "mention") : checks, identity);
+    return checksForWriter(fullLead, finding ? checks.filter((c) => c.mode !== "mention") : checks, identity);
   };
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
@@ -270,7 +278,7 @@ export async function pullNext(
   // who was never handed to the vendor, and the winner is claimed atomically so two
   // concurrent runs cannot take the same person. Nobody retryable (or email-gateway
   // unreachable, which is fail-closed) falls through to serveNext exactly as before.
-  const retry = mode.kind === "find" ? null : await pickRetryCandidate({
+  const retry = finding ? null : await pickRetryCandidate({
     orgId: params.orgId,
     campaignId: params.campaignId,
     brandId: params.brandId,
@@ -417,7 +425,7 @@ export async function pullNext(
 
   // RELEASED: a person another pipe of the brand served and could not reach on ITS channel (src/lib/released-pool.ts),
   // that this pipe can. Paid for once already: taken before buying anyone new.
-  if (mode.kind !== "find") {
+  if (!finding) {
     const released = await claimReleasedLead({
       orgId: params.orgId,
       campaignId: params.campaignId,
@@ -463,6 +471,58 @@ export async function pullNext(
     }
   }
 
+  // CONTACTED PURE PROSPECTS: the brand's own contacted people still owed a follow-up, each once per brand ever.
+  if (mode.kind === "find_contacted") {
+    const find = await claimContactedProspect({
+      orgId: params.orgId,
+      brandId: params.brandId,
+      brandIds: params.brandIds,
+      sourceCampaignId: params.campaignId,
+      featureSlug: params.featureSlug,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+      reachableBy: params.reachableBy ?? null,
+      // Nothing is bought: the people were already emailed, so a source stating no email choice takes them as found.
+      acceptedEmails: params.acceptedEmails ?? "as_found",
+      signal,
+    });
+    if (!find) {
+      if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+      console.log(
+        `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${CONTACTED_PROSPECTS_NONE_OWED_REASON} brand=${params.brandId}`,
+      );
+      return { found: false, reason: CONTACTED_PROSPECTS_NONE_OWED_REASON };
+    }
+    const foundLead = await buildFullLead(find.leadId);
+    const qualification = await writerChecks(foundLead);
+    console.log(
+      `[lead-service] pullNext found=true source=contacted-prospects campaign=${params.campaignId} email=${find.email} leadId=${find.leadId} row=${find.leadCampaignId}`,
+    );
+    return {
+      found: true,
+      lead: {
+        leadId: find.leadId,
+        email: find.email,
+        data: foundLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: foundLead.apolloPersonId ?? null,
+        goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: null,
+        buyingSignal: null,
+        qualification,
+      },
+    };
+  }
+
   // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
   if (mode.kind === "stock") {
     const judgeSourceAudience = createSourceAudienceJudge({ orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
@@ -488,6 +548,16 @@ export async function pullNext(
         const belongs = await judgeSourceAudience(sourceCampaignId, q.audienceId);
         if (!belongs.belongs) return { fits: false, reason: belongs.reason };
         return askAudienceFit({ ...q, brandId: params.brandId }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
+      },
+      // A contacted pure prospect (no audience): still owed a prospect follow-up now? Same verdict a writer reads.
+      askStillOwed: async (sourceRowId) => {
+        const handout = await handoutOfSourceRow(sourceRowId);
+        if (!handout) return null;
+        const verdict = (
+          await loadProspectFollowupVerdicts({ ...handout, leadIds: [handout.leadId], context: { userId: params.userId ?? null, runId: params.runId ?? null } })
+        ).get(handout.leadId);
+        if (!verdict) throw new Error(`[lead-service] no prospect follow-up verdict for lead ${handout.leadId}`);
+        return verdict.owed ? { fits: true } : { fits: false, reason: `no longer owed a prospect follow-up: ${verdict.reasons.join(", ")}` };
       },
     });
     const stocked = claim.lead;
