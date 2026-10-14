@@ -79,10 +79,8 @@ vi.mock("../../src/lib/sourcing-origin.js", () => {
 });
 
 const resolveServeSource = vi.fn();
-const withinBudget = vi.fn();
 vi.mock("../../src/lib/source-campaign.js", () => ({
   resolveServeSource: (...a: unknown[]) => resolveServeSource(...a),
-  withinBudget: (...a: unknown[]) => withinBudget(...a),
 }));
 
 // Default: campaign-service states no source that runs on its own (runsOnItsOwn absent) = today's serve.
@@ -387,18 +385,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: RUN, response: { found: false, reason: "source_campaign_off" } }));
   });
 
-  it("a source over its daily budget answers source_budget_reached", async () => {
-    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
-    resolveServeSource.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: SOURCE_CAMPAIGN, detail: "spent" });
-    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
-    updateRun.mockResolvedValue(undefined);
-
-    const res = await post(app, AUDIENCE);
-
-    expect(res.body).toEqual({ found: false, reason: "source_budget_reached" });
-    expect(pullNext).not.toHaveBeenCalled();
-  });
-
   it("fails loud (500, no run, no serve) when the source campaign cannot be read", async () => {
     resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
     resolveServeSource.mockRejectedValueOnce(new Error("campaign-service source-campaigns read failed: 502"));
@@ -529,14 +515,14 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("records a refused source as `skipped` with its reason and detail", async () => {
     resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
-    resolveServeSource.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: SOURCE_CAMPAIGN, detail: "spent 500c of 500c" });
+    resolveServeSource.mockResolvedValueOnce({ kind: "refused", reason: "source_campaign_off", campaignId: SOURCE_CAMPAIGN, detail: "source campaign is off" });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
 
     await post(app, AUDIENCE);
 
     expect(recordLeadRequested).toHaveBeenCalledWith(
-      expect.objectContaining({ performed: { outcome: "skipped", reason: "source_budget_reached", detail: "spent 500c of 500c" } }),
+      expect.objectContaining({ performed: { outcome: "skipped", reason: "source_campaign_off", detail: "source campaign is off" } }),
     );
   });
 
@@ -579,7 +565,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("a source unit's OWN run (no x-audience-id) finds in its own audiences, files under itself, opens no on-demand run, records no on_demand event", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1", "aud-2"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
@@ -610,7 +595,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("a source unit's own run stating population contacted_pure_prospects walks no audience, finds in the brand's contacted people, answers the row id (NEVER-NO-FOLLOWUP-1014)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
@@ -643,7 +627,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("a source unit's own run asks with the email policy ITS OWN workflow states (CATCHALL-SOURCE-OWNS-1014)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
@@ -656,7 +639,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("a source unit's own run stating nothing sends no policy, whatever the pipes it feeds accept (valid only)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
@@ -689,7 +671,6 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
   it("a source unit's own run walks its audiences with the reach its lead strategy states (the workflow's reachableBy)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1", "aud-2"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
@@ -718,22 +699,8 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     const res = await postAsUnit();
 
     expect(res.body).toEqual({ found: false, reason: "source_campaign_off" });
-    expect(withinBudget).not.toHaveBeenCalled();
     expect(pullNext).not.toHaveBeenCalled();
     expect(recordLeadRequested).not.toHaveBeenCalled();
-  });
-
-  it("a source unit over its own budget finds nothing: found:false source_budget_reached", async () => {
-    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
-    withinBudget.mockResolvedValueOnce({ kind: "refused", reason: "source_budget_reached", campaignId: UNIT, detail: "spent 500c of 500c" });
-    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
-    updateRun.mockResolvedValue(undefined);
-
-    const res = await postAsUnit();
-
-    expect(res.body).toEqual({ found: false, reason: "source_budget_reached" });
-    expect(resolveSourceAudiences).not.toHaveBeenCalled();
-    expect(pullNext).not.toHaveBeenCalled();
   });
 
   it("an outreach campaign whose source runs on its own serves the STOCK: no on-demand find, no on_demand event, empty = source_stock_empty", async () => {
