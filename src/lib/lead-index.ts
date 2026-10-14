@@ -74,7 +74,11 @@ interface RawIndexRow {
  * off it, which is what made the walk cost 4.8s on a 17,910-person brand. `scope.leadIds` narrows
  * it to a handful of people for an incremental recompute (see lead-read-model.ts).
  */
-function leadIndexStatement(scope: LeadListScope) {
+function leadIndexStatement(
+  scope: LeadListScope,
+  from = leadCampaignBaseRelation(scope),
+  rowIds: readonly string[] | null = null,
+) {
   return sql<RawIndexRow[]>`
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.status, lc.served_at, lc.channel_sent_at,
@@ -82,7 +86,7 @@ function leadIndexStatement(scope: LeadListScope) {
       em.value AS email_value,
       concat_ws(E'\n', l.first_name, l.last_name, l.name, org.current_title, org.org_name, em.value)
         AS search_text
-    FROM ${leadCampaignBaseRelation(scope)}
+    FROM ${from}
     LEFT JOIN leads l ON l.id = lc.lead_id
     LEFT JOIN LATERAL (
       SELECT lo.title AS current_title, o.name AS org_name
@@ -101,16 +105,22 @@ function leadIndexStatement(scope: LeadListScope) {
       ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
       LIMIT 1
     ) em ON true
-    WHERE lc.org_id = ${scope.orgId}
+    WHERE ${leadIndexScopeFilter(scope)}
+      ${rowIds ? sql`AND lc.id = ANY(${[...rowIds]}::uuid[])` : sql``}
+    ORDER BY lc.created_at ASC, lc.id ASC
+  `;
+}
+
+/** The outer scope filter the index statement and its id pass share, so both read one population. */
+function leadIndexScopeFilter(scope: LeadListScope) {
+  return sql`lc.org_id = ${scope.orgId}
       ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignScopeIds(scope) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(scope)!})` : sql``}
       ${leadStatusScope(scope) ? sql`AND lc.status = ANY(${leadStatusScope(scope)!})` : sql``}
       ${scope.queryOrgId ? sql`AND lc.org_id = ${scope.queryOrgId}` : sql``}
       ${scope.userId ? sql`AND lc.user_id = ${scope.userId}` : sql``}
       ${scope.workflowSlug ? sql`AND lc.workflow_slug = ${scope.workflowSlug}` : sql``}
-      ${scope.leadIds ? sql`AND lc.lead_id = ANY(${[...scope.leadIds]}::uuid[])` : sql``}
-    ORDER BY lc.created_at ASC, lc.id ASC
-  `;
+      ${scope.leadIds ? sql`AND lc.lead_id = ANY(${[...scope.leadIds]}::uuid[])` : sql``}`;
 }
 
 function mapIndexRow(r: RawIndexRow): LeadIndexRow {
@@ -144,6 +154,38 @@ export async function* streamLeadIndex(
   for await (const rows of leadIndexStatement(scope).cursor(size)) {
     if (rows.length === 0) continue;
     yield rows.map(mapIndexRow);
+  }
+}
+
+/**
+ * The same population for a caller that does slow work between chunks (the read model's build and
+ * refresh: an email-gateway question and a standing resolve per chunk, seconds each).
+ *
+ * `streamLeadIndex` keeps ONE statement open across the whole walk, so while the caller works the
+ * Postgres backend sits in that statement waiting on the client (`ClientRead`): it held a
+ * connection and showed as the box's busiest active query in 37 of 40 samples for no CPU at all
+ * (DB-LOAD-1014). Here the scope is deduped ONCE into its winning rows (an id per person, never the
+ * rows themselves), then each chunk is read by a short statement fetching those rows by primary key
+ * with the same scope filter, joins and order: one dedup per walk as before, nothing held open
+ * between chunks. Re-running the dedup per chunk (narrowed to its people) cost 2.5x the database
+ * time. Like a single walk, which reads every chunk from the snapshot it started in, the winners are
+ * the ones of the walk's start; a row that left the scope since is not returned.
+ */
+export async function* walkLeadIndex(
+  scope: LeadListScope,
+  chunkSize: number,
+): AsyncGenerator<LeadIndexRow[]> {
+  const size = Math.max(1, chunkSize);
+  const winners = await sql<Array<{ id: string }>>`
+    SELECT lc.id::text AS id
+    FROM ${leadCampaignBaseRelation(scope)}
+    WHERE ${leadIndexScopeFilter(scope)}
+    ORDER BY lc.created_at ASC, lc.id ASC
+  `;
+  for (let i = 0; i < winners.length; i += size) {
+    const rowIds = winners.slice(i, i + size).map((w) => w.id);
+    const rows = await leadIndexStatement(scope, sql`leads_campaigns lc`, rowIds);
+    if (rows.length > 0) yield rows.map(mapIndexRow);
   }
 }
 
