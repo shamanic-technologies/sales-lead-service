@@ -2,6 +2,7 @@ import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy } from "./email-policy.js";
+import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
 import { serveNext, type Person, type ReachMethod, type ServiceContext } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
@@ -514,11 +515,13 @@ export async function pullNext(
       if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
       const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
       let served: Awaited<ReturnType<typeof serveNext>>;
+      const walked = { sourceCampaignId: params.campaignId, audienceId: candidateAudienceId, acceptedEmails: params.acceptedEmails };
       try {
         served = (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal)) ?? (await serveNext(candidateAudienceId, audienceCtx));
       } catch (err) {
         if (isAudienceNotServeableError(err)) {
           notServeable++;
+          await recordEmptyAnswer({ ...walked, reason: "not_serveable" });
           continue;
         }
         throw err;
@@ -531,9 +534,14 @@ export async function pullNext(
       }
       if (isNoRecentPostsAnswer(served)) {
         noRecentPosts++;
+        await recordEmptyAnswer({ ...walked, reason: "no_recent_posts" });
         continue;
       }
-      if (served.status === "exhausted" || !served.person) continue;
+      if (served.status === "exhausted" || !served.person) {
+        await recordEmptyAnswer({ ...walked, reason: "exhausted" });
+        continue;
+      }
+      await clearEmptyAnswer(walked);
       return recordServed(served, candidateAudienceId);
     }
     // An audience with nothing to read (competitor pages posted nothing) means the walk did NOT find everyone gone:
