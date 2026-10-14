@@ -14,14 +14,21 @@ const TIMEOUT_MS = 60_000;
 /** Jev's limit is 32k tokens of state; ~4 chars a token, with room for the question. */
 export const MAX_STATE_CHARS = 100_000;
 
+/**
+ * WHO pays: the org whose request asked (its identity headers, `/orgs/judgments`), or the PLATFORM for a
+ * background sweep no org request started (`/internal/platform-judgments`: service key only, no org, user or run).
+ */
+export type JudgmentPayer = SpendIdentity | "platform";
+
 async function ask(
   state: unknown,
   questions: Record<string, Record<string, unknown>>,
-  id: SpendIdentity,
+  id: JudgmentPayer,
 ): Promise<{ answers: Record<string, Record<string, unknown>>; model: string }> {
-  const res = await fetchWithRetry(`${CHAT_SERVICE_URL}/orgs/judgments`, {
+  const path = id === "platform" ? "/internal/platform-judgments" : "/orgs/judgments";
+  const res = await fetchWithRetry(`${CHAT_SERVICE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...identityHeaders(id) },
+    headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...(id === "platform" ? {} : identityHeaders(id)) },
     body: JSON.stringify({ state, questions }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
@@ -53,7 +60,7 @@ export interface YesNoQuestion {
 export async function judgeYesNo<K extends string>(
   state: unknown,
   questions: Record<K, YesNoQuestion>,
-  id: SpendIdentity,
+  id: JudgmentPayer,
 ): Promise<{ probabilities: Record<K, number>; model: string }> {
   const wire: Record<string, Record<string, unknown>> = {};
   for (const [k, q] of Object.entries(questions) as Array<[K, YesNoQuestion]>) {

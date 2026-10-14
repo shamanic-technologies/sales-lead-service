@@ -4,7 +4,7 @@
  * `relationship_judgments` with the thread position it read (`thread_seq`): a lead is judged again only
  * when its thread MOVED (a new message, a signup, a payment, a merge that brought another thread in).
  *
- * Billed to the org whose brand it is (chat-service declares the spend), on a run of this service. The
+ * Billed to the PLATFORM (no org request starts the sweep: chat-service `/internal/platform-judgments`). The
  * questions explain the relationship the owner means; no tag is decided by a rule on words here.
  */
 import { sql } from "drizzle-orm";
@@ -13,7 +13,6 @@ import { getCompanies } from "./company-client.js";
 import { judgeYesNo, MAX_STATE_CHARS, type YesNoQuestion } from "./qualification-judge.js";
 import { readThread, toSubject, type Scope, type Subject, type ThreadLine } from "./relationship-subjects.js";
 import { RELATIONSHIP_TAGS, type RelationshipTag } from "./relationship-tags.js";
-import type { SpendIdentity } from "./treg-client.js";
 
 const CONTEXT =
   "You read everything a brand knows about ONE person: every message between the person and the brand's own " +
@@ -116,7 +115,7 @@ export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subj
 }
 
 /** Judge one lead and freeze the answer. Throws on any failure (nothing written). */
-export async function judgeSubject(s: Subject, id: SpendIdentity): Promise<Record<RelationshipTag, number>> {
+export async function judgeSubject(s: Subject, runId: string): Promise<Record<RelationshipTag, number>> {
   const brand = await brandCard(s.brandId);
   const company = s.companyKey
     ? (await db.execute(sql`SELECT name, domain FROM relationship_companies WHERE org_id = ${s.orgId} AND human_id = ${s.humanId}::uuid`)) as unknown as Array<{ name: string | null; domain: string | null }>
@@ -128,11 +127,12 @@ export async function judgeSubject(s: Subject, id: SpendIdentity): Promise<Recor
     person: { name: s.name, emails: s.emails, phones: s.phones, channels: s.channels, company: company[0] ?? null },
     thread,
   };
-  const { probabilities, model } = await judgeYesNo(state, TAG_QUESTIONS, id);
+  // A background sweep: no org request started it, so the platform pays (chat-service platform judgments).
+  const { probabilities, model } = await judgeYesNo(state, TAG_QUESTIONS, "platform");
   await db.execute(sql`
     INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id, judged_at)
     VALUES (${s.orgId}, ${s.brandId}, ${s.humanId}::uuid, ${s.companyKey}, ${JSON.stringify(probabilities)}::jsonb,
-      ${s.threadSeq}::bigint, ${model}, ${id.runId}, now())
+      ${s.threadSeq}::bigint, ${model}, ${runId}, now())
     ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
       probabilities = excluded.probabilities, thread_seq = excluded.thread_seq, model = excluded.model,
       run_id = excluded.run_id, judged_at = excluded.judged_at
