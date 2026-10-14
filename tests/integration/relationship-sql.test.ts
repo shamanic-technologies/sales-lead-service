@@ -133,4 +133,15 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     await withdrawTag({ orgId, brandId, humanId: yuliia, tag: "personal", userId: "user-1" });
     expect(await allowed()).toBe(false);
   });
+
+  it("a lead's own employer (a local organization row) names the company on the block", async () => {
+    const human = randomUUID();
+    const [org] = (await db.execute(sql`INSERT INTO organizations (name, primary_domain) VALUES ('Local Co', 'local.co') RETURNING id::text`)) as unknown as Array<{ id: string }>;
+    await db.execute(sql`
+      INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name) VALUES (${orgId}, ${brandId}, ${human}::uuid, ${org.id}, 'Someone')
+    `);
+    const b = (await loadRelationships(orgId, brandId, [human])).get(human)!;
+    expect(b.company).toEqual({ id: org.id, name: "Local Co", domain: "local.co", source: "lead" });
+    await db.execute(sql`DELETE FROM organizations WHERE id = ${org.id}::uuid`);
+  });
 });

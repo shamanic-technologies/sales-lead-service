@@ -97,7 +97,7 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   const keyNames = new Map<string, { name: string | null; domain: string | null }>();
   if (leadKeys.length > 0) {
     const orgRows = (await db.execute(sql`
-      SELECT id::text AS id, name, domain FROM organizations WHERE id::text = ANY(${sql.param(leadKeys)}::text[])
+      SELECT id::text AS id, name, primary_domain AS domain FROM organizations WHERE id = ANY(${sql.param(leadKeys)}::uuid[])
     `)) as unknown as Array<{ id: string; name: string | null; domain: string | null }>;
     for (const r of orgRows) keyNames.set(r.id, { name: r.name, domain: r.domain });
     const brandKeys = leadKeys.filter((k) => !keyNames.has(k));
