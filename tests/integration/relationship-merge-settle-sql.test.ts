@@ -1,7 +1,7 @@
 /**
  * RELATIONSHIP-TAGS-1014b against a REAL database: an open "same person?" question the judge already put at
  * or above 50% is linked as its judgment (an answered or doubtful one is left alone), and the person's own
- * block lists the merges that made them, with the link to undo.
+ * block lists the merges that made them, with the link to undo and both names (an absorbed person from its CRM facts).
  */
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -36,7 +36,7 @@ describe.skipIf(!hasRealDatabase)("relationship merges settled from 50% sure", (
   const scope = { orgId, brandId };
 
   afterAll(async () => {
-    for (const t of ["relationship_merge_questions", "relationship_subjects", "org_human_aliases"]) {
+    for (const t of ["relationship_merge_questions", "relationship_subjects", "org_human_aliases", "relationship_person_humans", "crm_facts"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
   });
@@ -55,9 +55,17 @@ describe.skipIf(!hasRealDatabase)("relationship merges settled from 50% sure", (
     await question(0.5, "open");
     const doubt = await question(0.45, "open");
     const answered = await question(0.4, "linked", "person:user-1");
+    // The merged person keeps the lead row; the absorbed one is named from its own CRM facts.
     await db.execute(sql`
-      INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name) VALUES
-        (${orgId}, ${brandId}, ${ka}::uuid, '', 'Kevin Lourd Pro (WA)'), (${orgId}, ${brandId}, ${kb}::uuid, '', 'Kevin Lourd')
+      INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name) VALUES (${orgId}, ${brandId}, ${kb}::uuid, '', 'Kevin Lourd')
+    `);
+    await db.execute(sql`
+      INSERT INTO relationship_person_humans (org_id, brand_id, person_key, atomic_human_id) VALUES (${orgId}, ${brandId}, 'matrix:kevin-pro', ${ka}::uuid)
+    `);
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${(BigInt(Date.now()) * 1000n).toString()}::bigint, ${orgId}, ${brandId}, 'matrix:kevin-pro', 'Kevin Lourd Pro (WA)',
+        ${sql.param([])}::text[], ${sql.param([])}::text[], 'message_in', now(), 'event', 'matrix', ${randomUUID()}, '{}'::jsonb, '{}'::jsonb)
     `);
 
     expect(await settleOpenMerges(scope)).toBe(2);
