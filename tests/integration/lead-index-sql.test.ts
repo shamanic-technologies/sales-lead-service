@@ -35,7 +35,9 @@ async function collectIndex(
   for await (const chunk of streamLeadIndex(scope, chunkSize)) rows.push(...chunk);
   return rows;
 }
-const { fetchBasicLeadChunk } = await import("../../src/lib/basic-leads.js");
+const { fetchBasicLeadChunk, streamBasicLeadChunks, walkBasicLeadChunks } = await import(
+  "../../src/lib/basic-leads.js"
+);
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -145,6 +147,20 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
     for (const chunkSize of [1, 2, 1000]) {
       const walked = [];
       for await (const chunk of walkLeadIndex(scope, chunkSize)) {
+        expect(chunk.length).toBeLessThanOrEqual(chunkSize);
+        walked.push(...chunk);
+      }
+      expect(walked).toEqual(streamed);
+    }
+  });
+
+  it("walks the same full rows in short statements as the one streamed basic statement (DB-LOAD-1014)", async () => {
+    const streamed = [];
+    for await (const chunk of streamBasicLeadChunks(scope, 1000)) streamed.push(...chunk);
+    expect(streamed).toHaveLength(3);
+    for (const chunkSize of [1, 2, 1000]) {
+      const walked = [];
+      for await (const chunk of walkBasicLeadChunks(scope, chunkSize)) {
         expect(chunk.length).toBeLessThanOrEqual(chunkSize);
         walked.push(...chunk);
       }
