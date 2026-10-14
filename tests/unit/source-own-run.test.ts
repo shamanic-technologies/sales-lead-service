@@ -322,6 +322,19 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
     expect(claimStockedLead).not.toHaveBeenCalled();
   });
 
+  it("a pipe serving a source's stock and stating nothing takes the finds AS FOUND (the source chose its emails)", async () => {
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    await pullNext(stockParams());
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "as_found" }));
+    expect(claimStockedLead).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "as_found" }));
+  });
+
+  it("a pipe serving a source's stock that STATES a policy keeps its own word on every pool", async () => {
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    await pullNext({ ...stockParams(), acceptedEmails: "valid_only" });
+    expect(claimStockedLead).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "valid_only" }));
+  });
+
   it("stock empty = source_stock_empty, never exhaustion, nothing found on demand", async () => {
     claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
     await expect(pullNext(stockParams("aud-1"))).resolves.toEqual({ found: false, reason: "source_stock_empty" });

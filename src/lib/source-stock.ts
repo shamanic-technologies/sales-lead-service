@@ -3,7 +3,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
-import type { EmailPolicy } from "./email-policy.js";
+import type { PoolEmailPolicy } from "./email-policy.js";
 
 /**
  * THE STOCK A SOURCE FOUND ON ITS OWN, HANDED TO THE PIPE AFTER IT (LEADS-ONLY-FUNNEL-CAMPAIGN, 2026-10-12).
@@ -90,8 +90,8 @@ export async function claimStockedLead(params: {
   brandProfileId: string | null;
   /** The outreach pipe's contact methods (src/lib/channel-reach.ts): a found lead missing one stays in the stock. */
   reachableBy?: readonly ReachMethod[] | null;
-  /** The outreach pipe's email policy (src/lib/email-policy.ts): a find whose address it refuses stays in the stock. */
-  acceptedEmails?: EmailPolicy | null;
+  /** The outreach pipe's email policy (src/lib/email-policy.ts): `as_found` when it states none; a find it refuses stays. */
+  acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */

@@ -1,6 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { ReachMethod } from "./people-client.js";
-import { emailPolicyClause, type EmailPolicy } from "./email-policy.js";
+import { emailPolicyClause, type PoolEmailPolicy } from "./email-policy.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 
 /**
@@ -13,7 +13,7 @@ import type { RelationshipPolicy } from "./relationship-tags.js";
 export function reachClauses(
   leadId: SQL,
   reachableBy: readonly ReachMethod[] | null | undefined,
-  acceptedEmails?: EmailPolicy | null,
+  acceptedEmails?: PoolEmailPolicy | null,
   relationships?: RelationshipScope | null,
 ): SQL {
   const methods = [...new Set<ReachMethod>(["email", ...(reachableBy ?? [])])].sort();
