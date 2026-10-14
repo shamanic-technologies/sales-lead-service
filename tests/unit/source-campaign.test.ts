@@ -1,13 +1,12 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
 // SOURCE CAMPAIGNS (src/lib/source-campaign.ts): which source campaign a serve is filed under,
-// read from campaign-service, within the source campaign's own budget read from billing.
+// read from campaign-service. No per-campaign ceiling is read from billing (owner 2026-10-14: a
+// campaign's spend is bounded by its sales funnel caps, enforced by billing at authorize).
 
 vi.mock("../../src/config.js", () => ({
   CAMPAIGN_SERVICE_URL: "http://campaign",
   CAMPAIGN_SERVICE_API_KEY: "campaign-key",
-  BILLING_SERVICE_URL: "http://billing",
-  BILLING_SERVICE_API_KEY: "billing-key",
   HUMAN_SERVICE_URL: "http://human",
   HUMAN_SERVICE_API_KEY: "human-key",
 }));
@@ -36,14 +35,13 @@ function sources(entries: Array<{ featureSlug: string; campaignId: string; runni
   };
 }
 
-function stub(opts: { campaign: unknown; campaignStatus?: number; budget?: unknown; budgetStatus?: number; choice?: unknown; choiceStatus?: number; seen?: Array<{ url: string; headers: Record<string, string> }> }) {
+function stub(opts: { campaign: unknown; campaignStatus?: number; choice?: unknown; choiceStatus?: number; seen?: Array<{ url: string; headers: Record<string, string> }> }) {
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     opts.seen?.push({ url, headers: init?.headers as Record<string, string> });
     if (url === `http://campaign/internal/campaigns/${OUTREACH}/source-campaigns`) return json(opts.campaign, opts.campaignStatus ?? 200);
     if (url === `http://human/orgs/lead-sourcing/sources?brandId=${BRAND}&offerId=${OFFER}`) return json(opts.choice ?? { chosenOriginSlugs: [] }, opts.choiceStatus ?? 200);
-    if (url.startsWith(`http://billing/internal/brands/${BRAND}/campaign-budget?`)) {
-      return json(opts.budget ?? { dailyBudgetCents: null, today: null }, opts.budgetStatus ?? 200);
-    }
+    // billing retired its per-campaign ceiling read (stage 2): it answers 404.
+    if (url.startsWith("http://billing/")) return json({ error: "Not found" }, 404);
     throw new Error(`unexpected ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -61,29 +59,21 @@ describe("resolveServeSource", () => {
     vi.restoreAllMocks();
   });
 
-  it("files the serve under the origin's ON source campaign, asking billing for THAT campaign's budget", async () => {
+  it("files the serve under the origin's ON source campaign; billing's retired per-campaign read (404) is never asked", async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     stub({
       campaign: sources([
         { featureSlug: COLD, campaignId: "src-cold", running: true },
         { featureSlug: LINKEDIN, campaignId: "src-li", running: false },
       ]),
-      budget: { dailyBudgetCents: "4200", today: { spentCents: "1000.5" } },
       seen,
     });
     await expect(resolve()).resolves.toEqual({ kind: "source", campaignId: "src-cold", originSlug: COLD, sourceSlug: COLD, offerId: OFFER });
     expect(seen[0].headers).toMatchObject({ "x-api-key": "campaign-key", "x-org-id": ORG });
-    const budgetUrl = new URL(seen[1].url);
-    expect(Object.fromEntries(budgetUrl.searchParams)).toEqual({
-      offerId: OFFER,
-      legKey: "start_to_lead_found",
-      featureSlug: COLD,
-      campaignIds: "src-cold",
-    });
-    expect(seen[1].headers).toMatchObject({ "x-api-key": "billing-key", "x-org-id": ORG });
+    expect(seen.some((x) => x.url.startsWith("http://billing/"))).toBe(false);
   });
 
-  it("an offer whose sources are not campaigns yet keeps today's serve (legacy), billing never asked", async () => {
+  it("an offer whose sources are not campaigns yet keeps today's serve (legacy)", async () => {
     const fetchMock = stub({ campaign: sources([]) });
     await expect(resolve()).resolves.toEqual({ kind: "legacy", why: "offer_not_on_source_campaigns" });
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -115,23 +105,7 @@ describe("resolveServeSource", () => {
     await expect(resolve(LINKEDIN)).resolves.toMatchObject({ kind: "refused", reason: "source_campaign_off", campaignId: null });
   });
 
-  it("the source campaign spent its daily budget today: refused source_budget_reached", async () => {
-    stub({
-      campaign: sources([{ featureSlug: COLD, campaignId: "src-cold", running: true }]),
-      budget: { dailyBudgetCents: "4200", today: { spentCents: "4200" } },
-    });
-    await expect(resolve()).resolves.toMatchObject({ kind: "refused", reason: "source_budget_reached", campaignId: "src-cold" });
-  });
-
-  it("no ceiling stated for the source campaign: nothing caps it here (the outreach gate paces, as today)", async () => {
-    stub({
-      campaign: sources([{ featureSlug: COLD, campaignId: "src-cold", running: true }]),
-      budget: { dailyBudgetCents: null, today: { spentCents: "999999" } },
-    });
-    await expect(resolve()).resolves.toMatchObject({ kind: "source", campaignId: "src-cold" });
-  });
-
-  it("LEAD SOURCING (owner 2026-10-11): an origin human-service chose is filed under the Lead Sourcing campaign, within ITS budget", async () => {
+  it("LEAD SOURCING (owner 2026-10-11): an origin human-service chose is filed under the Lead Sourcing campaign", async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     stub({
       campaign: sources([
@@ -139,15 +113,12 @@ describe("resolveServeSource", () => {
         { featureSlug: "lead-sourcing", campaignId: "src-ls", running: true },
       ]),
       choice: { chosenOriginSlugs: [COLD, LINKEDIN] },
-      budget: { dailyBudgetCents: null, today: null },
       seen,
     });
     await expect(resolve()).resolves.toEqual({ kind: "source", campaignId: "src-ls", originSlug: COLD, sourceSlug: "lead-sourcing", offerId: OFFER });
     const human = seen.find((x) => x.url.startsWith("http://human/"))!;
     expect(human.headers).toMatchObject({ "x-api-key": "human-key", "x-org-id": ORG, "x-user-id": "user-1", "x-run-id": "run-1" });
-    const budget = new URL(seen.find((x) => x.url.startsWith("http://billing/"))!.url);
-    expect(budget.searchParams.get("featureSlug")).toBe("lead-sourcing");
-    expect(budget.searchParams.get("campaignIds")).toBe("src-ls");
+    expect(seen.some((x) => x.url.startsWith("http://billing/"))).toBe(false);
   });
 
   it("LEAD SOURCING: an origin human-service did not choose is refused source_campaign_off, nothing bought", async () => {
@@ -174,13 +145,11 @@ describe("resolveServeSource", () => {
     await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
   });
 
-  it("fails loud when campaign-service or billing cannot answer", async () => {
+  it("fails loud when campaign-service cannot answer", async () => {
     const { SourceCampaignUnresolvedError } = await import("../../src/lib/source-campaign.js");
     stub({ campaign: { error: "boom" }, campaignStatus: 500 });
     await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
     stub({ campaign: { unexpected: true } });
-    await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
-    stub({ campaign: sources([{ featureSlug: COLD, campaignId: "src-cold", running: true }]), budget: { error: "x" }, budgetStatus: 502 });
     await expect(resolve()).rejects.toBeInstanceOf(SourceCampaignUnresolvedError);
   });
 });

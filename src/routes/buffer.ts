@@ -17,7 +17,7 @@ import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
 import { poolSenderOf, type PoolSender } from "../lib/retry-pool.js";
 import type { ReachMethod } from "../lib/people-client.js";
 import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reasons.js";
-import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
+import { resolveServeSource, type ServeSource } from "../lib/source-campaign.js";
 import { decideSourceMode, type SourceUnit } from "../lib/source-mode.js";
 import { resolveSourceAudiences } from "../lib/source-audiences.js";
 import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
@@ -178,23 +178,15 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     }
 
     if (sourceMode.kind === "own_run") {
-      // The source unit's OWN run: within its own budget, in its own audiences, filed under itself.
+      // The source unit's OWN run: in its own audiences, filed under itself.
       const unit = sourceMode.unit;
       ownRunUnit = unit;
       runFeatureSlug = unit.featureSlug;
       if (unit.status !== "ongoing") {
         serveSource = { kind: "refused", reason: SOURCE_CAMPAIGN_OFF_REASON, campaignId: unit.id, detail: `source campaign ${unit.id} (${unit.featureSlug}) is ${unit.status}` };
       } else {
-        const budget = await withinBudget({
-          orgId: req.orgId!,
-          brandId: unit.brandId,
-          offerId: unit.offerId,
-          sourceSlug: unit.featureSlug,
-          campaignId: unit.id,
-          originSlug: unit.featureSlug,
-        });
-        if (budget.kind === "refused") serveSource = budget;
-        else if (population) {
+        // What it may spend is its sales funnel's caps, enforced by billing at every spend authorization.
+        if (population) {
           // Found among the brand's own contacted people (src/lib/prospect-followup.ts): nothing to walk, nothing bought.
         } else {
           const found = await resolveSourceAudiences({
