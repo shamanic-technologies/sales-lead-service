@@ -43,6 +43,9 @@ describe("policyAllows business_only", () => {
     expect(policyAllows("business_only", { ...base, tags: ["customer", "prospect"] })).toBe(true);
     expect(policyAllows("business_only", { ...base, tags: ["other_professional"] })).toBe(true);
   });
+  it("an unanswered same-person question holds them back", () => {
+    expect(policyAllows("business_only", { ...base, tags: ["customer"], openMerge: true })).toBe(false);
+  });
 });
 
 describe("merge blocking across spellings and alphabets", () => {
