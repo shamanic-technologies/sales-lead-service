@@ -38,6 +38,7 @@ import {
 } from "./lead-standing-resolver.js";
 import type { LeadStanding } from "./lead-standing.js";
 import type { OfferCard, OfferCardResolver } from "./offer-card-client.js";
+import type { ReplyVerdictsMemo } from "./reply-verdicts-client.js";
 
 /** One campaign card under a person: what that campaign is, and what happened in it. */
 export interface LeadCampaignEvidence {
@@ -106,6 +107,11 @@ export interface CampaignBreakdownOptions {
    * brand / org / offer / multi-member-identity read, which is where the breakdown is read.
    */
   singleCampaignScopeId?: string | null;
+  /**
+   * The request's shared reply-verdict reads: the cards ask about the same people the rows did, so
+   * they reuse that answer rather than asking instantly-service a second time (DASH-LATENCY-1014).
+   */
+  replyVerdicts?: ReplyVerdictsMemo;
 }
 
 interface MembershipRow {
@@ -201,8 +207,9 @@ export function createCampaignBreakdownResolver(
   // Two resolvers, because a card whose delivery the provider cannot speak to must not read as
   // "never contacted": it is resolved with the delivery layer marked unasked, which answers
   // `unresolved` / `delivery_not_queried` unless a hand statement decides it on its own.
-  const measuredStanding = createLeadStandingResolver({ ...standingCtx, deliveryQueried });
-  const unmeasuredStanding = createLeadStandingResolver({ ...standingCtx, deliveryQueried: false });
+  const replyVerdicts = options.replyVerdicts;
+  const measuredStanding = createLeadStandingResolver({ ...standingCtx, deliveryQueried, replyVerdicts });
+  const unmeasuredStanding = createLeadStandingResolver({ ...standingCtx, deliveryQueried: false, replyVerdicts });
   // The org's campaign identities, read ONCE for the whole response and reused by every chunk.
   let families: Promise<CampaignFamilies | null> | null = null;
 

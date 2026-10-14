@@ -84,7 +84,7 @@ import {
   type LeadStandingResolver,
   type StandingRow,
 } from "../lib/lead-standing-resolver.js";
-import { ReplyVerdictsUnavailableError } from "../lib/reply-verdicts-client.js";
+import { createReplyVerdictsMemo, ReplyVerdictsUnavailableError } from "../lib/reply-verdicts-client.js";
 import {
   parseLeadStandingFilter,
   parseSalesInterestStageFilter,
@@ -928,12 +928,16 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
     // Likewise ONE standing resolver for the whole response: the org's campaign -> leg map is
     // read once and reused by every chunk, so naming the standing on fifty thousand rows costs the
     // same single campaign-service call as naming it on one.
+    // The replies each person sent, read ONCE per request and shared by the row standing and the
+    // campaign cards below (both ask about the same people; reply-verdicts-client.ts).
+    const replyVerdicts = createReplyVerdictsMemo();
     const standingResolver = createLeadStandingResolver({
       orgId: req.orgId!,
       userId: req.userId ?? null,
       runId: req.runId ?? null,
       brandId: brandIdStr ?? null,
       deliveryQueried: hasScopeForStatus,
+      replyVerdicts,
     });
     // The nested campaign cards, when asked for. ONE resolver for the whole response: the org's
     // campaign identities and its campaign -> offer map are read once and reused by every chunk.
@@ -947,6 +951,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           deliveryQueried: hasScopeForStatus,
           offerResolver,
           singleCampaignScopeId: statusCampaignIdStr ?? null,
+          replyVerdicts,
         })
       : null;
 
@@ -1116,14 +1121,10 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             delivery: standingDelivery(deliveryByRow.get(r.id)!),
           })),
         );
-        const [audienceMap, offerMap, standingMap] = await Promise.all([
-          audiencePending,
-          offerPending,
-          standingPending,
-        ]);
-
-        const breakdownMap = breakdownResolver
-          ? await breakdownResolver.resolve(
+        // The campaign cards read only the overlay and the gateway answer above, never the row's
+        // standing, so they are resolved ALONGSIDE it rather than after it (DASH-LATENCY-1014).
+        const breakdownPending = breakdownResolver
+          ? breakdownResolver.resolve(
               basicRows.map((r) => ({
                 id: r.id,
                 leadId: r.leadId,
@@ -1132,7 +1133,13 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
               })),
               statusMap,
             )
-          : null;
+          : Promise.resolve(null);
+        const [audienceMap, offerMap, standingMap, breakdownMap] = await Promise.all([
+          audiencePending,
+          offerPending,
+          standingPending,
+          breakdownPending,
+        ]);
 
         for (const r of basicRows) {
           const emailValue = r.email?.value ?? "";
@@ -1301,30 +1308,33 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             : DEFAULT_STATUS,
         );
       }
-      const standingMap = await resolveStandings(
-        standingResolver,
-        chunkRows.map((row) => ({
-          id: row.id,
-          leadId: row.leadId,
-          campaignId: row.campaignId,
-          brandIds: row.brandIds,
-          status: row.status,
-          email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
-          delivery: standingDelivery(deliveryByRow.get(row.id)!),
-        })),
-      );
-
-      const breakdownMap = breakdownResolver
-        ? await breakdownResolver.resolve(
-            chunkRows.map((row) => ({
-              id: row.id,
-              leadId: row.leadId,
-              email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
-              delivery: deliveryByRow.get(row.id) ?? null,
-            })),
-            statusMap,
-          )
-        : null;
+      // The row standing and the campaign cards are independent reads of the same overlay: asked
+      // at once (DASH-LATENCY-1014).
+      const [standingMap, breakdownMap] = await Promise.all([
+        resolveStandings(
+          standingResolver,
+          chunkRows.map((row) => ({
+            id: row.id,
+            leadId: row.leadId,
+            campaignId: row.campaignId,
+            brandIds: row.brandIds,
+            status: row.status,
+            email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
+            delivery: standingDelivery(deliveryByRow.get(row.id)!),
+          })),
+        ),
+        breakdownResolver
+          ? breakdownResolver.resolve(
+              chunkRows.map((row) => ({
+                id: row.id,
+                leadId: row.leadId,
+                email: primaryEmail(fullLeadByLeadId.get(row.leadId))?.value ?? null,
+                delivery: deliveryByRow.get(row.id) ?? null,
+              })),
+              statusMap,
+            )
+          : Promise.resolve(null),
+      ]);
 
       for (const row of chunkRows) {
         const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;

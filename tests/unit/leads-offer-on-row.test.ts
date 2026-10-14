@@ -26,6 +26,13 @@ vi.mock("../../src/db/index.js", () => ({
   }),
 }));
 
+// The standing's statement reads now run alongside the reply read rather than after it, so the
+// level-tag read is started even when the replies fail; this file's `sql` mock hands out the walk's
+// row chunks in call order, so that read must not draw one of them.
+vi.mock("../../src/lib/level-tags.js", () => ({
+  loadLevelTags: async () => ({ companyKeyOf: new Map(), companyMarks: new Map(), companyStatus: new Map(), humanOptOuts: new Set(), humanFacts: new Map() }),
+}));
+
 vi.mock("../../src/lib/lead-shape.js", () => ({
   buildFullLeadsBatch: (ids: string[]) =>
     Promise.resolve(

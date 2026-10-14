@@ -26,12 +26,14 @@ export function isInteractiveRead(method: string | undefined, url: string | unde
   const parts = path.split("/").filter((p) => p.length > 0);
   if (parts[0] !== "orgs" || parts[1] !== "leads") return false;
   if (parts.length === 2) {
-    // A bounded page a person looks at — never a walk of the whole population.
+    // A bounded page a person looks at — never a walk of the whole population. `include=campaigns`
+    // nests each person's campaign cards under a row: still one bounded page, and the one the
+    // dashboard's Leads page sends on every load, so it waits on the interactive loop too
+    // (DASH-LATENCY-1014; it sat behind features-service's compact walks on the general one).
     return (
       params.has("limit") &&
       params.get("view") !== "compact" &&
-      params.get("format") !== "csv" &&
-      !params.has("include")
+      params.get("format") !== "csv"
     );
   }
   if (parts.length === 3) {
