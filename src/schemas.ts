@@ -8054,6 +8054,17 @@ registry.registerPath({
 
 const RelationshipTagEnum = z.enum(RELATIONSHIP_TAGS);
 
+const SettledMergeSchema = z
+  .object({
+    linkId: z.string().openapi({ description: "Undo it with POST /orgs/brands/{brandId}/relationships/merges/{linkId}/undo (the pair is never asked again)." }),
+    humanIds: z.array(z.string()).openapi({ description: "The two people (atomic human ids) the merge joined." }),
+    names: z.array(z.string().nullable()).openapi({ description: "Their names, same order as humanIds." }),
+    judgedBy: z.string().openapi({ description: "`jev` (the judge, from 50% sure) or `person:<userId>`." }),
+    confidence: z.number().openapi({ description: "The judge's P(same person)." }),
+    at: z.string(),
+  })
+  .openapi("RelationshipSettledMerge");
+
 export const RelationshipBlockSchema = z
   .object({
     humanId: z.string().nullable().openapi({ description: "The human (human-service, this org's view) the block is about." }),
@@ -8085,10 +8096,13 @@ export const RelationshipBlockSchema = z
         description: "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure.",
       }),
     }),
+    merges: z.array(SettledMergeSchema).openapi({
+      description: "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId.",
+    }),
   })
   .openapi("RelationshipBlock", {
     description:
-      "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between).",
+      "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.5, no < 0.4, unsure between: the true doubt, asked on the review page).",
   });
 
 const relationshipHeaders = (withUser: boolean) => [
@@ -8151,7 +8165,7 @@ registry.registerPath({
                 }),
               ),
               settled: z.object({
-                merges: z.array(z.object({ linkId: z.string(), humanIds: z.array(z.string()), names: z.array(z.string().nullable()), judgedBy: z.string(), at: z.string() })),
+                merges: z.array(SettledMergeSchema),
                 people: z.array(
                   z.object({
                     humanId: z.string(),

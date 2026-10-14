@@ -9868,6 +9868,49 @@
           "campaignUnknown"
         ]
       },
+      "RelationshipSettledMerge": {
+        "type": "object",
+        "properties": {
+          "linkId": {
+            "type": "string",
+            "description": "Undo it with POST /orgs/brands/{brandId}/relationships/merges/{linkId}/undo (the pair is never asked again)."
+          },
+          "humanIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The two people (atomic human ids) the merge joined."
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "nullable": true
+            },
+            "description": "Their names, same order as humanIds."
+          },
+          "judgedBy": {
+            "type": "string",
+            "description": "`jev` (the judge, from 50% sure) or `person:<userId>`."
+          },
+          "confidence": {
+            "type": "number",
+            "description": "The judge's P(same person)."
+          },
+          "at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "linkId",
+          "humanIds",
+          "names",
+          "judgedBy",
+          "confidence",
+          "at"
+        ]
+      },
       "RelationshipBlock": {
         "type": "object",
         "properties": {
@@ -10029,6 +10072,13 @@
             "required": [
               "business_only"
             ]
+          },
+          "merges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelationshipSettledMerge"
+            },
+            "description": "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId."
           }
         },
         "required": [
@@ -10038,9 +10088,10 @@
           "unsureTags",
           "judgedAt",
           "details",
-          "policies"
+          "policies",
+          "merges"
         ],
-        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between)."
+        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.5, no < 0.4, unsure between: the true doubt, asked on the review page)."
       },
       "RelationshipReview": {
         "type": "object",
@@ -10241,38 +10292,7 @@
               "merges": {
                 "type": "array",
                 "items": {
-                  "type": "object",
-                  "properties": {
-                    "linkId": {
-                      "type": "string"
-                    },
-                    "humanIds": {
-                      "type": "array",
-                      "items": {
-                        "type": "string"
-                      }
-                    },
-                    "names": {
-                      "type": "array",
-                      "items": {
-                        "type": "string",
-                        "nullable": true
-                      }
-                    },
-                    "judgedBy": {
-                      "type": "string"
-                    },
-                    "at": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "linkId",
-                    "humanIds",
-                    "names",
-                    "judgedBy",
-                    "at"
-                  ]
+                  "$ref": "#/components/schemas/RelationshipSettledMerge"
                 }
               },
               "people": {
@@ -17979,7 +17999,7 @@
                             }
                           }
                         ],
-                        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between)."
+                        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.5, no < 0.4, unsure between: the true doubt, asked on the review page)."
                       }
                     }
                   },

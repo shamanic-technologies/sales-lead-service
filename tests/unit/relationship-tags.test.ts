@@ -14,7 +14,7 @@ describe("decideTags", () => {
         ["customer", { evidence: "payment", at }],
         ["prospect", { evidence: "signup", at }],
       ]),
-      judgment: { probabilities: { prospect: 0.1, personal: 0.9, investor: 0.5, team: 0.1 }, at },
+      judgment: { probabilities: { prospect: 0.1, personal: 0.9, investor: 0.45, team: 0.1 }, at },
     });
     const by = new Map(d.map((x) => [x.tag, x]));
     expect(by.get("customer")).toMatchObject({ state: "no", basis: "person" });
@@ -26,9 +26,11 @@ describe("decideTags", () => {
   });
 
   it("thresholds", () => {
-    expect(judgedState(0.75)).toBe("yes");
-    expect(judgedState(0.35)).toBe("no");
-    expect(judgedState(0.5)).toBe("unsure");
+    expect(judgedState(0.5)).toBe("yes");
+    expect(judgedState(0.59)).toBe("yes");
+    expect(judgedState(0.4)).toBe("unsure");
+    expect(judgedState(0.49)).toBe("unsure");
+    expect(judgedState(0.39)).toBe("no");
   });
 });
 
