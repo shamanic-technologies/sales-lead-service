@@ -21,6 +21,8 @@ import { resolveSourceAudiences } from "../lib/source-audiences.js";
 import { SOURCE_CAMPAIGN_OFF_REASON, TARGETED_AUDIENCES_UNAVAILABLE_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
+import { recordSourceEmailDemand, sourceRunEmailPolicy } from "../lib/source-email-demand.js";
+import type { EmailPolicy } from "../lib/email-policy.js";
 
 const router = Router();
 
@@ -99,6 +101,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
   let reachableBy: ReachMethod[] | null = null;
+  // The email policy the serve asks with: the caller's word, widened for a source unit's own run to what its pipes
+  // accept (src/lib/source-email-demand.ts: the catch-all choice is made at the find).
+  let acceptedEmails: EmailPolicy | null = parsed.data.acceptedEmails ?? null;
   // The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve, the
   // campaign's own pools still drain (src/lib/buffer.ts).
   let freshServeRefused: { reason: ServeEmptyReason; detail: string } | null = null;
@@ -183,7 +188,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
           // The campaign's targeting is a hard subset: none of its audiences walkable = nobody looked for, said why.
           if (found.kind === "targets_unavailable") {
             serveSource = { kind: "refused", reason: TARGETED_AUDIENCES_UNAVAILABLE_REASON, campaignId: unit.id, detail: found.detail };
-          } else findAudienceIds = found.audienceIds;
+          } else {
+            findAudienceIds = found.audienceIds;
+            acceptedEmails = await sourceRunEmailPolicy(unit.id, acceptedEmails);
+          }
         }
       }
     } else {
@@ -241,6 +249,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         const onDemandSource = serveSource.kind === "source" && !sourceMode.sourceCampaignIds.includes(serveSource.campaignId);
         if (!onDemandSource) {
           stockSourceIds = sourceMode.sourceCampaignIds;
+          // What this pipe accepts reaches the sources that find for it (they check the emails, not this ask).
+          await recordSourceEmailDemand({ sourceCampaignIds: stockSourceIds, outreachCampaignId: campaignId, acceptedEmails });
           serveSource = { kind: "legacy", why: "offer_not_on_source_campaigns" };
           runFeatureSlug = featureSlug;
         }
@@ -384,7 +394,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         audienceId: req.audienceId ?? null,
         ...(pullMode ? { mode: pullMode } : {}),
         ...(reachableBy ? { reachableBy } : {}),
-        ...(parsed.data.acceptedEmails ? { acceptedEmails: parsed.data.acceptedEmails } : {}),
+        ...(acceptedEmails ? { acceptedEmails } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,
