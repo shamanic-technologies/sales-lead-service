@@ -765,10 +765,19 @@ export const FullLeadSchema = z
       .nullable()
       .openapi({
         description:
-          "Recipient's IANA timezone (e.g. 'America/New_York'), resolved upstream from the lead's location. " +
-          "Forward this to the send path so cold email is scheduled in the recipient's local business hours " +
-          "(email-gateway-service → instantly-service). null when upstream provides none — the send path falls back to a safe default.",
+          "Recipient's IANA timezone (e.g. 'America/New_York'): stated by the client, carried from the enrichment, or " +
+          "inferred from what we hold (phone country, location, company, email country domain); `timezoneSource` says which. " +
+          "Forward this to the send path so every message is scheduled in the recipient's local business hours. null when " +
+          "nothing tells it — the send path falls back to a safe default.",
         example: "America/New_York",
+      }),
+    timezoneSource: z
+      .enum(["stated", "enrichment", "inferred"])
+      .nullable()
+      .openapi({
+        description:
+          "Where `timezone` came from: stated (the client said so) > enrichment > inferred. A weaker source never replaces a stronger one. null when timezone is null.",
+        example: "inferred",
       }),
     businessLanguages: z
       .array(z.string())
@@ -893,6 +902,7 @@ export const FullLeadSchema = z
       state: "ME",
       country: "USA",
       timezone: "America/New_York",
+      timezoneSource: "enrichment",
       seniority: "founder",
       departments: ["c_suite"],
       subdepartments: ["founders"],
@@ -1226,6 +1236,7 @@ export const BufferNextResponseSchema = z
               state: "ME",
               country: "USA",
               timezone: "America/New_York",
+              timezoneSource: "enrichment",
               seniority: "founder",
               departments: ["c_suite"],
               subdepartments: null,
@@ -6953,6 +6964,19 @@ const NamedPersonRequestSchema = z
     name: z.string().max(300).nullish().openapi({
       description: "The person's full name as the statement carries it; used only for a lead created here with no CRM name.",
     }),
+    phone: z.string().min(3).max(50).nullish().openapi({
+      description:
+        "The person's phone as the statement carries it, international form preferred (+44 7700 900123). Recorded as the lead's " +
+        "phone (unless another lead already holds it) and read to infer the person's timezone when none is stated.",
+      example: "+447700900123",
+    }),
+    timezone: z.string().max(64).nullish().openapi({
+      description:
+        "The person's IANA timezone, when the client knows it (400 when not an IANA zone). A stated zone always wins: it " +
+        "replaces an inferred or enriched one and is never replaced by them. Absent = inferred from what we hold (phone " +
+        "country, location, company, email country domain), or null when nothing tells it.",
+      example: "Europe/London",
+    }),
   })
   .openapi("NamedPersonRequest");
 
@@ -6971,6 +6995,13 @@ const NamedPersonResponseSchema = z
     knownBy: z.enum(["crm_fact", "brand_lead", "statement"]).openapi({
       description:
         "Why the brand is known to know the person: a live fact of its CRM copy, a lead already filed under the brand, or the brand's own statement (`statedBy`, now or earlier).",
+    }),
+    timezone: z.string().nullable().openapi({
+      description: "The person's IANA timezone after this filing (stated, enrichment, or inferred); null when nothing tells it.",
+      example: "Europe/London",
+    }),
+    timezoneSource: z.enum(["stated", "enrichment", "inferred"]).nullable().openapi({
+      description: "Where `timezone` came from. stated > enrichment > inferred: a weaker source never replaces a stronger one.",
     }),
   })
   .openapi("NamedPersonResponse");

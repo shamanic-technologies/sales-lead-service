@@ -33,6 +33,7 @@ const minimalLead = {
   state: null,
   country: null,
   timezone: null,
+  timezoneSource: null,
   businessLanguages: null,
   seniority: null,
   departments: null,
@@ -163,8 +164,11 @@ describe("FullLeadSchema", () => {
 
   it("accepts timezone as an IANA string and as null", () => {
     expect(
-      FullLeadSchema.safeParse({ ...minimalLead, timezone: "America/New_York" }).success,
+      FullLeadSchema.safeParse({ ...minimalLead, timezone: "America/New_York", timezoneSource: "inferred" }).success,
     ).toBe(true);
+    expect(
+      FullLeadSchema.safeParse({ ...minimalLead, timezone: "Europe/London", timezoneSource: "guessed" }).success,
+    ).toBe(false);
     expect(
       FullLeadSchema.safeParse({ ...minimalLead, timezone: null }).success,
     ).toBe(true);
