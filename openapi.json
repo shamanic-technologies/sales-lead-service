@@ -1381,9 +1381,17 @@
             "example": [
               "phone"
             ]
+          },
+          "relationships": {
+            "type": "string",
+            "enum": [
+              "business_only"
+            ],
+            "description": "The pipe's relationship policy (tactic \"Business contacts only\", RELATIONSHIP-TAGS-1014). `business_only`: nobody the brand knows as personal, investor, supplier, team, partner or advisor (yes, or still unsure) is handed out, nor anybody whose whole thread was never judged yet. Applies to every already-paid pool and is forwarded to human-service serve-next. Absent = today's serve.",
+            "example": "business_only"
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`), both optional; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`), all optional; an empty body is today's serve."
       },
       "LeadsResponse": {
         "type": "object",
@@ -9858,6 +9866,603 @@
           "foundNow",
           "campaignUnknown"
         ]
+      },
+      "RelationshipBlock": {
+        "type": "object",
+        "properties": {
+          "humanId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The human (human-service, this org's view) the block is about."
+          },
+          "company": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "nullable": true
+              },
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "domain": {
+                "type": "string",
+                "nullable": true
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "lead",
+                  "email_domain",
+                  "signup",
+                  "treg_enrich",
+                  "treg_identity",
+                  "person"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "domain",
+              "source"
+            ],
+            "description": "The company of this lead; null while unknown."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "personal",
+                "customer",
+                "prospect",
+                "team",
+                "investor",
+                "advisor",
+                "supplier",
+                "partner",
+                "other_professional"
+              ]
+            },
+            "description": "Tags that are YES: a person's word, a source's evidence, or a confident judgment."
+          },
+          "unsureTags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "personal",
+                "customer",
+                "prospect",
+                "team",
+                "investor",
+                "advisor",
+                "supplier",
+                "partner",
+                "other_professional"
+              ]
+            },
+            "description": "Tags the judge is unsure about: waiting on the review page."
+          },
+          "judgedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When the whole thread was last judged; null = never judged."
+          },
+          "details": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tag": {
+                  "type": "string",
+                  "enum": [
+                    "personal",
+                    "customer",
+                    "prospect",
+                    "team",
+                    "investor",
+                    "advisor",
+                    "supplier",
+                    "partner",
+                    "other_professional"
+                  ]
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "human",
+                    "lead"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "yes",
+                    "no",
+                    "unsure"
+                  ]
+                },
+                "basis": {
+                  "type": "string",
+                  "enum": [
+                    "evidence",
+                    "judgment",
+                    "person"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "nullable": true
+                },
+                "evidence": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "at": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "tag",
+                "level",
+                "state",
+                "basis",
+                "confidence",
+                "evidence",
+                "at"
+              ]
+            }
+          },
+          "policies": {
+            "type": "object",
+            "properties": {
+              "business_only": {
+                "type": "boolean",
+                "description": "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure."
+              }
+            },
+            "required": [
+              "business_only"
+            ]
+          }
+        },
+        "required": [
+          "humanId",
+          "company",
+          "tags",
+          "unsureTags",
+          "judgedAt",
+          "details",
+          "policies"
+        ],
+        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between)."
+      },
+      "RelationshipReview": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "mergeQuestions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "confidence": {
+                  "type": "number"
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "a": {
+                  "type": "object",
+                  "properties": {
+                    "humanId": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "emails": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "phones": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "channels": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "humanId",
+                    "name",
+                    "emails",
+                    "phones",
+                    "channels"
+                  ]
+                },
+                "b": {
+                  "type": "object",
+                  "properties": {
+                    "humanId": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "emails": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "phones": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "channels": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "humanId",
+                    "name",
+                    "emails",
+                    "phones",
+                    "channels"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "confidence",
+                "reason",
+                "a",
+                "b"
+              ]
+            }
+          },
+          "tagQuestions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "humanId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "tag": {
+                  "type": "string",
+                  "enum": [
+                    "personal",
+                    "customer",
+                    "prospect",
+                    "team",
+                    "investor",
+                    "advisor",
+                    "supplier",
+                    "partner",
+                    "other_professional"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "nullable": true
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "humanId",
+                "name",
+                "tag",
+                "confidence",
+                "reason"
+              ]
+            }
+          },
+          "companyQuestions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "humanId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "candidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "domain": {
+                        "type": "string",
+                        "nullable": true
+                      },
+                      "source": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "domain",
+                      "source"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "humanId",
+                "name",
+                "candidates"
+              ]
+            }
+          },
+          "settled": {
+            "type": "object",
+            "properties": {
+              "merges": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "linkId": {
+                      "type": "string"
+                    },
+                    "humanIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "judgedBy": {
+                      "type": "string"
+                    },
+                    "at": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "linkId",
+                    "humanIds",
+                    "names",
+                    "judgedBy",
+                    "at"
+                  ]
+                }
+              },
+              "people": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "humanId": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "company": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "name": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "domain": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "source": {
+                          "type": "string",
+                          "enum": [
+                            "lead",
+                            "email_domain",
+                            "signup",
+                            "treg_enrich",
+                            "treg_identity",
+                            "person"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "domain",
+                        "source"
+                      ],
+                      "description": "The company of this lead; null while unknown."
+                    },
+                    "tags": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "personal",
+                          "customer",
+                          "prospect",
+                          "team",
+                          "investor",
+                          "advisor",
+                          "supplier",
+                          "partner",
+                          "other_professional"
+                        ]
+                      }
+                    },
+                    "details": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tag": {
+                            "type": "string",
+                            "enum": [
+                              "personal",
+                              "customer",
+                              "prospect",
+                              "team",
+                              "investor",
+                              "advisor",
+                              "supplier",
+                              "partner",
+                              "other_professional"
+                            ]
+                          },
+                          "level": {
+                            "type": "string",
+                            "enum": [
+                              "human",
+                              "lead"
+                            ]
+                          },
+                          "state": {
+                            "type": "string",
+                            "enum": [
+                              "yes",
+                              "no",
+                              "unsure"
+                            ]
+                          },
+                          "basis": {
+                            "type": "string",
+                            "enum": [
+                              "evidence",
+                              "judgment",
+                              "person"
+                            ]
+                          },
+                          "confidence": {
+                            "type": "number",
+                            "nullable": true
+                          },
+                          "evidence": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "at": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "tag",
+                          "level",
+                          "state",
+                          "basis",
+                          "confidence",
+                          "evidence",
+                          "at"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "humanId",
+                    "name",
+                    "company",
+                    "tags",
+                    "details"
+                  ]
+                }
+              }
+            },
+            "required": [
+              "merges",
+              "people"
+            ]
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "subjects": {
+                "type": "integer"
+              },
+              "judged": {
+                "type": "integer"
+              },
+              "byTag": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer"
+                }
+              },
+              "unsureMerges": {
+                "type": "integer"
+              },
+              "unsureTags": {
+                "type": "integer"
+              },
+              "companyQuestions": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "subjects",
+              "judged",
+              "byTag",
+              "unsureMerges",
+              "unsureTags",
+              "companyQuestions"
+            ]
+          }
+        },
+        "required": [
+          "brandId",
+          "mergeQuestions",
+          "tagQuestions",
+          "companyQuestions",
+          "settled",
+          "counts"
+        ]
       }
     },
     "parameters": {},
@@ -17292,6 +17897,724 @@
           },
           "502": {
             "description": "social-service or campaign-service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/relationships/query": {
+      "post": {
+        "summary": "The relationship block of each human at a brand (Unibox rows, the CRM serve)",
+        "description": "One block per asked human id, in order. A human never judged at this brand answers with `tags: []`, `judgedAt: null` (never a guess).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "humanIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "minItems": 1,
+                    "maxItems": 1000
+                  }
+                },
+                "required": [
+                  "humanIds"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Blocks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "relationships": {
+                      "type": "array",
+                      "items": {
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/RelationshipBlock"
+                          },
+                          {
+                            "type": "object",
+                            "properties": {
+                              "humanId": {
+                                "type": "string"
+                              }
+                            }
+                          }
+                        ],
+                        "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between)."
+                      }
+                    }
+                  },
+                  "required": [
+                    "relationships"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "502": {
+            "description": "A dependency could not answer"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/relationships/review": {
+      "get": {
+        "summary": "The brand's relationship review page: unsure merges, unsure tags, company questions, everything settled",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Review",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipReview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/relationships/merge-questions/{questionId}/answer": {
+      "post": {
+        "summary": "Answer an unsure merge: yes = one person (org-scoped link in human-service), no = never asked again",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who says it (recorded on the statement)"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "questionId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "same": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "same"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string"
+                    },
+                    "linkId": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "linkId"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown question"
+          },
+          "409": {
+            "description": "human-service refused the link"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/relationships/merges/{linkId}/undo": {
+      "post": {
+        "summary": "Undo a merge stated from here (by the judge or a person)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who says it (recorded on the statement)"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "linkId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Undone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "changed": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "changed"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown merge"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/relationships/{humanId}/tags/{tag}": {
+      "put": {
+        "summary": "A person says yes or no about one relationship tag (outranks evidence and judgment)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who says it (recorded on the statement)"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "humanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "personal",
+                "customer",
+                "prospect",
+                "team",
+                "investor",
+                "advisor",
+                "supplier",
+                "partner",
+                "other_professional"
+              ]
+            },
+            "required": true,
+            "name": "tag",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "yes",
+                      "no"
+                    ]
+                  }
+                },
+                "required": [
+                  "state"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "relationship": {
+                      "$ref": "#/components/schemas/RelationshipBlock"
+                    }
+                  },
+                  "required": [
+                    "relationship"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Withdraw a person's word on a tag (back to evidence / judgment)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who says it (recorded on the statement)"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "humanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "personal",
+                "customer",
+                "prospect",
+                "team",
+                "investor",
+                "advisor",
+                "supplier",
+                "partner",
+                "other_professional"
+              ]
+            },
+            "required": true,
+            "name": "tag",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Withdrawn",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "withdrawn": {
+                      "type": "boolean"
+                    },
+                    "relationship": {
+                      "$ref": "#/components/schemas/RelationshipBlock"
+                    }
+                  },
+                  "required": [
+                    "withdrawn",
+                    "relationship"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/relationships/{humanId}/company": {
+      "put": {
+        "summary": "A person states the company of a human (a domain, a name, or none); never looked up again",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Who says it (recorded on the statement)"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "humanId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "domain": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "domain"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name"
+                    ]
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "none": {
+                        "type": "boolean",
+                        "enum": [
+                          true
+                        ]
+                      }
+                    },
+                    "required": [
+                      "none"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "company": {
+                      "type": "object",
+                      "properties": {
+                        "companyId": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "name": {
+                          "type": "string",
+                          "nullable": true
+                        },
+                        "domain": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "companyId",
+                        "name",
+                        "domain"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "company"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a domain"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/relationship": {
+      "get": {
+        "summary": "Who the person of one lead row is to its brand (writers read it before writing)",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The block",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "leadId": {
+                      "type": "string"
+                    },
+                    "brandId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "relationship": {
+                      "$ref": "#/components/schemas/RelationshipBlock"
+                    }
+                  },
+                  "required": [
+                    "leadId",
+                    "brandId",
+                    "relationship"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such row in this org (or not of that brand)"
           }
         }
       }

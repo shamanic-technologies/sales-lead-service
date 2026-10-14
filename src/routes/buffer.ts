@@ -5,6 +5,7 @@ import { pullNext, type PullNextMode } from "../lib/buffer.js";
 import { createRun, updateRun } from "../lib/runs-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { BufferNextRequestSchema } from "../schemas.js";
+import { relationshipOfLead } from "../lib/relationship-read.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
@@ -393,10 +394,17 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         ...(pullMode ? { mode: pullMode } : {}),
         ...(reachableBy ? { reachableBy } : {}),
         ...(acceptedEmails ? { acceptedEmails } : {}),
+        ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,
     );
+
+    // Who the served person is to the brand (RELATIONSHIP-TAGS-1014): the writer reads it before writing. Cached
+    // with the answer, so a replay serves the same block.
+    if (result.found && result.lead && result.lead.data) {
+      (result.lead.data as unknown as Record<string, unknown>).relationship = await relationshipOfLead(req.orgId!, brandId, result.lead.leadId);
+    }
 
     // Cache response keyed by caller's runId for idempotency.
     // campaign-service guarantees one workflow run per campaign at a time, so concurrent

@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
-import { reachClauses } from "./reach-sql.js";
+import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import type { EmailPolicy } from "./email-policy.js";
 
 /**
@@ -92,6 +92,8 @@ export async function claimStockedLead(params: {
   reachableBy?: readonly ReachMethod[] | null;
   /** The outreach pipe's email policy (src/lib/email-policy.ts): a find whose address it refuses stays in the stock. */
   acceptedEmails?: EmailPolicy | null;
+  /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
+  relationships?: RelationshipScope | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */
   askFit: AskAudienceFit;
 }): Promise<StockClaim> {
@@ -124,7 +126,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
          AND NOT EXISTS (
            SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
          )
-         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails)}
+         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships)}
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED

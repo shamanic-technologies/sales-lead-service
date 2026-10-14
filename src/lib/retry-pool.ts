@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import type { ReachMethod } from "./people-client.js";
-import { reachClauses } from "./reach-sql.js";
+import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import type { EmailPolicy } from "./email-policy.js";
 
 /**
@@ -325,6 +325,8 @@ export async function loadRetryCandidates(params: {
   reachableBy?: readonly ReachMethod[] | null;
   /** The pipe's email policy (src/lib/email-policy.ts): absent = valid only, a catch-all person is never handed back. */
   acceptedEmails?: EmailPolicy | null;
+  /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
+  relationships?: RelationshipScope | null;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
   const nowIso = new Date(params.nowMs).toISOString();
@@ -350,7 +352,7 @@ export async function loadRetryCandidates(params: {
       AND lc.sender_closed_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails)}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships)}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -518,6 +520,8 @@ export async function pickRetryCandidate(params: {
   nowMs?: number;
   reachableBy?: readonly ReachMethod[] | null;
   acceptedEmails?: EmailPolicy | null;
+  /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
+  relationships?: RelationshipScope | null;
 }): Promise<RetryCandidate | null> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -527,6 +531,7 @@ export async function pickRetryCandidate(params: {
     nowMs,
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: params.acceptedEmails ?? null,
+    relationships: params.relationships ?? null,
   });
   if (candidates.length === 0) return null;
 

@@ -36,6 +36,7 @@ import meetingAttributionRoutes from "./routes/meeting-attribution.js";
 import sourceStockRoutes from "./routes/source-stock.js";
 import socialEngagementsRoutes from "./routes/social-engagements.js";
 import leadIdentityRoutes from "./routes/lead-identity.js";
+import relationshipsRoutes from "./routes/relationships.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { withRequestContext } from "./lib/request-context.js";
 
@@ -96,6 +97,7 @@ app.use(meetingAttributionRoutes);
 app.use(sourceStockRoutes);
 app.use(socialEngagementsRoutes);
 app.use(leadIdentityRoutes);
+app.use(relationshipsRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });

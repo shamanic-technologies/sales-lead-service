@@ -35,6 +35,12 @@ const BRAND_SCALAR_TABLES = [
   "outside_answer_judgments",
   "lead_disqualification_marks",
   "company_disqualification_marks",
+  "relationship_person_humans",
+  "relationship_subjects",
+  "relationship_evidence",
+  "relationship_judgments",
+  "relationship_statements",
+  "relationship_merge_questions",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
@@ -156,6 +162,21 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO company_disqualification_marks (org_id, brand_id, company_key, offer_key, source, note, stated_from_lead_id, stated_by_user_id)
       VALUES (${org}, ${brand}, ${`org:${randomUUID()}`}, '', 'manual', 'not our target', ${leadId}::uuid, 'itest-user')`);
+    const human = randomUUID();
+    await db.execute(sql`
+      INSERT INTO relationship_person_humans (org_id, brand_id, person_key, atomic_human_id) VALUES (${org}, ${brand}, ${`email:${randomUUID()}@x.io`}, ${human}::uuid)`);
+    await db.execute(sql`
+      INSERT INTO relationship_subjects (org_id, brand_id, human_id, name) VALUES (${org}, ${brand}, ${human}::uuid, 'Itest Person')`);
+    await db.execute(sql`
+      INSERT INTO relationship_evidence (org_id, brand_id, human_id, tag, evidence, at) VALUES (${org}, ${brand}, ${human}::uuid, 'prospect', 'signup', now())`);
+    await db.execute(sql`
+      INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
+      VALUES (${org}, ${brand}, ${human}::uuid, '{"personal":0.1}'::jsonb, 1, 'jev-test', 'run')`);
+    await db.execute(sql`
+      INSERT INTO relationship_statements (org_id, brand_id, human_id, tag, state, stated_by_user_id) VALUES (${org}, ${brand}, ${human}::uuid, 'customer', 'yes', 'itest-user')`);
+    await db.execute(sql`
+      INSERT INTO relationship_merge_questions (org_id, brand_id, human_a, human_b, probability, model, run_id, state)
+      VALUES (${org}, ${brand}, ${"00000000-0000-4000-8000-000000000001"}::uuid, ${human}::uuid, 0.5, 'jev-test', 'run', 'open')`);
     await db.execute(sql`
       INSERT INTO lead_read_models (scope_key, org_id, scope, applied_xmin)
       VALUES (${`itest-${randomUUID()}`}, ${org}, ${JSON.stringify({ orgId: org, brandId: brand })}::jsonb, pg_current_xact_id())`);

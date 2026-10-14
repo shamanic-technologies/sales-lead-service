@@ -164,10 +164,14 @@ export interface TregCallResult {
 export class TregMeter {
   private keys: Promise<TregKeys> | null = null;
 
-  constructor(private readonly identity: SpendIdentity) {}
+  /** `background`: a lookup the owner approved for a sweep with no request (billed to the org, no user). */
+  constructor(
+    private readonly identity: SpendIdentity,
+    private readonly opts: { background?: boolean; purpose?: string } = {},
+  ) {}
 
   private resolve(): Promise<TregKeys> {
-    if (!this.identity.userId) {
+    if (!this.identity.userId && !this.opts.background) {
       throw new Error("[lead-service] a paid qualification probe needs the request's user (x-user-id): billing authorizes per user");
     }
     if (!this.keys) this.keys = resolveKeys(this.identity);
@@ -183,7 +187,7 @@ export class TregMeter {
 
     if (keys.keySource === "platform") {
       try {
-        await authorize(this.identity, req.maxMicro, `qualification probe: ${req.endpointId}`);
+        await authorize(this.identity, req.maxMicro, `${this.opts.purpose ?? "qualification probe"}: ${req.endpointId}`);
       } catch (error) {
         await cancelCost(this.identity, hold.id);
         throw error;
