@@ -603,6 +603,13 @@
       "when": 1787111260000,
       "tag": "0085_drop_source_email_demands",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1787197600000,
+      "tag": "0086_relationship_subject_direct",
+      "breakpoints": true
     }
   ]
 }

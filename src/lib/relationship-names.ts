@@ -66,25 +66,64 @@ export function tokensOf(p: NamedPerson): string[] {
 
 /**
  * A score for how worth asking a pair is (0 = not a candidate). The FIRST token of the unlinked name
- * must match some token of the known person; every other matching token adds weight (a last name).
+ * must match some token of the known person; each matching token adds weight (a last name), each token
+ * of the unlinked name the known person does not carry takes some away ("Yulia (WA)" fits Yuliia Siletska
+ * better than "Julia Smith" does).
  */
 export function pairScore(unlinked: NamedPerson, known: NamedPerson): number {
-  const u = nameTokens(unlinked.name);
+  return scoreAgainst(nameTokens(unlinked.name), tokensOf(known).map(skeleton));
+}
+
+/** `u` = the unlinked name's tokens, `k` = the known person's token skeletons (precomputed once per sweep). */
+function scoreAgainst(u: readonly string[], k: readonly string[]): number {
   if (u.length === 0) return 0;
-  const k = tokensOf(known).map(skeleton);
   const first = skeleton(u[0]);
   if (!k.some((x) => skeletonsMatch(first, x))) return 0;
-  let score = 1;
-  for (const tok of u.slice(1)) if (k.some((x) => skeletonsMatch(skeleton(tok), x))) score += 2;
+  let score = 2;
+  for (const tok of u.slice(1)) score += k.some((x) => skeletonsMatch(skeleton(tok), x)) ? 2 : -1;
   if (k.includes(first)) score += 0.5;
-  return score;
+  return Math.max(score, 0.1);
 }
 
 /** The best known candidates for one unlinked person, at most `max`, best first. */
-export function candidatesFor(unlinked: NamedPerson, known: readonly NamedPerson[], max = 5): Array<{ person: NamedPerson; score: number }> {
-  return known
-    .filter((k) => k.humanId !== unlinked.humanId)
-    .map((k) => ({ person: k, score: pairScore(unlinked, k) }))
+export interface KnownIndexEntry {
+  person: NamedPerson;
+  skeletons: string[];
+}
+
+/** The known people with their name skeletons, computed once for a whole sweep. */
+export function indexKnown(known: readonly NamedPerson[]): KnownIndexEntry[] {
+  return known.map((person) => ({ person, skeletons: tokensOf(person).map(skeleton) }));
+}
+
+export function candidatesFor(
+  unlinked: NamedPerson,
+  known: readonly NamedPerson[] | readonly KnownIndexEntry[],
+  max = 5,
+): Array<{ person: NamedPerson; score: number }> {
+  const index: readonly KnownIndexEntry[] =
+    known.length > 0 && "skeletons" in (known[0] as object) ? (known as readonly KnownIndexEntry[]) : indexKnown(known as readonly NamedPerson[]);
+  const u = nameTokens(unlinked.name);
+  return index
+    .filter((k) => k.person.humanId !== unlinked.humanId)
+    .map((k) => ({ person: k.person, score: scoreAgainst(u, k.skeletons) }))
+    .filter((c) => c.score > 0)
+    .sort((a, b) => b.score - a.score || a.person.humanId.localeCompare(b.person.humanId))
+    .slice(0, max);
+}
+
+/**
+ * From the KNOWN side: for each known person, the best unlinked candidates (at most `max`). The known side is
+ * small (people with an address), the unlinked side can be a whole WhatsApp group roster.
+ */
+export function unlinkedCandidatesFor(
+  known: NamedPerson,
+  unlinked: ReadonlyArray<{ person: NamedPerson; tokens: string[] }>,
+  max = 3,
+): Array<{ person: NamedPerson; score: number }> {
+  const k = tokensOf(known).map(skeleton);
+  return unlinked
+    .map((u) => ({ person: u.person, score: scoreAgainst(u.tokens, k) }))
     .filter((c) => c.score > 0)
     .sort((a, b) => b.score - a.score || a.person.humanId.localeCompare(b.person.humanId))
     .slice(0, max);

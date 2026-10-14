@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decideTags, judgedState, policyAllows, tagsIn, type RelationshipTag } from "../../src/lib/relationship-tags.js";
-import { candidatesFor, nameTokens, pairScore, skeleton } from "../../src/lib/relationship-names.js";
+import { candidatesFor, nameTokens, pairScore, skeleton, unlinkedCandidatesFor } from "../../src/lib/relationship-names.js";
 import { bestName } from "../../src/lib/relationship-subjects.js";
 import { companyOfEnrich } from "../../src/lib/relationship-company.js";
 
@@ -56,6 +56,11 @@ describe("merge blocking across spellings and alphabets", () => {
   it("Dima is a candidate for Dmytro; Anne Dimon is not one for Yulia", () => {
     expect(pairScore({ humanId: "u", name: "Dima", emails: [] }, { humanId: "k", name: "Dmytro Burda", emails: ["dmytroburda@gmail.com"] })).toBeGreaterThan(0);
     expect(pairScore({ humanId: "u", name: "Yulia (WA)", emails: [] }, { humanId: "k", name: "Anne Dimon", emails: ["adimon@traveltowellness.com"] })).toBe(0);
+  });
+  it("from the known side, a lone matching first name beats a name with an extra unmatched token", () => {
+    const pool = ["Julia Smith", "Yulia (WA)", "Bob"].map((name, i) => ({ person: { humanId: `u${i}`, name, emails: [] }, tokens: nameTokens(name) }));
+    const c = unlinkedCandidatesFor({ humanId: "k", name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"] }, pool, 3);
+    expect(c.map((x) => x.person.name)).toEqual(["Yulia (WA)", "Julia Smith"]);
   });
   it("a last name match ranks first", () => {
     const c = candidatesFor({ humanId: "u", name: "Yulia Siletska", emails: [] }, [
