@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { outcomesCreditedAfterReach } from "../../src/lib/campaign-outcome-credit.js";
+import { campaignFirstTouch, outcomesCreditedAfterReach } from "../../src/lib/campaign-outcome-credit.js";
 import type { LeadOutcomes } from "../../src/lib/lead-index.js";
 
 function held(stepAt: Record<string, string | null>, positiveReplyAt?: string | null): LeadOutcomes {
@@ -43,5 +43,19 @@ describe("outcomesCreditedAfterReach (VALUED-ATTRIBUTION-1014)", () => {
   it("applies the same rule to a ledger positive reply", () => {
     expect(outcomesCreditedAfterReach(held({}, "2026-10-01T00:00:00.000Z"), "2026-10-12T00:00:00Z").positiveReply).toBeUndefined();
     expect(outcomesCreditedAfterReach(held({}, "2026-10-13T00:00:00.000Z"), "2026-10-12T00:00:00Z").positiveReply).toBe(true);
+  });
+
+  it("first touch = the first send when there was one, else the serve (one rule, every campaign)", () => {
+    expect(campaignFirstTouch("2026-10-12T14:42:17.562Z", "2026-10-12T13:35:52.837Z")).toBe("2026-10-12T14:42:17.562Z");
+    expect(campaignFirstTouch(null, "2026-10-12T13:35:52.837Z")).toBe("2026-10-12T13:35:52.837Z");
+    expect(campaignFirstTouch(null, null)).toBeNull();
+  });
+
+  it("Valued stays at zero even off the serve: every outcome predates the 13:35 serve too", () => {
+    const out = outcomesCreditedAfterReach(
+      held({ signup: "2026-10-12T16:24:00.000Z" }),
+      campaignFirstTouch(null, "2026-10-12T20:52:52.145Z"),
+    );
+    expect([...out.steps]).toEqual([]);
   });
 });

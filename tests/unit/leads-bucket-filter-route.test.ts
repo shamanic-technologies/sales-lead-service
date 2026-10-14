@@ -346,6 +346,23 @@ describe("GET /orgs/leads/bucket-counts — a campaign is credited only with wha
     expect(res.body.total).toBe(1);
   });
 
+  it("a campaign that never sends (Start -> Lead found -> Paid client) is credited for a payment after its serve, never one before", async () => {
+    statusByEmail = {};
+    // p3: found 2026-02-15, paid 2026-03-01 -> the campaign's. p4: found 2026-04-01, had paid 2026-03-15 -> not.
+    indexRows[3] = { ...indexRows[3], servedAt: "2026-02-15T00:00:00.000Z" };
+    indexRows[4] = { ...indexRows[4], servedAt: "2026-04-01T00:00:00.000Z" };
+    outcomes = new Map([
+      [indexRows[3].leadId, { steps: new Set(["sale"]), latestAt: "2026-03-01T00:00:00.000Z", stepAt: new Map([["sale", "2026-03-01T00:00:00.000Z"]]) }],
+      [indexRows[4].leadId, { steps: new Set(["sale"]), latestAt: "2026-03-15T00:00:00.000Z", stepAt: new Map([["sale", "2026-03-15T00:00:00.000Z"]]) }],
+    ]);
+    const res = await counts(`?brandId=${BRAND}&campaignId=camp-1`);
+    expect(res.status).toBe(200);
+    expect(res.body.people.sent).toBe(0);
+    expect(res.body.counts.sale).toBe(1);
+    const tab = await get(`?brandId=${BRAND}&campaignId=camp-1&bucket=sale`);
+    expect(tab.body.total).toBe(1);
+  });
+
   it("a BRAND read keeps every live outcome: it describes the person at the brand, not a campaign's credit", async () => {
     const res = await counts(`?brandId=${BRAND}`);
     expect(res.status).toBe(200);
