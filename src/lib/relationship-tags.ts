@@ -108,8 +108,13 @@ export function tagsIn(details: readonly TagDetail[], state: TagState): Relation
  * any excluded tag that is yes = no. An excluded tag still UNSURE also holds them back: the owner
  * has not said they are only business.
  */
-export function policyAllows(policy: RelationshipPolicy, block: { tags: readonly RelationshipTag[]; unsureTags: readonly RelationshipTag[]; judgedAt: string | null }): boolean {
+export function policyAllows(
+  policy: RelationshipPolicy,
+  block: { tags: readonly RelationshipTag[]; unsureTags: readonly RelationshipTag[]; judgedAt: string | null; openMerge?: boolean },
+): boolean {
   if (policy !== "business_only") return true;
   if (block.judgedAt === null) return false;
+  // "Are they the same person as someone we talk with?" still unanswered: they may be known (never assume a stranger).
+  if (block.openMerge) return false;
   return !BUSINESS_ONLY_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
 }

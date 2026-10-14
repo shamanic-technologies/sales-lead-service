@@ -91,6 +91,13 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     `) as unknown as Promise<Array<{ human: string; company_id: string | null; name: string | null; domain: string | null; source: CompanySource }>>,
   ]);
 
+  // A person with an unanswered "same person?" question may be someone we already know: held back from business-only.
+  const openMerges = new Set(
+    ((await db.execute(sql`
+      SELECT human_a::text AS a, human_b::text AS b FROM relationship_merge_questions
+      WHERE org_id = ${orgId} AND state = 'open' AND (human_a = ANY(${sql.param(humans)}::uuid[]) OR human_b = ANY(${sql.param(humans)}::uuid[]))
+    `)) as unknown as Array<{ a: string; b: string }>).flatMap((r) => [r.a, r.b]),
+  );
   const companyKeyOf = new Map(subjects.map((s) => [s.human, s.company_key]));
   const learned = new Map(companies.map((c) => [c.human, c]));
   // A lead's own employer key (not learned here): name it from brand-service or the local organization row.
@@ -140,7 +147,7 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       unsureTags,
       judgedAt,
       details,
-      policies: { business_only: policyAllows("business_only", { tags, unsureTags, judgedAt }) },
+      policies: { business_only: policyAllows("business_only", { tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }) },
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }
