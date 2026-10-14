@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import { judgeAudienceForSource } from "../../src/lib/source-stock-belongs.js";
 
 // LEAK-1012 part 2: a find belongs to the source holding it only if its audience is of the source's offer, its own
-// list is the source's origin, and (when the funnel targets audiences) it is one of them.
+// list is the source's origin.
 describe("judgeAudienceForSource", () => {
-  const unit = { id: "unit-wa", featureSlug: "sourcing-crm-contacts", offerId: "offer-1", audienceIds: ["aud-phone"] };
+  const unit = { id: "unit-wa", featureSlug: "sourcing-crm-contacts", offerId: "offer-1" };
   const crm = new Set(["sourcing-crm-contacts"]);
 
   it("accepts the funnel's own audience", () => {
@@ -22,13 +22,7 @@ describe("judgeAudienceForSource", () => {
     expect(judgeAudienceForSource(unit, crm, { id: "aud-none", offerId: "offer-1", originSlug: null })).toMatchObject({ belongs: false });
   });
 
-  it("refuses an audience of the same origin and offer that the funnel does not target (the email funnel's people)", () => {
-    const v = judgeAudienceForSource(unit, crm, { id: "aud-email", offerId: "offer-1", originSlug: "sourcing-crm-contacts" });
-    expect(v).toEqual({ belongs: false, reason: expect.stringContaining("does not target (it targets aud-phone)") });
-  });
-
-  it("a funnel that targets nothing accepts every audience of its origin and offer", () => {
-    const open = { ...unit, audienceIds: null };
-    expect(judgeAudienceForSource(open, crm, { id: "aud-email", offerId: "offer-1", originSlug: "sourcing-crm-contacts" })).toEqual({ belongs: true });
+  it("every audience of its origin and offer belongs: a campaign audience pick no longer decides (LEAK-1012)", () => {
+    expect(judgeAudienceForSource(unit, crm, { id: "aud-email", offerId: "offer-1", originSlug: "sourcing-crm-contacts" })).toEqual({ belongs: true });
   });
 });

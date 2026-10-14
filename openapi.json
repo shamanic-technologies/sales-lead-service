@@ -56,7 +56,6 @@
               "source_stock_empty",
               "origin_not_fed",
               "audience_offer_mismatch",
-              "targeted_audiences_unavailable",
               "no_recent_posts"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
@@ -1367,9 +1366,24 @@
             ],
             "description": "Which verified emails this workflow accepts. `valid_only` (what a body without this field gets: unchanged behaviour) hands out only addresses the verifier confirmed. `valid_and_catch_all` also hands out addresses on a catch-all domain (the verifier cannot confirm the mailbox; ~7% bounce measured vs <1% for valid), including people of the brand already revealed and dropped as catch-all, without paying for them again. unknown, invalid and risky addresses are never handed out, whatever the option. Applies to the fresh serve and to every already-paid pool (a catch-all person is never handed to a campaign asking valid only).",
             "example": "valid_and_catch_all"
+          },
+          "reachableBy": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "email",
+                "phone"
+              ]
+            },
+            "minItems": 1,
+            "description": "WHO this run hands out, as its pipe's lead strategy states it (the workflow a play runs says it): only people reachable by EVERY listed contact method (`phone` = a phone number, e.g. a WhatsApp-reachable strategy; `email` = a deliverable address). Added to what the campaign's channel itself requires. Applies to the fresh serve (human-service never hands out, reveals or marks served a person without them) and to every already-paid pool. A source campaign's own run walks its audiences with it, so two strategies of one source never take each other's people. Absent = no requirement beyond the channel's (unchanged behaviour).",
+            "example": [
+              "phone"
+            ]
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both. The only body field is the optional `acceptedEmails`; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`), both optional; an empty body is today's serve."
       },
       "LeadsResponse": {
         "type": "object",

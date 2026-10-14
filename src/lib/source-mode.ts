@@ -38,11 +38,6 @@ export interface SourceUnit {
   offerId: string;
   brandId: string;
   status: string;
-  /**
-   * The audiences the unit's campaign TARGETS (campaign-service `audienceIds`, a HARD subset, no fallback). Null =
-   * none stated (absent, null or empty: inherit the brand's active audiences), today's behaviour.
-   */
-  audienceIds: string[] | null;
 }
 
 export type SourceMode =
@@ -76,14 +71,9 @@ export async function fetchSourceUnit(campaignId: string, orgId: string): Promis
       `source unit ${campaignId} states no channel, offer, brand or status (feature=${String(c.featureSlug)} offer=${String(c.offerId)} brand=${String(brandId)} status=${String(c.status)})`,
     );
   }
-  let audienceIds: string[] | null = null;
-  if (c.audienceIds !== undefined && c.audienceIds !== null) {
-    if (!Array.isArray(c.audienceIds) || c.audienceIds.some((a) => typeof a !== "string" || a.length === 0)) {
-      throw new SourceCampaignUnresolvedError(`source unit ${campaignId} states unreadable audienceIds (${JSON.stringify(c.audienceIds).slice(0, 200)})`);
-    }
-    if (c.audienceIds.length > 0) audienceIds = [...new Set(c.audienceIds as string[])];
-  }
-  return { id: campaignId, featureSlug: c.featureSlug, offerId: c.offerId, brandId, status: c.status, audienceIds };
+  // The campaign's `audienceIds` is NOT read: who a source finds is its pipe's lead strategy (the workflow's
+  // `reachableBy`), never a per-campaign audience pick (owner 2026-10-14, LEAK-1012).
+  return { id: campaignId, featureSlug: c.featureSlug, offerId: c.offerId, brandId, status: c.status };
 }
 
 export async function decideSourceMode(params: { orgId: string; campaignId: string; featureSlug: string }): Promise<SourceMode> {

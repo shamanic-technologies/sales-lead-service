@@ -988,10 +988,19 @@ export const BufferNextRequestSchema = z
         "Which verified emails this workflow accepts. `valid_only` (what a body without this field gets: unchanged behaviour) hands out only addresses the verifier confirmed. `valid_and_catch_all` also hands out addresses on a catch-all domain (the verifier cannot confirm the mailbox; ~7% bounce measured vs <1% for valid), including people of the brand already revealed and dropped as catch-all, without paying for them again. unknown, invalid and risky addresses are never handed out, whatever the option. Applies to the fresh serve and to every already-paid pool (a catch-all person is never handed to a campaign asking valid only).",
       example: "valid_and_catch_all",
     }),
+    reachableBy: z
+      .array(z.enum(["email", "phone"]))
+      .min(1)
+      .optional()
+      .openapi({
+        description:
+          "WHO this run hands out, as its pipe's lead strategy states it (the workflow a play runs says it): only people reachable by EVERY listed contact method (`phone` = a phone number, e.g. a WhatsApp-reachable strategy; `email` = a deliverable address). Added to what the campaign's channel itself requires. Applies to the fresh serve (human-service never hands out, reveals or marks served a person without them) and to every already-paid pool. A source campaign's own run walks its audiences with it, so two strategies of one source never take each other's people. Absent = no requirement beyond the channel's (unchanged behaviour).",
+        example: ["phone"],
+      }),
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No filters and no provider are accepted — human-service owns both. The only body field is the optional `acceptedEmails`; an empty body is today's serve.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`), both optional; an empty body is today's serve.",
   });
 
 export const ServedBuyingSignalSchema = z

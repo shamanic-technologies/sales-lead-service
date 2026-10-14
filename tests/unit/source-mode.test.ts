@@ -98,22 +98,17 @@ describe("decideSourceMode", () => {
       });
       const { decideSourceMode } = await import("../../src/lib/source-mode.js");
       const mode = await decideSourceMode({ orgId: ORG, campaignId: UNIT, featureSlug: slug });
-      expect(mode).toEqual({ kind: "own_run", unit: { id: UNIT, featureSlug: slug, offerId: "offer-1", brandId: "brand-1", status: "ongoing", audienceIds: null } });
+      expect(mode).toEqual({ kind: "own_run", unit: { id: UNIT, featureSlug: slug, offerId: "offer-1", brandId: "brand-1", status: "ongoing" } });
     }
   });
 
-  it("a source unit carries its campaign's targeted audienceIds; empty = none stated; unreadable throws", async () => {
-    const unitRow = (audienceIds: unknown) => () =>
-      json({ campaign: { id: UNIT, featureSlug: COLD, legKey: "start_to_lead_found", offerId: "offer-1", brandIds: ["brand-1"], status: "ongoing", audienceIds } });
+  it("a source unit's campaign audienceIds are never read: who it finds is its pipe's lead strategy (LEAK-1012)", async () => {
+    stubFetch({
+      [`http://campaign/campaigns/${UNIT}`]: () =>
+        json({ campaign: { id: UNIT, featureSlug: COLD, legKey: "start_to_lead_found", offerId: "offer-1", brandIds: ["brand-1"], status: "ongoing", audienceIds: ["a-1"] } }),
+    });
     const { fetchSourceUnit } = await import("../../src/lib/source-mode.js");
-    stubFetch({ [`http://campaign/campaigns/${UNIT}`]: unitRow(["a-1", "a-1", "a-2"]) });
-    expect((await fetchSourceUnit(UNIT, ORG))?.audienceIds).toEqual(["a-1", "a-2"]);
-    stubFetch({ [`http://campaign/campaigns/${UNIT}`]: unitRow([]) });
-    expect((await fetchSourceUnit(UNIT, ORG))?.audienceIds).toBeNull();
-    stubFetch({ [`http://campaign/campaigns/${UNIT}`]: unitRow(null) });
-    expect((await fetchSourceUnit(UNIT, ORG))?.audienceIds).toBeNull();
-    stubFetch({ [`http://campaign/campaigns/${UNIT}`]: unitRow("a-1") });
-    await expect(fetchSourceUnit(UNIT, ORG)).rejects.toThrow(/unreadable audienceIds/);
+    expect(await fetchSourceUnit(UNIT, ORG)).toEqual({ id: UNIT, featureSlug: COLD, offerId: "offer-1", brandId: "brand-1", status: "ongoing" });
   });
 
   it("a sourcing-shaped slug on a campaign that is NOT a source falls back to the outreach read", async () => {
@@ -160,7 +155,7 @@ describe("resolveSourceAudiences", () => {
       [origin("a-unknown")]: () => json({ audienceId: "a-unknown", list: "apollo_search", sourcingFeatureSlug: COLD }),
     });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    const got = await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null, targetAudienceIds: null });
+    const got = await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null });
     expect(got).toEqual({ kind: "walk", audienceIds: ["a-big", "a-small", "a-unknown"] });
   });
 
@@ -182,7 +177,7 @@ describe("resolveSourceAudiences", () => {
       }),
     );
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    const base = { orgId: ORG, brandId: "brand-1", offerId: "offer-1", preferredAudienceId: null, targetAudienceIds: null };
+    const base = { orgId: ORG, brandId: "brand-1", offerId: "offer-1", preferredAudienceId: null };
     expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-crm-contacts" })).toEqual({ kind: "walk", audienceIds: ["a-crm"] });
     expect(await resolveSourceAudiences({ ...base, unitSlug: COLD })).toEqual({ kind: "walk", audienceIds: ["a-apollo"] });
     // The named Apollo audience is not walked by the CRM unit either.
@@ -197,7 +192,7 @@ describe("resolveSourceAudiences", () => {
       [origin("a-2")]: () => json({ sourcingFeatureSlug: COLD }),
     });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: "a-2", targetAudienceIds: null })).toEqual({ kind: "walk", audienceIds: ["a-2", "a-1"] });
+    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: "a-2" })).toEqual({ kind: "walk", audienceIds: ["a-2", "a-1"] });
   });
 
   it("Lead Sourcing walks the audiences of the origins human-service CHOSE for the brand", async () => {
@@ -208,7 +203,7 @@ describe("resolveSourceAudiences", () => {
       [origin("a-sig")]: () => json({ sourcingFeatureSlug: "sourcing-apollo-buying-signals" }),
     });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: "lead-sourcing", preferredAudienceId: null, targetAudienceIds: null })).toEqual({ kind: "walk", audienceIds: ["a-sig"] });
+    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: "lead-sourcing", preferredAudienceId: null })).toEqual({ kind: "walk", audienceIds: ["a-sig"] });
   });
 
   it("an audience serving from no list (422) is left out", async () => {
@@ -217,58 +212,13 @@ describe("resolveSourceAudiences", () => {
       [origin("a-1")]: () => json({ error: "no committed provider" }, 422),
     });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null, targetAudienceIds: null })).toEqual({ kind: "walk", audienceIds: [] });
-  });
-
-  it("a unit whose campaign targets [A] on an offer holding active A and B walks only A; without targets it walks A and B", async () => {
-    const routes = {
-      [list]: () => json({ audiences: [{ id: "a-A", availableToContactCount: 5 }, { id: "a-B", availableToContactCount: 900 }], total: 2 }),
-      [origin("a-A")]: () => json({ sourcingFeatureSlug: "sourcing-crm-contacts" }),
-      [origin("a-B")]: () => json({ sourcingFeatureSlug: "sourcing-crm-contacts" }),
-    };
-    const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    const base = { orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: "sourcing-crm-contacts", preferredAudienceId: null };
-    const calls = stubFetch(routes);
-    expect(await resolveSourceAudiences({ ...base, targetAudienceIds: ["a-A"] })).toEqual({ kind: "walk", audienceIds: ["a-A"] });
-    // B is never even asked about: the targeting is a hard subset.
-    expect(calls).not.toContain(origin("a-B"));
-    stubFetch(routes);
-    expect(await resolveSourceAudiences({ ...base, targetAudienceIds: null })).toEqual({ kind: "walk", audienceIds: ["a-B", "a-A"] });
-  });
-
-  it("a named audience outside the targets is not walked", async () => {
-    stubFetch({
-      [list]: () => json({ audiences: [{ id: "a-A", availableToContactCount: 5 }, { id: "a-B", availableToContactCount: 900 }], total: 2 }),
-      [origin("a-A")]: () => json({ sourcingFeatureSlug: COLD }),
-    });
-    const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: "a-B", targetAudienceIds: ["a-A"] })).toEqual({
-      kind: "walk",
-      audienceIds: ["a-A"],
-    });
-  });
-
-  it("targeted audiences none of which is served under the unit's channel: targets_unavailable, never a fallback to the others", async () => {
-    stubFetch({
-      [list]: () => json({ audiences: [{ id: "a-A", availableToContactCount: 5 }, { id: "a-B", availableToContactCount: 900 }], total: 2 }),
-      [origin("a-A")]: () => json({ sourcingFeatureSlug: "sourcing-apollo-buying-signals" }),
-    });
-    const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    const got = await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null, targetAudienceIds: ["a-A"] });
-    expect(got.kind).toBe("targets_unavailable");
-  });
-
-  it("targeted audiences that are not active audiences of the offer: targets_unavailable", async () => {
-    stubFetch({ [list]: () => json({ audiences: [{ id: "a-B", availableToContactCount: 900 }], total: 1 }) });
-    const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    const got = await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null, targetAudienceIds: ["a-gone"] });
-    expect(got).toEqual({ kind: "targets_unavailable", detail: expect.stringMatching(/not active audiences/) });
+    expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null })).toEqual({ kind: "walk", audienceIds: [] });
   });
 
   it("an unreadable audience list throws", async () => {
     stubFetch({ [list]: () => json({ error: "down" }, 500) });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
-    await expect(resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null, targetAudienceIds: null })).rejects.toThrow(/audience list failed/);
+    await expect(resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: COLD, preferredAudienceId: null })).rejects.toThrow(/audience list failed/);
   });
 });
 
