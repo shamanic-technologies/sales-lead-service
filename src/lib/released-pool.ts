@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
-import { reachClauses } from "./reach-sql.js";
+import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import type { EmailPolicy } from "./email-policy.js";
 import { fetchAudienceOfferId, fetchAudienceOriginSlug, loadOriginsByChannelSlug } from "./sourcing-origin.js";
 
@@ -119,6 +119,8 @@ export async function claimReleasedLead(params: {
   reachableBy: ReachMethod[];
   /** The taking campaign's email policy (src/lib/email-policy.ts): absent = valid only. */
   acceptedEmails?: EmailPolicy | null;
+  /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
+  relationships?: RelationshipScope | null;
   offerId: string | null;
   runId: string | null;
   parentRunId: string | null;
@@ -130,7 +132,7 @@ export async function claimReleasedLead(params: {
 }): Promise<ReleasedLead | null> {
   if (params.brandIds.length === 0) return null;
   const brands = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
-  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails);
+  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships);
   const candidates = (await db.execute(sql`
     SELECT s.id, s.campaign_id, s.lead_id, s.audience_id
       FROM leads_campaigns s

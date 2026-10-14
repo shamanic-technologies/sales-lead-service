@@ -33,6 +33,8 @@ import {
   type ServeEmptyReason,
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
+import type { RelationshipScope } from "./reach-sql.js";
+import type { RelationshipPolicy } from "./relationship-tags.js";
 import { askAudienceFit } from "./audience-fit-client.js";
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { isAudienceNotServeableError } from "./people-client.js";
@@ -90,6 +92,11 @@ interface PullNextParams {
    * and applied to every pool. Absent = valid only (today, and nothing on the wire).
    */
   acceptedEmails?: EmailPolicy;
+  /**
+   * The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): forwarded to human-service on
+   * every fresh serve and applied to every pool. Absent = nothing asked (today).
+   */
+  relationships?: RelationshipPolicy;
   /**
    * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
    * campaign's retry / released pools still drain, then the answer names this reason.
@@ -198,7 +205,11 @@ export async function pullNext(
     audienceId: audienceId ?? undefined,
     ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
     ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
+    ...(params.relationships ? { relationships: params.relationships } : {}),
   };
+  const relationships: RelationshipScope | null = params.relationships
+    ? { policy: params.relationships, orgId: params.orgId, brandIds: params.brandIds }
+    : null;
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
   // it from brand-service for attribution/storage. No goal set ⟹ brand-service
@@ -264,6 +275,7 @@ export async function pullNext(
     context: ctx,
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: params.acceptedEmails ?? null,
+    relationships,
   });
 
   if (retry) {
@@ -409,6 +421,7 @@ export async function pullNext(
       featureSlug: params.featureSlug,
       reachableBy: params.reachableBy ?? [],
       acceptedEmails: params.acceptedEmails ?? null,
+      relationships,
       offerId,
       runId: params.runId ?? null,
       parentRunId: params.parentRunId ?? null,
@@ -464,6 +477,7 @@ export async function pullNext(
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
       acceptedEmails: params.acceptedEmails ?? null,
+      relationships,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
       askFit: async ({ sourceCampaignId, ...q }) => {

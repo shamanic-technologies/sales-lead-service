@@ -145,3 +145,48 @@ export async function withdrawHumanFact(factId: string, reason: string): Promise
     reason,
   });
 }
+
+/** One human as an ORG sees it (fleet links + that org's own judgment links); null when unknown (404). */
+export async function getHumanInOrg(humanId: string, orgId: string): Promise<HumanView | null> {
+  try {
+    return await call<HumanView>("GET", `/internal/human-identities/${encodeURIComponent(humanId)}?orgId=${encodeURIComponent(orgId)}`);
+  } catch (err) {
+    if (err instanceof HumanIdentityError && err.status === 404) return null;
+    throw err;
+  }
+}
+
+export interface HumanLinkView {
+  linkId: string;
+  relation: "same" | "distinct";
+  scope: "fleet" | "org";
+  orgId: string | null;
+  humanIds: string[];
+  judgedBy: string;
+}
+
+/**
+ * State that two humans are (`same`) or are not (`distinct`) one person, in ONE org's view (a judgment
+ * never merges the fleet). `judgedBy` = "jev" or "person:<userId>". `link` null = already one human.
+ */
+export async function stateHumanLink(input: {
+  orgId: string;
+  relation: "same" | "distinct";
+  humanIds: [string, string];
+  judgedBy: string;
+  evidence: string;
+}): Promise<{ changed: boolean; link: HumanLinkView | null; humanIds: string[] }> {
+  return call("POST", "/internal/human-identities/links", {
+    orgId: input.orgId,
+    relation: input.relation,
+    humanIds: input.humanIds,
+    judgedBy: input.judgedBy,
+    statedBy: HUMAN_IDENTITY_SOURCE,
+    evidence: input.evidence,
+  });
+}
+
+/** Undo an org link (the org that stated it). Idempotent at human-service. */
+export async function withdrawHumanLink(linkId: string, orgId: string, withdrawnBy: string, reason: string): Promise<{ changed: boolean }> {
+  return call("POST", `/internal/human-identities/links/${encodeURIComponent(linkId)}/withdraw`, { orgId, withdrawnBy, reason });
+}

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EMAIL_POLICIES } from "./lib/email-policy.js";
+import { RELATIONSHIP_POLICIES, RELATIONSHIP_TAGS } from "./lib/relationship-tags.js";
 import {
   OpenAPIRegistry,
   extendZodWithOpenApi,
@@ -997,10 +998,15 @@ export const BufferNextRequestSchema = z
           "WHO this run hands out, as its pipe's lead strategy states it (the workflow a play runs says it): only people reachable by EVERY listed contact method (`phone` = a phone number, e.g. a WhatsApp-reachable strategy; `email` = a deliverable address). Added to what the campaign's channel itself requires. Applies to the fresh serve (human-service never hands out, reveals or marks served a person without them) and to every already-paid pool. A source campaign's own run walks its audiences with it, so two strategies of one source never take each other's people. Absent = no requirement beyond the channel's (unchanged behaviour).",
         example: ["phone"],
       }),
+    relationships: z.enum(RELATIONSHIP_POLICIES).optional().openapi({
+      description:
+        "The pipe's relationship policy (tactic \"Business contacts only\", RELATIONSHIP-TAGS-1014). `business_only`: nobody the brand knows as personal, investor, supplier, team, partner or advisor (yes, or still unsure) is handed out, nor anybody whose whole thread was never judged yet. Applies to every already-paid pool and is forwarded to human-service serve-next. Absent = today's serve.",
+      example: "business_only",
+    }),
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`), both optional; an empty body is today's serve.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`), all optional; an empty body is today's serve.",
   });
 
 export const ServedBuyingSignalSchema = z
@@ -8040,5 +8046,224 @@ registry.registerPath({
     },
     401: { description: "Unauthorized" },
     502: { description: "social-service or campaign-service could not answer" },
+  },
+});
+
+
+// --- Relationship tags (RELATIONSHIP-TAGS-1014) ---
+
+const RelationshipTagEnum = z.enum(RELATIONSHIP_TAGS);
+
+export const RelationshipBlockSchema = z
+  .object({
+    humanId: z.string().nullable().openapi({ description: "The human (human-service, this org's view) the block is about." }),
+    company: z
+      .object({
+        id: z.string().nullable(),
+        name: z.string().nullable(),
+        domain: z.string().nullable(),
+        source: z.enum(["lead", "email_domain", "signup", "treg_enrich", "treg_identity", "person"]),
+      })
+      .nullable()
+      .openapi({ description: "The company of this lead; null while unknown." }),
+    tags: z.array(RelationshipTagEnum).openapi({ description: "Tags that are YES: a person's word, a source's evidence, or a confident judgment." }),
+    unsureTags: z.array(RelationshipTagEnum).openapi({ description: "Tags the judge is unsure about: waiting on the review page." }),
+    judgedAt: z.string().nullable().openapi({ description: "When the whole thread was last judged; null = never judged." }),
+    details: z.array(
+      z.object({
+        tag: RelationshipTagEnum,
+        level: z.enum(["human", "lead"]),
+        state: z.enum(["yes", "no", "unsure"]),
+        basis: z.enum(["evidence", "judgment", "person"]),
+        confidence: z.number().nullable(),
+        evidence: z.string().nullable(),
+        at: z.string(),
+      }),
+    ),
+    policies: z.object({
+      business_only: z.boolean().openapi({
+        description: "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure.",
+      }),
+    }),
+  })
+  .openapi("RelationshipBlock", {
+    description:
+      "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.75, no <= 0.35, unsure between).",
+  });
+
+const relationshipHeaders = (withUser: boolean) => [
+  { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+  { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal org UUID" },
+  ...(withUser
+    ? [{ in: "header" as const, name: "x-user-id", required: true, schema: { type: "string" as const }, description: "Who says it (recorded on the statement)" }]
+    : []),
+];
+
+const MergeCardSchema = z.object({
+  humanId: z.string(),
+  name: z.string().nullable(),
+  emails: z.array(z.string()),
+  phones: z.array(z.string()),
+  channels: z.array(z.string()),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/relationships/query",
+  summary: "The relationship block of each human at a brand (Unibox rows, the CRM serve)",
+  description: "One block per asked human id, in order. A human never judged at this brand answers with `tags: []`, `judgedAt: null` (never a guess).",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ humanIds: z.array(z.string()).min(1).max(1000) }) } } },
+  },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "Blocks",
+      content: { "application/json": { schema: z.object({ relationships: z.array(RelationshipBlockSchema.extend({ humanId: z.string() })) }) } },
+    },
+    400: { description: "Invalid body" },
+    502: { description: "A dependency could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/relationships/review",
+  summary: "The brand's relationship review page: unsure merges, unsure tags, company questions, everything settled",
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "Review",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              mergeQuestions: z.array(z.object({ id: z.string(), confidence: z.number(), reason: z.string().nullable(), a: MergeCardSchema, b: MergeCardSchema })),
+              tagQuestions: z.array(z.object({ humanId: z.string(), name: z.string().nullable(), tag: RelationshipTagEnum, confidence: z.number().nullable(), reason: z.string().nullable() })),
+              companyQuestions: z.array(
+                z.object({
+                  humanId: z.string(),
+                  name: z.string().nullable(),
+                  candidates: z.array(z.object({ name: z.string().nullable(), domain: z.string().nullable(), source: z.string() })),
+                }),
+              ),
+              settled: z.object({
+                merges: z.array(z.object({ linkId: z.string(), humanIds: z.array(z.string()), names: z.array(z.string().nullable()), judgedBy: z.string(), at: z.string() })),
+                people: z.array(
+                  z.object({
+                    humanId: z.string(),
+                    name: z.string().nullable(),
+                    company: RelationshipBlockSchema.shape.company,
+                    tags: z.array(RelationshipTagEnum),
+                    details: RelationshipBlockSchema.shape.details,
+                  }),
+                ),
+              }),
+              counts: z.object({
+                subjects: z.number().int(),
+                judged: z.number().int(),
+                byTag: z.record(z.string(), z.number().int()),
+                unsureMerges: z.number().int(),
+                unsureTags: z.number().int(),
+                companyQuestions: z.number().int(),
+              }),
+            })
+            .openapi("RelationshipReview"),
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/relationships/merge-questions/{questionId}/answer",
+  summary: "Answer an unsure merge: yes = one person (org-scoped link in human-service), no = never asked again",
+  request: {
+    params: z.object({ brandId: z.string(), questionId: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ same: z.boolean() }) } } },
+  },
+  parameters: relationshipHeaders(true),
+  responses: {
+    200: { description: "Answered", content: { "application/json": { schema: z.object({ state: z.string(), linkId: z.string().nullable() }) } } },
+    404: { description: "Unknown question" },
+    409: { description: "human-service refused the link" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/relationships/merges/{linkId}/undo",
+  summary: "Undo a merge stated from here (by the judge or a person)",
+  request: { params: z.object({ brandId: z.string(), linkId: z.string() }) },
+  parameters: relationshipHeaders(true),
+  responses: {
+    200: { description: "Undone", content: { "application/json": { schema: z.object({ changed: z.boolean() }) } } },
+    404: { description: "Unknown merge" },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/brands/{brandId}/relationships/{humanId}/tags/{tag}",
+  summary: "A person says yes or no about one relationship tag (outranks evidence and judgment)",
+  request: {
+    params: z.object({ brandId: z.string(), humanId: z.string(), tag: RelationshipTagEnum }),
+    body: { content: { "application/json": { schema: z.object({ state: z.enum(["yes", "no"]) }) } } },
+  },
+  parameters: relationshipHeaders(true),
+  responses: { 200: { description: "Stated", content: { "application/json": { schema: z.object({ relationship: RelationshipBlockSchema }) } } } },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/brands/{brandId}/relationships/{humanId}/tags/{tag}",
+  summary: "Withdraw a person's word on a tag (back to evidence / judgment)",
+  request: { params: z.object({ brandId: z.string(), humanId: z.string(), tag: RelationshipTagEnum }) },
+  parameters: relationshipHeaders(true),
+  responses: {
+    200: { description: "Withdrawn", content: { "application/json": { schema: z.object({ withdrawn: z.boolean(), relationship: RelationshipBlockSchema }) } } },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/brands/{brandId}/relationships/{humanId}/company",
+  summary: "A person states the company of a human (a domain, a name, or none); never looked up again",
+  request: {
+    params: z.object({ brandId: z.string(), humanId: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.union([z.object({ domain: z.string() }), z.object({ name: z.string() }), z.object({ none: z.literal(true) })]),
+        },
+      },
+    },
+  },
+  parameters: relationshipHeaders(true),
+  responses: {
+    200: {
+      description: "Stated",
+      content: { "application/json": { schema: z.object({ company: z.object({ companyId: z.string().nullable(), name: z.string().nullable(), domain: z.string().nullable() }) }) } },
+    },
+    400: { description: "Not a domain" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/relationship",
+  summary: "Who the person of one lead row is to its brand (writers read it before writing)",
+  request: { params: z.object({ id: z.string() }), query: z.object({ brandId: z.string().optional() }) },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "The block",
+      content: { "application/json": { schema: z.object({ leadId: z.string(), brandId: z.string().nullable(), relationship: RelationshipBlockSchema }) } },
+    },
+    404: { description: "No such row in this org (or not of that brand)" },
   },
 });
