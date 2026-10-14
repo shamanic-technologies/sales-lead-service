@@ -168,6 +168,7 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 const fetchChannelSendsBatch = vi.fn();
 vi.mock("../../src/lib/channel-send-client.js", () => ({
   fetchChannelSendsBatch: (...args: unknown[]) => fetchChannelSendsBatch(...args),
+  channelSendKey: (email: string) => email.trim().toLowerCase(),
 }));
 
 import {
@@ -876,8 +877,11 @@ describe("the pool of a pipe that does not write by email", () => {
     // The WhatsApped person is not returned; the one nothing went out to is.
     expect(picked?.id).toBe("fresh");
     expect(checkDeliveryStatus).not.toHaveBeenCalled();
-    const [brandId, emails, ctx] = fetchChannelSendsBatch.mock.calls[0];
+    // ONE batch call for the whole pull (WA-SENDS-BATCH-1014), scoped to the brand and THIS campaign.
+    expect(fetchChannelSendsBatch).toHaveBeenCalledTimes(1);
+    const [brandId, campaignId, emails, ctx] = fetchChannelSendsBatch.mock.calls[0];
     expect(brandId).toBe("brand-1");
+    expect(campaignId).toBe(CAMPAIGN);
     expect(emails).toEqual(["Imenez@gmail.com", "fresh@example.com"]);
     expect(ctx).toMatchObject({ orgId: "org-1" });
     // Out of the pool for good, in its own column (never sent_at), with the sender's date and id.
@@ -891,7 +895,8 @@ describe("the pool of a pipe that does not write by email", () => {
     rows = Array.from({ length: CHANNEL_RETRY_CANDIDATE_BATCH_SIZE + 5 }, (_, i) => row({ id: `p${String(i).padStart(2, "0")}` }));
     fetchChannelSendsBatch.mockResolvedValue(new Map());
     await pickRetryCandidate({ ...base, sender: "channel" });
-    expect(fetchChannelSendsBatch.mock.calls[0][1]).toHaveLength(CHANNEL_RETRY_CANDIDATE_BATCH_SIZE);
+    expect(fetchChannelSendsBatch).toHaveBeenCalledTimes(1);
+    expect(fetchChannelSendsBatch.mock.calls[0][2]).toHaveLength(CHANNEL_RETRY_CANDIDATE_BATCH_SIZE);
   });
 
   it("re-serves nobody while the sender is still sending", async () => {
@@ -907,6 +912,30 @@ describe("the pool of a pipe that does not write by email", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(await pickRetryCandidate({ ...base, sender: "channel" })).toBeNull();
     expect(rows[0].retry_claimed_at).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("a person whose sends this campaign are all failed or refused is handed back (nothing went out)", async () => {
+    rows = [row({ id: "failed" })];
+    fetchChannelSendsBatch.mockResolvedValue(
+      new Map([["failed@example.com", [send({ status: "failed", sentAt: null }), send({ status: "refused", sentAt: null })]]]),
+    );
+    expect((await pickRetryCandidate({ ...base, sender: "channel" }))?.id).toBe("failed");
+  });
+
+  it("a person the sender is absent for is handed back; the lookup is case- and space-folded like crm-service", async () => {
+    rows = [row({ id: "sentcased", email: " Done@Example.com" }), row({ id: "none", email: "none@example.com", served_at: "2026-08-25T10:00:00.000Z" })];
+    fetchChannelSendsBatch.mockResolvedValue(new Map([["done@example.com", [send({ sendId: "s-done" })]]]));
+    expect((await pickRetryCandidate({ ...base, sender: "channel" }))?.id).toBe("none");
+  });
+
+  it("a person crm-service cannot match fails the pull closed: nobody handed back", async () => {
+    rows = [row({ id: "bad", email: "not-an-email" }), row({ id: "ok", email: "ok@example.com" })];
+    fetchChannelSendsBatch.mockRejectedValue(new Error("crm-service cannot match 1 email(s): [\"not-an-email\"]"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await pickRetryCandidate({ ...base, sender: "channel" })).toBeNull();
+    expect(rows.every((r) => r.retry_claimed_at === null)).toBe(true);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });

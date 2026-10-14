@@ -7,16 +7,21 @@
  * each). For a pipe whose channel does not write by email, the answer comes from the service that PERFORMED the send:
  * crm-service keeps every send with its campaign id, status and sentAt. Read, never reconstructed here.
  *
- * crm-service serves the record one person at a time (`GET /orgs/whatsapp/messages?brandId=&email=`), so a bounded
- * batch is asked with bounded concurrency. FAIL LOUD: any failure throws `ChannelSendsUnavailableError`, and the pool
- * treats that as "no evidence" (fail-closed: nobody is re-served on a guess).
+ * WA-SENDS-BATCH-1014: ONE call per pull, `POST /orgs/whatsapp/sends/query {brandId, campaignId, emails}` (this
+ * campaign's sends to the listed people, any status, newest first; a person with none is absent). The per-person
+ * `GET /orgs/whatsapp/messages` it replaces cost one request and one crm-service run per person.
+ *
+ * FAIL LOUD: any failure throws `ChannelSendsUnavailableError`, and the pool treats that as "no evidence"
+ * (fail-closed: nobody is re-served on a guess). An entry crm-service names in `invalidEmails` is a person it cannot
+ * match; the per-person read answered such an email with a 400, which failed the whole pull, so it still does
+ * (named in the error, never read as "nothing sent").
  */
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
-/** Per-person reads in flight at once: each one is a crm-service request + its run. */
-export const CHANNEL_SEND_READ_CONCURRENCY = 4;
+/** crm-service's own cap on `emails` per query. */
+export const CHANNEL_SENDS_QUERY_MAX_EMAILS = 500;
 
 export class ChannelSendsUnavailableError extends Error {
   constructor(message: string) {
@@ -66,55 +71,69 @@ function readSend(raw: unknown): ChannelSend {
   };
 }
 
-/** Every send the brand's non-email sender holds for ONE person (any campaign), as it states them. */
-export async function fetchChannelSends(
-  brandId: string,
-  email: string,
-  ctx: ChannelSendContext,
-): Promise<ChannelSend[]> {
-  const path = `/orgs/whatsapp/messages?brandId=${encodeURIComponent(brandId)}&email=${encodeURIComponent(email)}`;
-  let response: Response;
-  try {
-    response = await fetchWithRetry(`${CRM_SERVICE_URL}${path}`, {
-      method: "GET",
-      headers: headersFor(ctx, brandId),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-  } catch (error) {
-    throw new ChannelSendsUnavailableError(`crm-service unreachable for ${path}: ${(error as Error).message}`);
-  }
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new ChannelSendsUnavailableError(`crm-service ${response.status} for ${path}: ${body.slice(0, 300)}`);
-  }
-  let body: { sends?: unknown };
-  try {
-    body = (await response.json()) as { sends?: unknown };
-  } catch (error) {
-    throw new ChannelSendsUnavailableError(`crm-service answer for ${path} was not JSON: ${(error as Error).message}`);
-  }
-  if (!Array.isArray(body.sends)) {
-    throw new ChannelSendsUnavailableError(`crm-service answer for ${path} carries no sends array`);
-  }
-  return body.sends.map(readSend);
+/** The key a person is matched on, as crm-service normalises it (trimmed, lower-cased). */
+export function channelSendKey(email: string): string {
+  return email.trim().toLowerCase();
 }
 
 /**
- * The sends of a bounded batch of people, keyed by lowercased email. One failure fails the whole batch (the pool
- * then re-serves nobody this pull rather than deciding on half the evidence).
+ * Every send THIS campaign's non-email sender holds for each listed person, keyed by `channelSendKey(email)`; a person
+ * with none is absent from the map. One call. Any failure, including a person crm-service cannot match, throws.
  */
 export async function fetchChannelSendsBatch(
   brandId: string,
+  campaignId: string,
   emails: readonly string[],
   ctx: ChannelSendContext,
 ): Promise<Map<string, ChannelSend[]>> {
   const out = new Map<string, ChannelSend[]>();
-  const queue = [...new Set(emails.map((e) => e.toLowerCase()))];
-  async function worker(): Promise<void> {
-    for (let email = queue.shift(); email !== undefined; email = queue.shift()) {
-      out.set(email, await fetchChannelSends(brandId, email, ctx));
-    }
+  const unique = [...new Set(emails.map(channelSendKey))];
+  if (unique.length === 0) return out;
+  if (unique.length > CHANNEL_SENDS_QUERY_MAX_EMAILS) {
+    throw new ChannelSendsUnavailableError(
+      `crm-service sends query takes at most ${CHANNEL_SENDS_QUERY_MAX_EMAILS} emails, asked ${unique.length}`,
+    );
   }
-  await Promise.all(Array.from({ length: Math.min(CHANNEL_SEND_READ_CONCURRENCY, queue.length) }, worker));
+  const path = "/orgs/whatsapp/sends/query";
+  const what = `${path} campaign=${campaignId} emails=${unique.length}`;
+  let response: Response;
+  try {
+    response = await fetchWithRetry(`${CRM_SERVICE_URL}${path}`, {
+      method: "POST",
+      headers: { ...headersFor(ctx, brandId), "Content-Type": "application/json" },
+      body: JSON.stringify({ brandId, campaignId, emails: unique }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new ChannelSendsUnavailableError(`crm-service unreachable for ${what}: ${(error as Error).message}`);
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new ChannelSendsUnavailableError(`crm-service ${response.status} for ${what}: ${body.slice(0, 300)}`);
+  }
+  let body: { sends?: unknown; invalidEmails?: unknown };
+  try {
+    body = (await response.json()) as { sends?: unknown; invalidEmails?: unknown };
+  } catch (error) {
+    throw new ChannelSendsUnavailableError(`crm-service answer for ${what} was not JSON: ${(error as Error).message}`);
+  }
+  if (!Array.isArray(body.sends) || !Array.isArray(body.invalidEmails)) {
+    throw new ChannelSendsUnavailableError(`crm-service answer for ${what} carries no sends/invalidEmails arrays`);
+  }
+  if (body.invalidEmails.length > 0) {
+    throw new ChannelSendsUnavailableError(
+      `crm-service cannot match ${body.invalidEmails.length} email(s) for ${what}: ${JSON.stringify(body.invalidEmails).slice(0, 300)}`,
+    );
+  }
+  for (const raw of body.sends) {
+    const email = (raw as Record<string, unknown> | null)?.email;
+    if (typeof email !== "string") {
+      throw new ChannelSendsUnavailableError(`crm-service send record names no email: ${JSON.stringify(raw)?.slice(0, 200)}`);
+    }
+    const key = channelSendKey(email);
+    const list = out.get(key) ?? [];
+    list.push(readSend(raw));
+    out.set(key, list);
+  }
   return out;
 }

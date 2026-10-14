@@ -3,7 +3,7 @@ import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
-import { fetchChannelSendsBatch, type ChannelSend } from "./channel-send-client.js";
+import { channelSendKey, fetchChannelSendsBatch, type ChannelSend } from "./channel-send-client.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
@@ -73,9 +73,8 @@ export const RETRY_CLAIM_LEASE_MS = 60 * 60 * 1000;
 export const RETRY_CANDIDATE_BATCH_SIZE = 50;
 
 /**
- * The batch for a pool whose sender is asked one person at a time (crm-service, see channel-send-client.ts). Smaller
- * than the email batch: each person is one request (and one crm-service run). A person found sent leaves the pool for
- * good, so the window still walks forward.
+ * The batch for a pool whose sender is crm-service (channel-send-client.ts): one `sends/query` call per pull for at most
+ * this many people. A person found sent leaves the pool for good, so the window still walks forward.
  */
 export const CHANNEL_RETRY_CANDIDATE_BATCH_SIZE = 10;
 
@@ -732,6 +731,7 @@ async function pickChannelCandidate(
   try {
     sendsByEmail = await fetchChannelSendsBatch(
       params.brandId,
+      params.campaignId,
       candidates.map((c) => c.email),
       { orgId: params.orgId, userId: params.context.userId ?? null, runId: params.context.runId ?? null },
     );
@@ -747,7 +747,7 @@ async function pickChannelCandidate(
   const retryable: RetryCandidate[] = [];
   let queuedCount = 0;
   for (const candidate of candidates) {
-    const decided = decideChannelRetry(sendsByEmail.get(candidate.email.toLowerCase()), params.campaignId, nowMs);
+    const decided = decideChannelRetry(sendsByEmail.get(channelSendKey(candidate.email)), params.campaignId, nowMs);
     if (decided.verdict === "channel_sent") sent.push({ id: candidate.id, sentAt: decided.sentAt, sendId: decided.sendId });
     else if (decided.verdict === "retry") retryable.push(candidate);
     else queuedCount += 1;
