@@ -221,7 +221,16 @@ function engagementOf(scope: ReadModelScope): EngagementContext {
     deliveryQueried: scope.deliveryQueried,
     orgId: scope.orgId,
     brandId: scope.brandId ?? undefined,
+    creditOutcomesAfterReach: creditsOutcomesAfterReach(scope),
   };
+}
+
+/**
+ * A read that names campaigns credits an outcome only when it happened after the scope first sent
+ * the person something (campaign-outcome-credit.ts); a brand read keeps every live outcome.
+ */
+export function creditsOutcomesAfterReach(scope: ReadModelScope): boolean {
+  return scope.campaignIds !== null && scope.campaignIds.length > 0;
 }
 
 /** What a model row holds. */

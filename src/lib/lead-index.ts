@@ -179,6 +179,10 @@ export interface LeadOutcomes {
    * beside `steps`, and the bucket reads it beside the delivery layer's own positive reply.
    */
   positiveReply?: boolean;
+  /** When the LATEST instance of each step happened (ISO, null = undated). Same keys as `steps`. */
+  stepAt?: Map<LeadStepOutcomeName, string | null>;
+  /** When the latest ledger positive reply happened (ISO, null = undated). */
+  positiveReplyAt?: string | null;
 }
 
 /**
@@ -223,9 +227,18 @@ export async function fetchOutcomesByLead(
     const existing: LeadOutcomes = byLead.get(row.lead_id) ?? {
       steps: new Set<LeadStepOutcomeName>(),
       latestAt: null,
+      stepAt: new Map<LeadStepOutcomeName, string | null>(),
     };
-    if (canonical) existing.steps.add(canonical);
-    if (positiveReply) existing.positiveReply = true;
+    if (canonical) {
+      existing.steps.add(canonical);
+      // Several ledger spellings can canonicalize to one step: keep the latest dated instance.
+      const prior = existing.stepAt!.get(canonical) ?? null;
+      existing.stepAt!.set(canonical, prior === null || (latest !== null && latest > prior) ? latest : prior);
+    }
+    if (positiveReply) {
+      existing.positiveReply = true;
+      existing.positiveReplyAt = latest;
+    }
     if (latest && (existing.latestAt === null || latest > existing.latestAt)) {
       existing.latestAt = latest;
     }

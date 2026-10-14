@@ -196,6 +196,8 @@ describe.skipIf(!hasRealDatabase)("CRM judging + form-as-positive-reply against 
     const contactedOnly = { ...DEFAULT_STATUS, contacted: true, sent: true, delivered: true };
     const bucketsAfter = bucketsForRow(contactedOnly, outcomes.get(ids.formafter.leadId)!.steps, outcomes.get(ids.formafter.leadId)!.positiveReply === true);
     expect(bucketsAfter.has("positive_reply")).toBe(true);
+    // Dated, so a campaign read can credit it only when it followed that campaign's first send.
+    expect(Number.isFinite(Date.parse(outcomes.get(ids.formafter.leadId)!.positiveReplyAt ?? ""))).toBe(true);
     expect(outcomes.get(ids.formbefore.leadId)?.positiveReply ?? false).toBe(false);
 
     const resolver = createLeadStandingResolver({ orgId, deliveryQueried: true });
