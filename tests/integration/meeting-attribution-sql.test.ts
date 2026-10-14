@@ -26,6 +26,7 @@ vi.mock("../../src/lib/fetch-retry.js", () => ({
 
 const { sql } = await import("../../src/db/index.js");
 const { readMeetingAttribution } = await import("../../src/lib/meeting-attribution.js");
+const { readMeetingBookingBeforeAfter } = await import("../../src/lib/meeting-booking-before-after.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -135,5 +136,17 @@ describe.skipIf(!hasRealDatabase)("meeting attribution against a real database",
     expect(r.summary.arms.yourTeamMeetingBooking).toEqual({ handled: 3, booked: 2, rate: 2 / 3 });
     expect(r.summary.unhandled).toEqual({ people: 2, booked: 1 });
     expect(r.summary.meetings).toMatchObject({ total: 5, aiMeetingBooking: 1, yourTeamMeetingBooking: 2, unknown: 2 });
+  });
+
+  it("splits the brand at its first AI Meeting Booking act, every positive replier in one window", async () => {
+    const r = await readMeetingBookingBeforeAfter({ brandId: BRAND });
+    expect(r.brands).toHaveLength(1);
+    const b = r.brands[0];
+    expect(b.goLive).toMatchObject({ at: "2026-10-01T11:00:10.000Z", basis: "first_ai_meeting_booking_act", campaignId: "itest-ai-mb" });
+    expect(b.before.people + b.after.people).toBe(6);
+    expect(b.before).toMatchObject({ people: 6, booked: 4, bookedAfterGoLive: 4 });
+    expect(b.after).toMatchObject({ people: 0, booked: 0, rate: null });
+    expect(b.unplacedMeetings).toEqual({ count: 1, reasons: { person_unknown: 1 } });
+    expect(r.fleet.brands).toBe(1);
   });
 });
