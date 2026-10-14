@@ -48,7 +48,7 @@
  */
 import { createHash } from "node:crypto";
 import { sql } from "../db/index.js";
-import { streamBasicLeadChunks, type BasicLeadRow } from "./basic-leads.js";
+import { streamBasicLeadChunks, walkBasicLeadChunks, type BasicLeadRow } from "./basic-leads.js";
 import { toCompactLead } from "./compact-lead.js";
 import { crmPositiveReplyAtFor, fetchCrmPositiveReplyDates } from "./crm-positive-reply-dates.js";
 import type { StatusResult } from "./email-gateway-client.js";
@@ -339,7 +339,7 @@ export async function reconcileFeed(feed: ChangeFeed): Promise<number> {
   const seen = new Set<string>();
   let changed = 0;
   for await (const rows of prefetchOne(
-    streamBasicLeadChunks(listScopeOf(feed.scope), RECONCILE_CHUNK_SIZE),
+    walkBasicLeadChunks(listScopeOf(feed.scope), RECONCILE_CHUNK_SIZE),
   )) {
     const fresh = await readChunk(feed, rows, evidenceAt, changedAt);
     for (const row of fresh) seen.add(row.id);
