@@ -196,6 +196,14 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "outside_answer_judgments", touchesUpdatedAt: false },
       { table: "lead_disqualification_marks", touchesUpdatedAt: true },
       { table: "company_disqualification_marks", touchesUpdatedAt: true },
+      // Who each person is to the brand (RELATIONSHIP-TAGS-1014). The org-level rows (personal statements with
+      // brand '', the companies an org learned, its own merge aliases) stay with the org that stated them.
+      { table: "relationship_person_humans", touchesUpdatedAt: false },
+      { table: "relationship_subjects", touchesUpdatedAt: true },
+      { table: "relationship_evidence", touchesUpdatedAt: true },
+      { table: "relationship_judgments", touchesUpdatedAt: false },
+      { table: "relationship_statements", touchesUpdatedAt: false },
+      { table: "relationship_merge_questions", touchesUpdatedAt: false },
     ];
     for (const { table, touchesUpdatedAt } of scalarTables) {
       moved.push({

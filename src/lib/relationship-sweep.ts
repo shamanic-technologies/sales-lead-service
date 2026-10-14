@@ -14,6 +14,7 @@ import { lookUpCompanies } from "./relationship-company.js";
 import { judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
 import { suggestMerges } from "./relationship-merges.js";
 import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects.js";
+import { recomputePolicy } from "./relationship-read.js";
 import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -30,11 +31,12 @@ export interface ScopeTick {
   judgeFailed: number;
   merges: { asked: number; linked: number; open: number; rejected: number } | null;
   companies: { looked: number; free: number; treg: number; none: number; tregMicro: number } | null;
+  policyChanged: number;
   error: string | null;
 }
 
 export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: boolean; companies?: boolean } = {}): Promise<ScopeTick> {
-  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, merges: null, companies: null, error: null };
+  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, merges: null, companies: null, policyChanged: 0, error: null };
   const refresh = await refreshSubjects(scope);
   tick.subjects = refresh.subjects;
   tick.withoutHuman = refresh.withoutHuman;
@@ -68,6 +70,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
     }
     if (opts.merges !== false) tick.merges = await suggestMerges(scope, await identity());
     if (opts.companies !== false) tick.companies = await lookUpCompanies(scope, await identity());
+    tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
   } catch (err) {
     failed = true;
     tick.error = err instanceof Error ? err.message : String(err);

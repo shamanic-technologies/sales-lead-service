@@ -55,7 +55,7 @@ async function personRows(scope: Scope): Promise<PersonRow[]> {
       (array_agg(f.full_name ORDER BY (f.full_name LIKE '%(%)') , f.seq DESC) FILTER (WHERE coalesce(f.full_name, '') <> ''))[1] AS name,
       array_agg(DISTINCT f.source) AS sources,
       max(f.seq)::text AS max_seq,
-      bool_or(f.type IN ('message_in', 'message_out')) AS has_messages
+      bool_or(f.type IN ('message_in', 'message_out', 'group_message', 'group_member')) AS has_messages
     FROM crm_facts f
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
@@ -313,6 +313,8 @@ export interface ThreadLine {
 }
 
 const MESSAGE_TYPES = new Set(["message_in", "message_out"]);
+// crm-service also states `group_member` (both are in a group chat, `groupName`) and `group_message` (a word they wrote
+// in it): read as their own kinds, text and group name carried.
 const DETAIL_KEYS = ["subject", "channel", "group", "groupName", "roomName", "amount", "amountCents", "currency", "status", "stage", "formName", "offer", "url", "title", "website", "company"];
 
 /** Every live fact of the subject's persons at the brand, oldest first, plus our outreach's labels. */

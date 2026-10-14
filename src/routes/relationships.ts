@@ -9,7 +9,9 @@ import { CompanyServiceError } from "../lib/company-client.js";
 import { HumanIdentityError } from "../lib/human-identity-client.js";
 import { CompanyStatementError, stateCompany } from "../lib/relationship-company.js";
 import { answerMergeQuestion, MergeQuestionNotFoundError, undoMerge } from "../lib/relationship-merges.js";
-import { EMPTY_RELATIONSHIP, loadRelationships, readReview, stateTag, withdrawTag } from "../lib/relationship-read.js";
+import { EMPTY_RELATIONSHIP, loadRelationships, readReview, relationshipOfLead, stateTag, withdrawTag } from "../lib/relationship-read.js";
+import { db } from "../db/index.js";
+import { sql } from "drizzle-orm";
 import { isRelationshipTag } from "../lib/relationship-tags.js";
 
 const router = Router();
@@ -186,6 +188,37 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/company", apiKeyAuth, r
       return;
     }
     fail(res, "company statement", err);
+  }
+});
+
+/**
+ * Who the person of ONE lead row is to its brand (writers read it before writing). `{id}` = the list row's `id`
+ * (a `leads_campaigns` row of the org; foreign = 404); `brandId` defaults to the row's first brand.
+ */
+router.get("/orgs/leads/:id/relationship", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+  const id = String(req.params.id);
+  if (!UUID_RE.test(id)) {
+    res.status(400).json({ error: "id must be the `id` of a lead row, a uuid" });
+    return;
+  }
+  const asked = typeof req.query.brandId === "string" ? req.query.brandId : null;
+  try {
+    const rows = (await db.execute(sql`
+      SELECT lead_id::text AS lead_id, brand_ids FROM leads_campaigns WHERE id = ${id}::uuid AND org_id = ${req.orgId!}
+    `)) as unknown as Array<{ lead_id: string; brand_ids: string[] }>;
+    const row = rows[0];
+    if (!row) {
+      res.status(404).json({ error: "Lead not found" });
+      return;
+    }
+    if (asked && !row.brand_ids.includes(asked)) {
+      res.status(404).json({ error: "Lead not found for this brand" });
+      return;
+    }
+    const brandId = asked ?? row.brand_ids[0] ?? null;
+    res.json({ leadId: row.lead_id, brandId, relationship: await relationshipOfLead(req.orgId!, brandId, row.lead_id) });
+  } catch (err) {
+    fail(res, "lead relationship", err);
   }
 });
 

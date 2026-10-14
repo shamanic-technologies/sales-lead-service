@@ -1,5 +1,6 @@
 import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import type { EmailPolicy } from "./email-policy.js";
+import type { RelationshipPolicy } from "./relationship-tags.js";
 import { isCreditInsufficientError } from "./credit-errors.js";
 
 /**
@@ -230,13 +231,19 @@ export interface ServiceContext {
    * serve, candidate and reveal body: human-service owns "deliverable". Absent = no key on the wire (valid only).
    */
   acceptedEmails?: EmailPolicy;
+  /**
+   * The pipe's relationship policy (RELATIONSHIP-TAGS-1014), sent as `relationships` on serve-next: human-service
+   * forwards it to crm-service for a CRM-sourced serve. Absent = no key on the wire.
+   */
+  relationships?: RelationshipPolicy;
 }
 
-/** The serve body: `{ reachableBy, acceptedEmails }` for what the pipe states, else `{}` (today's bytes). */
+/** The serve body: what the pipe states (`reachableBy`, `acceptedEmails`, `relationships`), else `{}` (today's bytes). */
 export function serveBody(ctx: ServiceContext): Record<string, unknown> {
   return {
     ...(ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {}),
     ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
+    ...(ctx.relationships ? { relationships: ctx.relationships } : {}),
   };
 }
 

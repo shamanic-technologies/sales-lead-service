@@ -10,7 +10,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { refreshSubjects, readThread, toSubject } from "../../src/lib/relationship-subjects.js";
 import { writeEvidence } from "../../src/lib/relationship-judge.js";
-import { loadRelationships, readReview, stateTag, withdrawTag } from "../../src/lib/relationship-read.js";
+import { loadRelationships, readReview, recomputePolicy, stateTag, withdrawTag } from "../../src/lib/relationship-read.js";
+import { relationshipClause } from "../../src/lib/reach-sql.js";
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -22,6 +23,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
   const yuliia = randomUUID();
   const scope = { orgId, brandId };
   let seq = BigInt(Date.now()) * 1000n;
+  const createdLeads: string[] = [];
 
   async function fact(p: { personKey: string; human: string | null; name: string; emails?: string[]; phones?: string[]; type: string; source: string; payload?: Record<string, unknown>; at?: string }): Promise<string> {
     const id = randomUUID();
@@ -36,6 +38,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
   }
 
   afterAll(async () => {
+    await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
     for (const t of ["crm_facts", "relationship_person_humans", "relationship_subjects", "relationship_evidence", "relationship_judgments", "relationship_statements", "relationship_companies", "org_human_aliases"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
@@ -111,5 +114,23 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     const b = (await loadRelationships(orgId, brandId, [yuliia])).get(yuliia)!;
     expect(b.company).toMatchObject({ id: companyId, name: "Acme", source: "treg_enrich" });
     expect(b.tags.sort()).toEqual(["customer", "personal", "prospect"]);
+  });
+
+  it("business_only: fail-closed until decided, a personal tag holds the person back, the pool clause reads it", async () => {
+    const [lead] = (await db.execute(sql`INSERT INTO leads (name, human_id) VALUES ('Yuliia', ${yuliaWa}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
+    createdLeads.push(lead.id);
+    const allowed = async () =>
+      ((await db.execute(sql`SELECT 1 AS ok WHERE TRUE ${relationshipClause(sql`${lead.id}::uuid`, { policy: "business_only", orgId, brandIds: [brandId] })}`)) as unknown as unknown[]).length === 1;
+    // The lead's fleet human (Yulia's WhatsApp id) is folded into Yuliia by the org's own link.
+    expect(await allowed()).toBe(false);
+    await recomputePolicy(orgId, brandId);
+    expect(await allowed()).toBe(false); // personal (0.92) + investor unsure
+    await stateTag({ orgId, brandId, humanId: yuliia, tag: "personal", state: "no", userId: "user-1" });
+    await stateTag({ orgId, brandId, humanId: yuliia, tag: "investor", state: "no", userId: "user-1" });
+    expect(await allowed()).toBe(true);
+    const block = (await loadRelationships(orgId, brandId, [yuliia])).get(yuliia)!;
+    expect(block.policies.business_only).toBe(true);
+    await withdrawTag({ orgId, brandId, humanId: yuliia, tag: "personal", userId: "user-1" });
+    expect(await allowed()).toBe(false);
   });
 });

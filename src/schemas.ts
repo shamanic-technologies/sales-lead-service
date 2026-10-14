@@ -8080,6 +8080,11 @@ export const RelationshipBlockSchema = z
         at: z.string(),
       }),
     ),
+    policies: z.object({
+      business_only: z.boolean().openapi({
+        description: "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure.",
+      }),
+    }),
   })
   .openapi("RelationshipBlock", {
     description:
@@ -8245,5 +8250,20 @@ registry.registerPath({
       content: { "application/json": { schema: z.object({ company: z.object({ companyId: z.string().nullable(), name: z.string().nullable(), domain: z.string().nullable() }) }) } },
     },
     400: { description: "Not a domain" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/relationship",
+  summary: "Who the person of one lead row is to its brand (writers read it before writing)",
+  request: { params: z.object({ id: z.string() }), query: z.object({ brandId: z.string().optional() }) },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "The block",
+      content: { "application/json": { schema: z.object({ leadId: z.string(), brandId: z.string().nullable(), relationship: RelationshipBlockSchema }) } },
+    },
+    404: { description: "No such row in this org (or not of that brand)" },
   },
 });

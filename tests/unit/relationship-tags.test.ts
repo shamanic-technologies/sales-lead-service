@@ -85,3 +85,11 @@ describe("companyOfEnrich", () => {
     expect(companyOfEnrich({ output: { full_name: "X", company: { name: "Co", website: "co.io" } } }).company).toEqual({ name: "Co", domain: "co.io", source: "treg_enrich" });
   });
 });
+
+describe("the pipe's relationship policy on the wire", () => {
+  it("serve-next carries `relationships` only when the pipe states it", async () => {
+    const { serveBody } = await import("../../src/lib/people-client.js");
+    expect(serveBody({ orgId: "o" } as never)).toEqual({});
+    expect(serveBody({ orgId: "o", relationships: "business_only" } as never)).toEqual({ relationships: "business_only" });
+  });
+});

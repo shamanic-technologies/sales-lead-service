@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS relationship_subjects (
   person_keys text[] NOT NULL DEFAULT '{}',
   thread_seq bigint NOT NULL DEFAULT 0,
   has_messages boolean NOT NULL DEFAULT false,
+  -- May a pipe stating `relationships: business_only` hand this lead out? Fail-closed (false) until decided:
+  -- recomputed by the sweep and on every person's word (relationship-read.ts `recomputePolicy`).
+  business_only_ok boolean NOT NULL DEFAULT false,
   first_seen_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (org_id, brand_id, human_id)

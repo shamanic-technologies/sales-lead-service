@@ -16,6 +16,7 @@ import {
   decideTags,
   isRelationshipTag,
   levelOf,
+  policyAllows,
   tagsIn,
   type RelationshipTag,
   type TagDetail,
@@ -36,9 +37,19 @@ export interface RelationshipBlock {
   unsureTags: RelationshipTag[];
   judgedAt: string | null;
   details: TagDetail[];
+  /** May a pipe stating each policy hand this person out? The one answer every server of people reads. */
+  policies: { business_only: boolean };
 }
 
-export const EMPTY_RELATIONSHIP: RelationshipBlock = { humanId: null, company: null, tags: [], unsureTags: [], judgedAt: null, details: [] };
+export const EMPTY_RELATIONSHIP: RelationshipBlock = {
+  humanId: null,
+  company: null,
+  tags: [],
+  unsureTags: [],
+  judgedAt: null,
+  details: [],
+  policies: { business_only: false },
+};
 
 type Ts = Date | string;
 const iso = (v: Ts | null | undefined): string | null => (v === null || v === undefined ? null : toIsoTimestamp(v));
@@ -118,13 +129,17 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     let company: RelationshipCompany | null = null;
     if (c) company = { id: c.company_id, name: c.name, domain: c.domain, source: c.source };
     else if (key) company = { id: key, name: keyNames.get(key)?.name ?? null, domain: keyNames.get(key)?.domain ?? null, source: "lead" };
+    const tags = tagsIn(details, "yes");
+    const unsureTags = tagsIn(details, "unsure");
+    const judgedAt = j ? iso(j.judged_at) : null;
     const block: RelationshipBlock = {
       humanId: h,
       company,
-      tags: tagsIn(details, "yes"),
-      unsureTags: tagsIn(details, "unsure"),
-      judgedAt: j ? iso(j.judged_at) : null,
+      tags,
+      unsureTags,
+      judgedAt,
       details,
+      policies: { business_only: policyAllows("business_only", { tags, unsureTags, judgedAt }) },
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }
@@ -237,6 +252,7 @@ export async function stateTag(input: { orgId: string; brandId: string; humanId:
       VALUES (${input.orgId}, ${brand}, ${human}::uuid, ${companyKey}, ${input.tag}, ${input.state}, ${input.userId})
     `);
   });
+  for (const b of humanLevel ? await brandsOfHuman(input.orgId, human) : [input.brandId]) await recomputePolicy(input.orgId, b, [human]);
 }
 
 /** Withdraw a person's word on a tag (back to evidence / judgment). Returns whether one was live. */
@@ -249,6 +265,7 @@ export async function withdrawTag(input: { orgId: string; brandId: string; human
       AND tag = ${input.tag} AND withdrawn_at IS NULL
     RETURNING 1
   `)) as unknown as unknown[];
+  for (const b of humanLevel ? await brandsOfHuman(input.orgId, human) : [input.brandId]) await recomputePolicy(input.orgId, b, [human]);
   return rows.length > 0;
 }
 
@@ -257,4 +274,47 @@ async function subjectCompanyKey(orgId: string, brandId: string, humanId: string
     SELECT company_key FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ${humanId}::uuid
   `)) as unknown as Array<{ company_key: string }>;
   return rows[0]?.company_key ?? "";
+}
+
+/**
+ * Store each lead's policy answer where the serve pools read it (`relationship_subjects.business_only_ok`).
+ * `humanIds` absent = every lead of the brand. A `personal` statement moves every brand of the human: call it
+ * per brand the human is a subject of (`brandsOfHuman`).
+ */
+export async function recomputePolicy(orgId: string, brandId: string, humanIds?: readonly string[]): Promise<number> {
+  const ids =
+    humanIds ??
+    ((await db.execute(sql`SELECT human_id::text AS h FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId}`)) as unknown as Array<{ h: string }>).map(
+      (r) => r.h,
+    );
+  let changed = 0;
+  for (let i = 0; i < ids.length; i += 1000) {
+    const blocks = await loadRelationships(orgId, brandId, ids.slice(i, i + 1000));
+    const pairs = [...blocks.values()].filter((b) => b.humanId).map((b) => ({ h: b.humanId!, ok: b.policies.business_only }));
+    if (pairs.length === 0) continue;
+    const rows = (await db.execute(sql`
+      UPDATE relationship_subjects s SET business_only_ok = v.ok
+      FROM jsonb_to_recordset(${JSON.stringify(pairs)}::jsonb) AS v(h uuid, ok boolean)
+      WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId} AND s.human_id = v.h AND s.business_only_ok IS DISTINCT FROM v.ok
+      RETURNING 1
+    `)) as unknown as unknown[];
+    changed += rows.length;
+  }
+  return changed;
+}
+
+export async function brandsOfHuman(orgId: string, humanId: string): Promise<string[]> {
+  const rows = (await db.execute(sql`
+    SELECT brand_id FROM relationship_subjects WHERE org_id = ${orgId} AND human_id = ${humanId}::uuid
+  `)) as unknown as Array<{ brand_id: string }>;
+  return rows.map((r) => r.brand_id);
+}
+
+/** The block of a lead row's human at a brand (lead detail, the served lead): a lead with no human yet = EMPTY. */
+export async function relationshipOfLead(orgId: string, brandId: string | null | undefined, leadId: string): Promise<RelationshipBlock> {
+  if (!brandId) return EMPTY_RELATIONSHIP;
+  const rows = (await db.execute(sql`SELECT human_id::text AS h FROM leads WHERE id = ${leadId}::uuid`)) as unknown as Array<{ h: string | null }>;
+  const h = rows[0]?.h ?? null;
+  if (!h) return EMPTY_RELATIONSHIP;
+  return (await loadRelationships(orgId, brandId, [h])).get(h) ?? { ...EMPTY_RELATIONSHIP, humanId: h };
 }

@@ -11,6 +11,9 @@ import request from "supertest";
 
 const findFirst = vi.fn();
 const insertValues = vi.fn(() => ({ onConflictDoNothing: vi.fn(async () => undefined) }));
+vi.mock("../../src/lib/relationship-read.js", () => ({
+  relationshipOfLead: vi.fn(async () => ({ humanId: null, company: null, tags: [], unsureTags: [], judgedAt: null, details: [], policies: { business_only: false } })),
+}));
 vi.mock("../../src/db/index.js", () => ({
   db: {
     query: { idempotencyCache: { findFirst: (...a: unknown[]) => findFirst(...a) } },
