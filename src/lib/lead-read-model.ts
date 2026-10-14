@@ -64,7 +64,7 @@ import {
   type EvidenceRequest,
 } from "./lead-delivery-evidence.js";
 import { enrichLeadIndex, type EngagementContext } from "./lead-engagement.js";
-import { streamLeadIndex, type LeadIndexRow } from "./lead-index.js";
+import { streamLeadIndex, walkLeadIndex, type LeadIndexRow } from "./lead-index.js";
 import {
   DEFAULT_LEAD_LIST_STATUSES,
   encodeLeadCursor,
@@ -477,7 +477,7 @@ async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
   const evidenceAt = new Date(startedAt - EVIDENCE_REUSE_MS);
   const resolver = resolverFor(scope);
   const seen: string[] = [];
-  for await (const chunk of streamLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
+  for await (const chunk of walkLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
     // The scope lock is held per CHUNK, never across the whole refresh: a read's catch-up waits for
     // at most one chunk rather than a whole-scope pass (tens of seconds on the largest brands). A
     // chunk is derived AND written under the lock, so a catch-up never lands between a chunk's
@@ -557,7 +557,7 @@ async function buildModel(
     let people = 0;
     try {
       const resolver = resolverFor(scope);
-      for await (const chunk of streamLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
+      for await (const chunk of walkLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
         const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
         await writeRows(sql, modelId, derived);
         people += derived.length;
