@@ -37,10 +37,6 @@
  *                            by (features-service `originsByChannel`): nobody is served from it for this pipe
  *                            (owner 2026-10-12). A wrong audience was named; says nothing about its people.
  *   audience_offer_mismatch — the named audience belongs to another offer than the one the campaign sells.
- *   targeted_audiences_unavailable — a source unit's own run whose campaign TARGETS audiences (campaign-service
- *                            `audienceIds`, a hard subset) none of which is an active audience of its offer served
- *                            under its channel (src/lib/source-audiences.ts). It looked nowhere else, by design: the
- *                            customer's targeting is never widened. Says nothing about any audience's people.
  *   no_recent_posts        — a linkedin_engagement audience human-service was asked to serve answered `exhausted`
  *                            with its own reason `no_recent_posts`: the competitor pages it reads engagers from
  *                            hold NO post inside its window, so there was nobody to read (owner 2026-10-13, Doc
@@ -63,7 +59,6 @@ export const SOURCE_BUDGET_REACHED_REASON = "source_budget_reached" as const;
 export const SOURCE_STOCK_EMPTY_REASON = "source_stock_empty" as const;
 export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
 export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
-export const TARGETED_AUDIENCES_UNAVAILABLE_REASON = "targeted_audiences_unavailable" as const;
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
@@ -78,7 +73,6 @@ export const SERVE_EMPTY_REASONS = [
   SOURCE_STOCK_EMPTY_REASON,
   ORIGIN_NOT_FED_REASON,
   AUDIENCE_OFFER_MISMATCH_REASON,
-  TARGETED_AUDIENCES_UNAVAILABLE_REASON,
   NO_RECENT_POSTS_REASON,
 ] as const;
 

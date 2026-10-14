@@ -12,13 +12,13 @@ import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
-import { channelReachableBy } from "../lib/channel-reach.js";
+import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
 import type { ReachMethod } from "../lib/people-client.js";
 import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reasons.js";
 import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
 import { decideSourceMode, type SourceUnit } from "../lib/source-mode.js";
 import { resolveSourceAudiences } from "../lib/source-audiences.js";
-import { SOURCE_CAMPAIGN_OFF_REASON, TARGETED_AUDIENCES_UNAVAILABLE_REASON } from "../lib/serve-reasons.js";
+import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 import { recordSourceEmailDemand, sourceRunEmailPolicy } from "../lib/source-email-demand.js";
@@ -153,7 +153,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     inFlightOutreach.add(campaignId);
     res.on("close", () => inFlightOutreach.delete(campaignId));
 
-    reachableBy = await channelReachableBy(featureSlug);
+    // The channel's own requirement plus WHO the workflow's lead strategy states it finds (owner 2026-10-14): both
+    // required, on every serve and every pool.
+    reachableBy = combineReach(await channelReachableBy(featureSlug), parsed.data.reachableBy ?? null);
 
     const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
 
@@ -181,17 +183,11 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
             offerId: unit.offerId,
             unitSlug: unit.featureSlug,
             preferredAudienceId: req.audienceId ?? null,
-            targetAudienceIds: unit.audienceIds,
             userId: req.userId ?? null,
             runId,
           });
-          // The campaign's targeting is a hard subset: none of its audiences walkable = nobody looked for, said why.
-          if (found.kind === "targets_unavailable") {
-            serveSource = { kind: "refused", reason: TARGETED_AUDIENCES_UNAVAILABLE_REASON, campaignId: unit.id, detail: found.detail };
-          } else {
-            findAudienceIds = found.audienceIds;
-            acceptedEmails = await sourceRunEmailPolicy(unit.id, acceptedEmails);
-          }
+          findAudienceIds = found.audienceIds;
+          acceptedEmails = await sourceRunEmailPolicy(unit.id, acceptedEmails);
         }
       }
     } else {

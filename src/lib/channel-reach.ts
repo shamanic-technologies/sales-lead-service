@@ -23,6 +23,16 @@ function warnOnce(channelSlug: string, line: string): void {
   console.warn(line);
 }
 
+/**
+ * PURE: what a serve requires, the channel's methods and the workflow's stated ones together (ALL required). The
+ * workflow's word is its pipe's LEAD STRATEGY (owner 2026-10-14, LEAK-1012: a WhatsApp-reachable strategy and an
+ * email-reachable one of the same CRM source never take each other's people). Null = nothing required by either.
+ */
+export function combineReach(channel: ReachMethod[] | null, stated: readonly ReachMethod[] | null): ReachMethod[] | null {
+  const all = new Set<ReachMethod>([...(channel ?? []), ...(stated ?? [])]);
+  return all.size === 0 ? null : [...all].sort();
+}
+
 export async function channelReachableBy(channelSlug: string): Promise<ReachMethod[] | null> {
   const methods = await loadChannelContactMethods(channelSlug);
   if (!methods || methods.length === 0) {
