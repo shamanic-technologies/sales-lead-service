@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { eq, lt } from "drizzle-orm";
+import { eq, lt, sql } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
 import { pullNext, type PullNextMode } from "../lib/buffer.js";
 import { createRun, updateRun } from "../lib/runs-client.js";
@@ -98,6 +98,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // serves their stock (`stockSourceIds`). Neither is an on-demand ask: neither records an `on_demand` event.
   let ownRunUnit: SourceUnit | null = null;
   let findAudienceIds: string[] = [];
+  // The source's lead strategy is the brand's CONTACTED PURE PROSPECTS (NEVER-NO-FOLLOWUP-1014): no audience walked.
+  const population = parsed.data.population ?? null;
   let stockSourceIds: string[] | null = null;
 
   // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
@@ -159,6 +161,14 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     reachableBy = combineReach(await channelReachableBy(featureSlug), parsed.data.reachableBy ?? null);
 
     const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
+    if (population && sourceMode.kind !== "own_run") {
+      // Who a source finds is ITS pipe's lead strategy: only a source unit's own run may state a population.
+      inFlightOutreach.delete(campaignId);
+      return res.status(400).json({
+        error: "population_needs_source_unit",
+        detail: `population "${population}" is a source pipe's lead strategy: x-campaign-id ${campaignId} (${featureSlug}) is not a lead source campaign (leg start_to_lead_found) running on its own`,
+      });
+    }
 
     if (sourceMode.kind === "own_run") {
       // The source unit's OWN run: within its own budget, in its own audiences, filed under itself.
@@ -177,7 +187,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
           originSlug: unit.featureSlug,
         });
         if (budget.kind === "refused") serveSource = budget;
-        else {
+        else if (population) {
+          // Found among the brand's own contacted people (src/lib/prospect-followup.ts): nothing to walk, nothing bought.
+        } else {
           const found = await resolveSourceAudiences({
             orgId: req.orgId!,
             brandId: unit.brandId,
@@ -365,7 +377,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
   const pullMode: PullNextMode | null = ownRunUnit
-    ? { kind: "find", audienceIds: findAudienceIds }
+    ? population
+      ? { kind: "find_contacted" }
+      : { kind: "find", audienceIds: findAudienceIds }
     : stockSourceIds
       ? { kind: "stock", sourceCampaignIds: stockSourceIds }
       : null;
@@ -400,6 +414,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     // with the answer, so a replay serves the same block.
     if (result.found && result.lead && result.lead.data) {
       (result.lead.data as unknown as Record<string, unknown>).relationship = await relationshipOfLead(req.orgId!, brandId, result.lead.leadId);
+      // The lead ROW the person holds on the asking campaign (every serve files one): what /orgs/leads/{id}/... read.
+      const [row] = (await db.execute(sql`
+        SELECT id::text AS id FROM leads_campaigns WHERE lead_id = ${result.lead.leadId}::uuid AND campaign_id = ${campaignId}
+      `)) as unknown as Array<{ id: string }>;
+      if (!row) throw new Error(`served lead ${result.lead.leadId} holds no row on campaign ${campaignId}`);
+      (result.lead as typeof result.lead & { leadCampaignId: string }).leadCampaignId = row.id;
     }
 
     // Cache response keyed by caller's runId for idempotency.

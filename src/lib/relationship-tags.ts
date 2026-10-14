@@ -46,6 +46,12 @@ export const RELATIONSHIP_POLICIES = ["business_only"] as const;
 export type RelationshipPolicy = (typeof RELATIONSHIP_POLICIES)[number];
 export const BUSINESS_ONLY_EXCLUDED: readonly RelationshipTag[] = ["personal", "investor", "supplier", "team", "partner", "advisor"];
 
+/**
+ * A PURE PROSPECT (NEVER-NO-FOLLOWUP-1014, owner 2026-10-14: "qui n'ont pas de tag autre, pas personal, pas client,
+ * pas investors, pure prospect"): no tag but `prospect`, yes or unsure.
+ */
+export const PURE_PROSPECT_EXCLUDED: readonly RelationshipTag[] = RELATIONSHIP_TAGS.filter((t) => t !== "prospect");
+
 export const JUDGED_YES = 0.5;
 /** Below this a judgment is a no; from it up to JUDGED_YES it is unsure. */
 export const JUDGED_NO = 0.4;
@@ -119,4 +125,23 @@ export function policyAllows(
   // "Are they the same person as someone we talk with?" still unanswered: they may be known (never assume a stranger).
   if (block.openMerge) return false;
   return !BUSINESS_ONLY_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
+}
+
+/**
+ * Is this person a PURE PROSPECT of the brand (NEVER-NO-FOLLOWUP-1014)? A relationship SUBJECT of the brand (some
+ * source of the org knows them: CRM, mailbox, WhatsApp...) only once judged, with no open "same person?" question and
+ * no tag but prospect, yes or unsure. A person NO source of the org knows outside our own outreach (not a subject) is
+ * one by definition, no judgment asked (owner's definition, relayed 2026-10-14): only a tag stated or judged elsewhere
+ * (`personal`, org-wide) or an open question holds them back.
+ */
+export function pureProspectAllows(block: {
+  subject: boolean;
+  tags: readonly RelationshipTag[];
+  unsureTags: readonly RelationshipTag[];
+  judgedAt: string | null;
+  openMerge?: boolean;
+}): boolean {
+  if (block.subject && block.judgedAt === null) return false;
+  if (block.openMerge) return false;
+  return !PURE_PROSPECT_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
 }

@@ -52,6 +52,8 @@ vi.mock("../../src/lib/relationship-read.js", () => ({
 vi.mock("../../src/db/index.js", () => ({
   db: {
     query: { idempotencyCache: { findFirst: (...a: unknown[]) => findFirst(...a) } },
+    // The served person's row on the asking campaign (lead.leadCampaignId).
+    execute: async () => [{ id: "row-1" }],
     insert: (table: { __table: string }) => ({
       values: (v: Record<string, unknown>) => {
         if (table.__table === "idempotency_cache") {

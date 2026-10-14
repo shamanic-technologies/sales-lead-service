@@ -56,7 +56,8 @@
               "source_stock_empty",
               "origin_not_fed",
               "audience_offer_mismatch",
-              "no_recent_posts"
+              "no_recent_posts",
+              "contacted_prospects_none_owed"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` / `source_budget_reached` name a source campaign that is off or spent today; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
@@ -352,6 +353,12 @@
             "format": "uuid",
             "description": "Which human-service person this lead is: the id of the canonical person human-service resolved when it served this lead from the audience (human-service `people.id`, the same `personId` its audience-members read returns). Use it as the durable identity of the person contacted. It is a different concept from `leadId` (lead-service's lead / provenance id): the two may differ and are never derived from each other. OMITTED when the serve stated no person (a lead served before this field existed, or a producer that did not state one). A retried serve hands out the value stored on the original serve.",
             "example": "60000000-0000-0000-0000-000000000001"
+          },
+          "leadCampaignId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The lead ROW this person holds on the campaign that asked (x-campaign-id): the `{id}` every per-row read takes (GET /orgs/leads/{id}, /history, /relationship, /prospect-followup, step statements). Present on every found serve.",
+            "example": "70000000-0000-0000-0000-000000000001"
           },
           "qualification": {
             "$ref": "#/components/schemas/LeadQualification"
@@ -1390,6 +1397,14 @@
             ],
             "description": "The pipe's relationship policy (tactic \"Business contacts only\", RELATIONSHIP-TAGS-1014). `business_only`: nobody the brand knows as personal, investor, supplier, team, partner or advisor (yes, or still unsure) is handed out, nor anybody whose whole thread was never judged yet. Applies to every already-paid pool and is forwarded to human-service serve-next. Absent = today's serve.",
             "example": "business_only"
+          },
+          "population": {
+            "type": "string",
+            "enum": [
+              "contacted_pure_prospects"
+            ],
+            "description": "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
+            "example": "contacted_pure_prospects"
           }
         },
         "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`), all optional; an empty body is today's serve."
@@ -10571,11 +10586,20 @@
               "business_only": {
                 "type": "boolean",
                 "description": "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure."
+              },
+              "pure_prospect": {
+                "type": "boolean",
+                "description": "Is this person a PURE PROSPECT of the brand (no tag but prospect, yes or unsure)? A person some source of the org knows (`subject`) only once judged and with no open \"same person?\" question; a person no source knows outside our own outreach is one unless a tag says otherwise. Read by the prospect follow-up verdict."
               }
             },
             "required": [
-              "business_only"
+              "business_only",
+              "pure_prospect"
             ]
+          },
+          "subject": {
+            "type": "boolean",
+            "description": "Does some source of the org (CRM, mailbox, WhatsApp/LinkedIn, signups, payments) know this person at the brand? false = known only through our own outreach."
           },
           "merges": {
             "type": "array",
@@ -10593,6 +10617,7 @@
           "judgedAt",
           "details",
           "policies",
+          "subject",
           "merges"
         ],
         "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.5, no < 0.4, unsure between: the true doubt, asked on the review page)."
@@ -10987,6 +11012,52 @@
           "companyQuestions",
           "settled",
           "counts"
+        ]
+      },
+      "ProspectFollowupVerdict": {
+        "type": "object",
+        "properties": {
+          "leadCampaignId": {
+            "type": "string",
+            "description": "The row asked about (by-row read only)."
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "owed": {
+            "type": "boolean",
+            "description": "true = this brand still owes the person a prospect follow-up: write it."
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "The strongest stop when not owed (first of `reasons`), null when owed."
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every stop, strongest first: opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, in_conversation (a reply waiting on an answer: the responder's), not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet), not_contacted (the brand never emailed them), sequence_running (the sender still has a step to send them for this brand). Empty when owed. A plain \"no thanks\" is not a stop."
+          },
+          "relationshipTags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The tags that make the person more than a prospect, when that is a reason."
+          }
+        },
+        "required": [
+          "leadId",
+          "brandId",
+          "owed",
+          "reason",
+          "reasons",
+          "relationshipTags"
         ]
       }
     },
@@ -19276,6 +19347,135 @@
           },
           "404": {
             "description": "No such row in this org (or not of that brand)"
+          }
+        }
+      }
+    },
+    "/orgs/leads/{id}/prospect-followup": {
+      "get": {
+        "summary": "Is the person of this lead row still owed a prospect follow-up by the brand? (writers ask right before writing)",
+        "description": "`{id}` = a lead row id (`leadCampaignId` on a buffer/next serve, the list row `id`, any campaign's row of the person, the reactive campaign's included). Cheap: local copies plus one email-gateway read. Fail loud: any source unreadable = 502, never a yes.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProspectFollowupVerdict"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a row id"
+          },
+          "404": {
+            "description": "No such row in this org (or not of that brand)"
+          },
+          "409": {
+            "description": "The row names no brand"
+          },
+          "502": {
+            "description": "A source could not be read: no verdict"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/prospect-followup": {
+      "get": {
+        "summary": "Is the person on this email still owed a prospect follow-up by the brand?",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "email",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verdict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProspectFollowupVerdict"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No email"
+          },
+          "404": {
+            "description": "No lead of the org's brand on that address"
+          },
+          "409": {
+            "description": "Several leads on that address"
+          },
+          "502": {
+            "description": "A source could not be read: no verdict"
           }
         }
       }

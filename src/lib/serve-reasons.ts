@@ -44,6 +44,10 @@
  *                            the audience fills as soon as a competitor posts. Wins over every other empty answer
  *                            of a walk that served nobody (a look found nothing to read, so not all walked out).
  *
+ *   contacted_prospects_none_owed — a "contacted pure prospects" source run (NEVER-NO-FOLLOWUP-1014,
+ *                            src/lib/prospect-followup.ts): every person the brand contacted is either already in a
+ *                            follow-up run of the reactive pipe, stopped (opted out, disqualified, replied, met, bought...) or not a pure
+ *                            prospect. Not a population that ran out: it refills as the brand contacts more people.
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
  * not-exhaustion, and only an explicit equality test gives that.
@@ -60,6 +64,7 @@ export const SOURCE_STOCK_EMPTY_REASON = "source_stock_empty" as const;
 export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
 export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
+export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_owed" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -74,6 +79,7 @@ export const SERVE_EMPTY_REASONS = [
   ORIGIN_NOT_FED_REASON,
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
+  CONTACTED_PROSPECTS_NONE_OWED_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];
