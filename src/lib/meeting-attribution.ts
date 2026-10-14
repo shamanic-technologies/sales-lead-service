@@ -673,18 +673,31 @@ async function fetchOrgCampaignCards(orgId: string): Promise<CampaignCard[]> {
     }));
 }
 
+export interface MeetingAttributionInputs {
+  meetings: MeetingFact[];
+  positiveReplies: PositiveReplyFact[];
+  answers: AnswerFact[];
+  campaigns: CampaignCard[];
+}
+
+/** Every fact the rule reads, fleet-wide (`brandId` null) or one brand. */
+export async function readMeetingAttributionInputs(brandId: string | null): Promise<MeetingAttributionInputs> {
+  const [meetings, positiveReplies, answers] = await Promise.all([
+    readMeetings(brandId),
+    readPositiveReplies(brandId),
+    readAnswers(brandId),
+  ]);
+  // campaign-service is asked only for orgs where a side has to be named.
+  const orgIds = [...new Set([...positiveReplies.map((r) => r.orgId), ...answers.map((a) => a.orgId)])].sort();
+  const campaigns = (await Promise.all(orgIds.map(fetchOrgCampaignCards))).flat();
+  return { meetings, positiveReplies, answers, campaigns };
+}
+
 /** Fleet-wide (`brandId` null) or one brand. */
 export async function readMeetingAttribution(params: {
   brandId: string | null;
   since: string | null;
 }): Promise<MeetingAttributionResult> {
-  const [meetings, positiveReplies, answers] = await Promise.all([
-    readMeetings(params.brandId),
-    readPositiveReplies(params.brandId),
-    readAnswers(params.brandId),
-  ]);
-  // campaign-service is asked only for orgs where a side has to be named.
-  const orgIds = [...new Set([...positiveReplies.map((r) => r.orgId), ...answers.map((a) => a.orgId)])].sort();
-  const campaigns = (await Promise.all(orgIds.map(fetchOrgCampaignCards))).flat();
-  return attributeMeetings({ meetings, positiveReplies, answers, campaigns, since: params.since });
+  const inputs = await readMeetingAttributionInputs(params.brandId);
+  return attributeMeetings({ ...inputs, since: params.since });
 }

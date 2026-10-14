@@ -8008,6 +8008,83 @@ registry.registerPath({
   },
 });
 
+const MeetingBookingWindow = z.object({
+  people: z.number().int().openapi({ description: "People whose FIRST positive reply is in this window (the rate's population)." }),
+  booked: z.number().int().openapi({ description: "Of them, people with a meeting at or after that reply, whoever booked it." }),
+  rate: z.number().nullable().openapi({ description: "booked / people; null when nobody." }),
+  bookedBy: z
+    .object({ aiMeetingBooking: z.number().int(), yourTeamMeetingBooking: z.number().int(), other: z.number().int(), unknown: z.number().int() })
+    .openapi({ description: "Who booked each booked person's first meeting (the side /internal/meeting-attribution gives it)." }),
+  bookedAfterGoLive: z.number().int().nullable().openapi({
+    description: "Of `booked`, people whose first meeting is at or after go-live: a person who replied BEFORE go-live and booked after stays in `before` and is counted here too. 0 on `after`; null without go-live.",
+  }),
+  withinDays: z
+    .object({ days: z.number().int(), people: z.number().int(), booked: z.number().int(), rate: z.number().nullable() })
+    .openapi({ description: "Same horizon for both windows: people whose first positive reply is at least `days` old, booked within `days` of it." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/meeting-attribution/before-after",
+  summary: "Positive reply -> Meeting booked rate BEFORE and AFTER a brand's AI Meeting Booking went live, with populations (internal, service-auth)",
+  description:
+    "For every brand with an AI Meeting Booking campaign (channel ai-meeting-booking, leg conversation_to_meeting_booked): its go-live = the FIRST " +
+    "AI Meeting Booking act of the follow-up ledger (an `acted` row whose acting campaign campaign-service states is AI Meeting Booking of the brand), " +
+    "never a campaign creation date. A person belongs to the window of their FIRST positive reply (before = strictly before go-live, after = at or " +
+    "after); booked = a meeting at or after that reply, the same person-to-meeting rule as /internal/meeting-attribution; a person who replied before " +
+    "go-live and booked after stays in `before` (`bookedAfterGoLive`). before.people + after.people = the brand's positive repliers since inception " +
+    "(asserted). A meeting with no person or no date is in no window (`unplacedMeetings`). A brand with no act yet is listed with `goLive: null`, " +
+    "every person in `before`, and is left out of `fleet`. A brand whose AI was on from day one has an empty `before`. 502 when campaign-service cannot answer.",
+  request: {
+    query: z.object({ brandId: z.string().optional().openapi({ description: "One brand; absent = fleet-wide." }) }),
+  },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Before / after rates per brand and fleet roll-up",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              scope: z.object({ brandId: z.string().nullable() }),
+              legKey: z.literal("conversation_to_meeting_booked"),
+              horizonDays: z.number().int(),
+              brands: z.array(
+                z.object({
+                  orgId: z.string(),
+                  brandId: z.string(),
+                  goLive: z
+                    .object({
+                      at: z.string(),
+                      basis: z.literal("first_ai_meeting_booking_act"),
+                      actRef: z.string().openapi({ description: "The follow-up ledger act that marks go-live." }),
+                      campaignId: z.string().openapi({ description: "The AI Meeting Booking campaign that acted." }),
+                    })
+                    .nullable(),
+                  goLiveUnknownReason: z.enum(["no_ai_meeting_booking_act"]).nullable(),
+                  positiveReplyPeople: z.number().int().openapi({ description: "People who replied positively since inception = before.people + after.people." }),
+                  before: MeetingBookingWindow,
+                  after: MeetingBookingWindow,
+                  unplacedMeetings: z
+                    .object({ count: z.number().int(), reasons: z.record(z.string(), z.number().int()) })
+                    .openapi({ description: "Meetings with no person (unmatched, held for review) or no date: in no window, no rate." }),
+                  meetingsWithoutPositiveReplyBefore: z.number().int().openapi({ description: "Meetings of a person with no positive reply before them: in no rate." }),
+                }),
+              ),
+              fleet: z
+                .object({ brands: z.number().int(), before: MeetingBookingWindow, after: MeetingBookingWindow })
+                .openapi({ description: "Sum over the brands with a go-live." }),
+            })
+            .openapi("MeetingBookingBeforeAfterResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid query" },
+    401: { description: "Unauthorized" },
+    502: { description: "campaign-service could not answer" },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/social-engagements/sync",
