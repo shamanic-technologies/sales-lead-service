@@ -38,7 +38,7 @@ export const leads = pgTable(
     // can schedule cold email in the recipient's local business hours. Null when
     // upstream provides none — downstream falls back to a safe default.
     timezone: text("timezone"),
-    // Where `timezone` came from (migration 0081, src/lib/lead-timezone.ts): 'stated' (the client said
+    // Where `timezone` came from (migration 0082, src/lib/lead-timezone.ts): 'stated' (the client said
     // so) > 'enrichment' (upstream) > 'inferred' (read here off phone / location / company / email
     // domain, `timezoneBasis` says which). A writer never overwrites a stronger source.
     timezoneSource: text("timezone_source"),

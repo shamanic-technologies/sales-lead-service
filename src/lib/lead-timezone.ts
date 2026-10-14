@@ -1,5 +1,5 @@
 /**
- * A lead's timezone and WHERE it came from (PUSHED-PERSON-TZ-1014, owner 2026-10-14; migration 0081).
+ * A lead's timezone and WHERE it came from (PUSHED-PERSON-TZ-1014, owner 2026-10-14; migration 0082).
  *
  * Every sender (cold email, AI follow-ups, AI meeting booking, WhatsApp) schedules in `lead.timezone`
  * and falls back to America/Chicago without one. Three sources, one precedence, enforced HERE by every
