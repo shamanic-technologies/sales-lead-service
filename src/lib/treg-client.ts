@@ -107,6 +107,33 @@ async function resolveKeys(id: SpendIdentity): Promise<TregKeys> {
   return { token: token.key, org: org.key, keySource: token.keySource };
 }
 
+/**
+ * A background sweep has no user, and key-service resolves an org's key source per user: it reads the PLATFORM
+ * keys directly (`/keys/platform/{provider}/decrypt`, global, no org or user). The spend is still authorized
+ * against, and declared on, the org (keySource platform).
+ */
+async function decryptPlatform(provider: string): Promise<string> {
+  const res = await fetchWithRetry(`${KEY_SERVICE_URL}/keys/platform/${provider}/decrypt`, {
+    method: "GET",
+    headers: {
+      "X-API-Key": KEY_SERVICE_API_KEY,
+      "X-Caller-Service": "lead",
+      "X-Caller-Method": "POST",
+      "X-Caller-Path": "/internal/relationship-sweep",
+    },
+    signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`[lead-service] key-service platform ${provider} decrypt failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const body = (await res.json()) as { key?: unknown };
+  if (typeof body.key !== "string") throw new Error(`[lead-service] key-service platform ${provider} decrypt answered without a key`);
+  return body.key;
+}
+
+async function resolvePlatformKeys(): Promise<TregKeys> {
+  const [token, org] = await Promise.all([decryptPlatform("treg"), decryptPlatform("treg-org")]);
+  return { token, org, keySource: "platform" };
+}
+
 interface RunCost {
   id: string;
 }
@@ -174,7 +201,7 @@ export class TregMeter {
     if (!this.identity.userId && !this.opts.background) {
       throw new Error("[lead-service] a paid qualification probe needs the request's user (x-user-id): billing authorizes per user");
     }
-    if (!this.keys) this.keys = resolveKeys(this.identity);
+    if (!this.keys) this.keys = this.identity.userId ? resolveKeys(this.identity) : resolvePlatformKeys();
     return this.keys;
   }
 
