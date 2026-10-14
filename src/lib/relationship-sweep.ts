@@ -6,7 +6,8 @@
  *   3. judgment: Jev reads each lead whose thread moved (messages first), JUDGE_PER_TICK at most;
  *   4. merges: unlinked people (no email) vs known people, asked of Jev, stated in human-service;
  *   5. companies: unknown employers, free first then treg (owner-approved price ceilings).
- * Spend (Jev, treg) is billed to the org on ONE run per brand per tick of this service. A brand that
+ * Jev is platform-billed (no org request starts the sweep); treg lookups are metered to the org on ONE run per
+ * brand per tick of this service. A brand that
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
  */
 import { createRun, updateRun } from "./runs-client.js";
@@ -57,7 +58,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
         while (next < todo.length) {
           const s = todo[next++];
           try {
-            await judgeSubject(s, id);
+            await judgeSubject(s, id.runId);
             tick.judged++;
           } catch (err) {
             if (err instanceof InsufficientCreditError) throw err;
@@ -68,7 +69,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
       };
       await Promise.all(Array.from({ length: JUDGE_CONCURRENCY }, worker));
     }
-    if (opts.merges !== false) tick.merges = await suggestMerges(scope, await identity());
+    if (opts.merges !== false) tick.merges = await suggestMerges(scope, (await identity()).runId);
     if (opts.companies !== false) tick.companies = await lookUpCompanies(scope, await identity());
     tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
   } catch (err) {
@@ -78,7 +79,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
     console.warn(`[lead-service] relationship sweep: org ${scope.orgId} cannot pay (${tick.error}); skipped this tick`);
   } finally {
     const r = run as { id: string } | null;
-    if (r) await updateRun(r.id, failed ? "failed" : "completed").catch((e) => console.error("[lead-service] relationship run close failed:", e));
+    if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
   }
   return tick;
 }

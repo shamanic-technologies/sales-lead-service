@@ -17,7 +17,6 @@ import { judgeYesNo } from "./qualification-judge.js";
 import { fitThread } from "./relationship-judge.js";
 import { candidatesFor, hasComparableName, type NamedPerson } from "./relationship-names.js";
 import { readThread, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
-import type { SpendIdentity } from "./treg-client.js";
 
 export const LINK_AT = 0.9;
 export const ASK_AT = 0.4;
@@ -108,11 +107,18 @@ export interface MergeTick {
   rejected: number;
 }
 
-export async function suggestMerges(scope: Scope, id: SpendIdentity): Promise<MergeTick> {
+export async function suggestMerges(scope: Scope, runId: string): Promise<MergeTick> {
   const tick: MergeTick = { asked: 0, linked: 0, open: 0, rejected: 0 };
   for (const p of await pendingPairs(scope)) {
     const state = { a: await card(p.unlinked), b: await card(p.known) };
-    const { probabilities, model } = await judgeYesNo(state, { same: SAME_PERSON }, id);
+    let judged: { probabilities: { same: number }; model: string };
+    try {
+      judged = await judgeYesNo(state, { same: SAME_PERSON }, "platform");
+    } catch (err) {
+      console.error(`[lead-service] merge judgment failed for ${p.unlinked.humanId} / ${p.known.humanId}; asked again next tick:`, err);
+      continue;
+    }
+    const { probabilities, model } = judged;
     const prob = probabilities.same;
     const [a, b] = orderPair(p.unlinked.humanId, p.known.humanId);
     const st: "linked" | "open" | "rejected" = prob >= LINK_AT ? "linked" : prob >= ASK_AT ? "open" : "rejected";
@@ -130,7 +136,7 @@ export async function suggestMerges(scope: Scope, id: SpendIdentity): Promise<Me
     }
     await db.execute(sql`
       INSERT INTO relationship_merge_questions (org_id, brand_id, human_a, human_b, probability, model, run_id, state, link_id, answered_by, answered_at)
-      VALUES (${scope.orgId}, ${scope.brandId}, ${a}::uuid, ${b}::uuid, ${prob}, ${model}, ${id.runId}, ${st}, ${linkId},
+      VALUES (${scope.orgId}, ${scope.brandId}, ${a}::uuid, ${b}::uuid, ${prob}, ${model}, ${runId}, ${st}, ${linkId},
         ${st === "linked" ? "jev" : null}, ${st === "linked" ? new Date().toISOString() : null}::timestamptz)
       ON CONFLICT (org_id, human_a, human_b) DO NOTHING
     `);
