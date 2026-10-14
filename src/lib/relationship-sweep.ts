@@ -20,8 +20,8 @@ import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_DELAY_MS = 150_000;
-export const JUDGE_PER_TICK = 80;
-const JUDGE_CONCURRENCY = 4;
+export const JUDGE_PER_TICK = 160;
+const JUDGE_CONCURRENCY = 6;
 
 export interface ScopeTick {
   scope: Scope;

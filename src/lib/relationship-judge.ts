@@ -109,7 +109,10 @@ export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subj
     LEFT JOIN relationship_judgments j ON j.org_id = s.org_id AND j.brand_id = s.brand_id AND j.human_id = s.human_id AND j.company_key = s.company_key
     WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND (j.human_id IS NULL OR j.thread_seq < s.thread_seq)
       AND s.has_direct
-    ORDER BY s.has_messages DESC, (j.human_id IS NULL) DESC, s.thread_seq DESC
+    -- People a source states as prospect / customer (the ones campaigns write to) and people we talk with, first.
+    ORDER BY (s.has_messages OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
+               AND e.human_id = s.human_id)) DESC,
+             (j.human_id IS NULL) DESC, s.thread_seq DESC
     LIMIT ${limit}
   `)) as unknown as Array<Record<string, unknown>>;
   return rows.map(toSubject);
