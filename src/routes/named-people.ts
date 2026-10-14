@@ -6,6 +6,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { fileNamedPerson } from "../lib/named-person.js";
+import { isIanaTimezone } from "../lib/timezone-inference.js";
 
 const router = Router();
 
@@ -27,6 +28,9 @@ const BodySchema = z.object({
     })
     .nullish(),
   name: z.string().trim().max(300).nullish(),
+  phone: z.string().trim().min(3).max(50).nullish(),
+  // An IANA zone the client states for the person (src/lib/lead-timezone.ts); never an offset.
+  timezone: z.string().trim().max(64).refine(isIanaTimezone, "not an IANA timezone (e.g. Europe/London)").nullish(),
 });
 
 router.post(
@@ -54,6 +58,8 @@ router.post(
         runId: req.runId ?? null,
         statedBy: parsed.data.statedBy ?? null,
         fullName: parsed.data.name ?? null,
+        phone: parsed.data.phone ?? null,
+        timezone: parsed.data.timezone ?? null,
       });
     } catch (err) {
       console.error(`[lead-service] named person: filing failed campaign=${campaignId}:`, err);
@@ -103,7 +109,7 @@ router.post(
 
     const { ok: _ok, ...filing } = result;
     console.log(
-      `[lead-service] named person: ${filing.status} campaign=${campaignId} lead=${filing.leadId} row=${filing.leadCampaignId} knownBy=${filing.knownBy}`,
+      `[lead-service] named person: ${filing.status} campaign=${campaignId} lead=${filing.leadId} row=${filing.leadCampaignId} knownBy=${filing.knownBy} timezone=${filing.timezone ?? "none"}/${filing.timezoneSource ?? "none"}`,
     );
     res.status(filing.status === "filed" ? 201 : 200).json(filing);
   }),

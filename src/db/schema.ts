@@ -38,6 +38,12 @@ export const leads = pgTable(
     // can schedule cold email in the recipient's local business hours. Null when
     // upstream provides none — downstream falls back to a safe default.
     timezone: text("timezone"),
+    // Where `timezone` came from (migration 0081, src/lib/lead-timezone.ts): 'stated' (the client said
+    // so) > 'enrichment' (upstream) > 'inferred' (read here off phone / location / company / email
+    // domain, `timezoneBasis` says which). A writer never overwrites a stronger source.
+    timezoneSource: text("timezone_source"),
+    timezoneBasis: text("timezone_basis"),
+    timezoneCheckedAt: timestamp("timezone_checked_at", { withTimezone: true }),
     // Language(s) this person plausibly conducts business in, ISO 639-1 lowercase
     // codes, ORDERED most-plausible-first. Derived and owned by human-service (see
     // its `businessLanguages`); lead-service only carries it. A Postgres array is

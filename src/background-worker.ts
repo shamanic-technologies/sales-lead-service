@@ -26,6 +26,7 @@ import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
 import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
 import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
+import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -63,12 +64,15 @@ startHumanEventsWorker();
 // An opt-out observed here (unsubscribe, stop request) is stated on the human in human-service so it
 // follows them to every company (human-opt-outs.ts).
 startHumanOptOutsWorker();
+// Every lead with no timezone gets one inferred from what we hold (phone, location, company, email
+// domain), never over a stated or enriched zone (lead-timezone.ts).
+startLeadTimezoneWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events, human-opt-outs");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events, human-opt-outs, lead-timezone");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);

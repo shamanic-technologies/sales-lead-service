@@ -32,6 +32,10 @@
  * opt_out / do_not_contact fact, is refused by name (`person_suppressed` + reason). The follow-up claim
  * re-checks opt-outs at send time as for anyone.
  *
+ * THE PERSON'S ZONE (PUSHED-PERSON-TZ-1014): a `timezone` the client states is written as stated (it
+ * wins over enrichment and inference); else the zone is inferred from what we hold, the `phone` the
+ * statement carries included (recorded as the lead's phone). `lead-timezone.ts`.
+ *
  * Idempotent on (lead, campaign): the unique index `idx_lc_lead_campaign` makes a second filing
  * answer the same row (`already_filed`), never a second one.
  */
@@ -41,7 +45,8 @@ import { leads } from "../db/schema.js";
 import { fetchCampaign } from "./campaign-client.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
-import { registerServedEmail } from "./leads-registry.js";
+import { registerServedEmail, upsertContactMethod } from "./leads-registry.js";
+import { inferLeadTimezone, writeStatedTimezone, type TimezoneSource } from "./lead-timezone.js";
 
 export const NAMED_PERSON_SOURCE = "named_person";
 
@@ -68,6 +73,9 @@ export interface NamedPersonFiling {
   email: string;
   servedAt: string;
   knownBy: KnownBy;
+  /** The person's zone after this filing (lead-timezone.ts), null when nothing tells it. */
+  timezone: string | null;
+  timezoneSource: TimezoneSource | null;
 }
 
 export type NamedPersonResult =
@@ -232,6 +240,10 @@ export async function fileNamedPerson(params: {
   statedBy?: PersonStatement | null;
   /** The name the statement carries, used only for a lead created here with no CRM name. */
   fullName?: string | null;
+  /** The person's phone as the statement carries it: recorded as a contact method, read for the zone. */
+  phone?: string | null;
+  /** The zone the client STATES for the person (IANA, validated by the route): wins over any other. */
+  timezone?: string | null;
 }): Promise<NamedPersonResult> {
   const email = normalizeEmail(params.email);
 
@@ -323,6 +335,22 @@ export async function fileNamedPerson(params: {
     );
   }
 
+  // PUSHED-PERSON-TZ-1014: every sender schedules in the person's zone. A phone the client hands us is
+  // the person's (recorded, unless another lead already holds it); a stated zone wins; else infer.
+  const phone = params.phone?.trim() || null;
+  if (phone) {
+    const recorded = await upsertContactMethod({ leadId, channel: "phone", value: phone, source: NAMED_PERSON_SOURCE });
+    if (!recorded.inserted) {
+      console.log(`[lead-service] named person: phone already held by another lead, not recorded on lead=${leadId}`);
+    }
+  }
+  const statedTimezone = params.timezone?.trim() || null;
+  if (statedTimezone) await writeStatedTimezone(leadId, statedTimezone);
+  else await inferLeadTimezone(leadId);
+  const zone = (await db.execute(sql`
+    SELECT timezone, timezone_source FROM leads WHERE id = ${leadId}
+  `)) as unknown as Array<{ timezone: string | null; timezone_source: TimezoneSource | null }>;
+
   return {
     ok: true,
     status: filed ? "filed" : "already_filed",
@@ -333,5 +361,7 @@ export async function fileNamedPerson(params: {
     email,
     servedAt: new Date(existing[0].served_at).toISOString(),
     knownBy: person.knownBy as KnownBy,
+    timezone: zone[0]?.timezone ?? null,
+    timezoneSource: zone[0]?.timezone ? (zone[0].timezone_source ?? null) : null,
   };
 }

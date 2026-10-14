@@ -93,6 +93,8 @@ export interface FullLead {
    * cold email in the recipient's local business hours. null when unknown.
    */
   timezone: string | null;
+  /** Where `timezone` came from (lead-timezone.ts): stated > enrichment > inferred; null with no zone. */
+  timezoneSource: "stated" | "enrichment" | "inferred" | null;
   /**
    * Language(s) this lead plausibly does business in, ISO 639-1, ORDERED
    * most-plausible-first (index 0 = most plausible). Produced by human-service.
@@ -279,6 +281,7 @@ export async function buildFullLead(leadId: string): Promise<FullLead> {
     state: lead.state ?? null,
     country: lead.country ?? null,
     timezone: lead.timezone ?? null,
+    timezoneSource: lead.timezone ? ((lead.timezoneSource as FullLead["timezoneSource"]) ?? "enrichment") : null,
     businessLanguages: lead.businessLanguages ?? null,
     seniority: lead.seniority ?? null,
     departments: lead.departments ?? null,
@@ -380,6 +383,7 @@ export async function buildFullLeadsBatch(
       state: lead.state ?? null,
       country: lead.country ?? null,
       timezone: lead.timezone ?? null,
+      timezoneSource: lead.timezone ? ((lead.timezoneSource as FullLead["timezoneSource"]) ?? "enrichment") : null,
       businessLanguages: lead.businessLanguages ?? null,
       seniority: lead.seniority ?? null,
       departments: lead.departments ?? null,
