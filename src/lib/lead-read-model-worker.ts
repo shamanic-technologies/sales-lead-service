@@ -10,9 +10,14 @@
  *
  * It also PRE-BUILDS the brand model of every brand that served a lead in the last
  * `ACTIVE_BRAND_WINDOW_DAYS`, so the first time a customer opens their Leads page it answers
- * immediately rather than paying the first build. A model nobody has read for `KEEP_WARM_MS` (and
- * that is not such a brand model) is retired, and retired models are deleted once no read can
- * still hold one.
+ * immediately rather than paying the first build. Any OTHER model is kept fresh only while somebody
+ * reads it (`REFRESH_IF_READ_WITHIN_MS`): past that it sits untouched, and the next read, finding it
+ * past its bound, refreshes it in place before answering (same answer, paid once by that read). A
+ * campaign identity or an offer that grows a campaign is a NEW scope key, so the old one is never
+ * read again: refreshing those every 3 minutes for their 7 days of keep-warm was ~60% of the box's
+ * Postgres time from lead-service (DB-LOAD-1014: 82 models, 461k of 761k rows, unread for 6h+).
+ * A model nobody has read for `KEEP_WARM_MS` (and that is not such a brand model) is retired, and
+ * retired models are deleted once no read can still hold one.
  *
  * An interval armed after boot, not a cron: a declared cron is best-effort and skips. The mutex is
  * INSIDE the sweep, and each model is refreshed under the same per-scope lock a read takes, so a
@@ -31,6 +36,8 @@ export const READ_MODEL_WORKER_INTERVAL_MS = 15_000;
 const FIRST_SWEEP_DELAY_MS = 20_000;
 /** A model nobody read for this long stops being kept fresh (unless it is an active brand's). */
 const KEEP_WARM_MS = 7 * 24 * 60 * 60_000;
+/** A model (other than an active brand's) is refreshed by this worker only if read this recently. */
+export const REFRESH_IF_READ_WITHIN_MS = 60 * 60_000;
 /** A brand that served anybody within this window gets its brand model pre-built. */
 const ACTIVE_BRAND_WINDOW_DAYS = 30;
 /** How often the active-brand list is re-read. */
@@ -67,6 +74,27 @@ interface LiveModel {
   last_read_at: Date | string;
 }
 
+/**
+ * Which live models this sweep refreshes and which it retires. Pinned (active-brand) models are
+ * always refreshed; another model is refreshed only if read within `REFRESH_IF_READ_WITHIN_MS`,
+ * retired once unread for `KEEP_WARM_MS`, and otherwise left alone (a read refreshes it first).
+ */
+export function planSweep(
+  live: ReadonlyArray<{ scope_key: string; scope: ReadModelScope; last_read_at: Date | string }>,
+  pinned: ReadonlyMap<string, ReadModelScope>,
+  now: number,
+): { refresh: Map<string, ReadModelScope>; retire: string[] } {
+  const refresh = new Map<string, ReadModelScope>(pinned);
+  const retire: string[] = [];
+  for (const model of live) {
+    if (pinned.has(model.scope_key)) continue;
+    const readAt = new Date(model.last_read_at).getTime();
+    if (readAt < now - KEEP_WARM_MS) retire.push(model.scope_key);
+    else if (readAt >= now - REFRESH_IF_READ_WITHIN_MS) refresh.set(model.scope_key, model.scope);
+  }
+  return { refresh, retire };
+}
+
 let sweeping = false;
 
 export async function sweepReadModels(): Promise<void> {
@@ -79,18 +107,12 @@ export async function sweepReadModels(): Promise<void> {
     const pinned = new Map<string, ReadModelScope>();
     for (const scope of await activeBrandModelScopes()) pinned.set(readModelKey(scope), scope);
 
-    const toRefresh = new Map<string, ReadModelScope>(pinned);
-    const staleBefore = Date.now() - KEEP_WARM_MS;
-    for (const model of live) {
-      if (pinned.has(model.scope_key)) continue;
-      if (new Date(model.last_read_at).getTime() < staleBefore) {
-        await sql`
-          UPDATE lead_read_models SET scope_key = NULL, retired_at = now()
-          WHERE scope_key = ${model.scope_key}
-        `;
-        continue;
-      }
-      toRefresh.set(model.scope_key, model.scope);
+    const { refresh: toRefresh, retire } = planSweep(live, pinned, Date.now());
+    for (const scopeKey of retire) {
+      await sql`
+        UPDATE lead_read_models SET scope_key = NULL, retired_at = now()
+        WHERE scope_key = ${scopeKey}
+      `;
     }
 
     for (const [key, scope] of toRefresh) {
