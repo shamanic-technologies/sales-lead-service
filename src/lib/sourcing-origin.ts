@@ -161,6 +161,11 @@ export async function loadOriginsByChannelSlug(channelSlug: string): Promise<Set
  * The contact method(s) a one-to-one channel needs to write to a person (features-service catalogue), or null when
  * the channel states none. Throws SourcingOriginUnresolvedError when the catalogue cannot be read.
  */
+/** Every channel the catalogue states contact methods for (features-service `contactMethodsByChannel`). */
+export async function listChannelsWithContactMethods(): Promise<string[]> {
+  return [...(await loadOriginsCatalogue()).contactMethodsByChannel.keys()];
+}
+
 export async function loadChannelContactMethods(channelSlug: string): Promise<string[] | null> {
   return (await loadOriginsCatalogue()).contactMethodsByChannel.get(channelSlug) ?? null;
 }

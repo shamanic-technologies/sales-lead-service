@@ -28,6 +28,7 @@ import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
+import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -71,12 +72,15 @@ startLeadTimezoneWorker();
 // Who each person is to each brand: leads from the CRM feed, Jev's tags on the whole thread, suggested
 // merges, unknown companies looked up (relationship-sweep.ts, RELATIONSHIP-TAGS-1014).
 startRelationshipSweepWorker();
+// Every served row of a non-email pipe carries what its sender (crm-service) states it sent, live or stopped
+// campaign alike (channel-send-reconcile.ts, WA-SENDS-BATCH-1014).
+startChannelSendReconcileWorker();
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events, human-opt-outs, lead-timezone");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events, human-opt-outs, lead-timezone, relationship-sweep, channel-send-reconcile");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);
