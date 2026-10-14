@@ -68,6 +68,11 @@ describe.skipIf(!hasRealDatabase)("email policy on the pools, against a real dat
     expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.legacy].sort());
   });
 
+  it("as_found (a stock pipe stating nothing) gets everyone the source kept", async () => {
+    const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), acceptedEmails: "as_found" });
+    expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.legacy].sort());
+  });
+
   it("a later serve stating no verdict leaves the recorded one in place", async () => {
     const [cm] = await db
       .select({ value: leadContactMethods.value })

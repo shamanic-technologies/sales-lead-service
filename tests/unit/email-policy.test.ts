@@ -22,6 +22,10 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(wide.params).toEqual(["valid", "catch_all"]);
   });
 
+  it("as_found (a stock pipe stating nothing) adds no clause: the source's strategy chose the emails", () => {
+    expect(dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "as_found")).sql).toBe("");
+  });
+
   it("serve body: no option = today's bytes; option rides beside reachableBy", () => {
     expect(serveBody({ orgId: "o" })).toEqual({});
     expect(serveBody({ orgId: "o", reachableBy: ["email"] })).toEqual({ reachableBy: ["email"] });

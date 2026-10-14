@@ -22,7 +22,6 @@ import { resolveSourceAudiences } from "../lib/source-audiences.js";
 import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
-import { recordSourceEmailDemand, sourceRunEmailPolicy } from "../lib/source-email-demand.js";
 import { loadEmptyAnswers, orderByEmptyAnswers } from "../lib/source-audience-walk.js";
 import type { EmailPolicy } from "../lib/email-policy.js";
 
@@ -103,9 +102,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
   let reachableBy: ReachMethod[] | null = null;
-  // The email policy the serve asks with: the caller's word, widened for a source unit's own run to what its pipes
-  // accept (src/lib/source-email-demand.ts: the catch-all choice is made at the find).
-  let acceptedEmails: EmailPolicy | null = parsed.data.acceptedEmails ?? null;
+  // The email policy the serve asks with: the caller's own word, nothing else. A source unit's run states its OWN
+  // strategy (its workflow's serve call), never read off the pipes it feeds (CATCHALL-SOURCE-OWNS-1014).
+  const acceptedEmails: EmailPolicy | null = parsed.data.acceptedEmails ?? null;
   // The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve, the
   // campaign's own pools still drain (src/lib/buffer.ts).
   let freshServeRefused: { reason: ServeEmptyReason; detail: string } | null = null;
@@ -188,7 +187,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
             userId: req.userId ?? null,
             runId,
           });
-          acceptedEmails = await sourceRunEmailPolicy(unit.id, acceptedEmails);
           // Audiences that just answered nobody under this policy go last, so each run reaches further.
           findAudienceIds = orderByEmptyAnswers(found.audienceIds, await loadEmptyAnswers(unit.id, acceptedEmails));
         }
@@ -248,8 +246,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         const onDemandSource = serveSource.kind === "source" && !sourceMode.sourceCampaignIds.includes(serveSource.campaignId);
         if (!onDemandSource) {
           stockSourceIds = sourceMode.sourceCampaignIds;
-          // What this pipe accepts reaches the sources that find for it (they check the emails, not this ask).
-          await recordSourceEmailDemand({ sourceCampaignIds: stockSourceIds, outreachCampaignId: campaignId, acceptedEmails });
           serveSource = { kind: "legacy", why: "offer_not_on_source_campaigns" };
           runFeatureSlug = featureSlug;
         }

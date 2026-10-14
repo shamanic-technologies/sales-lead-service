@@ -18,16 +18,24 @@ export type EmailPolicy = (typeof EMAIL_POLICIES)[number];
 
 export const DEFAULT_EMAIL_POLICY: EmailPolicy = "valid_only";
 
+/**
+ * What a POOL (retry, source stock, released) filters on: a pipe's stated policy, or `as_found` = hand the person as
+ * the source found them. An outreach pipe serving a source's stock and stating nothing makes no email choice
+ * (CATCHALL-SOURCE-OWNS-1014, owner 2026-10-14): which emails a source keeps is the SOURCE pipe's own strategy.
+ */
+export type PoolEmailPolicy = EmailPolicy | "as_found";
+
 /** The verification verdicts a policy accepts. */
 export function acceptedVerdicts(policy: EmailPolicy | null | undefined): readonly string[] {
   return (policy ?? DEFAULT_EMAIL_POLICY) === "valid_and_catch_all" ? ["valid", "catch_all"] : ["valid"];
 }
 
 /**
- * `AND NOT EXISTS (...)`: the lead carries no email whose recorded verdict the policy refuses. A NULL verdict (every
+ * `AND NOT EXISTS (...)`: the lead carries no email whose recorded verdict the policy refuses (`as_found`: no clause). A NULL verdict (every
  * serve before the option, and serves with no verification: CRM, apify) is accepted, as it always was.
  */
-export function emailPolicyClause(leadId: SQL, policy: EmailPolicy | null | undefined): SQL {
+export function emailPolicyClause(leadId: SQL, policy: PoolEmailPolicy | null | undefined): SQL {
+  if (policy === "as_found") return sql``;
   const accepted = sql.join(acceptedVerdicts(policy).map((v) => sql`${v}`), sql`, `);
   return sql`AND NOT EXISTS (SELECT 1 FROM lead_contact_methods cm_v WHERE cm_v.lead_id = ${leadId} AND cm_v.channel = 'email' AND cm_v.verification_verdict IS NOT NULL AND cm_v.verification_verdict NOT IN (${accepted}))`;
 }
