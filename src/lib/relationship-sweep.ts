@@ -10,7 +10,7 @@
  * brand per tick of this service. A brand that
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
  */
-import { createRun, updateRun } from "./runs-client.js";
+import { closePlatformRun, createPlatformRun, createRun, updateRun } from "./runs-client.js";
 import { lookUpCompanies } from "./relationship-company.js";
 import { judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
 import { suggestMerges } from "./relationship-merges.js";
@@ -48,6 +48,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
     if (!run) run = await createRun({ orgId: scope.orgId, brandId: scope.brandId, serviceName: "lead-service", taskName: "relationship-sweep" });
     return { orgId: scope.orgId, userId: null, runId: run.id, brandId: scope.brandId };
   };
+  let platformRun: { id: string } | null = null;
   let failed = false;
   try {
     const todo = await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK);
@@ -70,7 +71,12 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
       await Promise.all(Array.from({ length: JUDGE_CONCURRENCY }, worker));
     }
     if (opts.merges !== false) tick.merges = await suggestMerges(scope, (await identity()).runId);
-    if (opts.companies !== false) tick.companies = await lookUpCompanies(scope, await identity());
+    if (opts.companies !== false) {
+      tick.companies = await lookUpCompanies(scope, async () => {
+        if (!platformRun) platformRun = await createPlatformRun("relationship-company-lookup");
+        return platformRun.id;
+      });
+    }
     tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
   } catch (err) {
     failed = true;
@@ -80,6 +86,8 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
   } finally {
     const r = run as { id: string } | null;
     if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
+    const pr = platformRun as { id: string } | null;
+    if (pr) await closePlatformRun(pr.id, failed ? "failed" : "completed").catch((e) => console.error("[lead-service] relationship platform run close failed:", e));
   }
   return tick;
 }

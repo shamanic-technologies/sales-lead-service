@@ -163,3 +163,34 @@ export async function getRunTotalCents(runId: string, orgId: string): Promise<{ 
   };
   return { totalCents: Number(run.totalCostInUsdCents ?? 0), actualCents: Number(run.actualCostInUsdCents ?? 0) };
 }
+
+// --- Platform runs: org-less spend a background sweep declares (no org request exists) -------------
+// runs-service `/v1/platform-runs` (service key + x-service-name, no org/user/run headers). No cost-status PATCH on
+// platform runs: costs are declared `actual` after the call, never provisioned.
+
+async function platformRunsRequest<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1${path}`, {
+    method,
+    headers: { "Content-Type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-service-name": "lead-service" },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+    signal: AbortSignal.timeout(RUNS_SERVICE_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`Runs service platform call failed: ${res.status} - ${await res.text()}`);
+  return (await res.json()) as T;
+}
+
+export async function createPlatformRun(taskName: string): Promise<{ id: string }> {
+  return platformRunsRequest("POST", "/platform-runs", { serviceName: "lead-service", taskName });
+}
+
+export async function addPlatformRunCosts(
+  runId: string,
+  items: Array<{ costName: string; costSource: "platform"; quantity: number; idempotencyKey: string }>,
+): Promise<void> {
+  if (items.length === 0) return;
+  await platformRunsRequest("POST", `/platform-runs/${runId}/costs`, { items });
+}
+
+export async function closePlatformRun(runId: string, status: "completed" | "failed"): Promise<void> {
+  await platformRunsRequest("PATCH", `/platform-runs/${runId}`, { status });
+}

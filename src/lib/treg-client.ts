@@ -26,6 +26,7 @@ import {
   TREG_BASE_URL,
 } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { addPlatformRunCosts } from "./runs-client.js";
 import type { ParamValue } from "./qualification-probes.js";
 
 export const TREG_COST_NAME = "treg-micro-usd";
@@ -108,9 +109,8 @@ async function resolveKeys(id: SpendIdentity): Promise<TregKeys> {
 }
 
 /**
- * A background sweep has no user, and key-service resolves an org's key source per user: it reads the PLATFORM
- * keys directly (`/keys/platform/{provider}/decrypt`, global, no org or user). The spend is still authorized
- * against, and declared on, the org (keySource platform).
+ * A background sweep has no user (key-service resolves an org's key source per user): `PlatformTregMeter` reads the
+ * PLATFORM keys directly (`/keys/platform/{provider}/decrypt`, global, no org or user).
  */
 async function decryptPlatform(provider: string): Promise<string> {
   const res = await fetchWithRetry(`${KEY_SERVICE_URL}/keys/platform/${provider}/decrypt`, {
@@ -191,17 +191,13 @@ export interface TregCallResult {
 export class TregMeter {
   private keys: Promise<TregKeys> | null = null;
 
-  /** `background`: a lookup the owner approved for a sweep with no request (billed to the org, no user). */
-  constructor(
-    private readonly identity: SpendIdentity,
-    private readonly opts: { background?: boolean; purpose?: string } = {},
-  ) {}
+  constructor(private readonly identity: SpendIdentity) {}
 
   private resolve(): Promise<TregKeys> {
-    if (!this.identity.userId && !this.opts.background) {
+    if (!this.identity.userId) {
       throw new Error("[lead-service] a paid qualification probe needs the request's user (x-user-id): billing authorizes per user");
     }
-    if (!this.keys) this.keys = this.identity.userId ? resolveKeys(this.identity) : resolvePlatformKeys();
+    if (!this.keys) this.keys = resolveKeys(this.identity);
     return this.keys;
   }
 
@@ -214,7 +210,7 @@ export class TregMeter {
 
     if (keys.keySource === "platform") {
       try {
-        await authorize(this.identity, req.maxMicro, `${this.opts.purpose ?? "qualification probe"}: ${req.endpointId}`);
+        await authorize(this.identity, req.maxMicro, `qualification probe: ${req.endpointId}`);
       } catch (error) {
         await cancelCost(this.identity, hold.id);
         throw error;
@@ -275,4 +271,67 @@ export function isTregRefusal(status: number, body: unknown): boolean {
   if (status === 402) return true;
   const detail = typeof body === "object" && body ? String((body as Record<string, unknown>).detail ?? (body as Record<string, unknown>).error ?? "") : "";
   return (status === 404 || status === 410 || status === 403) && /no tool|not available|disabled|withdrawn/i.test(detail);
+}
+
+/**
+ * A treg call a background sweep makes with no org request behind it (RELATIONSHIP-TAGS-1014 company lookup): the
+ * PLATFORM pays (fleet rule: org-less spend on a platform run). Platform keys read directly; no balance to authorize;
+ * the ceiling rides `X-Treg-Route-Max-Cost` so treg refuses rather than overspend; the real charge is declared
+ * `actual` on the platform run after the answer. A call that never answered declares nothing (logged loud: treg may
+ * have charged; its own ledger is the reconciler).
+ */
+export class PlatformTregMeter {
+  private keys: Promise<TregKeys> | null = null;
+
+  constructor(private readonly platformRunId: string) {}
+
+  async call(req: { endpointId: string; method: "GET" | "POST"; params: Record<string, ParamValue>; maxMicro: number }): Promise<TregCallResult> {
+    if (!this.keys) this.keys = resolvePlatformKeys();
+    const keys = await this.keys;
+    let url = `${TREG_BASE_URL}/call/${req.endpointId}`;
+    const headers: Record<string, string> = {
+      "X-Treg-Token": keys.token,
+      "X-Treg-Org": keys.org,
+      "X-Treg-Route-Max-Cost": (req.maxMicro / 1_000_000).toFixed(6),
+      "Idempotency-Key": randomUUID(),
+    };
+    let body: string | undefined;
+    if (req.method === "GET") {
+      url += `?${new URLSearchParams(Object.entries(req.params).map(([k, v]) => [k, String(v)])).toString()}`;
+    } else {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(req.params);
+    }
+    let response: Response;
+    try {
+      response = await fetch(url, { method: req.method, headers, body, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+    } catch (err) {
+      console.error(`[lead-service] platform treg ${req.endpointId} never answered (run ${this.platformRunId}); nothing declared, treg may have charged:`, err);
+      throw err;
+    }
+    const contentType = response.headers.get("content-type");
+    const text = await response.text();
+    let parsed: unknown = text;
+    if (contentType?.includes("json")) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = text;
+      }
+    }
+    const costHeader = response.headers.get("x-treg-cost-micro");
+    let charged = 0;
+    if (costHeader !== null) {
+      charged = Number(costHeader);
+      if (!Number.isFinite(charged) || charged < 0) throw new Error(`[lead-service] treg cost header unreadable: ${costHeader}`);
+    } else if (response.ok) {
+      throw new Error(`[lead-service] treg ${req.endpointId} answered ${response.status} without X-Treg-Cost-Micro; cannot declare the cost`);
+    }
+    if (charged > 0) {
+      await addPlatformRunCosts(this.platformRunId, [
+        { costName: TREG_COST_NAME, costSource: "platform", quantity: charged, idempotencyKey: `lead-service:cost:${randomUUID()}` },
+      ]);
+    }
+    return { status: response.status, body: parsed, chargedMicro: charged, contentType };
+  }
 }

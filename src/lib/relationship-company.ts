@@ -10,8 +10,9 @@
  *      ENRICH_MAX_MICRO through `X-Treg-Route-Max-Cost`): the person's current company;
  *   4. treg `treg.people.identity.resolve` ($0.02 per success, capped) ONLY when enrich knew nobody: email ->
  *      LinkedIn profile, then enrich again on that profile.
+ * No org request starts the sweep, so treg is PLATFORM-billed (platform keys, a platform run, `actual` cost).
  * Two different companies found at the same step (two work domains) = a QUESTION on the review page
- * (`conflict`), nothing chosen. Every treg call is metered to the org (`treg-micro-usd`), summed per human
+ * (`conflict`), nothing chosen. Every treg call is declared (`treg-micro-usd`) on the sweep's platform run, summed per human
  * in `treg_micro`. A person's own word (`PUT .../company`) outranks all and is never looked up again.
  */
 import { sql } from "drizzle-orm";
@@ -19,7 +20,7 @@ import { db } from "../db/index.js";
 import { getCompanies, resolveCompanies } from "./company-client.js";
 import { workEmailDomain } from "./lead-identity.js";
 import { toSubject, type Scope, type Subject } from "./relationship-subjects.js";
-import { InsufficientCreditError, TregMeter, type SpendIdentity } from "./treg-client.js";
+import { PlatformTregMeter } from "./treg-client.js";
 
 export const ENRICH_ENDPOINT = "treg.people.enrich";
 export const IDENTITY_ENDPOINT = "treg.people.identity.resolve";
@@ -132,9 +133,11 @@ export interface CompanyTick {
   tregMicro: number;
 }
 
-export async function lookUpCompanies(scope: Scope, id: SpendIdentity): Promise<CompanyTick> {
+/** `platformRunId`: the platform run this sweep's treg spend is declared on (no org request starts the sweep). */
+export async function lookUpCompanies(scope: Scope, platformRunId: () => Promise<string>): Promise<CompanyTick> {
   const tick: CompanyTick = { looked: 0, free: 0, treg: 0, none: 0, tregMicro: 0 };
-  const meter = new TregMeter(id, { background: true, purpose: "relationship company lookup" });
+  let meter: PlatformTregMeter | null = null;
+  const treg = async () => (meter ??= new PlatformTregMeter(await platformRunId()));
   for (const s of await subjectsWithoutCompany(scope)) {
     tick.looked++;
     // 1. work email domain
@@ -158,16 +161,16 @@ export async function lookUpCompanies(scope: Scope, id: SpendIdentity): Promise<
     // 3. treg enrich, 4. identity resolve only when enrich knew nobody
     let micro = 0;
     try {
-      const first = await meter.call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email, ...(s.name ? { full_name: s.name } : {}) }, maxMicro: ENRICH_MAX_MICRO });
+      const first = await (await treg()).call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email, ...(s.name ? { full_name: s.name } : {}) }, maxMicro: ENRICH_MAX_MICRO });
       micro += first.chargedMicro;
       let enrich = first.status < 300 ? companyOfEnrich(first.body) : { found: false, company: null, linkedinUrl: null };
       let source: CompanySource = "treg_enrich";
       if (!enrich.found) {
-        const ident = await meter.call({ endpointId: IDENTITY_ENDPOINT, method: "POST", params: { email }, maxMicro: IDENTITY_MAX_MICRO });
+        const ident = await (await treg()).call({ endpointId: IDENTITY_ENDPOINT, method: "POST", params: { email }, maxMicro: IDENTITY_MAX_MICRO });
         micro += ident.chargedMicro;
         const li = ident.status < 300 ? str((ident.body as { output?: Record<string, unknown> } | null)?.output?.linkedin_url) : null;
         if (li) {
-          const second = await meter.call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { linkedin_url: li }, maxMicro: ENRICH_MAX_MICRO });
+          const second = await (await treg()).call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { linkedin_url: li }, maxMicro: ENRICH_MAX_MICRO });
           micro += second.chargedMicro;
           enrich = second.status < 300 ? companyOfEnrich(second.body) : enrich;
           source = "treg_identity";
@@ -181,7 +184,6 @@ export async function lookUpCompanies(scope: Scope, id: SpendIdentity): Promise<
       await record(s, { candidates: [], chosen: null, companyId: null, tregMicro: micro });
       tick.none++;
     } catch (err) {
-      if (err instanceof InsufficientCreditError) throw err;
       console.error(`[lead-service] relationship company lookup failed for human ${s.humanId} (org ${s.orgId}):`, err);
       if (micro > 0) await record(s, { candidates: [], chosen: null, companyId: null, tregMicro: micro });
     }
