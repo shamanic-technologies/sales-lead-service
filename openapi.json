@@ -9821,6 +9821,462 @@
           "attributedMeetings"
         ]
       },
+      "MeetingBookingBeforeAfterResponse": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "type": "object",
+            "properties": {
+              "brandId": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "brandId"
+            ]
+          },
+          "legKey": {
+            "type": "string",
+            "enum": [
+              "conversation_to_meeting_booked"
+            ]
+          },
+          "horizonDays": {
+            "type": "integer"
+          },
+          "brands": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string"
+                },
+                "brandId": {
+                  "type": "string"
+                },
+                "goLive": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "at": {
+                      "type": "string"
+                    },
+                    "basis": {
+                      "type": "string",
+                      "enum": [
+                        "first_ai_meeting_booking_act"
+                      ]
+                    },
+                    "actRef": {
+                      "type": "string",
+                      "description": "The follow-up ledger act that marks go-live."
+                    },
+                    "campaignId": {
+                      "type": "string",
+                      "description": "The AI Meeting Booking campaign that acted."
+                    }
+                  },
+                  "required": [
+                    "at",
+                    "basis",
+                    "actRef",
+                    "campaignId"
+                  ]
+                },
+                "goLiveUnknownReason": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "no_ai_meeting_booking_act",
+                    null
+                  ]
+                },
+                "positiveReplyPeople": {
+                  "type": "integer",
+                  "description": "People who replied positively since inception = before.people + after.people."
+                },
+                "before": {
+                  "type": "object",
+                  "properties": {
+                    "people": {
+                      "type": "integer",
+                      "description": "People whose FIRST positive reply is in this window (the rate's population)."
+                    },
+                    "booked": {
+                      "type": "integer",
+                      "description": "Of them, people with a meeting at or after that reply, whoever booked it."
+                    },
+                    "rate": {
+                      "type": "number",
+                      "nullable": true,
+                      "description": "booked / people; null when nobody."
+                    },
+                    "bookedBy": {
+                      "type": "object",
+                      "properties": {
+                        "aiMeetingBooking": {
+                          "type": "integer"
+                        },
+                        "yourTeamMeetingBooking": {
+                          "type": "integer"
+                        },
+                        "other": {
+                          "type": "integer"
+                        },
+                        "unknown": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "aiMeetingBooking",
+                        "yourTeamMeetingBooking",
+                        "other",
+                        "unknown"
+                      ],
+                      "description": "Who booked each booked person's first meeting (the side /internal/meeting-attribution gives it)."
+                    },
+                    "bookedAfterGoLive": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "Of `booked`, people whose first meeting is at or after go-live: a person who replied BEFORE go-live and booked after stays in `before` and is counted here too. 0 on `after`; null without go-live."
+                    },
+                    "withinDays": {
+                      "type": "object",
+                      "properties": {
+                        "days": {
+                          "type": "integer"
+                        },
+                        "people": {
+                          "type": "integer"
+                        },
+                        "booked": {
+                          "type": "integer"
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "days",
+                        "people",
+                        "booked",
+                        "rate"
+                      ],
+                      "description": "Same horizon for both windows: people whose first positive reply is at least `days` old, booked within `days` of it."
+                    }
+                  },
+                  "required": [
+                    "people",
+                    "booked",
+                    "rate",
+                    "bookedBy",
+                    "bookedAfterGoLive",
+                    "withinDays"
+                  ]
+                },
+                "after": {
+                  "type": "object",
+                  "properties": {
+                    "people": {
+                      "type": "integer",
+                      "description": "People whose FIRST positive reply is in this window (the rate's population)."
+                    },
+                    "booked": {
+                      "type": "integer",
+                      "description": "Of them, people with a meeting at or after that reply, whoever booked it."
+                    },
+                    "rate": {
+                      "type": "number",
+                      "nullable": true,
+                      "description": "booked / people; null when nobody."
+                    },
+                    "bookedBy": {
+                      "type": "object",
+                      "properties": {
+                        "aiMeetingBooking": {
+                          "type": "integer"
+                        },
+                        "yourTeamMeetingBooking": {
+                          "type": "integer"
+                        },
+                        "other": {
+                          "type": "integer"
+                        },
+                        "unknown": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "aiMeetingBooking",
+                        "yourTeamMeetingBooking",
+                        "other",
+                        "unknown"
+                      ],
+                      "description": "Who booked each booked person's first meeting (the side /internal/meeting-attribution gives it)."
+                    },
+                    "bookedAfterGoLive": {
+                      "type": "integer",
+                      "nullable": true,
+                      "description": "Of `booked`, people whose first meeting is at or after go-live: a person who replied BEFORE go-live and booked after stays in `before` and is counted here too. 0 on `after`; null without go-live."
+                    },
+                    "withinDays": {
+                      "type": "object",
+                      "properties": {
+                        "days": {
+                          "type": "integer"
+                        },
+                        "people": {
+                          "type": "integer"
+                        },
+                        "booked": {
+                          "type": "integer"
+                        },
+                        "rate": {
+                          "type": "number",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "days",
+                        "people",
+                        "booked",
+                        "rate"
+                      ],
+                      "description": "Same horizon for both windows: people whose first positive reply is at least `days` old, booked within `days` of it."
+                    }
+                  },
+                  "required": [
+                    "people",
+                    "booked",
+                    "rate",
+                    "bookedBy",
+                    "bookedAfterGoLive",
+                    "withinDays"
+                  ]
+                },
+                "unplacedMeetings": {
+                  "type": "object",
+                  "properties": {
+                    "count": {
+                      "type": "integer"
+                    },
+                    "reasons": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "required": [
+                    "count",
+                    "reasons"
+                  ],
+                  "description": "Meetings with no person (unmatched, held for review) or no date: in no window, no rate."
+                },
+                "meetingsWithoutPositiveReplyBefore": {
+                  "type": "integer",
+                  "description": "Meetings of a person with no positive reply before them: in no rate."
+                }
+              },
+              "required": [
+                "orgId",
+                "brandId",
+                "goLive",
+                "goLiveUnknownReason",
+                "positiveReplyPeople",
+                "before",
+                "after",
+                "unplacedMeetings",
+                "meetingsWithoutPositiveReplyBefore"
+              ]
+            }
+          },
+          "fleet": {
+            "type": "object",
+            "properties": {
+              "brands": {
+                "type": "integer"
+              },
+              "before": {
+                "type": "object",
+                "properties": {
+                  "people": {
+                    "type": "integer",
+                    "description": "People whose FIRST positive reply is in this window (the rate's population)."
+                  },
+                  "booked": {
+                    "type": "integer",
+                    "description": "Of them, people with a meeting at or after that reply, whoever booked it."
+                  },
+                  "rate": {
+                    "type": "number",
+                    "nullable": true,
+                    "description": "booked / people; null when nobody."
+                  },
+                  "bookedBy": {
+                    "type": "object",
+                    "properties": {
+                      "aiMeetingBooking": {
+                        "type": "integer"
+                      },
+                      "yourTeamMeetingBooking": {
+                        "type": "integer"
+                      },
+                      "other": {
+                        "type": "integer"
+                      },
+                      "unknown": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "aiMeetingBooking",
+                      "yourTeamMeetingBooking",
+                      "other",
+                      "unknown"
+                    ],
+                    "description": "Who booked each booked person's first meeting (the side /internal/meeting-attribution gives it)."
+                  },
+                  "bookedAfterGoLive": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "Of `booked`, people whose first meeting is at or after go-live: a person who replied BEFORE go-live and booked after stays in `before` and is counted here too. 0 on `after`; null without go-live."
+                  },
+                  "withinDays": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "integer"
+                      },
+                      "people": {
+                        "type": "integer"
+                      },
+                      "booked": {
+                        "type": "integer"
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "people",
+                      "booked",
+                      "rate"
+                    ],
+                    "description": "Same horizon for both windows: people whose first positive reply is at least `days` old, booked within `days` of it."
+                  }
+                },
+                "required": [
+                  "people",
+                  "booked",
+                  "rate",
+                  "bookedBy",
+                  "bookedAfterGoLive",
+                  "withinDays"
+                ]
+              },
+              "after": {
+                "type": "object",
+                "properties": {
+                  "people": {
+                    "type": "integer",
+                    "description": "People whose FIRST positive reply is in this window (the rate's population)."
+                  },
+                  "booked": {
+                    "type": "integer",
+                    "description": "Of them, people with a meeting at or after that reply, whoever booked it."
+                  },
+                  "rate": {
+                    "type": "number",
+                    "nullable": true,
+                    "description": "booked / people; null when nobody."
+                  },
+                  "bookedBy": {
+                    "type": "object",
+                    "properties": {
+                      "aiMeetingBooking": {
+                        "type": "integer"
+                      },
+                      "yourTeamMeetingBooking": {
+                        "type": "integer"
+                      },
+                      "other": {
+                        "type": "integer"
+                      },
+                      "unknown": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "aiMeetingBooking",
+                      "yourTeamMeetingBooking",
+                      "other",
+                      "unknown"
+                    ],
+                    "description": "Who booked each booked person's first meeting (the side /internal/meeting-attribution gives it)."
+                  },
+                  "bookedAfterGoLive": {
+                    "type": "integer",
+                    "nullable": true,
+                    "description": "Of `booked`, people whose first meeting is at or after go-live: a person who replied BEFORE go-live and booked after stays in `before` and is counted here too. 0 on `after`; null without go-live."
+                  },
+                  "withinDays": {
+                    "type": "object",
+                    "properties": {
+                      "days": {
+                        "type": "integer"
+                      },
+                      "people": {
+                        "type": "integer"
+                      },
+                      "booked": {
+                        "type": "integer"
+                      },
+                      "rate": {
+                        "type": "number",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "days",
+                      "people",
+                      "booked",
+                      "rate"
+                    ],
+                    "description": "Same horizon for both windows: people whose first positive reply is at least `days` old, booked within `days` of it."
+                  }
+                },
+                "required": [
+                  "people",
+                  "booked",
+                  "rate",
+                  "bookedBy",
+                  "bookedAfterGoLive",
+                  "withinDays"
+                ]
+              }
+            },
+            "required": [
+              "brands",
+              "before",
+              "after"
+            ],
+            "description": "Sum over the brands with a go-live."
+          }
+        },
+        "required": [
+          "scope",
+          "legKey",
+          "horizonDays",
+          "brands",
+          "fleet"
+        ]
+      },
       "SocialEngagementsSyncResponse": {
         "type": "object",
         "properties": {
@@ -17877,6 +18333,54 @@
           },
           "400": {
             "description": "Unparseable `since`"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "502": {
+            "description": "campaign-service could not answer"
+          }
+        }
+      }
+    },
+    "/internal/meeting-attribution/before-after": {
+      "get": {
+        "summary": "Positive reply -> Meeting booked rate BEFORE and AFTER a brand's AI Meeting Booking went live, with populations (internal, service-auth)",
+        "description": "For every brand with an AI Meeting Booking campaign (channel ai-meeting-booking, leg conversation_to_meeting_booked): its go-live = the FIRST AI Meeting Booking act of the follow-up ledger (an `acted` row whose acting campaign campaign-service states is AI Meeting Booking of the brand), never a campaign creation date. A person belongs to the window of their FIRST positive reply (before = strictly before go-live, after = at or after); booked = a meeting at or after that reply, the same person-to-meeting rule as /internal/meeting-attribution; a person who replied before go-live and booked after stays in `before` (`bookedAfterGoLive`). before.people + after.people = the brand's positive repliers since inception (asserted). A meeting with no person or no date is in no window (`unplacedMeetings`). A brand with no act yet is listed with `goLive: null`, every person in `before`, and is left out of `fleet`. A brand whose AI was on from day one has an empty `before`. 502 when campaign-service cannot answer.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "One brand; absent = fleet-wide."
+            },
+            "required": false,
+            "description": "One brand; absent = fleet-wide.",
+            "name": "brandId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Before / after rates per brand and fleet roll-up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeetingBookingBeforeAfterResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query"
           },
           "401": {
             "description": "Unauthorized"
