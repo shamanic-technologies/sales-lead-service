@@ -13,7 +13,7 @@
 import { closePlatformRun, createPlatformRun, createRun, updateRun } from "./runs-client.js";
 import { lookUpCompanies } from "./relationship-company.js";
 import { judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
-import { suggestMerges } from "./relationship-merges.js";
+import { suggestMerges, type MergeTick } from "./relationship-merges.js";
 import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects.js";
 import { recomputePolicy } from "./relationship-read.js";
 import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
@@ -32,7 +32,7 @@ export interface ScopeTick {
   evidenceWritten: number;
   judged: number;
   judgeFailed: number;
-  merges: { asked: number; linked: number; open: number; rejected: number } | null;
+  merges: MergeTick | null;
   companies: { looked: number; free: number; treg: number; none: number; tregMicro: number } | null;
   policyChanged: number;
   error: string | null;
@@ -116,7 +116,7 @@ export function startRelationshipSweepWorker(): void {
     try {
       const results = await sweepAllOnce();
       for (const r of results) {
-        if (r.judged || r.merges?.asked || r.companies?.looked) {
+        if (r.judged || r.merges?.asked || r.merges?.settled || r.companies?.looked) {
           console.log(
             `[lead-service] relationship sweep ${r.scope.brandId}: ${r.subjects} leads, judged ${r.judged} (${r.judgeFailed} failed), ` +
               `merges ${JSON.stringify(r.merges)}, companies ${JSON.stringify(r.companies)}`,

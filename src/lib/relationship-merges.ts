@@ -6,8 +6,10 @@
  *   - candidates: each subject of the brand with NO email and a real name, against the brand's
  *     subjects WITH an email, picked by name blocking (`relationship-names.ts`), never a rule on words;
  *   - Jev reads both people (names, keys, channels, both threads) and gives P(same);
- *   - >= LINK_AT: an org link judged by "jev" (undoable from the review page);
- *     >= ASK_AT: a question for the owner; below: recorded as rejected, never asked again.
+ *   - >= LINK_AT (more likely than not, owner 2026-10-14 RELATIONSHIP-TAGS-1014b): an org link judged by "jev",
+ *     undoable from the review page or the person's own block (`merges`); >= ASK_AT: the true doubt, a question
+ *     for the owner; below: recorded as rejected, never asked again. A question left open under an older, higher
+ *     LINK_AT is settled by the same rule on the next tick (`settleOpenMerges`); one a person answered never is.
  * Every pair is judged ONCE (`relationship_merge_questions`, unique per org and pair).
  */
 import { sql } from "drizzle-orm";
@@ -18,7 +20,7 @@ import { fitThread } from "./relationship-judge.js";
 import { hasComparableName, nameTokens, unlinkedCandidatesFor } from "./relationship-names.js";
 import { readThread, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
 
-export const LINK_AT = 0.9;
+export const LINK_AT = 0.5;
 export const ASK_AT = 0.4;
 const PAIRS_PER_TICK = 40;
 const PAIR_CONCURRENCY = 4;
@@ -114,14 +116,47 @@ async function pendingPairs(scope: Scope): Promise<Pair[]> {
 }
 
 export interface MergeTick {
+  settled: number;
   asked: number;
   linked: number;
   open: number;
   rejected: number;
 }
 
+/** State an org link judged by Jev at human-service and re-read the org view of both people. */
+async function linkByJudge(orgId: string, a: string, b: string, evidence: string): Promise<string | null> {
+  const r = await stateHumanLink({ orgId, relation: "same", humanIds: [a, b], judgedBy: "jev", evidence });
+  await refreshOrgAliases(orgId, [a, b]);
+  return r.link?.linkId ?? null;
+}
+
+/** Open questions the judge already put at or above LINK_AT (asked under an older edge): linked as its judgment. */
+export async function settleOpenMerges(scope: Scope): Promise<number> {
+  const rows = (await db.execute(sql`
+    SELECT id::text, human_a::text AS a, human_b::text AS b, probability, model FROM relationship_merge_questions
+    WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND state = 'open' AND answered_by IS NULL AND probability >= ${LINK_AT}
+    ORDER BY probability DESC LIMIT ${PAIRS_PER_TICK}
+  `)) as unknown as Array<{ id: string; a: string; b: string; probability: number; model: string | null }>;
+  let settled = 0;
+  for (const q of rows) {
+    const linkId = await linkByJudge(
+      scope.orgId,
+      q.a,
+      q.b,
+      `lead-service relationship sweep: Jev P(same)=${Number(q.probability).toFixed(3)} (${q.model ?? "unknown model"}), settled at the >= ${LINK_AT} edge (question ${q.id})`,
+    );
+    const done = (await db.execute(sql`
+      UPDATE relationship_merge_questions SET state = 'linked', link_id = ${linkId}, answered_by = 'jev', answered_at = now()
+      WHERE id = ${q.id}::uuid AND state = 'open' AND answered_by IS NULL
+      RETURNING 1
+    `)) as unknown as unknown[];
+    settled += done.length;
+  }
+  return settled;
+}
+
 export async function suggestMerges(scope: Scope, runId: string): Promise<MergeTick> {
-  const tick: MergeTick = { asked: 0, linked: 0, open: 0, rejected: 0 };
+  const tick: MergeTick = { settled: await settleOpenMerges(scope), asked: 0, linked: 0, open: 0, rejected: 0 };
   const pairs = await pendingPairs(scope);
   let next = 0;
   let failures = 0;
@@ -146,15 +181,7 @@ export async function suggestMerges(scope: Scope, runId: string): Promise<MergeT
     const st: "linked" | "open" | "rejected" = prob >= LINK_AT ? "linked" : prob >= ASK_AT ? "open" : "rejected";
     let linkId: string | null = null;
     if (st === "linked") {
-      const r = await stateHumanLink({
-        orgId: scope.orgId,
-        relation: "same",
-        humanIds: [a, b],
-        judgedBy: "jev",
-        evidence: `lead-service relationship sweep: Jev P(same)=${prob.toFixed(3)} (${model}) for "${p.unlinked.name}" and "${p.known.name}"`,
-      });
-      linkId = r.link?.linkId ?? null;
-      await refreshOrgAliases(scope.orgId, [a, b]);
+      linkId = await linkByJudge(scope.orgId, a, b, `lead-service relationship sweep: Jev P(same)=${prob.toFixed(3)} (${model}) for "${p.unlinked.name}" and "${p.known.name}"`);
     }
     await db.execute(sql`
       INSERT INTO relationship_merge_questions (org_id, brand_id, human_a, human_b, probability, model, run_id, state, link_id, answered_by, answered_at)
