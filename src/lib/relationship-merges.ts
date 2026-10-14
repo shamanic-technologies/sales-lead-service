@@ -15,12 +15,13 @@ import { db } from "../db/index.js";
 import { getHumanInOrg, stateHumanLink, withdrawHumanLink } from "./human-identity-client.js";
 import { judgeYesNo } from "./qualification-judge.js";
 import { fitThread } from "./relationship-judge.js";
-import { candidatesFor, hasComparableName, type NamedPerson } from "./relationship-names.js";
+import { hasComparableName, nameTokens, unlinkedCandidatesFor } from "./relationship-names.js";
 import { readThread, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
 
 export const LINK_AT = 0.9;
 export const ASK_AT = 0.4;
-const PAIRS_PER_TICK = 40;
+const PAIRS_PER_TICK = 120;
+const PAIR_CONCURRENCY = 6;
 const MAX_CANDIDATES = 3;
 
 const SAME_PERSON = {
@@ -87,17 +88,28 @@ async function pendingPairs(scope: Scope): Promise<Pair[]> {
   `)) as unknown as Array<{ a: string; b: string }>;
   const askedSet = new Set(asked.map((r) => `${r.a}|${r.b}`));
   const byId = new Map(subjects.map((s) => [s.humanId, s]));
-  const knownNamed: NamedPerson[] = known.map((k) => ({ humanId: k.humanId, name: k.name, emails: k.emails }));
-  const out: Pair[] = [];
-  for (const u of unlinked) {
-    for (const c of candidatesFor({ humanId: u.humanId, name: u.name, emails: [] }, knownNamed, MAX_CANDIDATES)) {
-      const [a, b] = orderPair(u.humanId, c.person.humanId);
+  // People a source states as prospect or customer of the brand (signed up, paid...): the ones campaigns write to.
+  const evidenced = new Set(
+    ((await db.execute(sql`
+      SELECT DISTINCT human_id::text AS h FROM relationship_evidence WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
+    `)) as unknown as Array<{ h: string }>).map((r) => r.h),
+  );
+  const isSignedUp = (s: Subject) => evidenced.has(s.humanId);
+  // From each KNOWN person (people with evidence first), the best
+  // unlinked candidates; strongest name evidence first across the brand.
+  const unlinkedIndex = unlinked.map((u) => ({ person: { humanId: u.humanId, name: u.name, emails: [] as string[] }, tokens: nameTokens(u.name) }));
+  const knownFirst = [...known].sort((x, y) => Number(isSignedUp(y)) - Number(isSignedUp(x)) || x.humanId.localeCompare(y.humanId));
+  const all: Array<Pair & { score: number; signedUp: boolean }> = [];
+  for (const k of knownFirst) {
+    for (const c of unlinkedCandidatesFor({ humanId: k.humanId, name: k.name, emails: k.emails }, unlinkedIndex, MAX_CANDIDATES)) {
+      const [a, b] = orderPair(c.person.humanId, k.humanId);
       if (askedSet.has(`${a}|${b}`)) continue;
-      out.push({ unlinked: u, known: byId.get(c.person.humanId)! });
-      if (out.length >= PAIRS_PER_TICK) return out;
+      all.push({ unlinked: byId.get(c.person.humanId)!, known: k, score: c.score, signedUp: isSignedUp(k) });
     }
   }
-  return out;
+  return all
+    .sort((x, y) => Number(y.signedUp) - Number(x.signedUp) || y.score - x.score || x.known.humanId.localeCompare(y.known.humanId))
+    .slice(0, PAIRS_PER_TICK);
 }
 
 export interface MergeTick {
@@ -109,14 +121,21 @@ export interface MergeTick {
 
 export async function suggestMerges(scope: Scope, runId: string): Promise<MergeTick> {
   const tick: MergeTick = { asked: 0, linked: 0, open: 0, rejected: 0 };
-  for (const p of await pendingPairs(scope)) {
+  const pairs = await pendingPairs(scope);
+  let next = 0;
+  const worker = async () => {
+    while (next < pairs.length) {
+      await askPair(pairs[next++]);
+    }
+  };
+  const askPair = async (p: Pair) => {
     const state = { a: await card(p.unlinked), b: await card(p.known) };
     let judged: { probabilities: { same: number }; model: string };
     try {
       judged = await judgeYesNo(state, { same: SAME_PERSON }, "platform");
     } catch (err) {
       console.error(`[lead-service] merge judgment failed for ${p.unlinked.humanId} / ${p.known.humanId}; asked again next tick:`, err);
-      continue;
+      return;
     }
     const { probabilities, model } = judged;
     const prob = probabilities.same;
@@ -144,7 +163,8 @@ export async function suggestMerges(scope: Scope, runId: string): Promise<MergeT
     if (st === "linked") tick.linked++;
     else if (st === "open") tick.open++;
     else tick.rejected++;
-  }
+  };
+  await Promise.all(Array.from({ length: PAIR_CONCURRENCY }, worker));
   return tick;
 }
 

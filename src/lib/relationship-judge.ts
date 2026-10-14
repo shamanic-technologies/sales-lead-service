@@ -108,6 +108,7 @@ export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subj
     SELECT s.* FROM relationship_subjects s
     LEFT JOIN relationship_judgments j ON j.org_id = s.org_id AND j.brand_id = s.brand_id AND j.human_id = s.human_id AND j.company_key = s.company_key
     WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND (j.human_id IS NULL OR j.thread_seq < s.thread_seq)
+      AND s.has_direct
     ORDER BY s.has_messages DESC, (j.human_id IS NULL) DESC, s.thread_seq DESC
     LIMIT ${limit}
   `)) as unknown as Array<Record<string, unknown>>;
