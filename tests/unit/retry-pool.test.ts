@@ -25,6 +25,7 @@ interface Row {
   sender_closed_at?: string | null;
   send_refused_at?: string | null;
   send_refused_until?: string | null;
+  channel_sent_at?: string | null;
   status: string;
 }
 
@@ -90,6 +91,7 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
       row.status !== "served" ||
       row.sent_at !== null ||
       (row.sender_closed_at ?? null) !== null ||
+      (/channel_sent_at IS NULL/.test(text) && (row.channel_sent_at ?? null) !== null) ||
       refusalStands(row, refusalNow) ||
       (row.retry_claimed_at !== null && row.retry_claimed_at >= leaseCutoff)
     ) {
@@ -111,6 +113,7 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
         r.status === "served" &&
         r.sent_at === null &&
         (r.sender_closed_at ?? null) === null &&
+        (!/lc\.channel_sent_at IS NULL/.test(text) || (r.channel_sent_at ?? null) === null) &&
         !refusalStands(r, refusalNow) &&
         (r.retry_claimed_at === null || r.retry_claimed_at < leaseCutoff),
     )
@@ -162,10 +165,18 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
   checkDeliveryStatus: (...args: unknown[]) => checkDeliveryStatus(...args),
 }));
 
+const fetchChannelSendsBatch = vi.fn();
+vi.mock("../../src/lib/channel-send-client.js", () => ({
+  fetchChannelSendsBatch: (...args: unknown[]) => fetchChannelSendsBatch(...args),
+}));
+
 import {
   campaignScopeFlags,
+  CHANNEL_RETRY_CANDIDATE_BATCH_SIZE,
+  decideChannelRetry,
   decideRetry,
   pickRetryCandidate,
+  poolSenderOf,
   RETRY_QUEUE_TTL_MS,
 } from "../../src/lib/retry-pool.js";
 
@@ -801,5 +812,116 @@ describe("a person the sender REFUSES to email (RECONTACT-LOOP-1011)", () => {
     expect(await pickRetryCandidate(base)).toBeNull();
     expect(errors).toHaveBeenCalled();
     errors.mockRestore();
+  });
+});
+
+/**
+ * WA-RESERVE-LOOP-1014: a WhatsApp campaign handed the same 8 people back 16-18 times each (campaign 4af21454,
+ * 2026-10-12/13), because the pool asked email-gateway alone and a WhatsApp send never reaches it. For a pipe whose
+ * channel does not write by email, the non-email sender's own record (crm-service) decides.
+ */
+describe("the pool of a pipe that does not write by email", () => {
+  const send = (over: Partial<{ sendId: string; status: string; campaignId: string | null; sentAt: string | null; createdAt: string | null }>) => ({
+    sendId: "send-1",
+    status: "sent",
+    campaignId: CAMPAIGN,
+    sentAt: "2026-10-12T14:43:32.913Z",
+    createdAt: "2026-10-12T14:43:31.765Z",
+    ...over,
+  });
+
+  it("asks email-gateway for an email channel, and for a channel stating no method (today, byte-identical)", () => {
+    expect(poolSenderOf(["email"])).toBe("email");
+    expect(poolSenderOf(null)).toBe("email");
+    expect(poolSenderOf([])).toBe("email");
+    expect(poolSenderOf(["phone"])).toBe("channel");
+  });
+
+  it("a send of THIS campaign the sender states sent is terminal, dated by the sender", () => {
+    expect(decideChannelRetry([send({})], CAMPAIGN, NOW)).toEqual({
+      verdict: "channel_sent",
+      sentAt: "2026-10-12T14:43:32.913Z",
+      sendId: "send-1",
+    });
+  });
+
+  it("the earliest sent send wins; a sent send with no readable date is still sent", () => {
+    expect(
+      decideChannelRetry([send({ sendId: "late", sentAt: "2026-10-13T00:00:00.000Z" }), send({ sendId: "early" })], CAMPAIGN, NOW),
+    ).toMatchObject({ verdict: "channel_sent", sendId: "early" });
+    expect(decideChannelRetry([send({ sentAt: null, createdAt: null })], CAMPAIGN, NOW)).toEqual({
+      verdict: "channel_sent",
+      sentAt: new Date(NOW).toISOString(),
+      sendId: "send-1",
+    });
+  });
+
+  it("another campaign's send says nothing about this one; a send in flight is left alone; nothing sent is retried", () => {
+    expect(decideChannelRetry([send({ campaignId: "other" })], CAMPAIGN, NOW)).toEqual({ verdict: "retry" });
+    expect(decideChannelRetry([send({ status: "sending", sentAt: null })], CAMPAIGN, NOW)).toEqual({ verdict: "in_vendor_queue" });
+    expect(decideChannelRetry([send({ status: "failed", sentAt: null }), send({ status: "refused", sentAt: null })], CAMPAIGN, NOW)).toEqual({ verdict: "retry" });
+    expect(decideChannelRetry(undefined, CAMPAIGN, NOW)).toEqual({ verdict: "retry" });
+  });
+
+  it("never hands back a person this campaign already WhatsApped, and records them as written to (the prod loop)", async () => {
+    markSentUpdates.length = 0;
+    rows = [row({ id: "imenez", email: "Imenez@gmail.com" }), row({ id: "fresh", email: "fresh@example.com", served_at: "2026-08-25T10:00:00.000Z" })];
+    fetchChannelSendsBatch.mockResolvedValue(
+      new Map([
+        ["imenez@gmail.com", [send({ sendId: "s-imenez" })]],
+        ["fresh@example.com", []],
+      ]),
+    );
+    const picked = await pickRetryCandidate({ ...base, sender: "channel" });
+    // The WhatsApped person is not returned; the one nothing went out to is.
+    expect(picked?.id).toBe("fresh");
+    expect(checkDeliveryStatus).not.toHaveBeenCalled();
+    const [brandId, emails, ctx] = fetchChannelSendsBatch.mock.calls[0];
+    expect(brandId).toBe("brand-1");
+    expect(emails).toEqual(["Imenez@gmail.com", "fresh@example.com"]);
+    expect(ctx).toMatchObject({ orgId: "org-1" });
+    // Out of the pool for good, in its own column (never sent_at), with the sender's date and id.
+    const channelMarks = markSentUpdates.filter((u) => (u.set as Record<string, unknown>).channelSentAt !== undefined);
+    expect(channelMarks).toHaveLength(1);
+    expect(channelMarks[0].set).toMatchObject({ channelSendId: "s-imenez", channelSentAt: new Date("2026-10-12T14:43:32.913Z") });
+    expect(channelMarks[0].set).not.toHaveProperty("sentAt");
+  });
+
+  it("asks the sender about a bounded batch", async () => {
+    rows = Array.from({ length: CHANNEL_RETRY_CANDIDATE_BATCH_SIZE + 5 }, (_, i) => row({ id: `p${String(i).padStart(2, "0")}` }));
+    fetchChannelSendsBatch.mockResolvedValue(new Map());
+    await pickRetryCandidate({ ...base, sender: "channel" });
+    expect(fetchChannelSendsBatch.mock.calls[0][1]).toHaveLength(CHANNEL_RETRY_CANDIDATE_BATCH_SIZE);
+  });
+
+  it("re-serves nobody while the sender is still sending", async () => {
+    rows = [row({ id: "inflight" })];
+    fetchChannelSendsBatch.mockResolvedValue(new Map([["inflight@example.com", [send({ status: "sending", sentAt: null })]]]));
+    expect(await pickRetryCandidate({ ...base, sender: "channel" })).toBeNull();
+    expect(rows[0].retry_claimed_at).toBeNull();
+  });
+
+  it("is FAIL-CLOSED when the sender cannot be read: nobody re-served, nobody claimed", async () => {
+    rows = [row({ id: "unknown" })];
+    fetchChannelSendsBatch.mockRejectedValue(new Error("crm-service 502"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await pickRetryCandidate({ ...base, sender: "channel" })).toBeNull();
+    expect(rows[0].retry_claimed_at).toBeNull();
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("a row already marked written to is never a candidate again", async () => {
+    rows = [row({ id: "done", channel_sent_at: "2026-10-12T14:43:32.913Z" })];
+    expect(await pickRetryCandidate({ ...base, sender: "channel" })).toBeNull();
+    expect(await pickRetryCandidate(base)).toBeNull();
+    expect(fetchChannelSendsBatch).not.toHaveBeenCalled();
+    expect(checkDeliveryStatus).not.toHaveBeenCalled();
+  });
+
+  it("an email pipe never asks the channel sender", async () => {
+    rows = [row({ id: "mail" })];
+    expect((await pickRetryCandidate(base))?.id).toBe("mail");
+    expect(fetchChannelSendsBatch).not.toHaveBeenCalled();
   });
 });

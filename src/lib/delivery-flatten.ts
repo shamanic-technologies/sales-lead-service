@@ -264,3 +264,24 @@ export function flattenCampaignSubsetStatus(
     global: mergeGlobal(result.broadcast?.global, result.transactional?.global),
   };
 }
+
+/**
+ * Fold a message the campaign's NON-EMAIL sender stated it sent (`leads_campaigns.channel_sent_at`, written by the
+ * paid-pool retry off crm-service's send record, WA-RESERVE-LOOP-1014) into a served row's overlay: the person was
+ * contacted and a message went out. email-gateway never sees a WhatsApp send, so without this a WhatsApp campaign
+ * reads 0 contacted wherever the overlay is read (bucket counts, people.sent, standing, rows, activity).
+ *
+ * Applied ONLY to a served row in a named scope (the caller's existing rule): an unserved/unscoped row keeps the
+ * all-false overlay. Email evidence is never overwritten: flags only turn on, timestamps take the earliest.
+ */
+export function withChannelSend(delivery: FlattenedStatus, channelSentAt: string | null | undefined): FlattenedStatus {
+  if (!channelSentAt) return delivery;
+  return {
+    ...delivery,
+    contacted: true,
+    sent: true,
+    sentCount: Math.max(delivery.sentCount, 1),
+    firstContactedAt: earliestIso(delivery.firstContactedAt, channelSentAt),
+    firstSentAt: earliestIso(delivery.firstSentAt, channelSentAt),
+  };
+}

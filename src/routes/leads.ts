@@ -102,6 +102,7 @@ import {
   flattenBrandStatus,
   flattenCampaignStatus,
   flattenFamilyStatus,
+  withChannelSend,
   type FlattenedStatus,
 } from "../lib/delivery-flatten.js";
 
@@ -134,6 +135,7 @@ interface RawLeadCampaignRow {
   run_id: string | null;
   // postgres.js returns timestamptz as Date OR string depending on the path; normalize via toIsoTimestamp.
   served_at: Date | string | null;
+  channel_sent_at: Date | string | null;
   workflow_slug: string | null;
   feature_slug: string | null;
   goal: string | null;
@@ -161,6 +163,8 @@ interface LeadCampaignRow {
   parentRunId: string | null;
   runId: string | null;
   servedAt: string | null;
+  /** Non-email channel send (`channel_sent_at`, retry-pool.ts): overlay input only, never serialized. */
+  channelSentAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
   goal: string | null;
@@ -199,7 +203,7 @@ async function fetchLeadCampaignRowById(
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
-      lc.served_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
+      lc.served_at, lc.channel_sent_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
       lc.brand_profile_id, lc.audience_id, lc.created_at,
       lc.created_at::text AS created_at_cursor,
       l.apollo_person_id AS lead_apollo_person_id,
@@ -228,6 +232,7 @@ function mapLeadCampaignRows(rows: RawLeadCampaignRow[]): LeadCampaignRow[] {
     parentRunId: r.parent_run_id,
     runId: r.run_id,
     servedAt: toIsoTimestamp(r.served_at),
+    channelSentAt: toIsoTimestamp(r.channel_sent_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
     goal: r.goal,
@@ -252,7 +257,7 @@ async function fetchLeadCampaignChunk(
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
-      lc.served_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
+      lc.served_at, lc.channel_sent_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
       lc.brand_profile_id, lc.audience_id, lc.created_at,
       lc.created_at::text AS created_at_cursor,
       l.apollo_person_id AS lead_apollo_person_id,
@@ -1037,7 +1042,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
             const statusResult = statusMap.get(r.email?.value ?? "");
             const delivery =
               hasScopeForStatus && r.status === "served"
-                ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+                ? withChannelSend(statusResult ? flatten(statusResult) : DEFAULT_STATUS, r.channelSentAt)
                 : DEFAULT_STATUS;
             await writer.write((wroteFirstBasic ? "," : "") + JSON.stringify(toCompactLead(r, delivery, crmPositiveReplyAtFor(crmReplies, r))));
             wroteFirstBasic = true;
@@ -1068,7 +1073,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
           deliveryByRow.set(
             r.id,
             hasScopeForStatus && r.status === "served"
-              ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+              ? withChannelSend(statusResult ? flatten(statusResult) : DEFAULT_STATUS, r.channelSentAt)
               : DEFAULT_STATUS,
           );
         }
@@ -1265,7 +1270,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         deliveryByRow.set(
           row.id,
           hasScopeForStatus && row.status === "served"
-            ? (statusResult ? flatten(statusResult) : DEFAULT_STATUS)
+            ? withChannelSend(statusResult ? flatten(statusResult) : DEFAULT_STATUS, row.channelSentAt)
             : DEFAULT_STATUS,
         );
       }
@@ -1823,6 +1828,9 @@ router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: Authenticate
       );
       statusResult = response.results.find((r) => r.email === email.value) ?? null;
       deliveryStatus = statusResult ? flatten(statusResult) : DEFAULT_STATUS;
+    }
+    if ((brandIdStr || campaignIdStr) && row.status === "served") {
+      deliveryStatus = withChannelSend(deliveryStatus, row.channelSentAt);
     }
 
     // One row, so nothing is memoized — the resolver exists here so the panel reads the SAME

@@ -3,6 +3,7 @@ import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
+import { fetchChannelSendsBatch, type ChannelSend } from "./channel-send-client.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
@@ -70,6 +71,64 @@ export const RETRY_CLAIM_LEASE_MS = 60 * 60 * 1000;
  * moves a repeatedly-failing person to the back, so the window walks forward.
  */
 export const RETRY_CANDIDATE_BATCH_SIZE = 50;
+
+/**
+ * The batch for a pool whose sender is asked one person at a time (crm-service, see channel-send-client.ts). Smaller
+ * than the email batch: each person is one request (and one crm-service run). A person found sent leaves the pool for
+ * good, so the window still walks forward.
+ */
+export const CHANNEL_RETRY_CANDIDATE_BATCH_SIZE = 10;
+
+/**
+ * WHO states whether a served person was contacted, by the channel the campaign's pipe writes on
+ * (WA-RESERVE-LOOP-1014). `email` = email-gateway's `/orgs/status` (every email pipe, and any pipe whose channel states
+ * no contact method: today's behaviour, byte-identical). `channel` = the non-email sender's own send record
+ * (crm-service), for a pipe whose channel does not write by email: email-gateway never sees those sends.
+ */
+export type PoolSender = "email" | "channel";
+
+/** PURE: the pool's sender from the channel's own contact methods (src/lib/channel-reach.ts). */
+export function poolSenderOf(channelMethods: readonly string[] | null): PoolSender {
+  if (!channelMethods || channelMethods.length === 0 || channelMethods.includes("email")) return "email";
+  return "channel";
+}
+
+/** What the non-email sender's record says about one candidate, for THIS campaign. */
+export type ChannelVerdict =
+  | { verdict: "channel_sent"; sentAt: string; sendId: string }
+  | { verdict: "in_vendor_queue" }
+  | { verdict: "retry" };
+
+/**
+ * PURE. Only sends carrying THIS campaign's id count (another campaign writing to the person is the brand-level
+ * suppression's business, as on the email side).
+ *
+ *   | a `sent` send of this campaign     | channel_sent (terminal, never re-served, counts as contacted) |
+ *   | else a `sending` one               | in_vendor_queue (the sender is on it; leave it alone)          |
+ *   | else (none, `failed`, `refused`)   | retry (nothing went out)                                      |
+ *
+ * A refusal about the CHANNEL (no phone, not on WhatsApp) is already set aside by the workflow's channel-refusals call
+ * (released-pool.ts: `send_refused_*`, the row never reaches this read). The sender's word is never re-graded here.
+ */
+export function decideChannelRetry(
+  sends: readonly ChannelSend[] | undefined,
+  campaignId: string,
+  nowMs: number,
+): ChannelVerdict {
+  const mine = (sends ?? []).filter((s) => s.campaignId === campaignId);
+  const sent = mine
+    .filter((s) => s.status === "sent")
+    .map((s) => {
+      const stated = s.sentAt ?? s.createdAt;
+      const ms = stated === null ? Number.NaN : Date.parse(stated);
+      // A send stated `sent` with no readable date is still sent: dated by when we read it, never re-served.
+      return { sendId: s.sendId, ms: Number.isNaN(ms) ? nowMs : ms };
+    })
+    .sort((a, b) => a.ms - b.ms);
+  if (sent.length > 0) return { verdict: "channel_sent", sentAt: new Date(sent[0].ms).toISOString(), sendId: sent[0].sendId };
+  if (mine.some((s) => s.status === "sending")) return { verdict: "in_vendor_queue" };
+  return { verdict: "retry" };
+}
 
 /** What the two email-gateway flags say we should do with a candidate. */
 export type RetryVerdict =
@@ -350,6 +409,7 @@ export async function loadRetryCandidates(params: {
       AND lc.status = 'served'
       AND lc.sent_at IS NULL
       AND lc.sender_closed_at IS NULL
+      AND lc.channel_sent_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
       ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships)}
@@ -408,6 +468,25 @@ export async function markSenderClosedCandidates(ids: string[], nowMs: number): 
 }
 
 /**
+ * Take a candidate out of the pool because the NON-EMAIL sender states it wrote to them for this campaign.
+ *
+ * Its own column, not `sent_at` (the lead history reads that as the email hand-off). Written once from the sender's
+ * record (its sentAt and send id); the row is never re-asked and its overlay reads contacted (withChannelSend).
+ */
+export async function markChannelSentCandidates(
+  sent: Array<{ id: string; sentAt: string; sendId: string }>,
+  nowMs: number,
+): Promise<void> {
+  const now = new Date(nowMs);
+  for (const s of sent) {
+    await db
+      .update(leadsCampaigns)
+      .set({ channelSentAt: new Date(s.sentAt), channelSendId: s.sendId, updatedAt: now })
+      .where(and(eq(leadsCampaigns.id, s.id), isNull(leadsCampaigns.channelSentAt)));
+  }
+}
+
+/**
  * Take a candidate out of the pool because the sender refuses to send to them.
  *
  * Written from the sender's statement only, verbatim: its code and when it lapses (NULL =
@@ -463,6 +542,7 @@ export async function claimCandidate(params: {
        AND status = 'served'
        AND sent_at IS NULL
        AND sender_closed_at IS NULL
+       AND channel_sent_at IS NULL
        AND (send_refused_at IS NULL OR (send_refused_until IS NOT NULL AND send_refused_until <= ${now}))
        AND (retry_claimed_at IS NULL OR retry_claimed_at < ${leaseCutoff})
     RETURNING id
@@ -522,8 +602,11 @@ export async function pickRetryCandidate(params: {
   acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
+  /** Who states whether a person was contacted (poolSenderOf). Absent = email-gateway (today). */
+  sender?: PoolSender;
 }): Promise<RetryCandidate | null> {
   const nowMs = params.nowMs ?? Date.now();
+  const sender: PoolSender = params.sender ?? "email";
 
   const candidates = await loadRetryCandidates({
     orgId: params.orgId,
@@ -532,8 +615,11 @@ export async function pickRetryCandidate(params: {
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: params.acceptedEmails ?? null,
     relationships: params.relationships ?? null,
+    ...(sender === "channel" ? { limit: CHANNEL_RETRY_CANDIDATE_BATCH_SIZE } : {}),
   });
   if (candidates.length === 0) return null;
+
+  if (sender === "channel") return pickChannelCandidate(params, candidates, nowMs);
 
   let statuses: StatusResult[];
   try {
@@ -630,5 +716,59 @@ export async function pickRetryCandidate(params: {
     // Lost the race to a concurrent pull — try the next one.
   }
 
+  return null;
+}
+
+/**
+ * The pool for a pipe that does not write by email (WA-RESERVE-LOOP-1014): the non-email sender's own record decides.
+ * Same claim, same fail-closed posture as the email path: crm-service unreadable = nobody re-served this pull.
+ */
+async function pickChannelCandidate(
+  params: { orgId: string; campaignId: string; brandId: string; runId: string | null; parentRunId: string | null; context: RetryPoolContext },
+  candidates: RetryCandidate[],
+  nowMs: number,
+): Promise<RetryCandidate | null> {
+  let sendsByEmail: Map<string, ChannelSend[]>;
+  try {
+    sendsByEmail = await fetchChannelSendsBatch(
+      params.brandId,
+      candidates.map((c) => c.email),
+      { orgId: params.orgId, userId: params.context.userId ?? null, runId: params.context.runId ?? null },
+    );
+  } catch (err) {
+    console.warn(
+      `[lead-service] retry-pool skipped: channel sender (crm-service) sends unavailable campaign=${params.campaignId} candidates=${candidates.length}:`,
+      err,
+    );
+    return null;
+  }
+
+  const sent: Array<{ id: string; sentAt: string; sendId: string }> = [];
+  const retryable: RetryCandidate[] = [];
+  let queuedCount = 0;
+  for (const candidate of candidates) {
+    const decided = decideChannelRetry(sendsByEmail.get(candidate.email.toLowerCase()), params.campaignId, nowMs);
+    if (decided.verdict === "channel_sent") sent.push({ id: candidate.id, sentAt: decided.sentAt, sendId: decided.sendId });
+    else if (decided.verdict === "retry") retryable.push(candidate);
+    else queuedCount += 1;
+  }
+
+  // Written to leave the pool for good whether or not anybody is returned this run.
+  await markChannelSentCandidates(sent, nowMs);
+  if (sent.length > 0) {
+    console.log(
+      `[lead-service] retry-pool: ${sent.length} candidate(s) already written to on the campaign's channel, out of the pool campaign=${params.campaignId}`,
+    );
+  }
+
+  for (const candidate of retryable) {
+    const claimed = await claimCandidate({ id: candidate.id, nowMs, runId: params.runId, parentRunId: params.parentRunId });
+    if (claimed) {
+      console.log(
+        `[lead-service] retry-pool claimed (channel sender) campaign=${params.campaignId} leadId=${candidate.leadId} attempt=${candidate.retryCount + 1} candidates=${candidates.length} channelSent=${sent.length} sending=${queuedCount}`,
+      );
+      return candidate;
+    }
+  }
   return null;
 }

@@ -685,6 +685,16 @@ describe("pullNext for a pipe: reach, sources, released people (owner 2026-10-12
     expect(upsertContactMethod).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", channel: "phone", value: "+33612345678" }));
   });
 
+  // WA-RESERVE-LOOP-1014: the pool of a pipe that does not write by email asks the channel's sender, not email-gateway.
+  it("a pipe whose channel does not write by email hands its pool sender to the retry pool; absent stays absent", async () => {
+    served({ ...person, provider: "apollo", phone: "+33612345678" });
+    await pullNext({ ...baseParams, featureSlug: "cold-whatsapp-outreach", reachableBy: ["phone"], poolSender: "channel" });
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ sender: "channel" }));
+    served(person);
+    await pullNext(baseParams);
+    expect(pickRetryCandidate.mock.calls[1][0]).not.toHaveProperty("sender");
+  });
+
   it("an email pipe asks for email", async () => {
     served(person);
     await pullNext({ ...baseParams, featureSlug: "sales-cold-email-outreach", reachableBy: ["email"] });

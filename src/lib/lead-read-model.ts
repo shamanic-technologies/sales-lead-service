@@ -45,6 +45,7 @@ import {
   flattenBrandStatus,
   flattenCampaignStatus,
   flattenFamilyStatus,
+  withChannelSend,
   type FlattenedStatus,
 } from "./delivery-flatten.js";
 import type { StatusResult } from "./email-gateway-client.js";
@@ -1028,7 +1029,9 @@ export function modelDeliveryFor(
   scope: ReadModelScope,
   status: string,
   result: StatusResult | undefined,
+  /** The row's non-email channel send (`channel_sent_at`), folded in like the model does. */
+  channelSentAt: string | null = null,
 ): FlattenedStatus {
   if (!scope.deliveryQueried || status !== "served") return DEFAULT_STATUS;
-  return result ? flattenOf(scope)(result) : DEFAULT_STATUS;
+  return withChannelSend(result ? flattenOf(scope)(result) : DEFAULT_STATUS, channelSentAt);
 }
