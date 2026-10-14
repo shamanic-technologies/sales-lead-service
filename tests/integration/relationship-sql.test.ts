@@ -71,7 +71,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     await db.execute(sql`
       INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id)
       VALUES (${orgId}, ${randomUUID()}, ${yuliaWa}::uuid, '', '{"personal":0.92,"customer":0.1}'::jsonb, 1, 'jev-test', 'run'),
-             (${orgId}, ${brandId}, ${yuliaWa}::uuid, '', '{"personal":0.2,"investor":0.5}'::jsonb, 1, 'jev-test', 'run')
+             (${orgId}, ${brandId}, ${yuliaWa}::uuid, '', '{"personal":0.2,"investor":0.45}'::jsonb, 1, 'jev-test', 'run')
     `);
     let b = (await loadRelationships(orgId, brandId, [yuliaWa])).get(yuliaWa)!;
     expect(b.tags).toEqual(["personal"]);

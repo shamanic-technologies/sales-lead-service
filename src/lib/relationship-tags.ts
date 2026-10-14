@@ -8,8 +8,9 @@
  * Bases, read with precedence person > evidence > judgment:
  *   - a person of the org said yes or no (review page, MCP): that is the answer, withdrawable;
  *   - a source stated a fact (signup -> prospect, payment / sale -> customer): yes;
- *   - Jev judged the person's whole merged thread: yes at or above JUDGED_YES, no at or below
- *     JUDGED_NO, unsure between (a question for the owner).
+ *   - Jev judged the person's whole merged thread: more likely than not (>= JUDGED_YES, 50%) is a yes,
+ *     below JUDGED_NO (40%) a no, the true doubt between is a question for the owner (owner 2026-10-14,
+ *     RELATIONSHIP-TAGS-1014b: the same edges as a merge, `relationship-merges.ts`).
  * Several tags are yes at once (Advisor + Customer, Personal + Customer): tags are additive.
  */
 
@@ -45,8 +46,9 @@ export const RELATIONSHIP_POLICIES = ["business_only"] as const;
 export type RelationshipPolicy = (typeof RELATIONSHIP_POLICIES)[number];
 export const BUSINESS_ONLY_EXCLUDED: readonly RelationshipTag[] = ["personal", "investor", "supplier", "team", "partner", "advisor"];
 
-export const JUDGED_YES = 0.75;
-export const JUDGED_NO = 0.35;
+export const JUDGED_YES = 0.5;
+/** Below this a judgment is a no; from it up to JUDGED_YES it is unsure. */
+export const JUDGED_NO = 0.4;
 
 export type TagState = "yes" | "no" | "unsure";
 export type TagBasis = "evidence" | "judgment" | "person";
@@ -72,7 +74,7 @@ export interface TagInputs {
 
 export function judgedState(p: number): TagState {
   if (p >= JUDGED_YES) return "yes";
-  if (p <= JUDGED_NO) return "no";
+  if (p < JUDGED_NO) return "no";
   return "unsure";
 }
 

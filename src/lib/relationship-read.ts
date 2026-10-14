@@ -40,6 +40,17 @@ export interface RelationshipBlock {
   details: TagDetail[];
   /** May a pipe stating each policy hand this person out? The one answer every server of people reads. */
   policies: { business_only: boolean };
+  /** Every merge stated from here that made this person (judge or person): undo one with its `linkId`. */
+  merges: SettledMerge[];
+}
+
+export interface SettledMerge {
+  linkId: string;
+  humanIds: string[];
+  names: Array<string | null>;
+  judgedBy: string;
+  confidence: number;
+  at: string;
 }
 
 export const EMPTY_RELATIONSHIP: RelationshipBlock = {
@@ -50,6 +61,7 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   judgedAt: null,
   details: [],
   policies: { business_only: false },
+  merges: [],
 };
 
 type Ts = Date | string;
@@ -98,6 +110,30 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       WHERE org_id = ${orgId} AND state = 'open' AND (human_a = ANY(${sql.param(humans)}::uuid[]) OR human_b = ANY(${sql.param(humans)}::uuid[]))
     `)) as unknown as Array<{ a: string; b: string }>).flatMap((r) => [r.a, r.b]),
   );
+  // Merges that made each human: links stated from here whose two atomic people now name it.
+  const linkedRows = (await db.execute(sql`
+    SELECT q.human_a::text AS a, q.human_b::text AS b, q.link_id, q.probability, q.answered_by, q.answered_at
+    FROM relationship_merge_questions q
+    WHERE q.org_id = ${orgId} AND q.state = 'linked' AND q.link_id IS NOT NULL
+      AND (q.human_a = ANY(${sql.param(humans)}::uuid[]) OR q.human_b = ANY(${sql.param(humans)}::uuid[])
+        OR EXISTS (SELECT 1 FROM org_human_aliases o WHERE o.org_id = q.org_id AND o.human_id = ANY(${sql.param(humans)}::uuid[])
+          AND o.atomic_human_id IN (q.human_a, q.human_b)))
+    ORDER BY q.answered_at DESC NULLS LAST
+  `)) as unknown as Array<{ a: string; b: string; link_id: string; probability: number; answered_by: string | null; answered_at: Ts | null }>;
+  const linkedCanon = await canonicalHumans(orgId, linkedRows.flatMap((r) => [r.a, r.b]));
+  const linkedNames = await cardsOf(orgId, brandId, Array.from(new Set(linkedRows.flatMap((r) => [r.a, r.b]))));
+  const mergesOf = new Map<string, SettledMerge[]>();
+  for (const r of linkedRows) {
+    const merge: SettledMerge = {
+      linkId: r.link_id,
+      humanIds: [r.a, r.b],
+      names: [linkedNames.get(r.a)?.name ?? null, linkedNames.get(r.b)?.name ?? null],
+      judgedBy: r.answered_by ?? "jev",
+      confidence: Number(r.probability),
+      at: iso(r.answered_at) ?? "",
+    };
+    for (const h of new Set([linkedCanon.get(r.a) ?? r.a, linkedCanon.get(r.b) ?? r.b])) mergesOf.set(h, [...(mergesOf.get(h) ?? []), merge]);
+  }
   const companyKeyOf = new Map(subjects.map((s) => [s.human, s.company_key]));
   const learned = new Map(companies.map((c) => [c.human, c]));
   // A lead's own employer key (not learned here): name it from brand-service or the local organization row.
@@ -148,6 +184,7 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       judgedAt,
       details,
       policies: { business_only: policyAllows("business_only", { tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }) },
+      merges: mergesOf.get(h) ?? [],
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }
@@ -168,7 +205,7 @@ export interface RelationshipReview {
   tagQuestions: Array<{ humanId: string; name: string | null; tag: RelationshipTag; confidence: number | null; reason: string | null }>;
   companyQuestions: Array<{ humanId: string; name: string | null; candidates: Array<{ name: string | null; domain: string | null; source: string }> }>;
   settled: {
-    merges: Array<{ linkId: string; humanIds: string[]; names: Array<string | null>; judgedBy: string; at: string }>;
+    merges: SettledMerge[];
     people: Array<{ humanId: string; name: string | null; company: RelationshipCompany | null; tags: RelationshipTag[]; details: TagDetail[] }>;
   };
   counts: { subjects: number; judged: number; byTag: Record<string, number>; unsureMerges: number; unsureTags: number; companyQuestions: number };
@@ -247,7 +284,7 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
     settled: {
       merges: questions
         .filter((q) => q.state === "linked" && q.link_id)
-        .map((q) => ({ linkId: q.link_id!, humanIds: [q.a, q.b], names: [cards.get(q.a)?.name ?? null, cards.get(q.b)?.name ?? null], judgedBy: q.answered_by ?? "jev", at: iso(q.answered_at) ?? "" })),
+        .map((q) => ({ linkId: q.link_id!, humanIds: [q.a, q.b], names: [cards.get(q.a)?.name ?? null, cards.get(q.b)?.name ?? null], judgedBy: q.answered_by ?? "jev", confidence: Number(q.probability), at: iso(q.answered_at) ?? "" })),
       people,
     },
     counts: { subjects: Number(total[0]?.n ?? 0), judged, byTag, unsureMerges: open.length, unsureTags: tagQuestions.length, companyQuestions: companyRows.length },
