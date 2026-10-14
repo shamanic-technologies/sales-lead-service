@@ -24,6 +24,7 @@ import {
   markChannelSentCandidates,
   markSentCandidates,
 } from "../../src/lib/retry-pool.js";
+import { loadUnmarkedServedRows } from "../../src/lib/channel-send-reconcile.js";
 
 /**
  * `tests/setup.ts` fills the DSN only when one is absent, so CI's throwaway Postgres wins
@@ -239,5 +240,41 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
     const tomorrow = now + 2 * 60 * 60 * 1000;
     expect((await loadRetryCandidates({ orgId, campaignId, nowMs: tomorrow })).map((c) => c.id)).not.toContain(row.id);
     expect(await claimCandidate({ id: row.id, nowMs: tomorrow, runId: randomUUID(), parentRunId: null })).toBe(false);
+  });
+});
+
+describe.skipIf(!hasRealDatabase)("channel-send reconcile reads against a real database (WA-SENDS-BATCH-1014)", () => {
+  it("lists only unmarked served rows of the named channels, with the person's email, newest serves bounded by servedSince", async () => {
+    const campaignId = `itest-reconcile-${randomUUID()}`;
+    const orgId = randomUUID();
+    const channel = `itest-wa-${randomUUID()}`;
+    const ids: Record<string, string> = {};
+    for (const [key, over] of [
+      ["unmarked", {}],
+      ["marked", { channelSentAt: new Date(), channelSendId: "s1" }],
+      ["old", { servedAt: new Date("2020-01-01T00:00:00.000Z") }],
+      ["otherChannel", { featureSlug: "sales-cold-email-outreach" }],
+      ["buffered", { status: "buffered" }],
+    ] as const) {
+      const [lead] = await db.insert(leads).values({ name: `itest ${key}` }).returning({ id: leads.id });
+      if (key !== "buffered") {
+        await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `${key}-${randomUUID()}@example.com`, source: "itest" });
+      }
+      const [row] = await db
+        .insert(leadsCampaigns)
+        .values({ leadId: lead.id, campaignId, orgId, brandIds: [randomUUID()], status: "served", servedAt: new Date(), featureSlug: channel, ...over })
+        .returning({ id: leadsCampaigns.id });
+      ids[key] = row.id;
+    }
+    try {
+      const recent = await loadUnmarkedServedRows([channel], new Date(Date.now() - 60_000));
+      expect(recent.map((r) => r.id)).toEqual([ids.unmarked]);
+      expect(recent[0].email).toMatch(/^unmarked-/);
+      const all = await loadUnmarkedServedRows([channel], null);
+      expect(all.map((r) => r.id).sort()).toEqual([ids.unmarked, ids.old].sort());
+      expect(await loadUnmarkedServedRows([], null)).toEqual([]);
+    } finally {
+      await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, campaignId));
+    }
   });
 });
