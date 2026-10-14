@@ -18,7 +18,7 @@ import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { readServedPersonId } from "./served-person-id.js";
 import { getCurrentGoal } from "./brand-client.js";
 import { fetchCampaign } from "./campaign-client.js";
-import { pickRetryCandidate } from "./retry-pool.js";
+import { pickRetryCandidate, type PoolSender } from "./retry-pool.js";
 import { checksForWriter, offerChecks, type WriterChecks } from "./writer-checks.js";
 import type { SpendIdentity } from "./treg-client.js";
 import {
@@ -93,6 +93,11 @@ interface PullNextParams {
    * (human-service `reachableBy`) and applied to every pool (retry, stock, released). Absent = no requirement.
    */
   reachableBy?: ReachMethod[];
+  /**
+   * Who states whether a served person of THIS campaign was contacted (retry-pool.ts `poolSenderOf`, from the channel's
+   * own contact methods): absent = email-gateway (today); `channel` = the non-email sender's record (crm-service).
+   */
+  poolSender?: PoolSender;
   /**
    * Which verified emails the workflow accepts (src/lib/email-policy.ts). Sent to human-service on every fresh serve
    * and applied to every pool. Absent = valid only (today, and nothing on the wire).
@@ -288,6 +293,7 @@ export async function pullNext(
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: poolEmails,
     relationships,
+    ...(params.poolSender ? { sender: params.poolSender } : {}),
   });
 
   if (retry) {

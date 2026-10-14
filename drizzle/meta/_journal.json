@@ -624,6 +624,13 @@
       "when": 1787397600000,
       "tag": "0088_prospect_followup_handouts",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1787397700000,
+      "tag": "0089_channel_sent",
+      "breakpoints": true
     }
   ]
 }

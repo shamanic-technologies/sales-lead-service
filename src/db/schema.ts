@@ -256,6 +256,12 @@ export const leadsCampaigns = pgTable(
     sendRefusedAt: timestamp("send_refused_at", { withTimezone: true }),
     sendRefusalCode: text("send_refusal_code"),
     sendRefusedUntil: timestamp("send_refused_until", { withTimezone: true }),
+    // channel_sent_*   — terminal on a NON-EMAIL channel (migration 0089, WA-RESERVE-LOOP-1014): the service
+    //                    that sent it (crm-service, WhatsApp) states a message went out to this person for this
+    //                    campaign; at = the sender's sentAt, id = its send id. The row leaves the pool for good.
+    //                    Not sent_at, which the lead history reads as the email hand-off.
+    channelSentAt: timestamp("channel_sent_at", { withTimezone: true }),
+    channelSendId: text("channel_send_id"),
     // --- Follow-up queue (src/lib/followup-queue.ts) ---
     // What we owe this person NEXT, and when. Once somebody shows a sales interest we owe them an
     // answer now and, if they go quiet, further answers at growing intervals, indefinitely, until

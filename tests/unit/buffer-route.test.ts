@@ -846,6 +846,8 @@ describe("POST /orgs/buffer/next — the pipe's reach and its sources (owner 202
     const res = await postFor("cold-whatsapp-outreach");
     expect(res.status).toBe(200);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }), expect.anything());
+    // WA-RESERVE-LOOP-1014: its paid pool asks the channel's own sender whether a person was written to.
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ poolSender: "channel" }), expect.anything());
   });
 
   it("an email campaign's serve carries the email requirement", async () => {
@@ -853,6 +855,8 @@ describe("POST /orgs/buffer/next — the pipe's reach and its sources (owner 202
     const res = await postFor("sales-cold-email-outreach");
     expect(res.status).toBe(200);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["email"] }), expect.anything());
+    // Email campaigns keep email-gateway: nothing new on the call.
+    expect(pullNext.mock.calls[0][0]).not.toHaveProperty("poolSender");
   });
 
   it("a channel whose method reachableBy cannot express passes nothing", async () => {

@@ -21,6 +21,7 @@ import {
   loadRetryCandidates,
   markSenderClosedCandidates,
   markSendRefusedCandidates,
+  markChannelSentCandidates,
   markSentCandidates,
 } from "../../src/lib/retry-pool.js";
 
@@ -208,5 +209,35 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
       expect(candidates.map((c) => c.id)).not.toContain(id);
       expect(await claimCandidate({ id, nowMs, runId: randomUUID(), parentRunId: null })).toBe(false);
     }
+  });
+
+  // WA-RESERVE-LOOP-1014: a person the campaign's non-email sender (crm-service) states it wrote to leaves the pool for
+  // good, in its own column (never sent_at: the lead history reads that as the email hand-off).
+  it("takes a person the channel sender wrote to out of the pool for good, never claimable, not sent_at", async () => {
+    const [lead] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
+    await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `wa-${randomUUID()}@example.com`, source: "itest" });
+    const [row] = await db
+      .insert(leadsCampaigns)
+      .values({ leadId: lead.id, campaignId, orgId, brandIds: [brandId], status: "served", servedAt: new Date() })
+      .returning({ id: leadsCampaigns.id });
+    const now = Date.now();
+    // A candidate before: it has an email and nothing marks it.
+    expect((await loadRetryCandidates({ orgId, campaignId, nowMs: now })).map((c) => c.id)).toContain(row.id);
+
+    await markChannelSentCandidates([{ id: row.id, sentAt: "2026-10-12T14:43:32.913Z", sendId: "send-abc" }], now);
+    // Written once: a second statement never moves the first.
+    await markChannelSentCandidates([{ id: row.id, sentAt: "2026-10-13T00:00:00.000Z", sendId: "send-later" }], now);
+
+    const [after] = await db
+      .select({ at: leadsCampaigns.channelSentAt, sendId: leadsCampaigns.channelSendId, sentAt: leadsCampaigns.sentAt })
+      .from(leadsCampaigns)
+      .where(eq(leadsCampaigns.id, row.id));
+    expect(after.at?.toISOString()).toBe("2026-10-12T14:43:32.913Z");
+    expect(after.sendId).toBe("send-abc");
+    expect(after.sentAt).toBeNull();
+
+    const tomorrow = now + 2 * 60 * 60 * 1000;
+    expect((await loadRetryCandidates({ orgId, campaignId, nowMs: tomorrow })).map((c) => c.id)).not.toContain(row.id);
+    expect(await claimCandidate({ id: row.id, nowMs: tomorrow, runId: randomUUID(), parentRunId: null })).toBe(false);
   });
 });

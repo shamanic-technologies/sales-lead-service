@@ -73,6 +73,8 @@ export interface BasicLeadRow {
   parentRunId: string | null;
   runId: string | null;
   servedAt: string | null;
+  /** A message went out on the campaign's non-email channel (`channel_sent_at`, see retry-pool.ts), or null. Overlay input only. */
+  channelSentAt: string | null;
   workflowSlug: string | null;
   featureSlug: string | null;
   goal: string | null;
@@ -117,6 +119,7 @@ interface RawBasicRow {
   parent_run_id: string | null;
   run_id: string | null;
   served_at: RawTimestamp;
+  channel_sent_at: RawTimestamp;
   workflow_slug: string | null;
   feature_slug: string | null;
   goal: string | null;
@@ -240,6 +243,7 @@ function mapRow(r: RawBasicRow): BasicLeadRow {
     parentRunId: r.parent_run_id,
     runId: r.run_id,
     servedAt: toIsoTimestamp(r.served_at),
+    channelSentAt: toIsoTimestamp(r.channel_sent_at),
     workflowSlug: r.workflow_slug,
     featureSlug: r.feature_slug,
     goal: r.goal,
@@ -274,7 +278,7 @@ function basicLeadQuery(
     SELECT
       lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
       lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
-      lc.served_at, lc.workflow_slug, lc.feature_slug,
+      lc.served_at, lc.channel_sent_at, lc.workflow_slug, lc.feature_slug,
       lc.goal, lc.active_goal_id, lc.brand_profile_id, lc.audience_id,
       COALESCE(lc.retry_claimed_at, lc.served_at) AS last_served_at,
       lc.created_at,
