@@ -114,6 +114,7 @@ export function fakeReadModelModule(real: Real): Real {
           deliveryQueried: scope.deliveryQueried,
           orgId: scope.orgId,
           brandId: scope.brandId ?? undefined,
+          creditOutcomesAfterReach: real.creditsOutcomesAfterReach(scope),
         },
         true,
         delivery,
