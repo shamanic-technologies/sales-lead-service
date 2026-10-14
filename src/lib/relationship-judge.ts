@@ -10,7 +10,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { getCompanies } from "./company-client.js";
-import { judgeYesNo, MAX_STATE_CHARS, type YesNoQuestion } from "./qualification-judge.js";
+import { judgeYesNo, type YesNoQuestion } from "./qualification-judge.js";
 import { readThread, toSubject, type Scope, type Subject, type ThreadLine } from "./relationship-subjects.js";
 import { RELATIONSHIP_TAGS, type RelationshipTag } from "./relationship-tags.js";
 
@@ -80,7 +80,13 @@ export const TAG_QUESTIONS: Record<RelationshipTag, YesNoQuestion> = {
 };
 
 /** The newest part of the thread that fits Jev's state, oldest first. */
-export function fitThread(lines: readonly ThreadLine[], budget = MAX_STATE_CHARS - 8_000): ThreadLine[] {
+/**
+ * Jev bills every input token (platform money, shared with every judgment of the fleet): the newest ~6k tokens of a
+ * thread say who someone is. Never the whole 100k-char window.
+ */
+export const THREAD_BUDGET_CHARS = 24_000;
+
+export function fitThread(lines: readonly ThreadLine[], budget = THREAD_BUDGET_CHARS): ThreadLine[] {
   const out: ThreadLine[] = [];
   let used = 0;
   for (let i = lines.length - 1; i >= 0; i--) {

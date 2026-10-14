@@ -322,6 +322,7 @@ export interface ThreadLine {
 }
 
 const MESSAGE_TYPES = new Set(["message_in", "message_out"]);
+const MESSAGE_HEAD_CHARS = 500;
 // crm-service also states `group_member` (both are in a group chat, `groupName`) and `group_message` (a word they wrote
 // in it): read as their own kinds, text and group name carried.
 const DETAIL_KEYS = ["subject", "channel", "group", "groupName", "roomName", "amount", "amountCents", "currency", "status", "stage", "formName", "offer", "url", "title", "website", "company"];
@@ -351,7 +352,8 @@ export async function readThread(s: Subject): Promise<ThreadLine[]> {
       source: f.source,
       kind: MESSAGE_TYPES.has(f.type) ? "message" : f.type,
       direction: f.type === "message_in" ? "in" : f.type === "message_out" ? "out" : null,
-      text: typeof p.text === "string" ? p.text.slice(0, 4000) : null,
+      // A relationship shows in how people talk, not in a long email body: the head of each message is enough.
+      text: typeof p.text === "string" ? p.text.slice(0, MESSAGE_HEAD_CHARS) : null,
       detail: Object.keys(detail).length > 0 ? detail : null,
     });
   }
