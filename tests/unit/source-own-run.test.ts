@@ -15,6 +15,12 @@ vi.mock("../../src/lib/people-client.js", () => ({
 }));
 
 const claimStockedLead = vi.fn();
+const recordEmptyAnswer = vi.fn(async () => {});
+const clearEmptyAnswer = vi.fn(async () => {});
+vi.mock("../../src/lib/source-audience-walk.js", () => ({
+  recordEmptyAnswer: (...a: unknown[]) => recordEmptyAnswer(...(a as [])),
+  clearEmptyAnswer: (...a: unknown[]) => clearEmptyAnswer(...(a as [])),
+}));
 vi.mock("../../src/lib/source-stock.js", () => ({
   SOURCE_FOUND_STATUS_REASON: "source_found",
   claimStockedLead: (...args: unknown[]) => claimStockedLead(...args),
@@ -183,6 +189,9 @@ describe("pullNext find mode (a source unit's own run)", () => {
     serveNext.mockResolvedValue({ status: "exhausted" });
     await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "audience_exhausted" });
     expect(insertValues).not.toHaveBeenCalled();
+    // Each empty answer is remembered so the next run asks the other audiences first.
+    expect(recordEmptyAnswer).toHaveBeenCalledWith(expect.objectContaining({ audienceId: "aud-1", reason: "exhausted" }));
+    expect(recordEmptyAnswer).toHaveBeenCalledWith(expect.objectContaining({ audienceId: "aud-2", reason: "exhausted" }));
   });
 
   it("an audience that cannot be walked yet is skipped; if the rest are empty it is NOT exhaustion", async () => {
