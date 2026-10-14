@@ -279,4 +279,59 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
     expect(gatewayCalls).toEqual([]);
     expect((await file(campaignId, addr("nobody"))).body.code).toBe("person_not_known");
   });
+
+  describe("the pushed person's timezone (PUSHED-PERSON-TZ-1014)", () => {
+    const phone = () => `+44 7700 ${Math.floor(100000 + Math.random() * 899999)}`;
+
+    it("a +44 phone, no zone stated: Europe/London inferred, the phone recorded", async () => {
+      const p = phone();
+      const res = await file(campaignId, addr("ukphone"), { ...stated(), phone: p });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body).toMatchObject({ timezone: "Europe/London", timezoneSource: "inferred" });
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead).toMatchObject({ timezone: "Europe/London", timezoneSource: "inferred", timezoneBasis: "phone_country" });
+      const phones = await db
+        .select()
+        .from(leadContactMethods)
+        .where(eq(leadContactMethods.leadId, res.body.leadId));
+      expect(phones.map((m) => `${m.channel}:${m.value}`)).toContain(`phone:${p}`);
+    });
+
+    it("a .co.uk address, no zone, no phone: Europe/London from the email domain", async () => {
+      const email = `employer-${tag}@acme-${tag}.co.uk`;
+      const res = await file(campaignId, email, stated());
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead).toMatchObject({ timezone: "Europe/London", timezoneSource: "inferred", timezoneBasis: "email_domain" });
+    });
+
+    it("a stated zone wins over the phone's country, and a later push without one keeps it", async () => {
+      const res = await file(campaignId, addr("statedtz"), { ...stated(), phone: phone(), timezone: "America/New_York" });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body).toMatchObject({ timezone: "America/New_York", timezoneSource: "stated" });
+      const again = await file(secondCampaignId, addr("statedtz"), { ...stated(), phone: phone() });
+      expect(again.body).toMatchObject({ timezone: "America/New_York", timezoneSource: "stated" });
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead).toMatchObject({ timezone: "America/New_York", timezoneSource: "stated", timezoneBasis: null });
+    });
+
+    it("nothing to infer from: null, unchanged behavior", async () => {
+      const res = await file(campaignId, addr("nozone"), stated());
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body).toMatchObject({ timezone: null, timezoneSource: null });
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead.timezone).toBeNull();
+      expect(lead.timezoneCheckedAt).not.toBeNull();
+    });
+
+    it("refuses a stated zone that is not an IANA name, writing nothing", async () => {
+      const res = await file(campaignId, addr("badtz"), { ...stated(), timezone: "GMT+1" });
+      expect(res.status).toBe(400);
+      expect(await db.select().from(leadContactMethods).where(eq(leadContactMethods.value, addr("badtz")))).toHaveLength(0);
+    });
+  });
 });

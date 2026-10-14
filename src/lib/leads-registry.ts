@@ -11,6 +11,7 @@ import {
 import type { Person } from "./people-client.js";
 import { findLeadBySocialLinkedin, foldSocialLead } from "./social-identity.js";
 import type { ServedIdentity } from "./serve-identity.js";
+import { writeEnrichedTimezone } from "./lead-timezone.js";
 
 // Person fields the gateway's neutral Person provides that map 1:1 to lead columns.
 // (departments / functions / twitter / github / facebook are NOT in the neutral
@@ -222,7 +223,9 @@ async function pickAndUpsertLead(
   options: { enriched: boolean; identity?: ServedIdentity | null },
   servedCompany: CompanyRef | null,
 ): Promise<string> {
-  const fields = pickPersonFields(person);
+  // The enrichment's zone is written through its precedence guard (lead-timezone.ts): it replaces an
+  // inferred zone, never one the client stated. A new lead takes it as is.
+  const { timezone: enrichedTimezone, ...fields } = pickPersonFields(person);
   const metadata = person as unknown;
   const enrichedAt = options.enriched ? new Date() : null;
 
@@ -290,6 +293,7 @@ async function pickAndUpsertLead(
         ...(enrichedAt ? { enrichedAt } : {}),
       })
       .where(eq(leads.id, socialOwnerId));
+    if (enrichedTimezone) await writeEnrichedTimezone(socialOwnerId, enrichedTimezone);
     return socialOwnerId;
   }
 
@@ -302,6 +306,7 @@ async function pickAndUpsertLead(
       .update(leads)
       .set({ ...fields, metadata, ...(enrichedAt ? { enrichedAt } : {}) })
       .where(eq(leads.id, existingId));
+    if (enrichedTimezone) await writeEnrichedTimezone(existingId, enrichedTimezone);
     return existingId;
   }
 
@@ -311,6 +316,7 @@ async function pickAndUpsertLead(
       // A job change: the provider id stays on the human's lead at the old company (it is unique).
       apolloPersonId: providerIdHeldElsewhere ? null : (person.providerPersonId ?? null),
       ...fields,
+      ...(enrichedTimezone ? { timezone: enrichedTimezone, timezoneSource: "enrichment" } : {}),
       metadata,
       enrichedAt,
     })
