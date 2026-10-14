@@ -17,7 +17,7 @@ describe.skipIf(!hasRealDatabase)("email policy on the pools, against a real dat
   const campaignId = `itest-policy-${randomUUID()}`;
   const orgId = randomUUID();
   const brandId = randomUUID();
-  const leadIds: Record<"valid" | "catchAll" | "legacy", string> = { valid: "", catchAll: "", legacy: "" };
+  const leadIds: Record<"valid" | "catchAll" | "unknown" | "legacy", string> = { valid: "", catchAll: "", unknown: "", legacy: "" };
 
   async function seed(verdict: string | null): Promise<string> {
     const [lead] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
@@ -42,6 +42,7 @@ describe.skipIf(!hasRealDatabase)("email policy on the pools, against a real dat
   beforeAll(async () => {
     leadIds.valid = await seed("valid");
     leadIds.catchAll = await seed("catch_all");
+    leadIds.unknown = await seed("unknown");
     leadIds.legacy = await seed(null);
   });
 
@@ -63,14 +64,19 @@ describe.skipIf(!hasRealDatabase)("email policy on the pools, against a real dat
     expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.legacy].sort());
   });
 
-  it("valid_and_catch_all gets everyone", async () => {
+  it("valid_and_catch_all gets everyone but the unknown address", async () => {
     const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), acceptedEmails: "valid_and_catch_all" });
     expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.legacy].sort());
   });
 
+  it("valid_catch_all_and_unknown (UNKNOWN-EMAILS-OPTION-1014) gets everyone", async () => {
+    const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), acceptedEmails: "valid_catch_all_and_unknown" });
+    expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.unknown, leadIds.legacy].sort());
+  });
+
   it("as_found (a stock pipe stating nothing) gets everyone the source kept", async () => {
     const got = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), acceptedEmails: "as_found" });
-    expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.legacy].sort());
+    expect(got.map((c) => c.leadId).sort()).toEqual([leadIds.valid, leadIds.catchAll, leadIds.unknown, leadIds.legacy].sort());
   });
 
   it("a later serve stating no verdict leaves the recorded one in place", async () => {
