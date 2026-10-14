@@ -20,6 +20,22 @@ export const MAX_STATE_CHARS = 100_000;
  */
 export type JudgmentPayer = SpendIdentity | "platform";
 
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/**
+ * The state with every half of a split emoji replaced by U+FFFD. A text cut at N UTF-16 units (a message head, a
+ * truncated field) can end on half a surrogate pair; the model vendor refuses the whole request as
+ * "invalid Unicode text" (400, not retryable), and the relationship sweep asked the same pairs again every tick.
+ */
+export function wellFormedState(value: unknown): unknown {
+  if (typeof value === "string") return value.replace(LONE_SURROGATE, "\uFFFD");
+  if (Array.isArray(value)) return value.map(wellFormedState);
+  if (value && typeof value === "object" && !(value instanceof Date)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [wellFormedState(k) as string, wellFormedState(v)]));
+  }
+  return value;
+}
+
 async function ask(
   state: unknown,
   questions: Record<string, Record<string, unknown>>,
@@ -29,7 +45,7 @@ async function ask(
   const res = await fetchWithRetry(`${CHAT_SERVICE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...(id === "platform" ? {} : identityHeaders(id)) },
-    body: JSON.stringify({ state, questions }),
+    body: JSON.stringify({ state: wellFormedState(state), questions }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) {
