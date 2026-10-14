@@ -98,6 +98,10 @@ vi.mock("../../src/lib/on-demand-run.js", () => ({
 
 const recordSourceEmailDemand = vi.fn();
 const sourceRunEmailPolicy = vi.fn();
+vi.mock("../../src/lib/source-audience-walk.js", () => ({
+  loadEmptyAnswers: async () => new Map(),
+  orderByEmptyAnswers: (ids: string[]) => ids,
+}));
 vi.mock("../../src/lib/source-email-demand.js", () => ({
   recordSourceEmailDemand: (...a: unknown[]) => recordSourceEmailDemand(...a),
   sourceRunEmailPolicy: (...a: unknown[]) => sourceRunEmailPolicy(...a),

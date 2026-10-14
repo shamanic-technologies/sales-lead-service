@@ -22,6 +22,7 @@ import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 import { recordSourceEmailDemand, sourceRunEmailPolicy } from "../lib/source-email-demand.js";
+import { loadEmptyAnswers, orderByEmptyAnswers } from "../lib/source-audience-walk.js";
 import type { EmailPolicy } from "../lib/email-policy.js";
 
 const router = Router();
@@ -186,8 +187,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
             userId: req.userId ?? null,
             runId,
           });
-          findAudienceIds = found.audienceIds;
           acceptedEmails = await sourceRunEmailPolicy(unit.id, acceptedEmails);
+          // Audiences that just answered nobody under this policy go last, so each run reaches further.
+          findAudienceIds = orderByEmptyAnswers(found.audienceIds, await loadEmptyAnswers(unit.id, acceptedEmails));
         }
       }
     } else {
