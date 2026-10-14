@@ -3571,6 +3571,66 @@ registry.registerPath({
 
 registry.registerPath({
   method: "get",
+  path: "/orgs/campaigns/{campaignId}/leads/by-lead/{leadId}",
+  summary: "Read ONE person's lead record on ONE campaign",
+  description:
+    "The lead record a person holds on a campaign, found by the PERSON's lead id (`leadId`: what " +
+    "POST /orgs/campaigns/{campaignId}/leads/by-email answers and campaign-service's trigger-event " +
+    "`ranLeads[].leadId` names), never by paging the campaign's leads. Same `{ leadDetail }` body as " +
+    "GET /orgs/leads/{id} (its `id` is the row id the per-row reads take: /history, /relationship, " +
+    "step statements), with the path campaign as the delivery scope (status, replies). A person " +
+    "holds at most one row per campaign. Org-scoped: another org's row is the same 404 as none.",
+  parameters: [
+    ...AuthHeaders,
+    {
+      in: "path" as const,
+      name: "campaignId",
+      required: true,
+      description: "The campaign the person was filed on.",
+      schema: { type: "string" as const },
+    },
+    {
+      in: "path" as const,
+      name: "leadId",
+      required: true,
+      description: "The person's lead id (`leadId`), a uuid. Not the row `id`.",
+      schema: { type: "string" as const, format: "uuid" },
+    },
+    {
+      in: "query" as const,
+      name: "include",
+      required: false,
+      description: "Same as GET /orgs/leads/{id}: `campaigns` nests the person's campaign cards.",
+      schema: { type: "string" as const, example: "campaigns" },
+    },
+    {
+      in: "query" as const,
+      name: "brandId",
+      required: false,
+      description: "Optional brand scope; a row outside it is a 404.",
+      schema: { type: "string" as const },
+    },
+  ],
+  responses: {
+    200: {
+      description: "The person's lead record on this campaign",
+      content: { "application/json": { schema: LeadDetailResponseSchema } },
+    },
+    400: {
+      description: "`leadId` is not a uuid, or a `campaignId` query was passed beside the path",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    401: { description: "Unauthorized" },
+    404: {
+      description:
+        "`lead_not_on_campaign`: this person holds no row on this campaign in the caller's org (or brand, when brandId is given)",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/orgs/stats",
   summary: "Get lead stats by status",
   description:
