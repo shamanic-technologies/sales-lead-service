@@ -13,6 +13,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { getCompanies } from "./company-client.js";
 import { canonicalHumans } from "./relationship-subjects.js";
 import {
+  BUSINESS_ONLY_EXCLUDED,
   decideTags,
   isRelationshipTag,
   levelOf,
@@ -217,6 +218,10 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
     for (const t of b.tags) byTag[t] = (byTag[t] ?? 0) + 1;
     if (b.tags.length > 0 || b.details.some((d) => d.basis === "person")) people.push({ humanId: s.human, name: s.name, company: b.company, tags: b.tags, details: b.details });
   }
+  // The questions that decide who a business-only pipe may write to come first (a "maybe a friend" matters more
+  // than a "maybe a prospect"), then the closest calls.
+  const weight = (t: RelationshipTag) => (BUSINESS_ONLY_EXCLUDED.includes(t) ? 0 : t === "customer" ? 1 : 2);
+  tagQuestions.sort((x, y) => weight(x.tag) - weight(y.tag) || Math.abs((x.confidence ?? 0.5) - 0.5) - Math.abs((y.confidence ?? 0.5) - 0.5));
   const open = questions.filter((q) => q.state === "open");
   return {
     brandId,
