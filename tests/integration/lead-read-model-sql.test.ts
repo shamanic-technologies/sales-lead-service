@@ -529,3 +529,58 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     });
   });
 });
+
+/**
+ * WA-RESERVE-LOOP-1014: a WhatsApp campaign read 0 contacted, because the overlay is email-gateway's and a WhatsApp send
+ * never reaches it. A row the paid-pool retry marked written to on the campaign's channel (`channel_sent_at`, off
+ * crm-service's send record) counts as contacted and sent, with no email evidence at all.
+ */
+describe.skipIf(!hasRealDatabase)("a campaign that writes on a non-email channel", () => {
+  const orgId = randomUUID();
+  const brandId = randomUUID();
+  const campaignId = `itest-wa-${randomUUID()}`;
+  const leadIds: string[] = [];
+  const scope = model.readModelScopeFor({ orgId, brandId, campaignId, statuses: ["buffered", "claimed", "served"] }, brandId, true);
+
+  beforeAll(async () => {
+    for (const [i, written] of [true, false].entries()) {
+      const [lead] = await db.insert(leads).values({ firstName: `Wa${i}`, lastName: "Person", name: `Wa${i} Person` }).returning({ id: leads.id });
+      leadIds.push(lead.id);
+      await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `wa${i}-${orgId}@example.com`, source: "itest" });
+      await db.insert(leadsCampaigns).values({
+        leadId: lead.id,
+        campaignId,
+        orgId,
+        brandIds: [brandId],
+        status: "served",
+        servedAt: new Date("2026-10-12T14:42:00Z"),
+        ...(written ? { channelSentAt: new Date("2026-10-12T14:43:32.913Z"), channelSendId: "send-1" } : {}),
+      });
+    }
+  }, 60_000);
+
+  beforeEach(() => {
+    statusByEmail = {};
+    repliesByEmail = {};
+    brandIdForReplies = brandId;
+    legByCampaign = new Map([[campaignId, "lead_found_to_conversation"]]);
+  });
+
+  afterAll(async () => {
+    await sql`DELETE FROM lead_read_models WHERE org_id = ${orgId}`;
+    await sql`DELETE FROM lead_read_changes WHERE org_id = ${orgId}`;
+    await sql`DELETE FROM lead_delivery_evidence WHERE org_id = ${orgId}`;
+    await db.delete(leadsCampaigns).where(eq(leadsCampaigns.orgId, orgId));
+    await db.delete(leads).where(inArray(leads.id, leadIds));
+  });
+
+  it("counts the person written to as contacted and sent; the other stays not contacted", async () => {
+    const m = await model.ensureReadModel(scope);
+    const buckets = await model.readModelBucketCounts(m, null);
+    expect(buckets.total).toBe(2);
+    expect(buckets.counts.contacted).toBe(1);
+    expect(buckets.people.sent).toBe(1);
+    const standings = await model.readModelStandingCounts(m, null);
+    expect(standings.counts.not_contacted).toBe(1);
+  });
+});

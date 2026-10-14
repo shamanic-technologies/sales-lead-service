@@ -14,6 +14,7 @@ import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/cr
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
 import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
+import { poolSenderOf, type PoolSender } from "../lib/retry-pool.js";
 import type { ReachMethod } from "../lib/people-client.js";
 import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reasons.js";
 import { resolveServeSource, withinBudget, type ServeSource } from "../lib/source-campaign.js";
@@ -104,6 +105,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
   let reachableBy: ReachMethod[] | null = null;
+  // Who states whether a served person was contacted (src/lib/retry-pool.ts `poolSenderOf`): email-gateway unless the
+  // channel does not write by email.
+  let poolSender: PoolSender = "email";
   // The email policy the serve asks with: the caller's own word, nothing else. A source unit's run states its OWN
   // strategy (its workflow's serve call), never read off the pipes it feeds (CATCHALL-SOURCE-OWNS-1014).
   const acceptedEmails: EmailPolicy | null = parsed.data.acceptedEmails ?? null;
@@ -158,7 +162,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     // The channel's own requirement plus WHO the workflow's lead strategy states it finds (owner 2026-10-14): both
     // required, on every serve and every pool.
-    reachableBy = combineReach(await channelReachableBy(featureSlug), parsed.data.reachableBy ?? null);
+    const channelMethods = await channelReachableBy(featureSlug);
+    reachableBy = combineReach(channelMethods, parsed.data.reachableBy ?? null);
+    // Who says whether a served person was contacted: the sender of the channel's own method (WA-RESERVE-LOOP-1014).
+    poolSender = poolSenderOf(channelMethods);
 
     const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
     if (population && sourceMode.kind !== "own_run") {
@@ -403,6 +410,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         audienceId: req.audienceId ?? null,
         ...(pullMode ? { mode: pullMode } : {}),
         ...(reachableBy ? { reachableBy } : {}),
+        ...(poolSender === "channel" ? { poolSender } : {}),
         ...(acceptedEmails ? { acceptedEmails } : {}),
         ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),

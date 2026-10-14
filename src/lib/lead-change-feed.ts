@@ -211,7 +211,7 @@ export function freshFeedRows(
     const payload = JSON.stringify(
       toCompactLead(
         row,
-        modelDeliveryFor(scope, row.status, delivery.get(row.email?.value ?? "")),
+        modelDeliveryFor(scope, row.status, delivery.get(row.email?.value ?? ""), row.channelSentAt),
         crmPositiveReplyAtFor(crmReplies, row),
       ),
     );

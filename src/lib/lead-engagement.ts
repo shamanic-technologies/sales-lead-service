@@ -9,7 +9,7 @@
  */
 import { toIsoTimestamp } from "./basic-leads.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
-import { DEFAULT_STATUS, type FlattenedStatus } from "./delivery-flatten.js";
+import { DEFAULT_STATUS, withChannelSend, type FlattenedStatus } from "./delivery-flatten.js";
 import { fetchBookingCallLeadIds } from "./booking-calls.js";
 import { bucketsForRow, leadActivityAt, type LeadBucket } from "./lead-buckets.js";
 import { fetchOutcomesByLead, type LeadIndexRow, type LeadOutcomes } from "./lead-index.js";
@@ -97,9 +97,7 @@ export async function enrichLeadIndex(
     // that shows no engagement in the table is in no engagement bucket either.
     const delivery =
       ctx.deliveryQueried && row.status === "served"
-        ? result
-          ? ctx.flatten(result)
-          : DEFAULT_STATUS
+        ? withChannelSend(result ? ctx.flatten(result) : DEFAULT_STATUS, row.channelSentAt)
         : DEFAULT_STATUS;
     const outcomes = outcomesByLead.get(row.leadId) ?? noOutcomes;
     return {

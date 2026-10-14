@@ -38,6 +38,8 @@ export interface LeadIndexRow {
   /** The lead's registered email, or null. The key every delivery answer is keyed on. */
   email: string | null;
   servedAt: string | null;
+  /** A message went out on the campaign's non-email channel (`channel_sent_at`, see retry-pool.ts), or null. */
+  channelSentAt: string | null;
   /** `created_at::text`, full precision — the position a default-ordered cursor is built from. */
   createdAtText: string;
   /**
@@ -57,6 +59,7 @@ interface RawIndexRow {
   status: string;
   email_value: string | null;
   served_at: Date | string | null;
+  channel_sent_at: Date | string | null;
   created_at_cursor: string;
   search_text: string | null;
 }
@@ -74,7 +77,7 @@ interface RawIndexRow {
 function leadIndexStatement(scope: LeadListScope) {
   return sql<RawIndexRow[]>`
     SELECT
-      lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.status, lc.served_at,
+      lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.status, lc.served_at, lc.channel_sent_at,
       lc.created_at::text AS created_at_cursor,
       em.value AS email_value,
       concat_ws(E'\n', l.first_name, l.last_name, l.name, org.current_title, org.org_name, em.value)
@@ -119,6 +122,7 @@ function mapIndexRow(r: RawIndexRow): LeadIndexRow {
     status: r.status,
     email: r.email_value,
     servedAt: toIsoTimestamp(r.served_at),
+    channelSentAt: toIsoTimestamp(r.channel_sent_at),
     createdAtText: r.created_at_cursor,
     searchText: r.search_text ?? "",
   };
