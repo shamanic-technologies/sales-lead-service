@@ -9,18 +9,25 @@
  * "contacted 8, signup 9, sale 4" while every one of those 9 signups and 4 sales predated the
  * campaign's first message.
  *
- * "Reached" = the first message this scope actually SENT the person (`firstSentAt` of the scope's
- * overlay: email-gateway's send, or the channel send folded in by `withChannelSend`). Never the
- * serve (being picked is not being reached) and never `contacted` (queued in a sequence, nothing
- * left). An outcome is credited iff its LATEST instance is strictly after that instant; an undated
- * outcome, or a person this scope never sent anything, credits nothing (same "never ours when we
- * cannot date it" stance as outcome-cause.ts).
+ * "Reached" = the scope's FIRST TOUCH of the person (`campaignFirstTouch`): its first message when
+ * it sent one (`firstSentAt` of the scope's overlay: email-gateway's send, or the channel send
+ * folded in by `withChannelSend`), otherwise its serve. Finding someone IS how a source campaign
+ * reaches them, and the owner supports Start -> Lead found -> Paid client funnels that never send
+ * (LEADS-ONLY-FUNNEL-CAMPAIGN, 2026-10-12), so one rule covers every campaign, no per-pipe branch.
+ * Never `contacted` (queued in a sequence, nothing left). An outcome is credited iff its LATEST
+ * instance is strictly after that instant; an undated outcome, or a row with neither a send nor a
+ * serve date, credits nothing (same "never ours when we cannot date it" stance as outcome-cause.ts).
  *
  * Only reads that name campaigns (a campaign identity or an offer's campaigns) apply it; a BRAND
  * read describes the person at the brand and keeps every live outcome.
  */
 import type { LeadOutcomes } from "./lead-index.js";
 import type { LeadStepOutcomeName } from "./step-statements.js";
+
+/** The scope's first touch of a person: its first send when it sent one, otherwise its serve. */
+export function campaignFirstTouch(firstSentAt: string | null, servedAt: string | null): string | null {
+  return firstSentAt ?? servedAt;
+}
 
 function isAfter(at: string | null | undefined, reachMs: number): at is string {
   if (!at) return false;

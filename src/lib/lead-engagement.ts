@@ -11,7 +11,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { DEFAULT_STATUS, withChannelSend, type FlattenedStatus } from "./delivery-flatten.js";
 import { fetchBookingCallLeadIds } from "./booking-calls.js";
-import { outcomesCreditedAfterReach } from "./campaign-outcome-credit.js";
+import { campaignFirstTouch, outcomesCreditedAfterReach } from "./campaign-outcome-credit.js";
 import { bucketsForRow, leadActivityAt, type LeadBucket } from "./lead-buckets.js";
 import { fetchOutcomesByLead, type LeadIndexRow, type LeadOutcomes } from "./lead-index.js";
 import type { LeadStandingState } from "./lead-standing.js";
@@ -108,7 +108,7 @@ export async function enrichLeadIndex(
         : DEFAULT_STATUS;
     const held = outcomesByLead.get(row.leadId) ?? noOutcomes;
     const outcomes = ctx.creditOutcomesAfterReach
-      ? outcomesCreditedAfterReach(held, delivery.firstSentAt)
+      ? outcomesCreditedAfterReach(held, campaignFirstTouch(delivery.firstSentAt, row.servedAt))
       : held;
     return {
       ...row,
