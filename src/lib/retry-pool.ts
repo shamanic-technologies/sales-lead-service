@@ -5,7 +5,7 @@ import { leadsCampaigns } from "../db/schema.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
-import type { EmailPolicy } from "./email-policy.js";
+import type { PoolEmailPolicy } from "./email-policy.js";
 
 /**
  * Drain the already-paid pool before buying more people.
@@ -324,7 +324,7 @@ export async function loadRetryCandidates(params: {
    */
   reachableBy?: readonly ReachMethod[] | null;
   /** The pipe's email policy (src/lib/email-policy.ts): absent = valid only, a catch-all person is never handed back. */
-  acceptedEmails?: EmailPolicy | null;
+  acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
 }): Promise<RetryCandidate[]> {
@@ -519,7 +519,7 @@ export async function pickRetryCandidate(params: {
   context: RetryPoolContext;
   nowMs?: number;
   reachableBy?: readonly ReachMethod[] | null;
-  acceptedEmails?: EmailPolicy | null;
+  acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
 }): Promise<RetryCandidate | null> {

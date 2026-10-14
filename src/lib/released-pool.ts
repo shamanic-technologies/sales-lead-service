@@ -3,7 +3,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
-import type { EmailPolicy } from "./email-policy.js";
+import type { PoolEmailPolicy } from "./email-policy.js";
 import { fetchAudienceOfferId, fetchAudienceOriginSlug, loadOriginsByChannelSlug } from "./sourcing-origin.js";
 
 /**
@@ -118,7 +118,7 @@ export async function claimReleasedLead(params: {
   featureSlug: string;
   reachableBy: ReachMethod[];
   /** The taking campaign's email policy (src/lib/email-policy.ts): absent = valid only. */
-  acceptedEmails?: EmailPolicy | null;
+  acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
   offerId: string | null;

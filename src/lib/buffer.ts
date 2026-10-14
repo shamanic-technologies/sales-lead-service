@@ -1,7 +1,7 @@
 import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
-import { readEmailVerdict, type EmailPolicy } from "./email-policy.js";
+import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
 import { serveNext, type Person, type ReachMethod, type ServiceContext } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
@@ -207,6 +207,10 @@ export async function pullNext(
     ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
     ...(params.relationships ? { relationships: params.relationships } : {}),
   };
+  // What the pools filter on: the pipe's own word, else, for a pipe serving a source's stock, the person as the source
+  // found them (CATCHALL-SOURCE-OWNS-1014: which emails a source keeps is the source pipe's strategy; a pipe stating
+  // nothing makes no email choice). Any other pipe stating nothing keeps valid only.
+  const poolEmails: PoolEmailPolicy | null = params.acceptedEmails ?? (mode.kind === "stock" ? "as_found" : null);
   const relationships: RelationshipScope | null = params.relationships
     ? { policy: params.relationships, orgId: params.orgId, brandIds: params.brandIds }
     : null;
@@ -274,7 +278,7 @@ export async function pullNext(
     parentRunId: params.parentRunId ?? null,
     context: ctx,
     reachableBy: params.reachableBy ?? null,
-    acceptedEmails: params.acceptedEmails ?? null,
+    acceptedEmails: poolEmails,
     relationships,
   });
 
@@ -420,7 +424,7 @@ export async function pullNext(
       brandIds: params.brandIds,
       featureSlug: params.featureSlug,
       reachableBy: params.reachableBy ?? [],
-      acceptedEmails: params.acceptedEmails ?? null,
+      acceptedEmails: poolEmails,
       relationships,
       offerId,
       runId: params.runId ?? null,
@@ -476,7 +480,7 @@ export async function pullNext(
       activeGoalId: params.activeGoalId ?? null,
       brandProfileId: params.brandProfileId ?? null,
       reachableBy: params.reachableBy ?? null,
-      acceptedEmails: params.acceptedEmails ?? null,
+      acceptedEmails: poolEmails,
       relationships,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.

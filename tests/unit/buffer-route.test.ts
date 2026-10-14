@@ -99,15 +99,9 @@ vi.mock("../../src/lib/on-demand-run.js", () => ({
   openOnDemandRun: (...a: unknown[]) => openOnDemandRun(...a),
 }));
 
-const recordSourceEmailDemand = vi.fn();
-const sourceRunEmailPolicy = vi.fn();
 vi.mock("../../src/lib/source-audience-walk.js", () => ({
   loadEmptyAnswers: async () => new Map(),
   orderByEmptyAnswers: (ids: string[]) => ids,
-}));
-vi.mock("../../src/lib/source-email-demand.js", () => ({
-  recordSourceEmailDemand: (...a: unknown[]) => recordSourceEmailDemand(...a),
-  sourceRunEmailPolicy: (...a: unknown[]) => sourceRunEmailPolicy(...a),
 }));
 
 const recordLeadRequested = vi.fn();
@@ -612,26 +606,23 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(recordLeadRequested).not.toHaveBeenCalled();
   });
 
-  it("a source unit's own run asks with the email policy its pipes accept (the catch-all choice is made at the find)", async () => {
+  it("a source unit's own run asks with the email policy ITS OWN workflow states (CATCHALL-SOURCE-OWNS-1014)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
     withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
-    sourceRunEmailPolicy.mockResolvedValueOnce("valid_and_catch_all");
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
 
-    await postAsUnit();
+    await postAsUnit(undefined, { acceptedEmails: "valid_and_catch_all" });
 
-    expect(sourceRunEmailPolicy).toHaveBeenCalledWith(UNIT, null);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "valid_and_catch_all", mode: { kind: "find", audienceIds: ["aud-1"] } }), expect.anything());
   });
 
-  it("a source unit's own run whose pipes state nothing wider sends no policy (byte-identical)", async () => {
+  it("a source unit's own run stating nothing sends no policy, whatever the pipes it feeds accept (valid only)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
     withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
-    sourceRunEmailPolicy.mockResolvedValueOnce(null);
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
     pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
@@ -641,7 +632,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(pullNext.mock.calls[0][0]).not.toHaveProperty("acceptedEmails");
   });
 
-  it("a stock ask records the policy the pipe stated for every source it reads", async () => {
+  it("a stock ask passes the pipe's own word only, and records nothing for the sources it reads", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "stock", sourceCampaignIds: [UNIT], read: { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] } });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);
@@ -655,11 +646,10 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
       .set("x-campaign-id", CAMPAIGN)
       .set("x-brand-id", BRAND)
       .set("x-feature-slug", "sales-cold-email-outreach")
-      .send({ acceptedEmails: "valid_and_catch_all" });
+      .send({});
 
-    expect(recordSourceEmailDemand).toHaveBeenCalledWith({ sourceCampaignIds: [UNIT], outreachCampaignId: CAMPAIGN, acceptedEmails: "valid_and_catch_all" });
-    expect(sourceRunEmailPolicy).not.toHaveBeenCalled();
-    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "valid_and_catch_all", mode: { kind: "stock", sourceCampaignIds: [UNIT] } }), expect.anything());
+    expect(pullNext.mock.calls[0][0]).not.toHaveProperty("acceptedEmails");
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ mode: { kind: "stock", sourceCampaignIds: [UNIT] } }), expect.anything());
   });
 
   it("a source unit's own run walks its audiences with the reach its lead strategy states (the workflow's reachableBy)", async () => {
