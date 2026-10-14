@@ -25,6 +25,8 @@ const RESOLVE_PER_TICK = 300;
 const RESOLVE_RETRY_AFTER = "1 day";
 /** Fact types that are bookkeeping of the feed, never something that happened with the person. */
 export const NON_EVENT_FACT_TYPES = ["withdrawn", "person_merged", "person_split"];
+/** Facts that only say the person sits in / wrote in a group chat shared with the brand's own people. */
+export const GROUP_FACT_TYPES = ["group_member", "group_message"];
 
 export interface Scope {
   orgId: string;
@@ -46,6 +48,7 @@ interface PersonRow {
   sources: string[];
   max_seq: string;
   has_messages: boolean;
+  has_direct: boolean;
 }
 
 async function personRows(scope: Scope): Promise<PersonRow[]> {
@@ -55,7 +58,8 @@ async function personRows(scope: Scope): Promise<PersonRow[]> {
       (array_agg(f.full_name ORDER BY (f.full_name LIKE '%(%)') , f.seq DESC) FILTER (WHERE coalesce(f.full_name, '') <> ''))[1] AS name,
       array_agg(DISTINCT f.source) AS sources,
       max(f.seq)::text AS max_seq,
-      bool_or(f.type IN ('message_in', 'message_out', 'group_message', 'group_member')) AS has_messages
+      bool_or(f.type IN ('message_in', 'message_out', 'group_message', 'group_member')) AS has_messages,
+      bool_or(f.type <> ALL(${sql.param(GROUP_FACT_TYPES)}::text[])) AS has_direct
     FROM crm_facts f
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
@@ -183,7 +187,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
   const atomicOf = new Map(mapped.map((m) => [m.person_key, m.human]));
   const canon = await canonicalHumans(scope.orgId, [...atomicOf.values()]);
 
-  interface Acc { names: string[]; emails: Set<string>; phones: Set<string>; channels: Set<string>; keys: string[]; seq: bigint; messages: boolean }
+  interface Acc { names: string[]; emails: Set<string>; phones: Set<string>; channels: Set<string>; keys: string[]; seq: bigint; messages: boolean; direct: boolean }
   const byHuman = new Map<string, Acc>();
   let withoutHuman = 0;
   for (const p of persons) {
@@ -193,7 +197,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
       continue;
     }
     const h = canon.get(atomic) ?? atomic;
-    const acc = byHuman.get(h) ?? { names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false };
+    const acc = byHuman.get(h) ?? { names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false, direct: false };
     if (p.name) acc.names.push(p.name);
     for (const e of keys.get(p.person_key)?.emails ?? []) acc.emails.add(e);
     for (const ph of keys.get(p.person_key)?.phones ?? []) acc.phones.add(ph);
@@ -202,6 +206,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     const seq = BigInt(p.max_seq);
     if (seq > acc.seq) acc.seq = seq;
     acc.messages = acc.messages || p.has_messages;
+    acc.direct = acc.direct || p.has_direct;
     byHuman.set(h, acc);
   }
   const humans = [...byHuman.keys()];
@@ -218,6 +223,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
       keys: a.keys.sort(),
       seq: a.seq.toString(),
       messages: a.messages,
+      direct: a.direct,
     };
   });
   for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500));
@@ -240,7 +246,7 @@ export function bestName(names: readonly string[]): string | null {
 
 async function writeSubjects(
   scope: Scope,
-  rows: Array<{ human: string; company: string; name: string | null; emails: string[]; phones: string[]; channels: string[]; keys: string[]; seq: string; messages: boolean }>,
+  rows: Array<{ human: string; company: string; name: string | null; emails: string[]; phones: string[]; channels: string[]; keys: string[]; seq: string; messages: boolean; direct: boolean }>,
 ): Promise<void> {
   if (rows.length === 0) return;
   const data = JSON.stringify(rows);
@@ -256,20 +262,21 @@ async function writeSubjects(
     `);
   }
   await db.execute(sql`
-    INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, phones, channels, person_keys, thread_seq, has_messages, updated_at)
+    INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, phones, channels, person_keys, thread_seq, has_messages, has_direct, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.name,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
       ARRAY(SELECT jsonb_array_elements_text(v.channels)), ARRAY(SELECT jsonb_array_elements_text(v.keys)),
-      v.seq::bigint, v.messages, now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, channels jsonb, keys jsonb, seq text, messages boolean)
+      v.seq::bigint, v.messages, v.direct, now()
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, channels jsonb, keys jsonb, seq text, messages boolean, direct boolean)
     ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
       company_key = excluded.company_key, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
       channels = excluded.channels, person_keys = excluded.person_keys, thread_seq = excluded.thread_seq,
-      has_messages = excluded.has_messages, updated_at = now()
+      has_messages = excluded.has_messages, has_direct = excluded.has_direct, updated_at = now()
     WHERE (relationship_subjects.company_key, relationship_subjects.name, relationship_subjects.emails, relationship_subjects.phones,
-           relationship_subjects.channels, relationship_subjects.person_keys, relationship_subjects.thread_seq, relationship_subjects.has_messages)
+           relationship_subjects.channels, relationship_subjects.person_keys, relationship_subjects.thread_seq, relationship_subjects.has_messages,
+           relationship_subjects.has_direct)
       IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.channels,
-           excluded.person_keys, excluded.thread_seq, excluded.has_messages)
+           excluded.person_keys, excluded.thread_seq, excluded.has_messages, excluded.has_direct)
   `);
 }
 
@@ -285,6 +292,7 @@ export interface Subject {
   personKeys: string[];
   threadSeq: string;
   hasMessages: boolean;
+  hasDirect: boolean;
 }
 
 export function toSubject(r: Record<string, unknown>): Subject {
@@ -300,6 +308,7 @@ export function toSubject(r: Record<string, unknown>): Subject {
     personKeys: (r.person_keys as string[]) ?? [],
     threadSeq: String(r.thread_seq ?? "0"),
     hasMessages: Boolean(r.has_messages),
+    hasDirect: r.has_direct === undefined ? true : Boolean(r.has_direct),
   };
 }
 
