@@ -220,6 +220,18 @@ async function cardsOf(orgId: string, brandId: string, ids: string[]): Promise<M
   `)) as unknown as Array<{ human: string; name: string | null; emails: string[]; phones: string[]; channels: string[] }>;
   const out = new Map<string, MergeCard>();
   for (const r of rows) if (!out.has(r.human)) out.set(r.human, { humanId: r.human, name: r.name, emails: r.emails, phones: r.phones, channels: r.channels });
+  // A person merged into another has no lead row of their own any more: name them from their own CRM facts.
+  const absorbed = ids.filter((id) => !out.has(id));
+  if (absorbed.length > 0) {
+    const facts = (await db.execute(sql`
+      SELECT DISTINCT ON (p.atomic_human_id) p.atomic_human_id::text AS human, f.full_name AS name
+      FROM relationship_person_humans p
+      JOIN crm_facts f ON f.org_id = p.org_id AND f.brand_id = p.brand_id AND f.person_key = p.person_key
+      WHERE p.org_id = ${orgId} AND p.atomic_human_id = ANY(${sql.param(absorbed)}::uuid[]) AND f.full_name IS NOT NULL AND f.full_name <> ''
+      ORDER BY p.atomic_human_id, (p.brand_id = ${brandId}) DESC, f.seq DESC
+    `)) as unknown as Array<{ human: string; name: string }>;
+    for (const f of facts) out.set(f.human, { humanId: f.human, name: f.name, emails: [], phones: [], channels: [] });
+  }
   for (const id of ids) if (!out.has(id)) out.set(id, { humanId: id, name: null, emails: [], phones: [], channels: [] });
   return out;
 }
