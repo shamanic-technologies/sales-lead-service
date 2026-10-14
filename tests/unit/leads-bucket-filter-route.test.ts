@@ -60,7 +60,10 @@ let indexRows: Array<{
   createdAtText: string;
   searchText: string;
 }> = [];
-let outcomes = new Map<string, { steps: Set<string>; latestAt: string | null }>();
+let outcomes = new Map<
+  string,
+  { steps: Set<string>; latestAt: string | null; stepAt?: Map<string, string | null> }
+>();
 let bookingCalled = new Set<string>();
 
 vi.mock("../../src/lib/booking-calls.js", () => ({
@@ -98,7 +101,12 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
       : Promise.resolve({
           results: items
             .filter((i) => statusByEmail[i.email])
-          .map((i) => ({ email: i.email, broadcast: { brand: statusByEmail[i.email] } })),
+          .map((i) => ({
+            email: i.email,
+            // The same evidence answers the brand AND the campaign question here; a campaign read
+            // flattens `campaign`, a brand read `brand`.
+            broadcast: { brand: statusByEmail[i.email], campaign: statusByEmail[i.email] },
+          })),
         }),
 }));
 
@@ -291,6 +299,58 @@ describe("GET /orgs/leads/bucket-counts", () => {
     expect((await get(`?brandId=${BRAND}&sort=relevance`)).status).toBe(400);
     expect((await get(`?brandId=${BRAND}&q=`)).status).toBe(400);
     expect((await get(`?brandId=${BRAND}&format=xlsx`)).status).toBe(400);
+  });
+});
+
+describe("GET /orgs/leads/bucket-counts — a campaign is credited only with what followed its first send (VALUED-ATTRIBUTION-1014)", () => {
+  beforeEach(() => {
+    // p0: first sent 2026-02-01; signed up BEFORE (their own CRM said so in January), bought after.
+    statusByEmail["p0@example.test"] = { contacted: true, sent: true, firstSentAt: "2026-02-01T00:00:00.000Z" };
+    // p1: queued, nothing sent; signs up later. The campaign never reached them.
+    statusByEmail["p1@example.test"] = { contacted: true };
+    outcomes = new Map([
+      [
+        indexRows[0].leadId,
+        {
+          steps: new Set(["signup", "sale"]),
+          latestAt: "2026-02-10T00:00:00.000Z",
+          stepAt: new Map([
+            ["signup", "2026-01-15T00:00:00.000Z"],
+            ["sale", "2026-02-10T00:00:00.000Z"],
+          ]),
+        },
+      ],
+      [
+        indexRows[1].leadId,
+        { steps: new Set(["signup"]), latestAt: "2026-03-01T00:00:00.000Z", stepAt: new Map([["signup", "2026-03-01T00:00:00.000Z"]]) },
+      ],
+      [
+        indexRows[3].leadId,
+        { steps: new Set(["sale"]), latestAt: "2026-03-01T00:00:00.000Z", stepAt: new Map([["sale", "2026-03-01T00:00:00.000Z"]]) },
+      ],
+    ]);
+  });
+
+  it("never counts more signups or sales than people the campaign sent to, and drops what came before", async () => {
+    const res = await counts(`?brandId=${BRAND}&campaignId=camp-1`);
+    expect(res.status).toBe(200);
+    expect(res.body.counts.signup).toBe(0);
+    expect(res.body.counts.sale).toBe(1);
+    expect(res.body.counts.signup).toBeLessThanOrEqual(res.body.people.sent);
+    expect(res.body.counts.sale).toBeLessThanOrEqual(res.body.people.sent);
+  });
+
+  it("the campaign's sale tab lists exactly the person its count names", async () => {
+    const res = await get(`?brandId=${BRAND}&campaignId=camp-1&bucket=sale`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+  });
+
+  it("a BRAND read keeps every live outcome: it describes the person at the brand, not a campaign's credit", async () => {
+    const res = await counts(`?brandId=${BRAND}`);
+    expect(res.status).toBe(200);
+    expect(res.body.counts.signup).toBe(2);
+    expect(res.body.counts.sale).toBe(2);
   });
 });
 
