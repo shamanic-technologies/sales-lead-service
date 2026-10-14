@@ -205,6 +205,19 @@ GET /leads?brandId=brand-123&clerkOrgId=org_abc
 
 ---
 
+### Read a Person's Lead on a Campaign
+
+```
+GET /orgs/campaigns/:campaignId/leads/by-lead/:leadId
+```
+
+The lead record of ONE person (`leadId`: what `leads/by-email` files and campaign-service's trigger-event
+`ranLeads[].leadId` names) on ONE campaign, without paging the campaign's leads. Same `{ leadDetail }`
+body as `GET /orgs/leads/:id`, delivery scoped to the path campaign. Org-scoped (`x-org-id`): no row, or
+another org's row, = 404 `lead_not_on_campaign`. Optional `brandId`, `include=campaigns`.
+
+---
+
 ### Get Cursor
 
 ```
