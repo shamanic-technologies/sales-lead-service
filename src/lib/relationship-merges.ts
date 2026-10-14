@@ -20,9 +20,10 @@ import { readThread, toSubject, type Scope, type Subject } from "./relationship-
 
 export const LINK_AT = 0.9;
 export const ASK_AT = 0.4;
-const PAIRS_PER_TICK = 120;
-const PAIR_CONCURRENCY = 6;
+const PAIRS_PER_TICK = 40;
+const PAIR_CONCURRENCY = 4;
 const MAX_CANDIDATES = 3;
+const MAX_FAILURES_PER_TICK = 3;
 
 const SAME_PERSON = {
   instructions:
@@ -35,7 +36,7 @@ const SAME_PERSON = {
 };
 
 async function card(s: Subject): Promise<Record<string, unknown>> {
-  return { name: s.name, emails: s.emails, phones: s.phones, channels: s.channels, thread: fitThread(await readThread(s), 30_000) };
+  return { name: s.name, emails: s.emails, phones: s.phones, channels: s.channels, thread: fitThread(await readThread(s), 6_000) };
 }
 
 export function orderPair(a: string, b: string): [string, string] {
@@ -123,6 +124,7 @@ export async function suggestMerges(scope: Scope, runId: string): Promise<MergeT
   const tick: MergeTick = { asked: 0, linked: 0, open: 0, rejected: 0 };
   const pairs = await pendingPairs(scope);
   let next = 0;
+  let failures = 0;
   const worker = async () => {
     while (next < pairs.length) {
       await askPair(pairs[next++]);
@@ -135,6 +137,7 @@ export async function suggestMerges(scope: Scope, runId: string): Promise<MergeT
       judged = await judgeYesNo(state, { same: SAME_PERSON }, "platform");
     } catch (err) {
       console.error(`[lead-service] merge judgment failed for ${p.unlinked.humanId} / ${p.known.humanId}; asked again next tick:`, err);
+      if (++failures >= MAX_FAILURES_PER_TICK) next = pairs.length; // the judge is down: stop asking this tick
       return;
     }
     const { probabilities, model } = judged;
