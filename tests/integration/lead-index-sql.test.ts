@@ -15,7 +15,7 @@ import { eq } from "drizzle-orm";
 const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizations } =
   await import("../../src/db/schema.js");
-const { countLeadListRows, streamLeadIndex, fetchOutcomesByLead } = await import(
+const { countLeadListRows, streamLeadIndex, walkLeadIndex, fetchOutcomesByLead } = await import(
   "../../src/lib/lead-index.js"
 );
 
@@ -138,6 +138,18 @@ describe.skipIf(!hasRealDatabase)("the lead index against a real database", () =
     expect(await countLeadListRows(scope)).toBe(3);
     // Every row carries the position a default-ordered cursor is built from.
     expect(rows.every((r) => typeof r.createdAtText === "string" && r.createdAtText.length > 0)).toBe(true);
+  });
+
+  it("walks the same people, rows and values in short statements as the one streamed statement (DB-LOAD-1014)", async () => {
+    const streamed = await collectIndex(scope);
+    for (const chunkSize of [1, 2, 1000]) {
+      const walked = [];
+      for await (const chunk of walkLeadIndex(scope, chunkSize)) {
+        expect(chunk.length).toBeLessThanOrEqual(chunkSize);
+        walked.push(...chunk);
+      }
+      expect(walked).toEqual(streamed);
+    }
   });
 
   it("carries the text a person is searched by, one field per line", async () => {
