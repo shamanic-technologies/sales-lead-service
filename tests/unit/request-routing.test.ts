@@ -6,6 +6,7 @@ describe("which HTTP thread answers a request", () => {
     "/orgs/leads?brandId=b&offerId=o&view=basic&bucket=contacted&sort=activity&limit=50&offset=0",
     "/orgs/leads?brandId=b&view=basic&standing=customer&limit=20",
     "/orgs/leads?brandId=b&q=acme&limit=50",
+    "/orgs/leads?brandId=b&view=basic&sort=activity&limit=50&include=campaigns",
     "/orgs/leads/bucket-counts?brandId=b&offerId=o",
     "/orgs/leads/standing-counts?brandId=b",
     "/orgs/leads/conversation-counts?campaignId=c",
@@ -22,7 +23,7 @@ describe("which HTTP thread answers a request", () => {
     "/orgs/leads?brandId=b&view=compact&limit=5000",
     "/orgs/leads?brandId=b&view=basic",
     "/orgs/leads?brandId=b&format=csv&limit=50",
-    "/orgs/leads?brandId=b&include=campaigns&limit=50",
+    "/orgs/leads?brandId=b&include=campaigns",
     "/orgs/leads/changes?brandId=b",
     // other surfaces
     "/orgs/leads/crm-pairings?brandId=b",

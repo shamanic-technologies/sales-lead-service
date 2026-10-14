@@ -29,6 +29,7 @@ import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
+import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -75,6 +76,12 @@ startRelationshipSweepWorker();
 // Every served row of a non-email pipe carries what its sender (crm-service) states it sent, live or stopped
 // campaign alike (channel-send-reconcile.ts, WA-SENDS-BATCH-1014).
 startChannelSendReconcileWorker();
+
+// The Leads search's trigram index, built CONCURRENTLY after boot and never awaited by anything
+// (read-model-search-index.ts, DASH-LATENCY-1014). Until it exists a search is slow, not wrong.
+ensureReadModelSearchIndex(connectionString).catch((error: unknown) => {
+  console.error("[lead-read-model] could not build the search index; searches stay unindexed:", error);
+});
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
