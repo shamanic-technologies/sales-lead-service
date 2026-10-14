@@ -273,6 +273,7 @@ function basicLeadQuery(
   cursor: BasicLeadCursor | null,
   limit: number | null,
   offset: number | null = null,
+  from = leadCampaignBaseRelation(f),
 ) {
   return sql<RawBasicRow[]>`
     SELECT
@@ -295,7 +296,7 @@ function basicLeadQuery(
       em.value AS email_value, em.status AS email_status
     FROM (
       SELECT lc.*
-      FROM ${leadCampaignBaseRelation(f)}
+      FROM ${from}
       WHERE lc.org_id = ${f.orgId}
         ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
         ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
@@ -356,6 +357,44 @@ export async function fetchBasicLeadRows(f: BasicLeadFilters): Promise<BasicLead
   }
 
   return rows;
+}
+
+/**
+ * The whole scoped population in chunks, for a caller that does slow work between chunks (the
+ * change feed's reconcile: a delivery read and a hash comparison per chunk).
+ *
+ * `streamBasicLeadChunks` keeps ONE statement open across the walk, so between chunks the Postgres
+ * backend sits in it waiting on the client (`ClientRead`), holding a connection and showing as the
+ * box's busiest active query (DB-LOAD-1014). Here the scope is deduped ONCE into its winning row ids
+ * (never the rows), then each chunk is read by primary key with the same scope filter, joins and
+ * order: one dedup per walk as before, nothing held open between chunks. Like a single statement,
+ * which reads every chunk from the snapshot it started in, the winners are those of the walk's start;
+ * a row that left the scope since is not returned.
+ */
+export async function* walkBasicLeadChunks(
+  f: BasicLeadFilters,
+  chunkSize: number,
+): AsyncGenerator<BasicLeadRow[]> {
+  const size = Math.max(1, chunkSize);
+  const winners = await sql<Array<{ id: string }>>`
+    SELECT lc.id::text AS id
+    FROM ${leadCampaignBaseRelation(f)}
+    WHERE lc.org_id = ${f.orgId}
+      ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
+      ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
+      ${leadStatusScope(f) ? sql`AND lc.status = ANY(${leadStatusScope(f)!})` : sql``}
+      ${f.queryOrgId ? sql`AND lc.org_id = ${f.queryOrgId}` : sql``}
+      ${f.userId ? sql`AND lc.user_id = ${f.userId}` : sql``}
+      ${f.workflowSlug ? sql`AND lc.workflow_slug = ${f.workflowSlug}` : sql``}
+      ${leadRowIdScope(f) ? sql`AND lc.id = ANY(${leadRowIdScope(f)!}::uuid[])` : sql``}
+      ${f.leadIds ? sql`AND lc.lead_id = ANY(${[...f.leadIds]}::uuid[])` : sql``}
+    ORDER BY lc.created_at ASC, lc.id ASC
+  `;
+  for (let i = 0; i < winners.length; i += size) {
+    const rowIds = winners.slice(i, i + size).map((w) => w.id);
+    const rows = await basicLeadQuery({ ...f, rowIds }, null, null, null, sql`leads_campaigns lc`);
+    if (rows.length > 0) yield rows.map(mapRow);
+  }
 }
 
 /**
