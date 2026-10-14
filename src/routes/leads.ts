@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { sql } from "../db/index.js";
 import {
@@ -212,6 +212,33 @@ async function fetchLeadCampaignRowById(
     FROM leads_campaigns lc
     LEFT JOIN leads l ON l.id = lc.lead_id
     WHERE lc.id = ${id} AND lc.org_id = ${orgId}
+    LIMIT 1
+  `;
+  return mapLeadCampaignRows(rows)[0] ?? null;
+}
+
+/**
+ * The ONE membership row a PERSON holds on a campaign, or null. `(lead_id, campaign_id)` is unique;
+ * `org_id` sits in the predicate, so another org's row is indistinguishable from none.
+ */
+export async function fetchLeadCampaignRowByPerson(
+  orgId: string,
+  leadId: string,
+  campaignId: string,
+): Promise<LeadCampaignRow | null> {
+  const rows = await sql<RawLeadCampaignRow[]>`
+    SELECT
+      lc.id, lc.lead_id, lc.campaign_id, lc.org_id, lc.user_id, lc.brand_ids,
+      lc.status, lc.status_reason, lc.status_details, lc.parent_run_id, lc.run_id,
+      lc.served_at, lc.channel_sent_at, lc.workflow_slug, lc.feature_slug, lc.goal, lc.active_goal_id,
+      lc.brand_profile_id, lc.audience_id, lc.created_at,
+      lc.created_at::text AS created_at_cursor,
+      l.apollo_person_id AS lead_apollo_person_id,
+      l.human_id::text AS lead_human_id,
+      l.company_id::text AS lead_company_id
+    FROM leads_campaigns lc
+    LEFT JOIN leads l ON l.id = lc.lead_id
+    WHERE lc.lead_id = ${leadId} AND lc.campaign_id = ${campaignId} AND lc.org_id = ${orgId}
     LIMIT 1
   `;
   return mapLeadCampaignRows(rows)[0] ?? null;
@@ -1746,9 +1773,61 @@ router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: Authenticate
     const row = await fetchLeadCampaignRowById(req.orgId!, id);
     if (!row) return res.status(404).json({ error: "Lead not found" });
 
-    const { brandId, campaignId } = req.query;
+    const { campaignId } = req.query;
+    return await respondLeadDetail(req, res, row, typeof campaignId === "string" ? campaignId : undefined);
+  } catch (error) {
+    console.error("[lead-service] Lead detail error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/**
+ * The lead record of ONE person on ONE campaign (LEAD-BY-PERSON-CAMPAIGN-1014).
+ *
+ * A caller holding a person's lead id (`leadId`: what `leads/by-email` files and campaign-service's
+ * `ranLeads[]` names) and a campaign asks for the membership row directly instead of paging the
+ * campaign's leads and matching the person (missed past the page size). `(lead_id, campaign_id)` is
+ * unique (`idx_lc_lead_campaign`), so at most one row answers. Same body as GET /orgs/leads/:id, with the
+ * campaign in the path standing as the delivery scope; another org's row is the same 404 as no row.
+ */
+router.get(
+  "/orgs/campaigns/:campaignId/leads/by-lead/:leadId",
+  apiKeyAuth,
+  requireOrgId,
+  async (req: AuthenticatedRequest, res) => {
+    try {
+      const { campaignId, leadId } = req.params;
+      if (!UUID_RE.test(leadId)) {
+        return res.status(400).json({ error: "leadId must be a person's lead id, a uuid" });
+      }
+      if (req.query.campaignId !== undefined) {
+        return res.status(400).json({ error: "campaignId is the path; do not pass it as a query parameter" });
+      }
+      const row = await fetchLeadCampaignRowByPerson(req.orgId!, leadId, campaignId);
+      if (!row) {
+        return res.status(404).json({
+          error: "This person is not a lead of this campaign in this org",
+          code: "lead_not_on_campaign",
+        });
+      }
+      return await respondLeadDetail(req, res, row, campaignId);
+    } catch (error) {
+      console.error("[lead-service] Lead by person detail error:", error);
+      return res.status(500).json({ error: "Internal server error" });
+    }
+  },
+);
+
+/** The detail body for one membership row, shared by the by-row-id and by-person reads. */
+async function respondLeadDetail(
+  req: AuthenticatedRequest,
+  res: Response,
+  row: LeadCampaignRow,
+  campaignIdStr: string | undefined,
+) {
+  {
+    const { brandId } = req.query;
     const brandIdStr = typeof brandId === "string" ? brandId : undefined;
-    const campaignIdStr = typeof campaignId === "string" ? campaignId : undefined;
 
     // Same `include` the list takes, meaning the same thing: nest this person's campaigns of this
     // brand under the record, each card stating what happened in that campaign alone. A panel
@@ -1899,10 +1978,7 @@ router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: Authenticate
         campaigns,
       ),
     });
-  } catch (error) {
-    console.error("[lead-service] Lead detail error:", error);
-    return res.status(500).json({ error: "Internal server error" });
   }
-});
+}
 
 export default router;
