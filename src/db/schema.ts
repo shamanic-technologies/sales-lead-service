@@ -1086,6 +1086,7 @@ export const crmFacts = pgTable(
     uniqueIndex("idx_crm_facts_seq").on(table.seq),
     index("idx_crm_facts_brand_contact").on(table.orgId, table.brandId, table.sourceContactId),
     index("idx_crm_facts_brand_crm_contact").on(table.orgId, table.brandId, table.crmContactId),
+    index("idx_crm_facts_brand_type_at").on(table.orgId, table.brandId, table.type, table.occurredAt),
   ],
 );
 
