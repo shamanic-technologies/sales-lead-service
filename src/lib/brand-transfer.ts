@@ -204,6 +204,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "relationship_judgments", touchesUpdatedAt: false },
       { table: "relationship_statements", touchesUpdatedAt: false },
       { table: "relationship_merge_questions", touchesUpdatedAt: false },
+      // Who was handed to the contacted-pure-prospects population (NEVER-NO-FOLLOWUP-1014): once per brand, ever.
+      { table: "prospect_followup_handouts", touchesUpdatedAt: false },
     ];
     for (const { table, touchesUpdatedAt } of scalarTables) {
       moved.push({

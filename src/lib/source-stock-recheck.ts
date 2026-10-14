@@ -56,7 +56,7 @@ export async function recheckSourceStock(params: {
   const before = await stockByAudience(params.orgId, params.sourceCampaignId);
   const setAside: StockRecheck["setAside"] = [];
   for (const { audienceId, inStock } of before) {
-    // A find without an audience fails its handover loudly (src/lib/source-stock.ts); nothing to judge it on here.
+    // A find without an audience is a contacted pure prospect, re-asked at handover (src/lib/source-stock.ts): no audience to judge.
     if (!audienceId) continue;
     const verdict = await params.judge(params.sourceCampaignId, audienceId);
     if (verdict.belongs) continue;

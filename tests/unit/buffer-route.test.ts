@@ -17,6 +17,8 @@ vi.mock("../../src/lib/relationship-read.js", () => ({
 vi.mock("../../src/db/index.js", () => ({
   db: {
     query: { idempotencyCache: { findFirst: (...a: unknown[]) => findFirst(...a) } },
+    // The served person's row on the asking campaign (lead.leadCampaignId).
+    execute: async () => [{ id: "row-1" }],
     insert: () => ({ values: (...a: unknown[]) => insertValues(...a) }),
     delete: () => ({ where: () => ({ then: (r: (x: unknown[]) => void) => Promise.resolve([]).then(r), catch: () => {} }) }),
   },
@@ -604,6 +606,39 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
       expect.anything(),
     );
     expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a source unit's own run stating population contacted_pure_prospects walks no audience, finds in the brand's contacted people, answers the row id (NEVER-NO-FOLLOWUP-1014)", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    withinBudget.mockResolvedValueOnce({ kind: "source", campaignId: UNIT, originSlug: "sourcing-apollo-cold-filters", sourceSlug: "sourcing-apollo-cold-filters", offerId: OFFER_ID });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
+
+    const res = await postAsUnit(undefined, { population: "contacted_pure_prospects" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.lead.leadCampaignId).toBe("row-1");
+    expect(resolveSourceAudiences).not.toHaveBeenCalled();
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ campaignId: UNIT, mode: { kind: "find_contacted" } }), expect.anything());
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("population stated by a campaign that is not a source unit is a 400, nothing served", async () => {
+    const res = await request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", CAMPAIGN)
+      .set("x-brand-id", BRAND)
+      .set("x-feature-slug", "lead-finder-v1")
+      .send({ population: "contacted_pure_prospects" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("population_needs_source_unit");
+    expect(pullNext).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
   });
 
   it("a source unit's own run asks with the email policy ITS OWN workflow states (CATCHALL-SOURCE-OWNS-1014)", async () => {

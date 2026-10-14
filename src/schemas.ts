@@ -1003,6 +1003,11 @@ export const BufferNextRequestSchema = z
         "The pipe's relationship policy (tactic \"Business contacts only\", RELATIONSHIP-TAGS-1014). `business_only`: nobody the brand knows as personal, investor, supplier, team, partner or advisor (yes, or still unsure) is handed out, nor anybody whose whole thread was never judged yet. Applies to every already-paid pool and is forwarded to human-service serve-next. Absent = today's serve.",
       example: "business_only",
     }),
+    population: z.enum(["contacted_pure_prospects"]).optional().openapi({
+      description:
+        "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
+      example: "contacted_pure_prospects",
+    }),
   })
   .openapi("BufferNextRequest", {
     description:
@@ -1177,6 +1182,15 @@ const ServedLeadSchema = z
           "OMITTED when the serve stated no person (a lead served before this field existed, or a producer that did " +
           "not state one). A retried serve hands out the value stored on the original serve.",
         example: "60000000-0000-0000-0000-000000000001",
+      }),
+    leadCampaignId: z
+      .string()
+      .uuid()
+      .optional()
+      .openapi({
+        description:
+          "The lead ROW this person holds on the campaign that asked (x-campaign-id): the `{id}` every per-row read takes (GET /orgs/leads/{id}, /history, /relationship, /prospect-followup, step statements). Present on every found serve.",
+        example: "70000000-0000-0000-0000-000000000001",
       }),
     qualification: LeadQualificationSchema.openapi({
       description:
@@ -8172,6 +8186,12 @@ export const RelationshipBlockSchema = z
       business_only: z.boolean().openapi({
         description: "May a pipe stating `relationships: business_only` hand this person out? false when never judged, or any of personal, investor, supplier, team, partner, advisor is yes or unsure.",
       }),
+      pure_prospect: z.boolean().openapi({
+        description: "Is this person a PURE PROSPECT of the brand (no tag but prospect, yes or unsure)? A person some source of the org knows (`subject`) only once judged and with no open \"same person?\" question; a person no source knows outside our own outreach is one unless a tag says otherwise. Read by the prospect follow-up verdict.",
+      }),
+    }),
+    subject: z.boolean().openapi({
+      description: "Does some source of the org (CRM, mailbox, WhatsApp/LinkedIn, signups, payments) know this person at the brand? false = known only through our own outreach.",
     }),
     merges: z.array(SettledMergeSchema).openapi({
       description: "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId.",
@@ -8356,5 +8376,59 @@ registry.registerPath({
       content: { "application/json": { schema: z.object({ leadId: z.string(), brandId: z.string().nullable(), relationship: RelationshipBlockSchema }) } },
     },
     404: { description: "No such row in this org (or not of that brand)" },
+  },
+});
+
+// --- Prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014) ---
+
+export const ProspectFollowupVerdictSchema = z
+  .object({
+    leadCampaignId: z.string().optional().openapi({ description: "The row asked about (by-row read only)." }),
+    leadId: z.string(),
+    brandId: z.string(),
+    owed: z.boolean().openapi({ description: "true = this brand still owes the person a prospect follow-up: write it." }),
+    reason: z.string().nullable().openapi({ description: "The strongest stop when not owed (first of `reasons`), null when owed." }),
+    reasons: z.array(z.string()).openapi({
+      description:
+        "Every stop, strongest first: opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, in_conversation (a reply waiting on an answer: the responder's), not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet), not_contacted (the brand never emailed them), sequence_running (the sender still has a step to send them for this brand). Empty when owed. A plain \"no thanks\" is not a stop.",
+    }),
+    relationshipTags: z.array(z.string()).openapi({ description: "The tags that make the person more than a prospect, when that is a reason." }),
+  })
+  .openapi("ProspectFollowupVerdict");
+
+const prospectFollowupHeaders = [
+  { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+  { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal org UUID" },
+];
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/prospect-followup",
+  summary: "Is the person of this lead row still owed a prospect follow-up by the brand? (writers ask right before writing)",
+  description:
+    "`{id}` = a lead row id (`leadCampaignId` on a buffer/next serve, the list row `id`, any campaign's row of the person, the reactive campaign's included). Cheap: local copies plus one email-gateway read. Fail loud: any source unreadable = 502, never a yes.",
+  request: { params: z.object({ id: z.string() }), query: z.object({ brandId: z.string().optional() }) },
+  parameters: prospectFollowupHeaders,
+  responses: {
+    200: { description: "The verdict", content: { "application/json": { schema: ProspectFollowupVerdictSchema } } },
+    400: { description: "Not a row id" },
+    404: { description: "No such row in this org (or not of that brand)" },
+    409: { description: "The row names no brand" },
+    502: { description: "A source could not be read: no verdict" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/prospect-followup",
+  summary: "Is the person on this email still owed a prospect follow-up by the brand?",
+  request: { params: z.object({ brandId: z.string() }), query: z.object({ email: z.string() }) },
+  parameters: prospectFollowupHeaders,
+  responses: {
+    200: { description: "The verdict", content: { "application/json": { schema: ProspectFollowupVerdictSchema } } },
+    400: { description: "No email" },
+    404: { description: "No lead of the org's brand on that address" },
+    409: { description: "Several leads on that address" },
+    502: { description: "A source could not be read: no verdict" },
   },
 });
