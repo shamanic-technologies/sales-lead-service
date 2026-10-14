@@ -563,7 +563,10 @@ export async function pullNext(
           await loadProspectFollowupVerdicts({ ...handout, leadIds: [handout.leadId], context: { userId: params.userId ?? null, runId: params.runId ?? null } })
         ).get(handout.leadId);
         if (!verdict) throw new Error(`[lead-service] no prospect follow-up verdict for lead ${handout.leadId}`);
-        return verdict.owed ? { fits: true } : { fits: false, reason: `no longer owed a prospect follow-up: ${verdict.reasons.join(", ")}` };
+        if (verdict.kind === "owed") return { fits: true };
+        // Not yet: released (the source finds them again once owed), never consumed. Stop: set aside for good.
+        if (verdict.kind === "not_yet") return { fits: false, release: true, reason: `not yet owed a prospect follow-up (${verdict.reasons.join(", ")}): released` };
+        return { fits: false, reason: `no longer owed a prospect follow-up: ${verdict.reasons.join(", ")}` };
       },
     });
     const stocked = claim.lead;
