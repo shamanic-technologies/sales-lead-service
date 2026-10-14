@@ -12,6 +12,7 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(acceptedVerdicts(undefined)).toEqual(["valid"]);
     expect(acceptedVerdicts("valid_only")).toEqual(["valid"]);
     expect(acceptedVerdicts("valid_and_catch_all")).toEqual(["valid", "catch_all"]);
+    expect(acceptedVerdicts("valid_catch_all_and_unknown")).toEqual(["valid", "catch_all", "unknown"]);
   });
 
   it("the pool clause refuses a recorded verdict outside the policy and keeps NULL", () => {
@@ -20,6 +21,8 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(q.params).toEqual(["valid"]);
     const wide = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "valid_and_catch_all"));
     expect(wide.params).toEqual(["valid", "catch_all"]);
+    const widest = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "valid_catch_all_and_unknown"));
+    expect(widest.params).toEqual(["valid", "catch_all", "unknown"]);
   });
 
   it("as_found (a stock pipe stating nothing) adds no clause: the source's strategy chose the emails", () => {
@@ -36,7 +39,9 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(BufferNextRequestSchema.safeParse({}).success).toBe(true);
     expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_only" }).success).toBe(true);
     expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_and_catch_all" }).success).toBe(true);
+    expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_catch_all_and_unknown" }).success).toBe(true);
     expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "unknown" }).success).toBe(false);
+    expect(BufferNextRequestSchema.safeParse({ acceptedEmails: "valid_catch_all_unknown_and_invalid" }).success).toBe(false);
   });
 
   it("reads a verdict as stated, null when absent, fails loud on garbage", () => {
