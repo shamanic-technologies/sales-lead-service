@@ -6956,6 +6956,85 @@ registry.registerPath({
   },
 });
 
+// --- Who reached a step at a brand (FACT-NOT-FOLLOWED-1014) ---
+
+const StepReachedPersonSchema = z
+  .object({
+    email: z.string().openapi({
+      description:
+        "The person, as a canonical (trimmed, lowercased) address. With `email`, the asked address; else the first address of the person's earliest reach.",
+    }),
+    name: z.string().nullable().openapi({ description: "Full name when any live fact or outcome of the person at the brand states one." }),
+    phone: z.string().nullable().openapi({ description: "A phone when any live fact or outcome of the person at the brand states one." }),
+    reachedAt: z.string().nullable().openapi({
+      description:
+        "With `since`: the person's earliest reach at/after `since` (always set). With `email`: their earliest dated reach ever; null only when every reach of theirs is undated.",
+    }),
+  })
+  .openapi("StepReachedPerson");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/step-reached",
+  summary: "Who reached a catalogue step at the brand, and when",
+  description:
+    "For campaign-service's `delay` trigger detector (a fact + a delay + \"still not Y\"). `step` is a features-service catalogue step key. " +
+    "With `since`: every person whose reach of the step falls at/after `since`, `reachedAt` = their earliest reach at/after it. " +
+    "With `email`: that one person at any time (`people` empty = never reached). Exactly one of `since` / `email`. " +
+    "What reaches a step is decided HERE, off two stores: the brand's copy of crm-service's people facts (the fact TYPE whatever tool saw it: " +
+    "signup, website_visit (a PostHog session), form_submitted, meeting_booked, meeting_attended, sale; a payment reaches `paid_client` only when it " +
+    "succeeded and was not wholly refunded; a fact withdrawn by crm-service does not count) and the outcome ledger (tracked, hand-stated, CRM, reply; " +
+    "live rows only; `sale` = `paid_client`, `form_submission` = `form_submitted`). This is \"did the person reach the step\", not a count. " +
+    "A person = a canonical email; reach rows sharing an address are one person; a reach with no email is not returned. " +
+    "Answerable steps: website_visit, signup, form_submitted, meeting_booked, meeting_attended, paid_client. " +
+    "Sorted by reachedAt ascending.",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      step: z.string().openapi({ description: "Catalogue step key, e.g. signup, website_visit, paid_client." }),
+      since: z.string().optional().openapi({ description: "ISO datetime: people whose reach falls at/after it." }),
+      email: z.string().optional().openapi({ description: "One address (case-insensitive): has this person EVER reached the step." }),
+    }),
+  },
+  parameters: [
+    {
+      in: "header" as const,
+      name: "x-api-key",
+      required: true,
+      schema: { type: "string" as const },
+      description: "API key for authenticating requests",
+    },
+    {
+      in: "header" as const,
+      name: "x-org-id",
+      required: true,
+      schema: { type: "string" as const },
+      description: "Internal organization UUID: the org whose brand is asked about",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The people who reached the step",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ step: z.string(), people: z.array(StepReachedPersonSchema) })
+            .openapi("StepReachedResponse"),
+        },
+      },
+    },
+    400: {
+      description:
+        "Missing x-org-id; step missing (step_required); unknown step (unknown_step); a catalogue step whose reach no store here sees per person, " +
+        "lead_found, conversation, industry_update_video, purchase (step_not_observable); not exactly one of since/email (since_or_email_required); " +
+        "unparseable since (invalid_since) or email (invalid_email).",
+    },
+    401: { description: "Unauthorized" },
+    500: { description: "Unreadable (step_reached_unreadable): never answered as nobody" },
+    503: { description: "The copy of crm-service's people facts has not reached the end of the feed yet (crm_copy_not_caught_up)" },
+  },
+});
+
 // --- "Already a customer", read off the prospect's own reply ---
 
 const NamedPersonCampaignParam = z.object({
