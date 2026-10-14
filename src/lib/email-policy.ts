@@ -6,14 +6,16 @@ import { sql, type SQL } from "drizzle-orm";
  * `valid_only` is the default and what a caller stating nothing gets: byte-identical to before the option existed.
  * `valid_and_catch_all` also accepts an address the verifier could not confirm because its domain accepts every
  * mailbox (~7% bounce measured, vs <1% for valid): a client whose market ran out of confirmed mailboxes keeps
- * reaching people. unknown / invalid / risky are never accepted, whatever the option.
+ * reaching people. `valid_catch_all_and_unknown` (UNKNOWN-EMAILS-OPTION-1014, owner 2026-10-14) also accepts an address
+ * the verifier could not judge at all (~15% bounce measured), chosen knowingly to keep a client's market spending.
+ * invalid / risky are never accepted, whatever the option.
  *
  * lead-service applies nothing to a FRESH serve: human-service owns "deliverable" and gets the option on every serve
  * request. What lead-service owns is its own pools (retry, source stock, released): a person served under
  * `valid_and_catch_all` carries their address's verdict (`lead_contact_methods.verification_verdict`) and is never
  * handed from a pool to a campaign asking `valid_only`.
  */
-export const EMAIL_POLICIES = ["valid_only", "valid_and_catch_all"] as const;
+export const EMAIL_POLICIES = ["valid_only", "valid_and_catch_all", "valid_catch_all_and_unknown"] as const;
 export type EmailPolicy = (typeof EMAIL_POLICIES)[number];
 
 export const DEFAULT_EMAIL_POLICY: EmailPolicy = "valid_only";
@@ -26,8 +28,14 @@ export const DEFAULT_EMAIL_POLICY: EmailPolicy = "valid_only";
 export type PoolEmailPolicy = EmailPolicy | "as_found";
 
 /** The verification verdicts a policy accepts. */
+const ACCEPTED_VERDICTS: Record<EmailPolicy, readonly string[]> = {
+  valid_only: ["valid"],
+  valid_and_catch_all: ["valid", "catch_all"],
+  valid_catch_all_and_unknown: ["valid", "catch_all", "unknown"],
+};
+
 export function acceptedVerdicts(policy: EmailPolicy | null | undefined): readonly string[] {
-  return (policy ?? DEFAULT_EMAIL_POLICY) === "valid_and_catch_all" ? ["valid", "catch_all"] : ["valid"];
+  return ACCEPTED_VERDICTS[policy ?? DEFAULT_EMAIL_POLICY];
 }
 
 /**
