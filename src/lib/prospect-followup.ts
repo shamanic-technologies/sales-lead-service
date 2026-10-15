@@ -1,4 +1,5 @@
 import { sql as dsql } from "drizzle-orm";
+import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { toIsoTimestamp } from "./basic-leads.js";
@@ -326,6 +327,8 @@ export async function claimContactedProspect(p: {
   brandProfileId: string | null;
   reachableBy?: readonly ReachMethod[] | null;
   acceptedEmails: PoolEmailPolicy;
+  /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
+  recentlyEmailed?: RecentlyEmailedScope | null;
   signal?: AbortSignal;
 }): Promise<ContactedProspectFind | null> {
   for (let offset = 0; ; offset += CANDIDATE_BATCH) {
@@ -340,7 +343,7 @@ export async function claimContactedProspect(p: {
           SELECT 1 FROM lead_timeline_facts x
           WHERE x.org_id = t.org_id AND x.brand_id = t.brand_id AND x.lead_id = t.lead_id AND x.withdrawn_at IS NULL
             AND x.label = ANY(${dsql.param([...STOP_LABELS])}::text[]))
-        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails)}
+        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails, null, p.recentlyEmailed)}
       GROUP BY t.lead_id
       ORDER BY max(t.occurred_at) ASC NULLS FIRST, t.lead_id ASC
       LIMIT ${CANDIDATE_BATCH} OFFSET ${offset}

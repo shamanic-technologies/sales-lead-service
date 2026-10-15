@@ -414,6 +414,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         ...(acceptedEmails ? { acceptedEmails } : {}),
         ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
         ...(parsed.data.stepFilter ? { stepFilter: parsed.data.stepFilter } : {}),
+        ...(parsed.data.excludeEmailedWithin ? { excludeEmailedWithin: parsed.data.excludeEmailedWithin } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,

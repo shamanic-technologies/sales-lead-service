@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EMAIL_POLICIES } from "./lib/email-policy.js";
 import { RELATIONSHIP_POLICIES, RELATIONSHIP_TAGS } from "./lib/relationship-tags.js";
+import { RECENTLY_EMAILED_WINDOWS } from "./lib/recently-emailed-sql.js";
 import {
   OpenAPIRegistry,
   extendZodWithOpenApi,
@@ -1015,6 +1016,11 @@ export const BufferNextRequestSchema = z
           "WHO this run hands out by the funnel steps the person reached in the brand's own tools (CRM-WARM-NURTURE-1015, a pipe's lead strategy, e.g. \"warm, never a client\"). crm-service's vocabulary, forwarded VERBATIM (lead-service validates no step): `{ reached?: Step[], notReached?: Step[] }`, each list non-empty when present, any one step of a list matches, both keys must hold; Step = `website_visit | signup | form_submission | meeting_booked | meeting_attended | meeting_not_held | sale | disqualified`. Clients are always out of a serve carrying it. Sent on every fresh serve of the run (human-service forwards it to crm-service, ANDed with the audience's own filter) and on the still-fits question asked before a source's stocked find is handed over. A run stating it never takes a person released by another pipe. A step crm-service refuses answers 400 `step_filter_refused` (never `found:false`); stated with `population` = 400 `step_filter_needs_audience_serve`. Absent = today's serve, bytes unchanged.",
         example: { reached: ["form_submission", "meeting_booked", "meeting_attended"], notReached: ["sale", "disqualified"] },
       }),
+    excludeEmailedWithin: z.enum(RECENTLY_EMAILED_WINDOWS).optional().openapi({
+      description:
+        "Tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015): `3_months` = never hand out a person this brand EMAILED in the last 3 calendar months (any campaign of the brand, any of the person's registered addresses; evidence = the emails instantly-service actually sent, as it announces them). Applies to every pool (this campaign's already-paid people, a source's stock, people released by another pipe, contacted pure prospects): a skipped person stays where they are and is handed out later, once the 3 months are over or to a serve that does not ask. On a fresh serve the person is checked right after the buy: a hit stays filed under the asking campaign (its paid pool, or the source's stock) and the next person is bought, up to 5 times per call; if all 5 were emailed recently the answer is `found:false`, reason `recently_emailed` (not exhaustion). Absent = no such skip (today's serve, bytes unchanged): a play where the client names the person, or that re-engages people already emailed, does not state it.",
+      example: "3_months",
+    }),
     population: z.enum(["contacted_pure_prospects"]).optional().openapi({
       description:
         "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
@@ -1023,7 +1029,7 @@ export const BufferNextRequestSchema = z
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `population`), all optional; an empty body is today's serve.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`), all optional; an empty body is today's serve.",
   });
 
 export const ServedBuyingSignalSchema = z

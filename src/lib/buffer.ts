@@ -30,6 +30,7 @@ import {
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
+  RECENTLY_EMAILED_REASON,
   isNoRecentPostsAnswer,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
@@ -38,6 +39,8 @@ import { claimContactedProspect, handoutOfSourceRow, loadProspectFollowupVerdict
 import type { RelationshipScope } from "./reach-sql.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 import { askAudienceFit } from "./audience-fit-client.js";
+import type { RecentlyEmailedScope, RecentlyEmailedWindow } from "./recently-emailed-sql.js";
+import { assertRecentlyEmailedReadable, leadRecentlyEmailed } from "./recently-emailed.js";
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 
@@ -115,11 +118,20 @@ interface PullNextParams {
    */
   stepFilter?: StepFilter;
   /**
+   * Tactic "Fresh contacts only" (src/lib/recently-emailed-sql.ts, FRESH-CONTACTS-1015): nobody the brand emailed inside
+   * the window is handed out. Every pool filters them (they stay where they are); a fresh serve that bought one keeps
+   * them filed under this campaign and buys the next, up to FRESH_SERVE_ATTEMPTS. Absent = nothing asked (today).
+   */
+  excludeEmailedWithin?: RecentlyEmailedWindow;
+  /**
    * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
    * campaign's retry / released pools still drain, then the answer names this reason.
    */
   freshServeRefused?: { reason: ServeEmptyReason; detail: string };
 }
+
+/** How many people one call may buy on a fresh serve when each was emailed by the brand inside the asked window. */
+export const FRESH_SERVE_ATTEMPTS = 5;
 
 interface PullNextResult {
   found: boolean;
@@ -234,6 +246,11 @@ export async function pullNext(
   const relationships: RelationshipScope | null = params.relationships
     ? { policy: params.relationships, orgId: params.orgId, brandIds: params.brandIds }
     : null;
+  const recentlyEmailed: RecentlyEmailedScope | null = params.excludeEmailedWithin
+    ? { window: params.excludeEmailedWithin, brandIds: params.brandIds }
+    : null;
+  // Who the brand emailed is read off the copy of instantly-service's facts: a copy still filling cannot say (fail loud).
+  if (recentlyEmailed) await assertRecentlyEmailedReadable();
 
   // 2. The goal belongs to the brand (brands.currentGoal), not the caller — read
   // it from brand-service for attribution/storage. No goal set ⟹ brand-service
@@ -300,6 +317,7 @@ export async function pullNext(
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: poolEmails,
     relationships,
+    recentlyEmailed,
     ...(params.poolSender ? { sender: params.poolSender } : {}),
   });
 
@@ -408,6 +426,16 @@ export async function pullNext(
       })
       .onConflictDoNothing();
 
+    // Fresh contacts only: a person the brand emailed inside the window is not handed out. Already bought and filed
+    // above, so nothing is lost: this campaign's paid pool (or the source's stock) hands them out later, filtered the
+    // same way. Checked before the Bonus checks are paid.
+    if (recentlyEmailed && (await leadRecentlyEmailed(leadId, recentlyEmailed))) {
+      console.log(
+        `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${RECENTLY_EMAILED_REASON} window=${recentlyEmailed.window}: kept filed under the campaign`,
+      );
+      return { found: false, reason: RECENTLY_EMAILED_REASON };
+    }
+
     const fullLead = await buildFullLead(leadId);
     const qualification = await writerChecks(fullLead);
 
@@ -448,6 +476,7 @@ export async function pullNext(
       reachableBy: params.reachableBy ?? [],
       acceptedEmails: poolEmails,
       relationships,
+      recentlyEmailed,
       offerId,
       runId: params.runId ?? null,
       parentRunId: params.parentRunId ?? null,
@@ -503,6 +532,7 @@ export async function pullNext(
       reachableBy: params.reachableBy ?? null,
       // Nothing is bought: the people were already emailed, so a source stating no email choice takes them as found.
       acceptedEmails: params.acceptedEmails ?? "as_found",
+      recentlyEmailed,
       signal,
     });
     if (!find) {
@@ -556,6 +586,7 @@ export async function pullNext(
       reachableBy: params.reachableBy ?? null,
       acceptedEmails: poolEmails,
       relationships,
+      recentlyEmailed,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
       askFit: async ({ sourceCampaignId, ...q }) => {
@@ -616,38 +647,44 @@ export async function pullNext(
   if (mode.kind === "find") {
     let notServeable = 0;
     let noRecentPosts = 0;
+    let recentlyEmailedHits = 0;
     for (const candidateAudienceId of mode.audienceIds) {
-      if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
       const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
-      let served: Awaited<ReturnType<typeof serveNext>>;
       const walked = { sourceCampaignId: params.campaignId, audienceId: candidateAudienceId, acceptedEmails: params.acceptedEmails };
-      try {
-        served = (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal)) ?? (await serveNext(candidateAudienceId, audienceCtx));
-      } catch (err) {
-        if (isAudienceNotServeableError(err)) {
-          notServeable++;
-          await recordEmptyAnswer({ ...walked, reason: "not_serveable" });
-          continue;
+      // The same audience is asked again only after a person emailed recently (fresh contacts only).
+      for (;;) {
+        if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+        let served: Awaited<ReturnType<typeof serveNext>>;
+        try {
+          served = (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal)) ?? (await serveNext(candidateAudienceId, audienceCtx));
+        } catch (err) {
+          if (isAudienceNotServeableError(err)) {
+            notServeable++;
+            await recordEmptyAnswer({ ...walked, reason: "not_serveable" });
+            break;
+          }
+          throw err;
         }
-        throw err;
+        if (served.status === "pending") {
+          console.log(
+            `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${candidateAudienceId} serveNext=pending`,
+          );
+          return { found: false, reason: SERVE_TIMED_OUT_REASON };
+        }
+        if (isNoRecentPostsAnswer(served)) {
+          noRecentPosts++;
+          await recordEmptyAnswer({ ...walked, reason: "no_recent_posts" });
+          break;
+        }
+        if (served.status === "exhausted" || !served.person) {
+          await recordEmptyAnswer({ ...walked, reason: "exhausted" });
+          break;
+        }
+        await clearEmptyAnswer(walked);
+        const result = await recordServed(served, candidateAudienceId);
+        if (result.found || result.reason !== RECENTLY_EMAILED_REASON) return result;
+        if (++recentlyEmailedHits >= FRESH_SERVE_ATTEMPTS) return result;
       }
-      if (served.status === "pending") {
-        console.log(
-          `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${candidateAudienceId} serveNext=pending`,
-        );
-        return { found: false, reason: SERVE_TIMED_OUT_REASON };
-      }
-      if (isNoRecentPostsAnswer(served)) {
-        noRecentPosts++;
-        await recordEmptyAnswer({ ...walked, reason: "no_recent_posts" });
-        continue;
-      }
-      if (served.status === "exhausted" || !served.person) {
-        await recordEmptyAnswer({ ...walked, reason: "exhausted" });
-        continue;
-      }
-      await clearEmptyAnswer(walked);
-      return recordServed(served, candidateAudienceId);
     }
     // An audience with nothing to read (competitor pages posted nothing) means the walk did NOT find everyone gone:
     // it wins over the rest. Then an audience that could not be walked; only a full walk-out is exhaustion.
@@ -682,37 +719,46 @@ export async function pullNext(
   // reveal is paid (src/lib/candidate-serve.ts). An audience human-service does not serve that
   // way (crm, apify, CRM outreach) answers null and keeps serve-next, screen and all.
   const servedAudienceId = audienceId as string;
-  const served = (await serveThroughCandidates(servedAudienceId, ctx, offerId, signal)) ?? (await serveNext(servedAudienceId, ctx));
-
-  // human-service bounds each serve-next call: when its budget runs out mid-walk it
-  // answers `pending` with no person, and the next call resumes the walk. That is an
-  // unfinished look, never exhaustion — reading it as exhaustion would stop the
-  // campaign for good on an audience that still has people.
-  if (served.status === "pending") {
-    console.log(
-      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId} serveNext=pending`,
-    );
-    return { found: false, reason: SERVE_TIMED_OUT_REASON };
+  // Fresh contacts only: a person the brand emailed recently stays filed under the campaign, the next one is bought.
+  for (let attempt = 1; ; attempt++) {
+    const result = await serveFresh();
+    if (result.found || result.reason !== RECENTLY_EMAILED_REASON || attempt >= FRESH_SERVE_ATTEMPTS) return result;
+    if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
   }
 
-  if (isNoRecentPostsAnswer(served)) {
-    console.log(
-      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${NO_RECENT_POSTS_REASON} audienceId=${audienceId}`,
-    );
-    // Nothing to read engagers from yet: not a population that ran out.
-    return { found: false, reason: NO_RECENT_POSTS_REASON };
-  }
+  async function serveFresh(): Promise<PullNextResult> {
+    const served = (await serveThroughCandidates(servedAudienceId, ctx, offerId, signal)) ?? (await serveNext(servedAudienceId, ctx));
 
-  if (served.status === "exhausted" || !served.person) {
-    console.log(
-      `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${AUDIENCE_EXHAUSTED_REASON} audienceId=${audienceId}`,
-    );
-    // The audience was walked and has nobody left — the one empty answer here that
-    // is evidence about a population.
-    return { found: false, reason: AUDIENCE_EXHAUSTED_REASON };
-  }
+    // human-service bounds each serve-next call: when its budget runs out mid-walk it
+    // answers `pending` with no person, and the next call resumes the walk. That is an
+    // unfinished look, never exhaustion — reading it as exhaustion would stop the
+    // campaign for good on an audience that still has people.
+    if (served.status === "pending") {
+      console.log(
+        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId} serveNext=pending`,
+      );
+      return { found: false, reason: SERVE_TIMED_OUT_REASON };
+    }
 
-  return recordServed(served, servedAudienceId);
+    if (isNoRecentPostsAnswer(served)) {
+      console.log(
+        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${NO_RECENT_POSTS_REASON} audienceId=${audienceId}`,
+      );
+      // Nothing to read engagers from yet: not a population that ran out.
+      return { found: false, reason: NO_RECENT_POSTS_REASON };
+    }
+
+    if (served.status === "exhausted" || !served.person) {
+      console.log(
+        `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${AUDIENCE_EXHAUSTED_REASON} audienceId=${audienceId}`,
+      );
+      // The audience was walked and has nobody left — the one empty answer here that
+      // is evidence about a population.
+      return { found: false, reason: AUDIENCE_EXHAUSTED_REASON };
+    }
+
+    return recordServed(served, servedAudienceId);
+  }
 }
 
 export { leadsCampaigns };
