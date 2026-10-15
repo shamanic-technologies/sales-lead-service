@@ -652,6 +652,13 @@
       "when": 1787497900000,
       "tag": "0092_followup_stated_occurrence",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1787597900000,
+      "tag": "0093_brand_person_statements_phone",
+      "breakpoints": true
     }
   ]
 }

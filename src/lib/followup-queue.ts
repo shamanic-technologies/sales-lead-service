@@ -76,6 +76,8 @@ import {
   type ClaimRelationshipPolicy,
 } from "./followup-relationship-gate.js";
 import type { RelationshipTag } from "./relationship-tags.js";
+import { loadHumanFacts } from "./human-opt-out-read.js";
+import { phoneValueSql } from "./e164-phone.js";
 
 /**
  * May the ACTING campaign take this row's current debt? See the module header: own-set = holder only,
@@ -166,7 +168,9 @@ export interface RefusedFollowup {
   leadCampaignId: string;
   leadId: string;
   campaignId: string;
-  email: string;
+  /** Null for a person known by phone only (`phone` set). */
+  email: string | null;
+  phone: string | null;
   reason: typeof NOT_A_LEAD_REASON;
   tags: RelationshipTag[];
   unsureTags: RelationshipTag[];
@@ -177,7 +181,8 @@ export interface PendingFollowup {
   leadCampaignId: string;
   leadId: string;
   campaignId: string;
-  email: string;
+  email: string | null;
+  phone: string | null;
   reason: ClaimPendingReason;
   retryAfterSeconds: number;
 }
@@ -194,8 +199,14 @@ export interface FollowupCandidate {
   id: string;
   leadId: string;
   campaignId: string;
-  /** The lead's canonical email. The delivery evidence (opt-out) is keyed on it. */
-  email: string;
+  /**
+   * The lead's canonical email. The delivery evidence (opt-out) is keyed on it. NULL for a person known by
+   * PHONE only (REPLY-PHONE-ONLY-1015, a WhatsApp writer): `phone` identifies them and the human's opt_out /
+   * do_not_contact facts decide the opt-out.
+   */
+  email: string | null;
+  /** The lead's first phone contact method (E.164 as stored), null when none. */
+  phone: string | null;
   /** Which brand the delivery evidence is asked for. */
   brandId: string;
   /** Raw `timestamptz`: postgres.js hands these back as `Date` OR `string`. */
@@ -270,6 +281,7 @@ interface RawCandidateRow {
   campaign_id: string;
   brand_ids: string[];
   email: string | null;
+  phone: string | null;
   followup_due_at: Date | string | null;
   followup_count: number | string | null;
   followup_last_action_at: Date | string | null;
@@ -309,7 +321,8 @@ export async function loadFollowupCandidates(params: {
       lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.audience_id,
       lc.followup_due_at, lc.followup_last_action_at,
       COALESCE(lc.followup_count, 0) AS followup_count,
-      lower(em.value) AS email
+      lower(em.value) AS email,
+      ph.value AS phone
     FROM leads_campaigns lc
     LEFT JOIN LATERAL (
       SELECT cm.value
@@ -318,6 +331,13 @@ export async function loadFollowupCandidates(params: {
       ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
       LIMIT 1
     ) em ON true
+    LEFT JOIN LATERAL (
+      SELECT cm.value
+      FROM lead_contact_methods cm
+      WHERE cm.lead_id = lc.lead_id AND cm.channel = 'phone'
+      ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
+      LIMIT 1
+    ) ph ON true
     WHERE lc.org_id = ${params.orgId}
       AND lc.campaign_id = ${params.campaignId}
       AND lc.followup_due_at IS NOT NULL
@@ -337,13 +357,15 @@ export async function loadFollowupCandidates(params: {
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
 
+  // A person with neither an email nor a phone cannot be written to by anyone: never handed out.
   return rows
-    .filter((r): r is RawCandidateRow & { email: string } => Boolean(r.email))
+    .filter((r) => Boolean(r.email) || Boolean(r.phone))
     .map((r) => ({
       id: r.id,
       leadId: r.lead_id,
       campaignId: r.campaign_id,
-      email: r.email,
+      email: r.email ?? null,
+      phone: r.phone ?? null,
       brandId: r.brand_ids[0] ?? "",
       dueAt: r.followup_due_at,
       followupCount: Number(r.followup_count ?? 0),
@@ -679,6 +701,7 @@ export async function pickFollowupCandidate(params: {
   // campaign's rows share a brand.
   const byBrand = new Map<string, FollowupCandidate[]>();
   for (const candidate of candidates) {
+    if (!candidate.email) continue; // phone-only: no email evidence to ask, the human's facts decide below
     const bucket = byBrand.get(candidate.brandId);
     if (bucket) bucket.push(candidate);
     else byBrand.set(candidate.brandId, [candidate]);
@@ -691,7 +714,7 @@ export async function pickFollowupCandidate(params: {
       const response = await checkDeliveryStatus(
         brandId,
         params.campaignId,
-        bucket.map((c) => ({ email: c.email })),
+        bucket.map((c) => ({ email: c.email as string })),
         forwardableContext(params.context),
       );
       results = response.results;
@@ -701,10 +724,19 @@ export async function pickFollowupCandidate(params: {
     for (const result of results) statusByEmail.set(result.email.toLowerCase(), result);
   }
 
+  // A person known by phone only: the email sender has nothing to say; their human's live opt_out /
+  // do_not_contact fact is the opt-out (the same facts a stated filing is suppressed on).
+  const phoneOnly = candidates.filter((c) => !c.email);
+  const humanFacts = phoneOnly.length > 0 ? await loadHumanFacts(phoneOnly.map((c) => c.leadId)) : null;
+
   const optedOutIds: string[] = [];
   const answerable: FollowupCandidate[] = [];
   for (const candidate of candidates) {
-    if (isOptedOut(statusByEmail.get(candidate.email), params.campaignId)) {
+    const human = candidate.email ? null : humanFacts?.get(candidate.leadId);
+    const optedOut = candidate.email
+      ? isOptedOut(statusByEmail.get(candidate.email), params.campaignId)
+      : Boolean(human?.optedOut || human?.doNotContact);
+    if (optedOut) {
       optedOutIds.push(candidate.id);
     } else {
       answerable.push(candidate);
@@ -726,18 +758,25 @@ export async function pickFollowupCandidate(params: {
             brandId: candidate.brandId,
             leadId: candidate.leadId,
             email: candidate.email,
+            phone: candidate.phone,
             budget,
           });
         } catch (err) {
           throw new ClaimRelationshipUnavailableError(err);
         }
-        const who = { leadCampaignId: candidate.id, leadId: candidate.leadId, campaignId: candidate.campaignId, email: candidate.email };
+        const who = {
+          leadCampaignId: candidate.id,
+          leadId: candidate.leadId,
+          campaignId: candidate.campaignId,
+          email: candidate.email,
+          phone: candidate.phone,
+        };
         if (verdict.kind === "refuse") {
           // Final for this due row: stopped, so the queue never offers it again (a later `scheduled` re-decides).
           await stopFollowups([candidate.id], RELATIONSHIP_STOP_REASON, nowMs);
           report.refused.push({ ...who, reason: verdict.reason, tags: verdict.tags, unsureTags: verdict.unsureTags });
           console.log(
-            `[lead-service] followup refused by relationship policy ${report.policy} campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} tags=${verdict.tags.join("+")} unsure=${verdict.unsureTags.join("+")}`,
+            `[lead-service] followup refused by relationship policy ${report.policy} campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email ?? `phone:${candidate.phone}`} tags=${verdict.tags.join("+")} unsure=${verdict.unsureTags.join("+")}`,
           );
           continue;
         }
@@ -754,7 +793,7 @@ export async function pickFollowupCandidate(params: {
       });
       if (claimed) {
         console.log(
-          `[lead-service] followup claimed campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} followupCount=${candidate.followupCount} due=${candidates.length} optedOut=${optedOutIds.length}`,
+          `[lead-service] followup claimed campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email ?? `phone:${candidate.phone}`} followupCount=${candidate.followupCount} due=${candidates.length} optedOut=${optedOutIds.length}`,
         );
         return withReport({ claimed: candidate });
       }
@@ -1104,6 +1143,43 @@ interface RawLookupRow {
   id: string;
   lead_id: string;
   email: string;
+}
+
+/**
+ * From a PHONE to the row that carries the debt (REPLY-PHONE-ONLY-1015): a person known by phone only (a
+ * WhatsApp writer with no email). Same exactness as the email lookup: equality on the registered `phone`
+ * contact method (separators ignored on both sides, `e164-phone.ts`), scoped to org + the campaign named;
+ * several rows = `ambiguous_lead`, never a pick.
+ */
+export type FollowupLeadPhoneLookup =
+  | { ok: true; id: string; leadId: string; phone: string }
+  | { ok: false; code: "lead_not_found" }
+  | { ok: false; code: "ambiguous_lead"; matches: Array<{ id: string; leadId: string; phone: string }> };
+
+export async function lookupFollowupRowByPhone(params: {
+  orgId: string;
+  campaignId: string;
+  /** E.164 (`canonicalE164`). */
+  phone: string;
+}): Promise<FollowupLeadPhoneLookup> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT ON (lc.id) lc.id, lc.lead_id, cm.value AS phone
+    FROM leads_campaigns lc
+    JOIN lead_contact_methods cm
+      ON cm.lead_id = lc.lead_id
+     AND cm.channel = 'phone'
+     AND ${phoneValueSql(sql`cm.value`)} = ${params.phone}
+    WHERE lc.org_id = ${params.orgId}
+      AND lc.campaign_id = ${params.campaignId}
+    ORDER BY lc.id ASC, cm.value ASC
+    LIMIT 5
+  `)) as unknown as Array<{ id: string; lead_id: string; phone: string }>;
+
+  if (rows.length === 0) return { ok: false, code: "lead_not_found" };
+  if (rows.length > 1) {
+    return { ok: false, code: "ambiguous_lead", matches: rows.map((r) => ({ id: r.id, leadId: r.lead_id, phone: r.phone })) };
+  }
+  return { ok: true, id: rows[0].id, leadId: rows[0].lead_id, phone: rows[0].phone };
 }
 
 export async function lookupFollowupRowByEmail(params: {

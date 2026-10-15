@@ -8,6 +8,7 @@
  */
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
+import { canonicalE164 } from "../lib/e164-phone.js";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import {
   FOLLOWUP_DUE_MAX_HORIZON_MS,
@@ -16,6 +17,7 @@ import {
   FollowupResponderStartUnavailableError,
   dueDateBounds,
   lookupFollowupRowByEmail,
+  lookupFollowupRowByPhone,
   parseDueDate,
   pickFollowupCandidate,
   readFollowupState,
@@ -69,8 +71,16 @@ const ActedByEmailBodySchema = z.object({
   email: z.string().trim().min(3).max(320),
 });
 
-const ScheduleByEmailBodySchema = z.object({
-  email: z.string().trim().min(3).max(320),
+// `email` identifies the person whenever present (byte-identical). Without it, `phone` (E.164) identifies them
+// (REPLY-PHONE-ONLY-1015: a WhatsApp writer known by phone only).
+type FailedLookup =
+  | { ok: false; code: "lead_not_found" }
+  | { ok: false; code: "ambiguous_lead"; matches: Array<Record<string, string>> };
+
+const ScheduleByEmailBodySchema = z
+  .object({
+  email: z.string().trim().min(3).max(320).nullish(),
+  phone: z.string().trim().min(3).max(50).nullish(),
   dueAt: z.string(),
   // The trigger occurrence through which the BRAND names this person (campaign-service, same object as on
   // the filing): opens a grant the holding campaign may claim once, even on a handed row.
@@ -80,7 +90,19 @@ const ScheduleByEmailBodySchema = z.object({
       triggerId: z.string().trim().min(1).max(200).nullish(),
     })
     .nullish(),
-});
+  })
+  .superRefine((body, ctx) => {
+    if (body.email) return;
+    if (!body.phone) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email or phone (E.164) is required" });
+    } else if (!canonicalE164(body.phone)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phone"],
+        message: "with no email, phone identifies the person and must be E.164 (e.g. +33612345678)",
+      });
+    }
+  });
 
 /**
  * Why a schedule-by-email statement left the person NOT due, in words a caller can hand to its client.
@@ -220,6 +242,7 @@ router.post(
           campaignId: candidate.campaignId,
           brandId: candidate.brandId,
           email: candidate.email,
+          phone: candidate.phone,
           audienceId: candidate.audienceId,
           dueAt: candidate.dueAt instanceof Date ? candidate.dueAt.toISOString() : candidate.dueAt,
           followupCount: candidate.followupCount,
@@ -315,24 +338,34 @@ router.post(
       return;
     }
 
-    const lookup = await lookupFollowupRowByEmail({
-      orgId: req.orgId as string,
-      campaignId,
-      email: parsed.data.email,
-    });
+    const byPhone = !parsed.data.email;
+    const notFound = byPhone ? "No lead on this campaign holds that phone" : "No lead on this campaign holds that email address";
+    const lookup: { ok: true; id: string; leadId: string; email: string | null; phone?: string } | FailedLookup =
+      byPhone
+        ? await lookupFollowupRowByPhone({
+            orgId: req.orgId as string,
+            campaignId,
+            phone: canonicalE164(parsed.data.phone) as string,
+          }).then((l) => (l.ok ? { ok: true as const, id: l.id, leadId: l.leadId, email: null, phone: l.phone } : l))
+        : await lookupFollowupRowByEmail({
+            orgId: req.orgId as string,
+            campaignId,
+            email: parsed.data.email as string,
+          });
 
     if (!lookup.ok) {
       if (lookup.code === "ambiguous_lead") {
         res.status(409).json({
-          error:
-            "That address matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here",
+          error: byPhone
+            ? "That phone matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here"
+            : "That address matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here",
           code: "ambiguous_lead",
           matches: lookup.matches,
         });
         return;
       }
       res.status(404).json({
-        error: "No lead on this campaign holds that email address",
+        error: notFound,
         code: "lead_not_found",
       });
       return;
@@ -357,7 +390,7 @@ router.post(
     // two statements — vanishingly rare, and still answered rather than swallowed.
     if (!state) {
       res.status(404).json({
-        error: "No lead on this campaign holds that email address",
+        error: notFound,
         code: "lead_not_found",
       });
       return;
@@ -365,12 +398,19 @@ router.post(
 
     const notMadeDue = notMadeDueOf(state);
     console.log(
-      `[lead-service] followup scheduled by email campaign=${campaignId} leadCampaignId=${lookup.id} due=${state.dueAt ?? "NOT_DUE"} setBy=${req.campaignId ?? "observer"} statedBy=${parsed.data.statedBy?.triggerEventId ?? "-"}${notMadeDue ? ` notMadeDue=${notMadeDue.code}` : ""}`,
+      `[lead-service] followup scheduled by ${byPhone ? "phone" : "email"} campaign=${campaignId} leadCampaignId=${lookup.id} due=${state.dueAt ?? "NOT_DUE"} setBy=${req.campaignId ?? "observer"} statedBy=${parsed.data.statedBy?.triggerEventId ?? "-"}${notMadeDue ? ` notMadeDue=${notMadeDue.code}` : ""}`,
     );
 
     // 200 either way (the statement was recorded), but never one that reads as success when nobody was made
     // due: `madeDue` + `notMadeDue` say so, and `followup.dueAt` is null.
-    res.json({ followup: state, leadId: lookup.leadId, email: lookup.email, madeDue: notMadeDue === null, notMadeDue });
+    res.json({
+      followup: state,
+      leadId: lookup.leadId,
+      email: lookup.email,
+      ...(byPhone ? { phone: lookup.phone } : {}),
+      madeDue: notMadeDue === null,
+      notMadeDue,
+    });
   }),
 );
 

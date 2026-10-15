@@ -43,7 +43,7 @@ const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, crmFacts, brandPersonStatements } = await import("../../src/db/schema.js");
 const { sql } = await import("drizzle-orm");
 const namedPeopleRoutes = (await import("../../src/routes/named-people.js")).default;
-const { lookupFollowupRowByEmail, writeFollowupStatement, pickFollowupCandidate } = await import(
+const { lookupFollowupRowByEmail, lookupFollowupRowByPhone, writeFollowupStatement, pickFollowupCandidate } = await import(
   "../../src/lib/followup-queue.js"
 );
 
@@ -332,6 +332,138 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
       const res = await file(campaignId, addr("badtz"), { ...stated(), timezone: "GMT+1" });
       expect(res.status).toBe(400);
       expect(await db.select().from(leadContactMethods).where(eq(leadContactMethods.value, addr("badtz")))).toHaveLength(0);
+    });
+  });
+
+  describe("a person known by PHONE only, no email (REPLY-PHONE-ONLY-1015)", () => {
+    const e164 = () => `+3367${String(Math.floor(1e7 + Math.random() * 9e7))}`;
+    const fileByPhone = (campaign: string, body: Record<string, unknown>) =>
+      request(app)
+        .post(`/orgs/campaigns/${campaign}/leads/by-email`)
+        .set("x-api-key", "test-api-key")
+        .set("x-org-id", orgId)
+        .set("x-run-id", randomUUID())
+        .send(body);
+
+    it("files a STATED phone + name person: 201 filed, the phone as the lead's contact method, then 200 already_filed", async () => {
+      gatewayCalls.length = 0;
+      const phone = e164();
+      // Written with separators: canonicalized to E.164.
+      const written = `${phone.slice(0, 3)} ${phone.slice(3, 4)} ${phone.slice(4, 8)}-${phone.slice(8)}`;
+      const eventId = randomUUID();
+      const res = await fileByPhone(campaignId, { phone: written, name: "Velveteen (WA)", ...stated(eventId) });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ status: "filed", campaignId, brandId, email: null, phone, knownBy: "statement", timezone: "Europe/Paris" });
+      createdLeadIds.push(res.body.leadId);
+      expect(gatewayCalls).toEqual([]);
+
+      const methods = await db.select().from(leadContactMethods).where(eq(leadContactMethods.leadId, res.body.leadId));
+      expect(methods.map((m) => `${m.channel}:${m.value}`)).toEqual([`phone:${phone}`]);
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead).toMatchObject({ name: "Velveteen (WA)" });
+      const statements = await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.phone, phone));
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatchObject({ email: null, sourceRef: eventId });
+
+      const again = await fileByPhone(campaignId, { phone, ...stated(eventId) });
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ status: "already_filed", leadId: res.body.leadId, leadCampaignId: res.body.leadCampaignId });
+      expect(await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.phone, phone))).toHaveLength(1);
+
+      // Known from then on (now a lead of the brand), on another campaign of the brand, without a statement: same lead.
+      const later = await fileByPhone(secondCampaignId, { phone });
+      expect(later.status).toBe(201);
+      expect(later.body).toMatchObject({ leadId: res.body.leadId, knownBy: "brand_lead" });
+    });
+
+    it("files a phone the brand's CRM copy carries (a WhatsApp message fact), named from the fact", async () => {
+      const phone = e164();
+      await crmFact("", { emails: [], phones: [phone], personKey: `phone:${phone}`, type: "message_in", source: "whatsapp", fullName: "Wa Writer" });
+      const res = await fileByPhone(campaignId, { phone });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body).toMatchObject({ knownBy: "crm_fact", phone, email: null });
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead.name).toBe("Wa Writer");
+    });
+
+    it("refuses an unstated phone nobody of the brand knows, a non-E.164 phone, and a body with neither", async () => {
+      expect((await fileByPhone(campaignId, { phone: e164() })).body.code).toBe("person_not_known");
+      expect((await fileByPhone(campaignId, { phone: "06 12 34 56 78", ...stated() })).status).toBe(400);
+      expect((await fileByPhone(campaignId, { name: "Nobody", ...stated() })).status).toBe(400);
+    });
+
+    it("reuses the lead already owning the phone; two leads holding it = ambiguous_lead, nothing filed", async () => {
+      const phone = e164();
+      const [owner] = await db.insert(leads).values({ name: "Owner" }).returning({ id: leads.id });
+      createdLeadIds.push(owner.id);
+      await db.insert(leadContactMethods).values({ leadId: owner.id, channel: "phone", value: phone, source: "itest" });
+      const res = await fileByPhone(campaignId, { phone, ...stated() });
+      expect(res.status).toBe(201);
+      expect(res.body.leadId).toBe(owner.id);
+
+      const [second] = await db.insert(leads).values({ name: "Twin" }).returning({ id: leads.id });
+      createdLeadIds.push(second.id);
+      // Stored with separators: a different value for the unique index, the same number for identification.
+      await db.insert(leadContactMethods).values({ leadId: second.id, channel: "phone", value: `${phone.slice(0, 3)} ${phone.slice(3)}`, source: "itest" });
+      const amb = await fileByPhone(secondCampaignId, { phone, ...stated() });
+      expect(amb.status).toBe(409);
+      expect(amb.body.code).toBe("ambiguous_lead");
+      expect([...amb.body.leadIds].sort()).toEqual([owner.id, second.id].sort());
+    });
+
+    it("refuses a stated phone-only person whose human carries a live opt_out", async () => {
+      const phone = e164();
+      const [lead] = await db.insert(leads).values({ name: "Out" }).returning({ id: leads.id });
+      createdLeadIds.push(lead.id);
+      const humanId = randomUUID();
+      humanIds.push(humanId);
+      await db.update(leads).set({ humanId }).where(eq(leads.id, lead.id));
+      await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "phone", value: phone, source: "itest" });
+      await db.execute(sql`INSERT INTO human_fact_copies (fact_id, human_id, kind, event_id) VALUES (${randomUUID()}, ${humanId}, 'opt_out', 1)`);
+      const res = await fileByPhone(campaignId, { phone, ...stated() });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: "person_suppressed", reason: "opted_out" });
+    });
+
+    it("an email given keeps the email-first identity: the phone is only recorded beside it", async () => {
+      await crmFact(addr("both"));
+      const phone = e164();
+      const res = await fileByPhone(campaignId, { email: addr("both"), phone });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body.email).toBe(addr("both"));
+      expect("phone" in res.body).toBe(false);
+    });
+
+    it("hands the phone-only person to the queue: found by phone, made due, claimed with email null", async () => {
+      const phone = e164();
+      const filed = await fileByPhone(campaignId, { phone, name: "Queue Phone", ...stated() });
+      expect(filed.status).toBe(201);
+      createdLeadIds.push(filed.body.leadId);
+
+      const lookup = await lookupFollowupRowByPhone({ orgId, campaignId, phone });
+      expect(lookup).toMatchObject({ ok: true, id: filed.body.leadCampaignId, leadId: filed.body.leadId, phone });
+      expect(await lookupFollowupRowByPhone({ orgId, campaignId, phone: e164() })).toEqual({ ok: false, code: "lead_not_found" });
+
+      const nowMs = Date.now();
+      await writeFollowupStatement({
+        orgId,
+        id: filed.body.leadCampaignId,
+        kind: "scheduled",
+        dueAtIso: new Date(nowMs).toISOString(),
+        reason: null,
+        nowMs,
+      });
+      const claim = await pickFollowupCandidate({
+        orgId,
+        campaignId,
+        runId: randomUUID(),
+        actingCampaignId: campaignId,
+        context: { orgId },
+        nowMs: nowMs + 1_000,
+      });
+      expect(claim.claimed).toMatchObject({ id: filed.body.leadCampaignId, email: null, phone });
     });
   });
 });

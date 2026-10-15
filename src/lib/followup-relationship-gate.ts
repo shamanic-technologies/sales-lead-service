@@ -35,6 +35,7 @@ import { judgeSubject } from "./relationship-judge.js";
 import { EMPTY_RELATIONSHIP, loadRelationships, recomputePolicy, type RelationshipBlock } from "./relationship-read.js";
 import { toSubject } from "./relationship-subjects.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
+import { canonicalE164, phoneValueSql } from "./e164-phone.js";
 
 /** Policies a claim may state. Only `pure_prospect`: `business_only` holds back every never-judged non-subject forever. */
 export const CLAIM_RELATIONSHIP_POLICIES = ["pure_prospect"] as const;
@@ -101,8 +102,26 @@ export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean): 
   return pending("same_person_question_open");
 }
 
-/** Does a live CRM fact of (org, brand) carry this address? Same predicate as named-person's "known to the brand". */
-async function crmFactAge(orgId: string, brandId: string, email: string): Promise<number | null> {
+/**
+ * Does a live CRM fact of (org, brand) carry this person? Same predicate as named-person's "known to the brand":
+ * the address, or for a person known by phone only (REPLY-PHONE-ONLY-1015) the E.164 phone. A phone-only person
+ * the CRM copy names (a WhatsApp writer always is) is therefore never "a stranger" before the sweep builds them.
+ */
+async function crmFactAge(orgId: string, brandId: string, email: string | null, phone: string | null): Promise<number | null> {
+  if (!email) {
+    const canonical = canonicalE164(phone);
+    if (!canonical) return null;
+    const rows = (await db.execute(sql`
+      SELECT max(f.received_at) AS at
+      FROM crm_facts f
+      WHERE f.org_id = ${orgId}
+        AND f.brand_id = ${brandId}
+        AND f.type <> 'withdrawn'
+        AND EXISTS (SELECT 1 FROM unnest(f.phones) AS p WHERE ${phoneValueSql(sql`p`)} = ${canonical})
+        AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
+    `)) as unknown as Array<{ at: Date | string | null }>;
+    return ageOf(rows[0]?.at);
+  }
   const rows = (await db.execute(sql`
     SELECT max(f.received_at) AS at
     FROM crm_facts f
@@ -112,7 +131,10 @@ async function crmFactAge(orgId: string, brandId: string, email: string): Promis
       AND EXISTS (SELECT 1 FROM unnest(f.emails) AS e WHERE lower(trim(e)) = ${email.trim().toLowerCase()})
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
   `)) as unknown as Array<{ at: Date | string | null }>;
-  const at = rows[0]?.at;
+  return ageOf(rows[0]?.at);
+}
+
+function ageOf(at: Date | string | null | undefined): number | null {
   if (at === null || at === undefined) return null;
   const ms = new Date(at).getTime();
   return Number.isNaN(ms) ? 0 : Date.now() - ms;
@@ -172,12 +194,14 @@ export async function gateFollowupCandidate(p: {
   orgId: string;
   brandId: string;
   leadId: string;
-  email: string;
+  /** Null for a person known by phone only (then `phone` identifies them). */
+  email: string | null;
+  phone?: string | null;
   budget: ClaimJudgeBudget;
 }): Promise<Exclude<ClaimGateVerdict, { kind: "judge" }>> {
   let block = await blockOfLead(p.orgId, p.brandId, p.leadId);
   const needsCrm = block.humanId !== null && !block.subject;
-  const age = needsCrm ? await crmFactAge(p.orgId, p.brandId, p.email) : null;
+  const age = needsCrm ? await crmFactAge(p.orgId, p.brandId, p.email, p.phone ?? null) : null;
   let verdict = decideClaimGate(block, age !== null);
   if (verdict.kind === "judge") {
     const judged = await judgeOnDemand(p.orgId, p.brandId, block.humanId!, p.budget);
@@ -188,7 +212,7 @@ export async function gateFollowupCandidate(p: {
   }
   if (verdict.kind === "pending" && verdict.reason === "relationship_not_built" && age !== null && age > NOT_BUILT_LOUD_AFTER_MS) {
     console.error(
-      `[lead-service] followup claim: ${p.email} (lead ${p.leadId}) is known to brand ${p.brandId}'s CRM copy for ${Math.round(age / 60_000)} min and the relationship sweep has not built them: held, never answered as a lead`,
+      `[lead-service] followup claim: ${p.email ?? `phone ${p.phone}`} (lead ${p.leadId}) is known to brand ${p.brandId}'s CRM copy for ${Math.round(age / 60_000)} min and the relationship sweep has not built them: held, never answered as a lead`,
     );
   }
   return verdict;

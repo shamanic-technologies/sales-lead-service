@@ -6,6 +6,7 @@ const pickFollowupCandidate = vi.fn();
 const readFollowupState = vi.fn();
 const writeFollowupStatement = vi.fn();
 const lookupFollowupRowByEmail = vi.fn();
+const lookupFollowupRowByPhone = vi.fn();
 const recordActedByEmail = vi.fn();
 const withdrawHandover = vi.fn();
 
@@ -24,6 +25,7 @@ vi.mock("../../src/lib/followup-queue.js", async (orig) => {
     readFollowupState: (...a: unknown[]) => readFollowupState(...a),
     writeFollowupStatement: (...a: unknown[]) => writeFollowupStatement(...a),
     lookupFollowupRowByEmail: (...a: unknown[]) => lookupFollowupRowByEmail(...a),
+    lookupFollowupRowByPhone: (...a: unknown[]) => lookupFollowupRowByPhone(...a),
     withdrawHandover: (...a: unknown[]) => withdrawHandover(...a),
   };
 });
@@ -49,6 +51,7 @@ beforeEach(() => {
   readFollowupState.mockReset();
   writeFollowupStatement.mockReset();
   lookupFollowupRowByEmail.mockReset();
+  lookupFollowupRowByPhone.mockReset();
 });
 
 describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
@@ -538,6 +541,53 @@ describe("POST /orgs/campaigns/:campaignId/followups/schedule-by-email", () => {
     const res = await request(app).post(url).set(auth).send({ email: "a@b.com", dueAt: dueNow(), statedBy: { triggerId: "t" } });
     expect(res.status).toBe(400);
     expect(writeFollowupStatement).not.toHaveBeenCalled();
+  });
+
+  describe("a person known by phone only (REPLY-PHONE-ONLY-1015)", () => {
+    it("no email: the E.164 phone identifies the person, made due, answer carries email null + phone", async () => {
+      lookupFollowupRowByPhone.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", phone: "+33612345678" });
+      writeFollowupStatement.mockResolvedValue(state);
+      const res = await request(app)
+        .post(url)
+        .set(auth)
+        .send({ phone: "+33 6 12 34 56 78", dueAt: dueNow(), statedBy: { triggerEventId: "evt-wa", triggerId: "positive_reply_received" } });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ followup: state, leadId: "lead-1", email: null, phone: "+33612345678", madeDue: true, notMadeDue: null });
+      expect(lookupFollowupRowByPhone).toHaveBeenCalledWith({ orgId: "org-1", campaignId: "camp-1", phone: "+33612345678" });
+      expect(lookupFollowupRowByEmail).not.toHaveBeenCalled();
+      expect(writeFollowupStatement).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ROW, kind: "scheduled", statedBy: { triggerEventId: "evt-wa", triggerId: "positive_reply_received" } }),
+      );
+    });
+
+    it("an email given wins: the phone is ignored, the answer is today's", async () => {
+      lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "a@b.com" });
+      writeFollowupStatement.mockResolvedValue(state);
+      const res = await request(app).post(url).set(auth).send({ email: "a@b.com", phone: "+33612345678", dueAt: dueNow() });
+      expect(res.body).toEqual({ followup: state, leadId: "lead-1", email: "a@b.com", madeDue: true, notMadeDue: null });
+      expect(lookupFollowupRowByPhone).not.toHaveBeenCalled();
+    });
+
+    it("400 for a non-E.164 phone or neither identity; 404 / 409 named like the email door", async () => {
+      expect((await request(app).post(url).set(auth).send({ phone: "06 12 34 56 78", dueAt: dueNow() })).status).toBe(400);
+      expect((await request(app).post(url).set(auth).send({ dueAt: dueNow() })).status).toBe(400);
+      lookupFollowupRowByPhone.mockResolvedValueOnce({ ok: false, code: "lead_not_found" });
+      const nf = await request(app).post(url).set(auth).send({ phone: "+33612345678", dueAt: dueNow() });
+      expect(nf.status).toBe(404);
+      expect(nf.body.code).toBe("lead_not_found");
+      lookupFollowupRowByPhone.mockResolvedValueOnce({
+        ok: false,
+        code: "ambiguous_lead",
+        matches: [
+          { id: ROW, leadId: "lead-1", phone: "+33612345678" },
+          { id: "r2", leadId: "lead-2", phone: "+33 6 12 34 56 78" },
+        ],
+      });
+      const amb = await request(app).post(url).set(auth).send({ phone: "+33612345678", dueAt: dueNow() });
+      expect(amb.status).toBe(409);
+      expect(amb.body.code).toBe("ambiguous_lead");
+      expect(writeFollowupStatement).not.toHaveBeenCalled();
+    });
   });
 
   it("404 with a NAMED code when no lead on this campaign holds that address", async () => {
