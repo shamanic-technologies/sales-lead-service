@@ -44,6 +44,14 @@ vi.mock("../../src/lib/sourcing-origin.js", () => ({
   },
 }));
 
+// Tactic "Fresh contacts only" (FRESH-CONTACTS-1015): its SQL runs in tests/integration/recently-emailed-sql.test.ts.
+const leadRecentlyEmailed = vi.fn(async () => false);
+const assertRecentlyEmailedReadable = vi.fn(async () => undefined);
+vi.mock("../../src/lib/recently-emailed.js", () => ({
+  leadRecentlyEmailed: (...args: unknown[]) => leadRecentlyEmailed(...(args as [])),
+  assertRecentlyEmailedReadable: (...args: unknown[]) => assertRecentlyEmailedReadable(...(args as [])),
+}));
+
 const pickRetryCandidate = vi.fn();
 vi.mock("../../src/lib/retry-pool.js", () => ({
   pickRetryCandidate: (...args: unknown[]) => pickRetryCandidate(...args),
@@ -761,5 +769,88 @@ describe("pullNext for a pipe: reach, sources, released people (owner 2026-10-12
     expect(result.found).toBe(true);
     expect(result.lead?.leadId).toBe("lead-9");
     expect(serveNext).not.toHaveBeenCalled();
+  });
+});
+
+describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getCurrentGoal.mockResolvedValue("signup");
+    pickRetryCandidate.mockResolvedValue(null);
+    fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: null });
+    offerChecks.mockResolvedValue([]);
+    checksForWriter.mockResolvedValue({ domain: null, checks: [] });
+    claimReleasedLead.mockResolvedValue(null);
+    fetchAudienceOfferId.mockResolvedValue(null);
+    leadRecentlyEmailed.mockResolvedValue(false);
+    assertRecentlyEmailedReadable.mockResolvedValue(undefined);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  function served(leadId: string, email: string) {
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, email } });
+    upsertLeadFromPerson.mockResolvedValueOnce(leadId);
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce(leadId);
+  }
+
+  it("never hands out a person the brand emailed recently: kept filed under the campaign, the next one is bought", async () => {
+    served("lead-emailed", "emailed@x.com");
+    served("lead-fresh", "fresh@x.com");
+    leadRecentlyEmailed.mockImplementation((async (leadId: string) => leadId === "lead-emailed") as never);
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-fresh" });
+
+    const result = await pullNext({ ...baseParams, excludeEmailedWithin: "3_months" });
+
+    expect(result.found).toBe(true);
+    expect(result.lead?.leadId).toBe("lead-fresh");
+    expect(result.lead?.email).toBe("fresh@x.com");
+    expect(serveNext).toHaveBeenCalledTimes(2);
+    expect(leadRecentlyEmailed).toHaveBeenCalledWith("lead-emailed", { window: "3_months", brandIds: ["brand-1"] });
+    // The skipped person is NOT burnt: filed under the asking campaign (its paid pool hands them out later).
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-emailed", campaignId: "campaign-1", status: "served" }));
+    // No Bonus check paid and no lead built for the skipped person.
+    expect(buildFullLead).toHaveBeenCalledTimes(1);
+    expect(checksForWriter).toHaveBeenCalledTimes(1);
+  });
+
+  it("every pool is asked with the window: this campaign's paid pool and released people", async () => {
+    served("lead-fresh", "fresh@x.com");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-fresh" });
+    await pullNext({ ...baseParams, excludeEmailedWithin: "3_months" });
+    const scope = { window: "3_months", brandIds: ["brand-1"] };
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ recentlyEmailed: scope }));
+    expect(claimReleasedLead).toHaveBeenCalledWith(expect.objectContaining({ recentlyEmailed: scope }));
+    expect(assertRecentlyEmailedReadable).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops after FRESH_SERVE_ATTEMPTS people all emailed recently: found false, recently_emailed (not exhaustion)", async () => {
+    for (let i = 0; i < 5; i++) served(`lead-${i}`, `p${i}@x.com`);
+    leadRecentlyEmailed.mockResolvedValue(true);
+    const result = await pullNext({ ...baseParams, excludeEmailedWithin: "3_months" });
+    expect(result).toEqual({ found: false, reason: "recently_emailed" });
+    expect(serveNext).toHaveBeenCalledTimes(5);
+    expect(buildFullLead).not.toHaveBeenCalled();
+  });
+
+  it("a copy of the sender's facts that never caught up fails the serve before anything is bought", async () => {
+    assertRecentlyEmailedReadable.mockRejectedValueOnce(new Error("not caught up"));
+    await expect(pullNext({ ...baseParams, excludeEmailedWithin: "3_months" })).rejects.toThrow("not caught up");
+    expect(serveNext).not.toHaveBeenCalled();
+    expect(pickRetryCandidate).not.toHaveBeenCalled();
+  });
+
+  it("not asked: today's serve, a recently emailed person is handed out, nothing is looked up", async () => {
+    served("lead-emailed", "emailed@x.com");
+    leadRecentlyEmailed.mockResolvedValue(true);
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-emailed" });
+    const result = await pullNext(baseParams);
+    expect(result.found).toBe(true);
+    expect(result.lead?.leadId).toBe("lead-emailed");
+    expect(serveNext).toHaveBeenCalledTimes(1);
+    expect(leadRecentlyEmailed).not.toHaveBeenCalled();
+    expect(assertRecentlyEmailedReadable).not.toHaveBeenCalled();
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ recentlyEmailed: null }));
   });
 });
