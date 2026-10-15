@@ -6,6 +6,8 @@
  *   AC2 a lead found records exactly one `lead_found` event; finding the same person again records none.
  *   AC3 a positive reply / a form submission (fired by instantly-service / crm-service) records nothing here.
  *   No back-fill; a failed delivery is kept and retried; a refusal is kept and never resent.
+ * Every pass is scoped to this file's org: the suite's files share one database and run in parallel (an unscoped
+ * pass read brand-transfer-sql's seeded sale and moved its count).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -155,7 +157,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     vi.spyOn(console, "error").mockImplementation(() => {});
     // Armed afresh for each case: what is recorded before arming never fires.
     await db.execute(sql`DELETE FROM outcome_trigger_sweep`);
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
   });
 
   afterEach(() => {
@@ -179,7 +181,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     } as const;
     await db.insert(conversionEvents).values(stated);
 
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours()).toHaveLength(1);
     expect(ours()[0].body).toMatchObject({
       triggerId: "meeting_booked",
@@ -192,9 +194,9 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     expect((await rowsOf({ step: "meeting_booked" })).map((r) => r.status)).toEqual(["delivered"]);
 
     // A re-sync reads nothing new; re-marking the person (a second statement row) is the same person: nothing sent.
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     await db.insert(conversionEvents).values({ ...stated, receivedAt: new Date() });
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours()).toHaveLength(1);
     expect((await rowsOf({ step: "meeting_booked" })).map((r) => r.status).sort()).toEqual(["already_fired", "delivered"]);
   });
@@ -231,7 +233,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
       receivedAt: new Date(),
     });
     await crmFact("form_submitted", addr("cy"));
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
 
     expect(ours()).toEqual([]);
     const rows = await rowsOf();
@@ -242,7 +244,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     await crmFact("signup", addr("newcomer"));
     await crmFact("payment", addr("payer"), { payload: { status: "succeeded", amountMinor: 5000, amountRefunded: 0 } });
     await crmFact("payment", addr("declined"), { payload: { status: "failed", amountMinor: 5000, amountRefunded: 0 } });
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
 
     const sent = ours().map((c) => [c.body.triggerId, (c.body.person as { email: string }).email, c.body.offerId]).sort();
     // Not leads: the brand's only active offer is named; no lead id.
@@ -256,7 +258,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
   it("a CRM fact about a lead names the lead and the offers of its campaigns", async () => {
     const leadId = await seedLead("dee");
     await crmFact("meeting_attended", addr("DEE"));
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours().map((c) => c.body)).toEqual([expect.objectContaining({ triggerId: "meeting_attended", leadId, offerId })]);
   });
 
@@ -276,10 +278,26 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
       costCents: 0,
       receivedAt: new Date(),
     });
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours().map((c) => c.body)).toEqual([
       expect.objectContaining({ triggerId: "meeting_booked", leadId: lead.id, offerId, person: { phone } }),
     ]);
+  });
+
+  it("a scoped pass never touches another org's outcomes (the suite's files share one database)", async () => {
+    const foreignOrg = randomUUID();
+    await db.insert(conversionEvents).values({
+      orgId: foreignOrg,
+      brandId: randomUUID(),
+      event: "sale",
+      email: addr("foreign"),
+      matchConfidence: "unmatched",
+      attributionStatus: "unmatched",
+      source: "tracker",
+      receivedAt: new Date(),
+    });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(await db.select().from(outcomeTriggerFires).where(eq(outcomeTriggerFires.orgId, foreignOrg))).toEqual([]);
   });
 
   it("no back-fill: an outcome before arming, or a CRM fact dated outside the window, never fires", async () => {
@@ -296,7 +314,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     });
     await crmFact("meeting_booked", addr("eve"), { occurredAt: new Date(Date.now() - 3 * 24 * 60 * 60_000) });
     await crmFact("signup", addr("undated"), { occurredAt: null });
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours()).toEqual([]);
     expect(await rowsOf()).toEqual([]);
   });
@@ -307,22 +325,22 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     const act = { orgId, brandIds: [brandId], leadCampaignId: row.id, leadId, heldByCampaignId: outreachId, action: "acted", occurredAt: new Date() };
     await db.insert(followupActions).values({ ...act, actingCampaignId: callCampaignId });
     await db.insert(followupActions).values({ ...act, actingCampaignId: otherCampaignId });
-    await sweepOutcomeTriggers();
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours().map((c) => c.body)).toEqual([expect.objectContaining({ triggerId: "booking_call_started", leadId, offerId })]);
   });
 
   it("a door that fails keeps the fire pending and retries it; a refusal is kept and never resent", async () => {
     doorAnswer = () => new Response("down", { status: 503 });
     await crmFact("signup", addr("retry"));
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     const [pending] = await rowsOf({ step: "signup" });
     expect(pending).toMatchObject({ status: "pending", attempts: 1 });
     expect(pending.lastError).toMatch(/503/);
 
     await db.update(outcomeTriggerFires).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outcomeTriggerFires.id, pending.id));
     doorAnswer = () => new Response(JSON.stringify({ event: { id: "evt-1" } }), { status: 201 });
-    await drainOutcomeTriggerFires();
+    await drainOutcomeTriggerFires({ orgIds: [orgId] });
     const [delivered] = await rowsOf({ step: "signup" });
     expect(delivered).toMatchObject({ status: "delivered", campaignEventId: "evt-1", attempts: 2 });
     // Our retry and the first attempt carry the same key: campaign-service records one event.
@@ -331,12 +349,12 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
 
     doorAnswer = () => new Response(JSON.stringify({ reason: "unknown_trigger" }), { status: 400 });
     await crmFact("signup", addr("refused"));
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     const refused = (await rowsOf({ step: "signup" })).find((r) => r.email === addr("refused"));
     expect(refused?.status).toBe("refused");
     const before = ours().length;
     await db.update(outcomeTriggerFires).set({ nextAttemptAt: new Date(Date.now() - 1000) }).where(eq(outcomeTriggerFires.id, refused!.id));
-    await drainOutcomeTriggerFires();
+    await drainOutcomeTriggerFires({ orgIds: [orgId] });
     expect(ours().length).toBe(before);
   });
 
@@ -356,7 +374,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
       }),
     );
     await crmFact("signup", addr("multi"), { brandId: otherBrand });
-    await sweepOutcomeTriggers();
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours()).toEqual([]);
     expect((await rowsOf()).map((r) => [r.status, r.skipReason])).toEqual([["skipped", "offer_unknown"]]);
   });
