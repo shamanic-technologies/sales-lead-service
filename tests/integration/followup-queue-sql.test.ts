@@ -301,6 +301,94 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId })).toBe(false);
   });
 
+  describe("the brand names a handed person through an occurrence (PUSHED-TRUTH-1015)", () => {
+    const HANDED = "Handed to the brand's team: the automated responder could not answer this reply.";
+
+    async function handedRow(): Promise<string> {
+      const id = await seedDueRow(new Date(Date.now() - 60_000));
+      await writeFollowupStatement({ orgId, id, kind: "handed", dueAtIso: null, reason: HANDED, nowMs: Date.now() });
+      return id;
+    }
+    const stateNow = (id: string, triggerEventId: string | null) =>
+      writeFollowupStatement({
+        orgId,
+        id,
+        kind: "scheduled",
+        dueAtIso: new Date(Date.now() - 1_000).toISOString(),
+        reason: null,
+        nowMs: Date.now(),
+        statedBy: triggerEventId ? { triggerEventId, triggerId: "email_pushed_via_api" } : null,
+      });
+    const claimAs = (acting: string) =>
+      pickFollowupCandidate({ orgId, campaignId, runId: null, actingCampaignId: acting, context: { orgId } });
+
+    it("a statement makes the handed person due, the holder claims them ONCE, a responder never", async () => {
+      const id = await handedRow();
+      const before = await readFollowupState(orgId, id);
+
+      const stated = await stateNow(id, "evt-1");
+      expect(stated?.dueAt).not.toBeNull();
+      // The hand-over itself is untouched: time, reason, stop reason.
+      expect(stated).toMatchObject({ handedAt: before?.handedAt, handedReason: HANDED, stoppedReason: HANDED });
+      expect(stated?.statedOccurrence).toMatchObject({ triggerEventId: "evt-1", triggerId: "email_pushed_via_api", closedAt: null });
+
+      // A responder (acting on the holder's queue) is refused, by the read and by a direct claim.
+      expect(await claimAs(actingCampaignId)).toEqual({ claimed: null, reason: "nothing_due" });
+      expect(await claimFollowup({ id, nowMs: Date.now(), runId: null, actingCampaignId })).toBe(false);
+
+      // The holding campaign (its run for the occurrence) claims them.
+      expect((await claimAs(campaignId)).claimed?.id).toBe(id);
+      expect((await readFollowupState(orgId, id))?.statedOccurrence?.closedAt).not.toBeNull();
+
+      // Once: even after the lease expires, the consumed grant opens nothing, for anyone.
+      const later = Date.now() + 2 * 60 * 60 * 1000;
+      expect(await claimFollowup({ id, nowMs: later, runId: null, actingCampaignId: campaignId })).toBe(false);
+      expect(await claimFollowup({ id, nowMs: later, runId: null, actingCampaignId })).toBe(false);
+
+      // The worker acts: the handed row returns to not due.
+      const acted = await writeFollowupStatement({
+        orgId,
+        id,
+        kind: "acted",
+        dueAtIso: new Date(Date.now() + 86_400_000).toISOString(),
+        reason: null,
+        nowMs: Date.now(),
+        actingCampaignId: campaignId,
+      });
+      expect(acted).toMatchObject({ dueAt: null, handedAt: before?.handedAt });
+    });
+
+    it("a redelivered occurrence restates the grant (one more claim), a plain schedule does not", async () => {
+      const id = await handedRow();
+      await stateNow(id, "evt-2");
+      expect((await claimAs(campaignId)).claimed?.id).toBe(id);
+
+      // The run failed: a plain scheduled (no statement) re-enters nothing.
+      await writeFollowupStatement({ orgId, id, kind: "stopped", dueAtIso: null, reason: "x", nowMs: Date.now() });
+      expect((await stateNow(id, null))?.dueAt).toBeNull();
+      // The occurrence is redelivered with the same id: due again, claimable once more by the holder.
+      const restated = await stateNow(id, "evt-2");
+      expect(restated?.statedOccurrence?.closedAt).toBeNull();
+      expect((await claimAs(campaignId)).claimed?.id).toBe(id);
+    });
+
+    it("a hand-over stated after the occurrence closes the open grant", async () => {
+      const id = await handedRow();
+      await stateNow(id, "evt-3");
+      const rehanded = await writeFollowupStatement({ orgId, id, kind: "handed", dueAtIso: null, reason: "a person answered", nowMs: Date.now() });
+      expect(rehanded?.dueAt).toBeNull();
+      expect(rehanded?.statedOccurrence?.closedAt).not.toBeNull();
+      expect(await claimAs(campaignId)).toEqual({ claimed: null, reason: "nothing_due" });
+    });
+
+    it("no statement on a handed row: unchanged, the person stays not due", async () => {
+      const id = await handedRow();
+      const plain = await stateNow(id, null);
+      expect(plain).toMatchObject({ dueAt: null, statedOccurrence: null, stoppedReason: HANDED });
+      expect(await claimAs(campaignId)).toEqual({ claimed: null, reason: "nothing_due" });
+    });
+  });
+
   describe("withdrawing a hand-over whose verdict was wrong", () => {
     const OFF_TOPIC = "The reply is about something other than the offer; handed to a person, the automated responder does not answer it";
 

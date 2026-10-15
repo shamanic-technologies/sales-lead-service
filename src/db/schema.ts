@@ -304,6 +304,13 @@ export const leadsCampaigns = pgTable(
     //                           Another campaign = that campaign's ladder on a predecessor's person: anyone but
     //                           the holder claims it. NULL = an observer said "due" (a reply, a trigger): anyone.
     followupDueSetByCampaignId: text("followup_due_set_by_campaign_id"),
+    // followup_stated_* — the trigger occurrence through which the BRAND named this person and made them due
+    //                           (migration 0092, PUSHED-TRUTH-1015). An open grant (event id set, closed_at
+    //                           NULL) is the ONE thing that makes a handed row claimable: by the holder, once.
+    followupStatedEventId: text("followup_stated_event_id"),
+    followupStatedTriggerId: text("followup_stated_trigger_id"),
+    followupStatedAt: timestamp("followup_stated_at", { withTimezone: true }),
+    followupStatedClosedAt: timestamp("followup_stated_closed_at", { withTimezone: true }),
     // --- Source stock (src/lib/source-stock.ts, migration 0068) ---
     // A source unit's own run stores the lead it found under the SOURCE campaign (status_reason 'source_found');
     // the outreach campaign that takes it claims the row here, once. NULL on every other row.
