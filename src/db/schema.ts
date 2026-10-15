@@ -1133,6 +1133,60 @@ export const triggerEventOutbox = pgTable(
 );
 
 /**
+ * Every outcome reach this service recorded for a person and what its OUTCOME TRIGGER did at campaign-service
+ * (migration 0094, EVERY-OUTCOME-FIRES-1015; src/lib/outcome-triggers.ts). ONCE per (org, brand, offer, step,
+ * person) while a fire is live (`pending`/`delivered`/`refused`); one row per (source record, offer).
+ */
+export const outcomeTriggerFires = pgTable(
+  "outcome_trigger_fires",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceRef: text("source_ref").notNull(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    /** '' = no offer could be named (status `skipped`, `offer_unknown`). */
+    offerId: text("offer_id").notNull(),
+    /** features-service's outcome (step) key: `lead_found`, `meeting_booked`, `paid_client`... */
+    step: text("step").notNull(),
+    /** `lead:<lead id>` or `email:<canonical address>`. */
+    personKey: text("person_key").notNull(),
+    leadId: uuid("lead_id"),
+    email: text("email"),
+    name: text("name"),
+    phone: text("phone"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    /** serve | tracker | manual | crm_fact | acted */
+    source: text("source").notNull(),
+    /** pending | delivered | refused | skipped | already_fired */
+    status: text("status").notNull(),
+    triggerId: text("trigger_id"),
+    skipReason: text("skip_reason"),
+    campaignEventId: text("campaign_event_id"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_otf_source_offer").on(table.sourceRef, table.offerId),
+    uniqueIndex("idx_otf_person_once")
+      .on(table.orgId, table.brandId, table.offerId, table.step, table.personKey)
+      .where(sql`status IN ('pending', 'delivered', 'refused')`),
+    index("idx_otf_due").on(table.nextAttemptAt).where(sql`status = 'pending'`),
+  ],
+);
+
+/** The outcome detector's state (migration 0094): armed once (no back-fill), where each cursor stands. */
+export const outcomeTriggerSweep = pgTable("outcome_trigger_sweep", {
+  id: text("id").primaryKey(),
+  armedAt: timestamp("armed_at", { withTimezone: true }).notNull(),
+  crmFactSeq: bigint("crm_fact_seq", { mode: "bigint" }).notNull(),
+  actsCreatedAt: timestamp("acts_created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
  * A person the brand's own organization named to us (migration 0079, PUSHED-PERSON-KNOWN-1014):
  * the evidence that the brand knows them, read by the named-person door. Append-only.
  */

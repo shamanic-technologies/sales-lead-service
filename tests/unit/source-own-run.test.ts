@@ -78,6 +78,12 @@ vi.mock("../../src/lib/writer-checks.js", () => ({
   checksForWriter: (...args: unknown[]) => checksForWriter(...args),
 }));
 
+// The `lead_found` outcome trigger (src/lib/outcome-triggers.ts) has its own suites: here only WHEN a serve rings it.
+const noteLeadFound = vi.fn();
+vi.mock("../../src/lib/outcome-triggers.js", () => ({
+  noteLeadFound: (...args: unknown[]) => noteLeadFound(...args),
+}));
+
 const insertValues = vi.fn();
 vi.mock("../../src/db/index.js", () => ({
   db: {
@@ -183,6 +189,8 @@ describe("pullNext find mode (a source unit's own run)", () => {
     expect(claimStockedLead).not.toHaveBeenCalled();
     // Hard filters read back only: the Bonus check (writer context) is paid when an outreach campaign takes the lead.
     expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-1" }, [{ id: "c-hard", mode: "must_pass" }], expect.anything());
+    // The source FOUND the person: lead_found rings under the source unit and its offer.
+    expect(noteLeadFound).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", campaignId: UNIT, offerId: "offer-1" }));
   });
 
   it("every audience walked and empty = audience_exhausted (the one answer that means nobody left)", async () => {
@@ -287,6 +295,8 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
     );
     expect(serveNext).not.toHaveBeenCalled();
     expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-9", apolloPersonId: "ap-9" }, [{ id: "c-bonus", mode: "mention" }], expect.anything());
+    // A stocked find was FOUND by its source: handing it to the outreach pipe finds nobody new.
+    expect(noteLeadFound).not.toHaveBeenCalled();
   });
 
   it("asks human-service, for the brand and org of the serve, whether each stocked find still fits its audience", async () => {

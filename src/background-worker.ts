@@ -23,6 +23,7 @@ import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
 import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
 import { startSocialEngagementsWorker } from "./lib/social-engagements.js";
 import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
+import { startOutcomeTriggerWorker } from "./lib/outcome-triggers.js";
 import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
 import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
@@ -58,6 +59,9 @@ startSocialEngagementsWorker();
 startBrandSignupsWorker(({ orgId, brandId }) => syncBrandOnce(orgId, brandId));
 // Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
+// Every outcome a person reaches (CRM fact, outcome ledger, booking call) rings its outcome trigger at campaign-service
+// once, and every undelivered ring is retried (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015).
+startOutcomeTriggerWorker();
 // A lead is a human (human-service) at a company (brand-service): resolves both for every lead and
 // writes every employer's firmographics to brand-service (lead-identity-sweep.ts).
 startLeadIdentityWorker();
@@ -87,7 +91,7 @@ ensureReadModelSearchIndex(connectionString).catch((error: unknown) => {
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, lead-identity, human-events, human-opt-outs, lead-timezone, relationship-sweep, channel-send-reconcile");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, outcome-triggers, lead-identity, human-events, human-opt-outs, lead-timezone, relationship-sweep, channel-send-reconcile");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);
