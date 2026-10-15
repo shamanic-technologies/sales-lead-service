@@ -236,15 +236,39 @@ export interface ServiceContext {
    * forwards it to crm-service for a CRM-sourced serve. Absent = no key on the wire.
    */
   relationships?: RelationshipPolicy;
+  /**
+   * The pipe's CRM funnel-step filter (CRM-WARM-NURTURE-1015), sent VERBATIM as `stepFilter` on serve-next and
+   * candidates/next: human-service forwards it to crm-service, which owns the step vocabulary and validates it.
+   * Absent = no key on the wire.
+   */
+  stepFilter?: StepFilter;
 }
 
-/** The serve body: what the pipe states (`reachableBy`, `acceptedEmails`, `relationships`), else `{}` (today's bytes). */
+/**
+ * crm-service's `stepFilter` (`{ reached?: Step[], notReached?: Step[] }`), carried as an OPAQUE object: lead-service
+ * never re-models or validates the step vocabulary (crm-service answers 400 on a bad step, surfaced loudly).
+ */
+export type StepFilter = Record<string, unknown>;
+
+/** The serve body: what the pipe states (`reachableBy`, `acceptedEmails`, `relationships`, `stepFilter`), else `{}` (today's bytes). */
 export function serveBody(ctx: ServiceContext): Record<string, unknown> {
   return {
     ...(ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {}),
     ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
     ...(ctx.relationships ? { relationships: ctx.relationships } : {}),
+    ...(ctx.stepFilter ? { stepFilter: ctx.stepFilter } : {}),
   };
+}
+
+/**
+ * A downstream refusal of the request the pipe stated (human-service / crm-service 400 on the `stepFilter`): an error
+ * answer of buffer/next, never `found:false` posing as an empty pool.
+ */
+export function isStepFilterRefusal(error: unknown, stepFilter: StepFilter | null | undefined): error is { status: number; message: string } {
+  if (!stepFilter) return false;
+  const status = (error as { status?: unknown } | null)?.status;
+  const named = error instanceof PeopleServiceError || (error instanceof Error && error.name === "AudienceFitError");
+  return named && status === 400;
 }
 
 function buildHeaders(ctx: ServiceContext): Record<string, string> {

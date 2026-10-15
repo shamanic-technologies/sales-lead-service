@@ -3,7 +3,7 @@ import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
-import { serveNext, type Person, type ReachMethod, type ServiceContext } from "./people-client.js";
+import { serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
 import { serveThroughCandidates } from "./candidate-serve.js";
@@ -108,6 +108,12 @@ interface PullNextParams {
    * every fresh serve and applied to every pool. Absent = nothing asked (today).
    */
   relationships?: RelationshipPolicy;
+  /**
+   * The pipe's CRM funnel-step filter (CRM-WARM-NURTURE-1015), opaque: forwarded verbatim on every fresh serve (and its
+   * candidates walk) and on every still-fits question at stock handover. The RELEASED pool is skipped when it is stated
+   * (its people were served under another pipe's rules and nothing here can vouch for their steps).
+   */
+  stepFilter?: StepFilter;
   /**
    * The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve; the
    * campaign's retry / released pools still drain, then the answer names this reason.
@@ -219,6 +225,7 @@ export async function pullNext(
     ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
     ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
     ...(params.relationships ? { relationships: params.relationships } : {}),
+    ...(params.stepFilter ? { stepFilter: params.stepFilter } : {}),
   };
   // What the pools filter on: the pipe's own word, else, for a pipe serving a source's stock, the person as the source
   // found them (CATCHALL-SOURCE-OWNS-1014: which emails a source keeps is the source pipe's strategy; a pipe stating
@@ -431,7 +438,8 @@ export async function pullNext(
 
   // RELEASED: a person another pipe of the brand served and could not reach on ITS channel (src/lib/released-pool.ts),
   // that this pipe can. Paid for once already: taken before buying anyone new.
-  if (!finding) {
+  // A pipe stating a step filter never takes a released person: no crm-service answer about their steps here.
+  if (!finding && !params.stepFilter) {
     const released = await claimReleasedLead({
       orgId: params.orgId,
       campaignId: params.campaignId,
@@ -553,7 +561,7 @@ export async function pullNext(
       askFit: async ({ sourceCampaignId, ...q }) => {
         const belongs = await judgeSourceAudience(sourceCampaignId, q.audienceId);
         if (!belongs.belongs) return { fits: false, reason: belongs.reason };
-        return askAudienceFit({ ...q, brandId: params.brandId }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
+        return askAudienceFit({ ...q, brandId: params.brandId, ...(params.stepFilter ? { stepFilter: params.stepFilter } : {}) }, { orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
       },
       // A contacted pure prospect (no audience): still owed a prospect follow-up now? Same verdict a writer reads.
       askStillOwed: async (sourceRowId) => {
