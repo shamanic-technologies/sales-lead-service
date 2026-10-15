@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
@@ -44,6 +45,7 @@ import { assertRecentlyEmailedReadable, leadRecentlyEmailed } from "./recently-e
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { noteLeadFound } from "./outcome-triggers.js";
 import { isAudienceNotServeableError } from "./people-client.js";
+import { prepareNamedServe, type NamedLeadRequest } from "./named-lead-serve.js";
 
 /**
  * What this serve does (src/lib/source-mode.ts, LEADS-ONLY-FUNNEL-CAMPAIGN 2026-10-12):
@@ -56,9 +58,13 @@ import { isAudienceNotServeableError } from "./people-client.js";
  *   find_contacted — a source unit's own run whose lead strategy is the brand's CONTACTED PURE PROSPECTS
  *           (body `population: "contacted_pure_prospects"`, NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts):
  *           like `find`, but from people the brand already emailed, each at most once per brand; nothing is bought.
+ *   named — the run's trigger occurrence NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
+ *           src/lib/named-lead-serve.ts): exactly that person, filed on this campaign, or a named refusal. No pool, no
+ *           audience, nothing bought but the one enrichment of a person known only by an email.
  */
 export type PullNextMode =
   | { kind: "serve" }
+  | { kind: "named"; named: NamedLeadRequest }
   | { kind: "find"; audienceIds: string[] }
   | { kind: "find_contacted" }
   | { kind: "stock"; sourceCampaignIds: string[] };
@@ -141,6 +147,10 @@ interface PullNextResult {
    * `audience_exhausted` says a population ran out — see serve-reasons.ts.
    */
   reason?: ServeEmptyReason;
+  /** A named serve's refusal only (src/lib/named-lead-serve.ts): one sentence a client can read. */
+  message?: string;
+  /** A named serve's empty answer only: true = a retry cannot change it, false = wait and ask again. */
+  final?: boolean;
   lead?: {
     leadId: string;
     email: string;
@@ -298,6 +308,54 @@ export async function pullNext(
   };
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+
+  // NAMED: the person the run's occurrence names, on this campaign, or why not. Never another person.
+  if (mode.kind === "named") {
+    const decision = await prepareNamedServe({
+      orgId: params.orgId,
+      brandId: params.brandId,
+      campaignId: params.campaignId,
+      named: mode.named,
+      sender: params.poolSender ?? "email",
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      context: { userId: params.userId ?? null, workflowSlug: params.workflowSlug ?? null, featureSlug: params.runFeatureSlug },
+    });
+    if (!decision.ok) {
+      console.log(
+        `[lead-service] pullNext found=false named campaign=${params.campaignId} lead=${mode.named.leadId} event=${mode.named.triggerEventId} reason=${decision.reason} final=${decision.final}`,
+      );
+      return { found: false, reason: decision.reason, message: decision.message, final: decision.final };
+    }
+    const namedLead = await buildFullLead(mode.named.leadId);
+    const qualification = await writerChecks(namedLead);
+    const [stored] = (await db.execute(sql`
+      SELECT audience_id::text AS audience_id, buying_signal, person_id::text AS person_id, goal
+      FROM leads_campaigns WHERE id = ${decision.leadCampaignId}::uuid
+    `)) as unknown as Array<{ audience_id: string | null; buying_signal: unknown; person_id: string | null; goal: string | null }>;
+    console.log(
+      `[lead-service] pullNext found=true source=named campaign=${params.campaignId} lead=${mode.named.leadId} event=${mode.named.triggerEventId}`,
+    );
+    return {
+      found: true,
+      lead: {
+        leadId: mode.named.leadId,
+        email: decision.email,
+        data: namedLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: namedLead.apolloPersonId ?? null,
+        goal: stored?.goal ?? goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: stored?.audience_id ?? null,
+        buyingSignal: readBuyingSignal(stored?.buying_signal ?? null),
+        ...(stored?.person_id ? { personId: stored.person_id } : {}),
+        qualification,
+      },
+    };
+  }
 
   // 3. Drain the already-paid pool BEFORE buying anyone new.
   //

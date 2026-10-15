@@ -924,3 +924,90 @@ describe("POST /orgs/buffer/next — the pipe's reach and its sources (owner 202
     expect(resolveServeSource).not.toHaveBeenCalled();
   });
 });
+
+describe("POST /orgs/buffer/next — a serve that NAMES its person (LEAD-NAMED-SERVE-1015)", () => {
+  let app: express.Express;
+  beforeAll(async () => {
+    const { default: route } = await import("../../src/routes/buffer.js");
+    app = express();
+    app.use(express.json());
+    app.use(route);
+  }, 30_000);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    findFirst.mockResolvedValue(undefined);
+    checkConcurrentBufferNext.mockResolvedValue({ blocked: false });
+    decideSourceMode.mockResolvedValue({ kind: "today", read: null });
+    createRun.mockResolvedValue({ id: "serve-run-named" });
+    updateRun.mockResolvedValue(undefined);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  const LEAD = "60000000-0000-4000-8000-000000000001";
+  let n = 0;
+  function postNamed(body: Record<string, unknown>) {
+    n++;
+    return request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", `${RUN.slice(0, -2)}${String(n).padStart(2, "0")}`)
+      .set("x-campaign-id", `${CAMPAIGN}-named-${n}`)
+      .set("x-brand-id", BRAND)
+      .set("x-feature-slug", "sales-cold-email-outreach")
+      .send(body);
+  }
+
+  it("serves in mode `named`, reads no source and records no on-demand ask", async () => {
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: LEAD, email: "kevin+x@distribute.you", data: {} } });
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-1" } });
+    expect(res.status).toBe(200);
+    expect(res.body.found).toBe(true);
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: { kind: "named", named: { leadId: LEAD, triggerEventId: "evt-1" } } }),
+      expect.anything(),
+    );
+    expect(decideSourceMode).not.toHaveBeenCalled();
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("passes a named refusal through: code, sentence, final", async () => {
+    pullNext.mockResolvedValueOnce({ found: false, reason: "named_lead_unwritable", message: "We only know this person's email address.", final: true });
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-2" } });
+    expect(res.body).toEqual({ found: false, reason: "named_lead_unwritable", message: "We only know this person's email address.", final: true });
+  });
+
+  it("a timed-out look is a stated wait", async () => {
+    pullNext.mockResolvedValueOnce({ found: false, reason: "serve_timed_out" });
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-3" } });
+    expect(res.body).toMatchObject({ found: false, reason: "serve_timed_out", final: false });
+    expect(typeof res.body.message).toBe("string");
+  });
+
+  it("credit refused is a stated wait", async () => {
+    pullNext.mockRejectedValueOnce(Object.assign(new Error("insufficient credit"), { name: "InsufficientCreditError" }));
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-4" } });
+    expect(res.body).toMatchObject({ found: false, reason: "credit_insufficient", final: false });
+  });
+
+  it("refuses namedLead with population (400), and a malformed namedLead (400)", async () => {
+    const both = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-5" }, population: "contacted_pure_prospects" });
+    expect(both.status).toBe(400);
+    expect(both.body.error).toBe("named_lead_excludes_population");
+    const bad = await postNamed({ namedLead: { leadId: "not-a-uuid", triggerEventId: "evt-6" } });
+    expect(bad.status).toBe(400);
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("a body without namedLead is today's serve (no `named` mode, no message/final added)", async () => {
+    pullNext.mockResolvedValueOnce({ found: false, reason: "no_audience" });
+    const res = await postNamed({});
+    expect(res.body).toEqual({ found: false, reason: "no_audience" });
+    expect((pullNext.mock.calls[0][0] as Record<string, unknown>).mode).toBeUndefined();
+    expect(decideSourceMode).toHaveBeenCalled();
+  });
+});

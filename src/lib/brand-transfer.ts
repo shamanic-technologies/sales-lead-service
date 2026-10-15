@@ -208,6 +208,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "prospect_followup_handouts", touchesUpdatedAt: false },
       // What each person's outcome triggers did (EVERY-OUTCOME-FIRES-1015): once per person, so it moves with them.
       { table: "outcome_trigger_fires", touchesUpdatedAt: false },
+      // Which trigger occurrences named which person on which campaign (LEAD-NAMED-SERVE-1015).
+      { table: "named_lead_serves", touchesUpdatedAt: false },
     ];
     // A person's outcome trigger fires ONCE per (org, brand, offer, outcome): a live fire the target already holds
     // for the same person makes the source's copy redundant, so it is dropped rather than colliding on the move.

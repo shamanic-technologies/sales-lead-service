@@ -57,10 +57,29 @@
               "audience_offer_mismatch",
               "no_recent_posts",
               "contacted_prospects_none_owed",
-              "recently_emailed"
+              "recently_emailed",
+              "named_lead_not_filed",
+              "named_lead_no_email",
+              "named_lead_suppressed",
+              "named_lead_already_worked",
+              "named_lead_in_send_queue",
+              "named_lead_sender_refuses",
+              "named_lead_sender_finished",
+              "named_lead_unwritable",
+              "named_lead_sender_unreadable"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` names a source campaign that is off; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
+          },
+          "message": {
+            "type": "string",
+            "description": "Named serves only (body `namedLead`), on found=false: one sentence a client can read saying why the named person was not handed out.",
+            "example": "This person was already emailed for this request."
+          },
+          "final": {
+            "type": "boolean",
+            "description": "Named serves only (body `namedLead`), on found=false: true = a retry cannot change the answer (end the occurrence as refused); false = wait and ask again later.",
+            "example": true
           }
         },
         "required": [
@@ -1445,9 +1464,32 @@
             ],
             "description": "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
             "example": "contacted_pure_prospects"
+          },
+          "namedLead": {
+            "type": "object",
+            "properties": {
+              "leadId": {
+                "type": "string",
+                "format": "uuid",
+                "description": "The lead the run's trigger occurrence names (lead-service lead id; campaign-service `trigger.leadId`).",
+                "example": "3946e857-0000-4000-8000-000000000000"
+              },
+              "triggerEventId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The trigger occurrence (campaign-service event id). A redelivered run of the same occurrence carries the same one.",
+                "example": "3bbee428-0000-4000-8000-000000000000"
+              }
+            },
+            "required": [
+              "leadId",
+              "triggerEventId"
+            ],
+            "additionalProperties": false,
+            "description": "LEAD-NAMED-SERVE-1015: the run works the person its trigger occurrence NAMES. The serve hands out EXACTLY that person (filed on the asking campaign of the org, e.g. by POST /orgs/campaigns/{id}/leads/by-email), in the same served shape as any serve, never another person; no audience is read (x-audience-id ignored), nothing is bought except ONE enrichment (treg people.enrich, billed to the org on the serve run) of a person known only by an email with no first name and no company. Otherwise `found:false` with `reason` (a `named_lead_*` code, or `credit_insufficient` / `serve_timed_out`), `message` (one sentence a client can read) and `final` (true = a retry cannot change it: end the occurrence as refused; false = wait, ask again later). Codes: `named_lead_not_filed`, `named_lead_no_email`, `named_lead_suppressed` (opted out, do not contact, unsubscribed, bounced), `named_lead_already_worked` (a redelivered run of an occurrence whose earlier run already got the person sent or queued; an earlier run that failed before sending gets the person again), `named_lead_in_send_queue`, `named_lead_sender_refuses`, `named_lead_sender_finished`, `named_lead_unwritable` (no name or company even after enrichment), all final; `named_lead_sender_unreadable`, `credit_insufficient`, `serve_timed_out` are waits. Who-to-find options (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`) do not apply to a named person; `population` with it = 400 `named_lead_excludes_population`. Absent = today's serve, bytes unchanged."
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`), all optional; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `namedLead`), all optional; an empty body is today's serve."
       },
       "LeadsResponse": {
         "type": "object",

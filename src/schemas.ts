@@ -1026,10 +1026,21 @@ export const BufferNextRequestSchema = z
         "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
       example: "contacted_pure_prospects",
     }),
+    namedLead: z
+      .object({
+        leadId: z.string().uuid().openapi({ description: "The lead the run's trigger occurrence names (lead-service lead id; campaign-service `trigger.leadId`).", example: "3946e857-0000-4000-8000-000000000000" }),
+        triggerEventId: z.string().min(1).openapi({ description: "The trigger occurrence (campaign-service event id). A redelivered run of the same occurrence carries the same one.", example: "3bbee428-0000-4000-8000-000000000000" }),
+      })
+      .strict()
+      .optional()
+      .openapi({
+        description:
+          "LEAD-NAMED-SERVE-1015: the run works the person its trigger occurrence NAMES. The serve hands out EXACTLY that person (filed on the asking campaign of the org, e.g. by POST /orgs/campaigns/{id}/leads/by-email), in the same served shape as any serve, never another person; no audience is read (x-audience-id ignored), nothing is bought except ONE enrichment (treg people.enrich, billed to the org on the serve run) of a person known only by an email with no first name and no company. Otherwise `found:false` with `reason` (a `named_lead_*` code, or `credit_insufficient` / `serve_timed_out`), `message` (one sentence a client can read) and `final` (true = a retry cannot change it: end the occurrence as refused; false = wait, ask again later). Codes: `named_lead_not_filed`, `named_lead_no_email`, `named_lead_suppressed` (opted out, do not contact, unsubscribed, bounced), `named_lead_already_worked` (a redelivered run of an occurrence whose earlier run already got the person sent or queued; an earlier run that failed before sending gets the person again), `named_lead_in_send_queue`, `named_lead_sender_refuses`, `named_lead_sender_finished`, `named_lead_unwritable` (no name or company even after enrichment), all final; `named_lead_sender_unreadable`, `credit_insufficient`, `serve_timed_out` are waits. Who-to-find options (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`) do not apply to a named person; `population` with it = 400 `named_lead_excludes_population`. Absent = today's serve, bytes unchanged.",
+      }),
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`), all optional; an empty body is today's serve.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `namedLead`), all optional; an empty body is today's serve.",
   });
 
 export const ServedBuyingSignalSchema = z
@@ -1258,6 +1269,14 @@ export const BufferNextResponseSchema = z
           "not-exhaustion.",
         example: "audience_exhausted",
       }),
+    message: z.string().optional().openapi({
+      description: "Named serves only (body `namedLead`), on found=false: one sentence a client can read saying why the named person was not handed out.",
+      example: "This person was already emailed for this request.",
+    }),
+    final: z.boolean().optional().openapi({
+      description: "Named serves only (body `namedLead`), on found=false: true = a retry cannot change the answer (end the occurrence as refused); false = wait and ask again later.",
+      example: true,
+    }),
   })
   .openapi("BufferNextResponse", {
     description:
