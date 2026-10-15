@@ -728,6 +728,23 @@ describe("pullNext for a pipe: reach, sources, released people (owner 2026-10-12
     expect(serveNext).not.toHaveBeenCalled();
   });
 
+  // CRM-WARM-NURTURE-1015: the pipe's step filter rides every fresh serve; a released person is never vouched for.
+  it("a stepFilter rides the fresh serve verbatim and the released pool is never asked", async () => {
+    const stepFilter = { reached: ["meeting_booked"], notReached: ["sale"] };
+    served(person);
+    const result = await pullNext({ ...baseParams, stepFilter });
+    expect(result.found).toBe(true);
+    expect(serveNext).toHaveBeenCalledWith("aud-1", expect.objectContaining({ stepFilter }));
+    expect(claimReleasedLead).not.toHaveBeenCalled();
+  });
+
+  it("no stepFilter: none in the serve context, the released pool asked as today", async () => {
+    served(person);
+    await pullNext(baseParams);
+    expect(serveNext.mock.calls[0][1]).not.toHaveProperty("stepFilter");
+    expect(claimReleasedLead).toHaveBeenCalled();
+  });
+
   it("a person another pipe released is taken before anyone is bought", async () => {
     claimReleasedLead.mockResolvedValueOnce({
       releasedRowId: "row-0",

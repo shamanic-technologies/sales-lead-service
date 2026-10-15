@@ -52,6 +52,7 @@ vi.mock("../../src/lib/trace-event.js", () => ({
 vi.mock("../../src/lib/people-client.js", () => ({
   AUDIENCE_NOT_SERVEABLE_REASON: "audience_not_serveable",
   isAudienceNotServeableError: () => false,
+  isStepFilterRefusal: (e: { status?: number } | null, f: unknown) => !!f && e?.status === 400,
 }));
 
 const resolveSourcingOriginSlug = vi.fn();
@@ -680,6 +681,80 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
     expect(res.status).toBe(200);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"], mode: { kind: "find", audienceIds: ["aud-1", "aud-2"] } }), expect.anything());
+  });
+
+  // --- CRM-WARM-NURTURE-1015: the pipe's CRM funnel-step filter, crm-service's vocabulary, carried verbatim ---
+  const STEP_FILTER = { reached: ["form_submission", "meeting_booked"], notReached: ["sale", "disqualified"] };
+
+  it("a source unit's own run passes its stepFilter VERBATIM to the serve", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    const res = await postAsUnit(undefined, { stepFilter: { ...STEP_FILTER, futureKey: ["x"] } });
+
+    expect(res.status).toBe(200);
+    expect(pullNext.mock.calls[0][0].stepFilter).toEqual({ ...STEP_FILTER, futureKey: ["x"] });
+  });
+
+  it("a run stating no stepFilter passes none (today's serve)", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    await postAsUnit();
+
+    expect(pullNext.mock.calls[0][0]).not.toHaveProperty("stepFilter");
+  });
+
+  it("a stepFilter crm-service refuses (400 downstream) is a 400 step_filter_refused, never found:false, nothing cached", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockRejectedValueOnce(Object.assign(new Error('People gateway call failed: 400 - {"error":"unknown step: meeting"}'), { status: 400 }));
+
+    const res = await postAsUnit(undefined, { stepFilter: { reached: ["meeting"] } });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("step_filter_refused");
+    expect(res.body.detail).toContain("unknown step: meeting");
+    expect(res.body).not.toHaveProperty("found");
+    expect(insertValues).not.toHaveBeenCalled();
+    expect(updateRun).toHaveBeenCalledWith("serve-run-1", "failed", expect.anything());
+  });
+
+  it("a downstream 400 on a run stating NO stepFilter stays today's 500", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockRejectedValueOnce(Object.assign(new Error("People gateway call failed: 400 - bad"), { status: 400 }));
+
+    const res = await postAsUnit();
+
+    expect(res.status).toBe(500);
+  });
+
+  it("stepFilter with population is a 400 (the contacted people are walked where no step filter applies), nothing served", async () => {
+    const res = await postAsUnit(undefined, { population: "contacted_pure_prospects", stepFilter: STEP_FILTER });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("step_filter_needs_audience_serve");
+    expect(decideSourceMode).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("a stepFilter that is not an object, or a step list that is not strings, is a 400", async () => {
+    for (const stepFilter of ["sale", ["sale"], { reached: "sale" }, { notReached: [1] }]) {
+      const res = await postAsUnit(undefined, { stepFilter });
+      expect(res.status).toBe(400);
+    }
+    expect(pullNext).not.toHaveBeenCalled();
   });
 
   it("a reachableBy outside email|phone, or empty, is a 400 and nothing is bought", async () => {

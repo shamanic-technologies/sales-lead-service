@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PeopleServiceError,
   serveNext,
+  serveBody,
+  isStepFilterRefusal,
   isPeopleCreditInsufficientError,
   isAudienceNotServeableError,
   type Person,
@@ -166,5 +168,32 @@ describe("people-client serveNext: the serving pipe's reach on the wire", () => 
     const { calls } = mockFetch({ status: "exhausted", person: null });
     await serveNext("aud-123", ctx);
     expect(JSON.parse(String(calls[0].init.body))).toEqual({});
+  });
+});
+
+// CRM-WARM-NURTURE-1015: crm-service's step filter, carried verbatim on the wire; absent = today's bytes.
+describe("people-client stepFilter", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("serve-next carries the pipe's stepFilter byte for byte", async () => {
+    const stepFilter = { reached: ["form_submission", "meeting_booked"], notReached: ["sale", "disqualified"] };
+    const { calls } = mockFetch({ status: "served", person });
+    await serveNext("aud-123", { ...ctx, stepFilter });
+    expect(calls[0].init.body).toBe(JSON.stringify({ stepFilter }));
+  });
+
+  it("no stepFilter: the body is byte-identical to today's", async () => {
+    const { calls } = mockFetch({ status: "served", person });
+    await serveNext("aud-123", { ...ctx, relationships: "business_only" });
+    expect(calls[0].init.body).toBe(JSON.stringify({ relationships: "business_only" }));
+    expect(serveBody(ctx)).toEqual({});
+  });
+
+  it("a 400 is a step-filter refusal only when the pipe stated one", () => {
+    const err = new PeopleServiceError(400, '{"error":"unknown step"}');
+    expect(isStepFilterRefusal(err, { reached: ["x"] })).toBe(true);
+    expect(isStepFilterRefusal(err, undefined)).toBe(false);
+    expect(isStepFilterRefusal(new PeopleServiceError(502, "down"), { reached: ["x"] })).toBe(false);
+    expect(isStepFilterRefusal(new Error("boom"), { reached: ["x"] })).toBe(false);
   });
 });

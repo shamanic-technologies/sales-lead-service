@@ -11,7 +11,7 @@ import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
-import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError } from "../lib/people-client.js";
+import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError, isStepFilterRefusal } from "../lib/people-client.js";
 import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
 import { poolSenderOf, type PoolSender } from "../lib/retry-pool.js";
@@ -56,6 +56,14 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   const parsed = BufferNextRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+  }
+  // The step filter is crm-service's answer about a person of an AUDIENCE (CRM-WARM-NURTURE-1015): the brand's contacted
+  // people are walked here, where nobody could apply it, so the two are never stated together (never a silent drop).
+  if (parsed.data.stepFilter && parsed.data.population) {
+    return res.status(400).json({
+      error: "step_filter_needs_audience_serve",
+      detail: `stepFilter applies to people served from an audience (crm-service judges their funnel steps); population "${parsed.data.population}" walks no audience`,
+    });
   }
 
   const campaignId = req.campaignId;
@@ -405,6 +413,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         ...(poolSender === "channel" ? { poolSender } : {}),
         ...(acceptedEmails ? { acceptedEmails } : {}),
         ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),
+        ...(parsed.data.stepFilter ? { stepFilter: parsed.data.stepFilter } : {}),
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,
@@ -484,6 +493,20 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       }
       recordAsk({ outcome: "skipped", reason: AUDIENCE_NOT_SERVEABLE_REASON });
       return res.json(result);
+    }
+
+    if (isStepFilterRefusal(error, parsed.data.stepFilter)) {
+      // The pipe stated a step filter the people's owner refused (crm-service 400 on a step): the WORKFLOW is wrong,
+      // never an empty pool. Loud, nothing served, nothing cached (a corrected workflow re-asks with a new run).
+      console.error(`[lead-service] buffer/next step_filter_refused campaign=${campaignId}: ${error.message}`);
+      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-step-filter-refused", level: "error", detail: error.message }, req.headers).catch(() => {});
+      try {
+        await updateRun(serveRunId, "failed", runMeta);
+        await closeOnDemand("failed");
+      } catch (runErr) {
+        console.error("[lead-service] Failed to close run after step-filter refusal:", runErr);
+      }
+      return res.status(400).json({ error: "step_filter_refused", detail: error.message });
     }
 
     console.error("[lead-service] buffer/next error:", error);
