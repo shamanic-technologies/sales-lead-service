@@ -50,6 +50,11 @@
  *   recently_emailed       — the serve asked for fresh contacts only (`excludeEmailedWithin`, FRESH-CONTACTS-1015)
  *                            and every person a fresh serve bought in this call had been emailed by the brand inside
  *                            the window (each stays filed under the asking campaign for later). Not exhaustion.
+ *
+ *   named_lead_*           — a serve that NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
+ *                            src/lib/named-lead-serve.ts) could not hand that person out. Each answer also
+ *                            carries `message` (a sentence a client can read) and `final` (true = a retry cannot
+ *                            change it; false = wait and ask again). Never about any population.
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
  * not-exhaustion, and only an explicit equality test gives that.
@@ -67,6 +72,19 @@ export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_owed" as const;
 export const RECENTLY_EMAILED_REASON = "recently_emailed" as const;
+/** Named-person serves (src/lib/named-lead-serve.ts): why the named person cannot be worked by this run. */
+export const NAMED_LEAD_REASONS = [
+  "named_lead_not_filed",
+  "named_lead_no_email",
+  "named_lead_suppressed",
+  "named_lead_already_worked",
+  "named_lead_in_send_queue",
+  "named_lead_sender_refuses",
+  "named_lead_sender_finished",
+  "named_lead_unwritable",
+  "named_lead_sender_unreadable",
+] as const;
+export type NamedLeadReason = (typeof NAMED_LEAD_REASONS)[number];
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -82,6 +100,7 @@ export const SERVE_EMPTY_REASONS = [
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
   RECENTLY_EMAILED_REASON,
+  ...NAMED_LEAD_REASONS,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];

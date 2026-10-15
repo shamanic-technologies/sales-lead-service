@@ -66,6 +66,16 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     });
   }
 
+  // The person the run's trigger occurrence names (LEAD-NAMED-SERVE-1015, src/lib/named-lead-serve.ts): that person or a
+  // named refusal. Who to FIND (population) means nothing for a person already named: stating both is refused.
+  const named = parsed.data.namedLead ?? null;
+  if (named && parsed.data.population) {
+    return res.status(400).json({
+      error: "named_lead_excludes_population",
+      detail: `namedLead names the person to serve; population "${parsed.data.population}" names whom a source finds. State one.`,
+    });
+  }
+
   const campaignId = req.campaignId;
   const brandIds = req.brandIds ?? [];
 
@@ -175,98 +185,101 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     // Who says whether a served person was contacted: the sender of the channel's own method (WA-RESERVE-LOOP-1014).
     poolSender = poolSenderOf(channelMethods);
 
-    const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
-    if (population && sourceMode.kind !== "own_run") {
-      // Who a source finds is ITS pipe's lead strategy: only a source unit's own run may state a population.
-      inFlightOutreach.delete(campaignId);
-      return res.status(400).json({
-        error: "population_needs_source_unit",
-        detail: `population "${population}" is a source pipe's lead strategy: x-campaign-id ${campaignId} (${featureSlug}) is not a lead source campaign (leg start_to_lead_found) running on its own`,
-      });
-    }
-
-    if (sourceMode.kind === "own_run") {
-      // The source unit's OWN run: in its own audiences, filed under itself.
-      const unit = sourceMode.unit;
-      ownRunUnit = unit;
-      runFeatureSlug = unit.featureSlug;
-      if (unit.status !== "ongoing") {
-        serveSource = { kind: "refused", reason: SOURCE_CAMPAIGN_OFF_REASON, campaignId: unit.id, detail: `source campaign ${unit.id} (${unit.featureSlug}) is ${unit.status}` };
-      } else {
-        // What it may spend is its sales funnel's caps, enforced by billing at every spend authorization.
-        if (population) {
-          // Found among the brand's own contacted people (src/lib/prospect-followup.ts): nothing to walk, nothing bought.
-        } else {
-          const found = await resolveSourceAudiences({
-            orgId: req.orgId!,
-            brandId: unit.brandId,
-            offerId: unit.offerId,
-            unitSlug: unit.featureSlug,
-            preferredAudienceId: req.audienceId ?? null,
-            userId: req.userId ?? null,
-            runId,
-          });
-          // Audiences that just answered nobody under this policy go last, so each run reaches further.
-          findAudienceIds = orderByEmptyAnswers(found.audienceIds, await loadEmptyAnswers(unit.id, acceptedEmails));
-        }
+    // A NAMED serve (LEAD-NAMED-SERVE-1015) hands out the person its occurrence names: no source, no audience.
+    if (!named) {
+      const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
+      if (population && sourceMode.kind !== "own_run") {
+        // Who a source finds is ITS pipe's lead strategy: only a source unit's own run may state a population.
+        inFlightOutreach.delete(campaignId);
+        return res.status(400).json({
+          error: "population_needs_source_unit",
+          detail: `population "${population}" is a source pipe's lead strategy: x-campaign-id ${campaignId} (${featureSlug}) is not a lead source campaign (leg start_to_lead_found) running on its own`,
+        });
       }
-    } else {
-      const sourcesRead = sourceMode.read;
-      if (req.audienceId) {
-        try {
-          const origin = await resolveSourcingOriginSlug({
-            audienceId: req.audienceId,
-            orgId: req.orgId!,
-            outreachFeatureSlug: featureSlug,
-          });
-          if (origin) runFeatureSlug = origin;
-        } catch (err) {
-          if (err instanceof OriginNotFedError) {
-            // A source that does not feed this pipe: nobody is served from it here, never "keeping the label".
-            console.error(`[lead-service] buffer/next origin_not_fed campaign=${campaignId} ${err.message}`);
-            freshServeRefused = { reason: ORIGIN_NOT_FED_REASON, detail: err.message };
+
+      if (sourceMode.kind === "own_run") {
+        // The source unit's OWN run: in its own audiences, filed under itself.
+        const unit = sourceMode.unit;
+        ownRunUnit = unit;
+        runFeatureSlug = unit.featureSlug;
+        if (unit.status !== "ongoing") {
+          serveSource = { kind: "refused", reason: SOURCE_CAMPAIGN_OFF_REASON, campaignId: unit.id, detail: `source campaign ${unit.id} (${unit.featureSlug}) is ${unit.status}` };
+        } else {
+          // What it may spend is its sales funnel's caps, enforced by billing at every spend authorization.
+          if (population) {
+            // Found among the brand's own contacted people (src/lib/prospect-followup.ts): nothing to walk, nothing bought.
           } else {
+            const found = await resolveSourceAudiences({
+              orgId: req.orgId!,
+              brandId: unit.brandId,
+              offerId: unit.offerId,
+              unitSlug: unit.featureSlug,
+              preferredAudienceId: req.audienceId ?? null,
+              userId: req.userId ?? null,
+              runId,
+            });
+            // Audiences that just answered nobody under this policy go last, so each run reaches further.
+            findAudienceIds = orderByEmptyAnswers(found.audienceIds, await loadEmptyAnswers(unit.id, acceptedEmails));
+          }
+        }
+      } else {
+        const sourcesRead = sourceMode.read;
+        if (req.audienceId) {
+          try {
+            const origin = await resolveSourcingOriginSlug({
+              audienceId: req.audienceId,
+              orgId: req.orgId!,
+              outreachFeatureSlug: featureSlug,
+            });
+            if (origin) runFeatureSlug = origin;
+          } catch (err) {
+            if (err instanceof OriginNotFedError) {
+              // A source that does not feed this pipe: nobody is served from it here, never "keeping the label".
+              console.error(`[lead-service] buffer/next origin_not_fed campaign=${campaignId} ${err.message}`);
+              freshServeRefused = { reason: ORIGIN_NOT_FED_REASON, detail: err.message };
+            } else {
+              console.error(
+                `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
+                err,
+              );
+              throw err;
+            }
+          }
+        }
+
+        if (runFeatureSlug !== featureSlug) {
+          try {
+            serveSource = await resolveServeSource({
+              orgId: req.orgId!,
+              brandId,
+              outreachCampaignId: campaignId,
+              originSlug: runFeatureSlug,
+              userId: req.userId ?? null,
+              runId,
+              ...(sourcesRead ? { read: sourcesRead } : {}),
+            });
+            // The run carries the slug of the source campaign it is filed under: the origin, or Lead Sourcing
+            // (whose serves keep their origin on the audience they served from).
+            if (serveSource.kind === "source") runFeatureSlug = serveSource.sourceSlug;
+          } catch (err) {
             console.error(
-              `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
+              `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,
               err,
             );
             throw err;
           }
         }
-      }
 
-      if (runFeatureSlug !== featureSlug) {
-        try {
-          serveSource = await resolveServeSource({
-            orgId: req.orgId!,
-            brandId,
-            outreachCampaignId: campaignId,
-            originSlug: runFeatureSlug,
-            userId: req.userId ?? null,
-            runId,
-            ...(sourcesRead ? { read: sourcesRead } : {}),
-          });
-          // The run carries the slug of the source campaign it is filed under: the origin, or Lead Sourcing
-          // (whose serves keep their origin on the audience they served from).
-          if (serveSource.kind === "source") runFeatureSlug = serveSource.sourceSlug;
-        } catch (err) {
-          console.error(
-            `[lead-service] buffer/next source campaign unresolved runId=${runId} campaignId=${campaignId} origin=${runFeatureSlug}:`,
-            err,
-          );
-          throw err;
-        }
-      }
-
-      if (sourceMode.kind === "stock") {
-        // Sources of this offer find on their own: serve their stock, never find on demand from them. The one
-        // exception is an audience whose origin resolves to a source that still answers on demand (the switch is
-        // per source): that serve is today's, byte for byte.
-        const onDemandSource = serveSource.kind === "source" && !sourceMode.sourceCampaignIds.includes(serveSource.campaignId);
-        if (!onDemandSource) {
-          stockSourceIds = sourceMode.sourceCampaignIds;
-          serveSource = { kind: "legacy", why: "offer_not_on_source_campaigns" };
-          runFeatureSlug = featureSlug;
+        if (sourceMode.kind === "stock") {
+          // Sources of this offer find on their own: serve their stock, never find on demand from them. The one
+          // exception is an audience whose origin resolves to a source that still answers on demand (the switch is
+          // per source): that serve is today's, byte for byte.
+          const onDemandSource = serveSource.kind === "source" && !sourceMode.sourceCampaignIds.includes(serveSource.campaignId);
+          if (!onDemandSource) {
+            stockSourceIds = sourceMode.sourceCampaignIds;
+            serveSource = { kind: "legacy", why: "offer_not_on_source_campaigns" };
+            runFeatureSlug = featureSlug;
+          }
         }
       }
     }
@@ -340,7 +353,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // Every answered ask is recorded as ONE `on_demand` trigger event at campaign-service
   // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
   const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
-    ownRunUnit || stockSourceIds
+    ownRunUnit || stockSourceIds || named
       ? undefined
       : recordLeadRequested({
       orgId: req.orgId!,
@@ -383,7 +396,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   }
 
   const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
-  const pullMode: PullNextMode | null = ownRunUnit
+  const pullMode: PullNextMode | null = named
+    ? { kind: "named", named }
+    : ownRunUnit
     ? population
       ? { kind: "find_contacted" }
       : { kind: "find", audienceIds: findAudienceIds }
@@ -419,6 +434,12 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       },
       pullSignal,
     );
+
+    // A named serve's empty answer always says whether to wait: a timed-out look is a wait.
+    if (named && !result.found && result.final === undefined) {
+      result.message = "We ran out of time looking this person up. We will try again shortly.";
+      result.final = false;
+    }
 
     // Who the served person is to the brand (RELATIONSHIP-TAGS-1014): the writer reads it before writing. Cached
     // with the answer, so a replay serves the same block.
@@ -466,7 +487,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   } catch (error) {
     if (isCreditInsufficientError(error)) {
       console.log(`[lead-service] buffer/next found=false reason=credit_insufficient campaign=${campaignId}`);
-      const result = { found: false, reason: CREDIT_INSUFFICIENT_REASON };
+      // A named serve's wait is stated as one (the occurrence is redelivered once credit is back).
+      const result = named
+        ? { found: false, reason: CREDIT_INSUFFICIENT_REASON, message: "Your balance cannot cover looking this person up. We will try again once it is topped up.", final: false }
+        : { found: false, reason: CREDIT_INSUFFICIENT_REASON };
       traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-credit-insufficient", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
       try {
         await updateRun(serveRunId, "completed", runMeta);
