@@ -464,13 +464,25 @@ async function deliverIds(ids: string[]): Promise<void> {
 }
 
 /** Redeliver every due pending row once (claimed with a lease, so two threads never take the same row). */
-export async function drainOutcomeTriggerFires(): Promise<Record<DeliveryResult, number>> {
+/**
+ * Narrows a pass to some orgs. Only the integration suite states it (its files share one database and run in
+ * parallel: an unscoped pass read another file's rows and moved its counts). Absent = every org, always in prod.
+ */
+export interface OutcomeSweepScope {
+  orgIds: readonly string[];
+}
+
+function inScope(column: ReturnType<typeof sql>, scope: OutcomeSweepScope | null): ReturnType<typeof sql> {
+  return scope ? sql`AND ${column} = ANY(${sql.param([...scope.orgIds])}::text[])` : sql``;
+}
+
+export async function drainOutcomeTriggerFires(scope: OutcomeSweepScope | null = null): Promise<Record<DeliveryResult, number>> {
   const counts: Record<DeliveryResult, number> = { delivered: 0, skipped: 0, refused: 0, retry: 0 };
   const due = (await db.execute(sql`
     UPDATE outcome_trigger_fires SET next_attempt_at = now() + ${`${DRAIN_LEASE_MS} milliseconds`}::interval
     WHERE id IN (
       SELECT id FROM outcome_trigger_fires
-      WHERE status = 'pending' AND next_attempt_at <= now()
+      WHERE status = 'pending' AND next_attempt_at <= now() ${inScope(sql`org_id`, scope)}
       ORDER BY next_attempt_at
       LIMIT ${DRAIN_BATCH}
       FOR UPDATE SKIP LOCKED
@@ -561,7 +573,7 @@ interface CrmFactRow {
 }
 
 /** New CRM facts since the cursor, in copy order. A failure stops at that fact: the cursor never passes it. */
-async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pending: string[]): Promise<number> {
+async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
   let reaches = 0;
   for (let batch = 0; batch < CRM_FACT_BATCHES_PER_TICK; batch++) {
     const facts = (await db.execute(sql`
@@ -578,7 +590,7 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
     let cursor = state.crmFactSeq;
     try {
       for (const f of facts) {
-        const step = stepOfCrmFact(f.type);
+        const step = scope && !scope.orgIds.includes(f.org_id) ? null : stepOfCrmFact(f.type);
         const at = toIsoTimestamp(f.occurred_at);
         const emails = canonicalEmails(f.emails ?? []);
         const reaches_ =
@@ -638,14 +650,14 @@ interface LedgerRow {
 }
 
 /** Outcome-ledger rows (not the CRM's: their record is the fact copy) inside the fresh window, not yet read. */
-async function sweepLedger(state: SweepState, now: Date, lookups: Lookups, pending: string[]): Promise<number> {
+async function sweepLedger(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
   const rows = (await db.execute(sql`
     SELECT ce.id::text AS id, ce.org_id, ce.brand_id, ce.event, ce.email, ce.phone,
       NULLIF(trim(concat_ws(' ', ce.first_name, ce.last_name)), '') AS name,
       ce.received_at, ce.source, ce.campaign_id,
       CASE WHEN ce.attribution_status = 'attributed' THEN ce.matched_lead_id::text END AS lead_id
     FROM conversion_events ce
-    WHERE ce.withdrawn_at IS NULL
+    WHERE ce.withdrawn_at IS NULL ${inScope(sql`ce.org_id`, scope)}
       AND ce.source <> 'crm'
       AND ce.event = ANY(${sql.param([...LEDGER_REACH_EVENTS])}::text[])
       AND ce.received_at >= ${freshSince(state.armedAt, now).toISOString()}::timestamptz
@@ -698,12 +710,12 @@ interface ActRow {
 }
 
 /** `acted` rows of an AI Instant Call campaign: a booking call placed with the person (booking-calls.ts). */
-async function sweepBookingCalls(state: SweepState, now: Date, lookups: Lookups, pending: string[]): Promise<number> {
+async function sweepBookingCalls(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
   const from = new Date(Math.max(state.armedAt.getTime(), state.actsCreatedAt.getTime() - ACTS_OVERLAP_MS));
   const acts = (await db.execute(sql`
     SELECT fa.id::text AS id, fa.org_id, fa.brand_ids, fa.lead_id::text AS lead_id, fa.acting_campaign_id, fa.occurred_at, fa.created_at
     FROM followup_actions fa
-    WHERE fa.action = 'acted' AND fa.acting_campaign_id IS NOT NULL
+    WHERE fa.action = 'acted' AND fa.acting_campaign_id IS NOT NULL ${inScope(sql`fa.org_id`, scope)}
       AND fa.created_at >= ${from.toISOString()}::timestamptz
     ORDER BY fa.created_at
     LIMIT ${LEDGER_BATCH}
@@ -754,7 +766,10 @@ let sweeping = false;
  * One pass: read every new reach, write it, ring the door for the new ones, then redeliver what is due.
  * Each source fails on its own (logged loud, retried next pass); a failure never moves a cursor past a reach.
  */
-export async function sweepOutcomeTriggers(now: Date = new Date()): Promise<{ crmFacts: number; ledger: number; bookingCalls: number; drained: Record<DeliveryResult, number> }> {
+export async function sweepOutcomeTriggers(
+  now: Date = new Date(),
+  scope: OutcomeSweepScope | null = null,
+): Promise<{ crmFacts: number; ledger: number; bookingCalls: number; drained: Record<DeliveryResult, number> }> {
   const empty = { delivered: 0, skipped: 0, refused: 0, retry: 0 };
   if (sweeping) return { crmFacts: 0, ledger: 0, bookingCalls: 0, drained: empty };
   sweeping = true;
@@ -770,11 +785,11 @@ export async function sweepOutcomeTriggers(now: Date = new Date()): Promise<{ cr
         return 0;
       }
     };
-    const crmFacts = await run("crm facts", () => sweepCrmFacts(state, now, lookups, pending));
-    const ledger = await run("outcome ledger", () => sweepLedger(state, now, lookups, pending));
-    const bookingCalls = await run("booking calls", () => sweepBookingCalls(state, now, lookups, pending));
+    const crmFacts = await run("crm facts", () => sweepCrmFacts(state, now, lookups, pending, scope));
+    const ledger = await run("outcome ledger", () => sweepLedger(state, now, lookups, pending, scope));
+    const bookingCalls = await run("booking calls", () => sweepBookingCalls(state, now, lookups, pending, scope));
     await deliverIds(pending);
-    const drained = await drainOutcomeTriggerFires();
+    const drained = await drainOutcomeTriggerFires(scope);
     if (crmFacts + ledger + bookingCalls + drained.delivered + drained.retry + drained.refused > 0) {
       console.log(
         `[lead-service] outcome trigger sweep: reaches crm=${crmFacts} ledger=${ledger} booking_calls=${bookingCalls}; ` +
