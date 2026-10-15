@@ -1,6 +1,7 @@
 import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import type { AudienceFitVerdict } from "./source-stock.js";
+import type { StepFilter } from "./people-client.js";
 
 /**
  * Does a person a source found earlier STILL fit the audience they were found for, right now? (STILL-FITS-1012)
@@ -17,7 +18,8 @@ import type { AudienceFitVerdict } from "./source-stock.js";
 
 // Deployed wire contract (human-service v0.50.10, STILL-FITS-1012; direct to HUMAN_SERVICE_URL, X-API-Key):
 //   POST {HUMAN_SERVICE_URL}/internal/audiences/still-fits
-//   Body: { orgId, audienceId, brandId, email, personId: string|null }
+//   Body: { orgId, audienceId, brandId, email, personId: string|null, stepFilter? }  (stepFilter: the pipe's own, verbatim,
+//   CRM-WARM-NURTURE-1015; absent = no key, today's bytes)
 //   200:  { fits: true, basis } | { fits: false, reason: "<plain words>", basis, failed: [{code, reason}] }
 //   404 audience_not_found · 422 { error, code } the person cannot be judged · 502 crm-service down
 const FIT_PATH = "/internal/audiences/still-fits";
@@ -32,7 +34,7 @@ export class AudienceFitError extends Error {
 }
 
 export async function askAudienceFit(
-  question: { audienceId: string; brandId: string; email: string; personId: string | null },
+  question: { audienceId: string; brandId: string; email: string; personId: string | null; stepFilter?: StepFilter },
   ctx: { orgId: string; userId?: string | null; runId?: string | null },
 ): Promise<AudienceFitVerdict> {
   const headers: Record<string, string> = {

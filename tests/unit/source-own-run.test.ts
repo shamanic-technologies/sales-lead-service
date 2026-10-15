@@ -303,6 +303,20 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
     );
   });
 
+  it("a pipe stating a stepFilter asks the still-fits question WITH it, verbatim (CRM-WARM-NURTURE-1015)", async () => {
+    const stepFilter = { reached: ["form_submission"], notReached: ["sale", "disqualified"] };
+    claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
+    judgeSourceAudience.mockResolvedValueOnce({ belongs: true });
+    askAudienceFit.mockResolvedValueOnce({ fits: true });
+    await pullNext({ ...stockParams(), stepFilter });
+    const { askFit } = claimStockedLead.mock.calls[0][0] as { askFit: (q: unknown) => Promise<unknown> };
+    await askFit({ sourceCampaignId: UNIT, audienceId: "aud-7", email: "x@acme.com", personId: null });
+    expect(askAudienceFit).toHaveBeenCalledWith(
+      { audienceId: "aud-7", email: "x@acme.com", personId: null, brandId: "brand-1", stepFilter },
+      expect.objectContaining({ orgId: "org-1" }),
+    );
+  });
+
   it("a find that is not the holding source's own (another offer, origin or funnel audience) is set aside, human-service never asked", async () => {
     claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
     judgeSourceAudience.mockResolvedValueOnce({ belongs: false, reason: "Found in audience aud-apollo, whose own list is sourcing-apollo-cold-filters" });

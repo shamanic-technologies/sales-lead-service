@@ -31,4 +31,24 @@ describe("audience fit client", () => {
       askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null }, { orgId: "o" }),
     ).rejects.toThrow(/404/);
   });
+
+  it("carries the pipe's stepFilter verbatim; absent = today's body (CRM-WARM-NURTURE-1015)", async () => {
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: string, init: RequestInit) => {
+      bodies.push(init.body as string);
+      return new Response(JSON.stringify({ fits: true }), { status: 200 });
+    }));
+    const stepFilter = { notReached: ["sale"] };
+    await askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null, stepFilter }, { orgId: "o" });
+    await askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null }, { orgId: "o" });
+    expect(JSON.parse(bodies[0])).toEqual({ orgId: "o", audienceId: "a", brandId: "b", email: "x@y.z", personId: null, stepFilter });
+    expect(bodies[1]).toBe(JSON.stringify({ orgId: "o", audienceId: "a", brandId: "b", email: "x@y.z", personId: null }));
+  });
+
+  it("a 400 on the stated stepFilter throws an AudienceFitError (status 400), never fits", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response('{"error":"unknown step"}', { status: 400 })));
+    await expect(
+      askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null, stepFilter: { reached: ["nope"] } }, { orgId: "o" }),
+    ).rejects.toMatchObject({ name: "AudienceFitError", status: 400 });
+  });
 });
