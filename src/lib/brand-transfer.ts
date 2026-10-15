@@ -206,7 +206,20 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "relationship_merge_questions", touchesUpdatedAt: false },
       // Who was handed to the contacted-pure-prospects population (NEVER-NO-FOLLOWUP-1014): once per brand, ever.
       { table: "prospect_followup_handouts", touchesUpdatedAt: false },
+      // What each person's outcome triggers did (EVERY-OUTCOME-FIRES-1015): once per person, so it moves with them.
+      { table: "outcome_trigger_fires", touchesUpdatedAt: false },
     ];
+    // A person's outcome trigger fires ONCE per (org, brand, offer, outcome): a live fire the target already holds
+    // for the same person makes the source's copy redundant, so it is dropped rather than colliding on the move.
+    await tx.execute(sql`
+      DELETE FROM outcome_trigger_fires s
+      WHERE ${brandScalarPending}
+        AND s.status IN ('pending', 'delivered', 'refused')
+        AND EXISTS (SELECT 1 FROM outcome_trigger_fires t
+                    WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.id <> s.id
+                      AND t.offer_id = s.offer_id AND t.step = s.step AND t.person_key = s.person_key
+                      AND t.status IN ('pending', 'delivered', 'refused'))
+    `);
     for (const { table, touchesUpdatedAt } of scalarTables) {
       moved.push({
         tableName: table,

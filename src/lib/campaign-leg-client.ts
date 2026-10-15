@@ -64,6 +64,21 @@ export async function fetchOrgCampaignOffers(ctx: CampaignLegContext): Promise<M
   return byId;
 }
 
+/** Every campaign of one org with the leg and the offer it states (null = states none) — one read. */
+export async function fetchOrgCampaignFacts(
+  ctx: CampaignLegContext,
+): Promise<Map<string, { legKey: string | null; offerId: string | null }>> {
+  const byId = new Map<string, { legKey: string | null; offerId: string | null }>();
+  for (const row of await fetchOrgCampaignRows(ctx)) {
+    if (!row?.id) continue;
+    byId.set(row.id, {
+      legKey: typeof row.legKey === "string" && row.legKey.length > 0 ? servedLegKey(row.featureSlug, row.legKey) : null,
+      offerId: typeof row.offerId === "string" && row.offerId.length > 0 ? row.offerId : null,
+    });
+  }
+  return byId;
+}
+
 async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaignRow[]> {
   const headers: Record<string, string> = {
     "X-API-Key": CAMPAIGN_SERVICE_API_KEY,
