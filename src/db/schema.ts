@@ -1142,7 +1142,10 @@ export const brandPersonStatements = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     orgId: text("org_id").notNull(),
     brandId: text("brand_id").notNull(),
-    email: text("email").notNull(),
+    /** Canonical address; NULL for a person stated by phone only (migration 0093). */
+    email: text("email"),
+    /** E.164, set for a person stated by phone only (REPLY-PHONE-ONLY-1015). */
+    phone: text("phone"),
     source: text("source").notNull(),
     sourceRef: text("source_ref").notNull(),
     triggerId: text("trigger_id"),
@@ -1153,5 +1156,9 @@ export const brandPersonStatements = pgTable(
   (table) => [
     uniqueIndex("idx_bps_key").on(table.orgId, table.brandId, table.email, table.source, table.sourceRef),
     index("idx_bps_brand_email").on(table.orgId, table.brandId, table.email),
+    uniqueIndex("idx_bps_phone_key")
+      .on(table.orgId, table.brandId, table.phone, table.source, table.sourceRef)
+      .where(sql`email IS NULL`),
+    index("idx_bps_brand_phone").on(table.orgId, table.brandId, table.phone).where(sql`phone IS NOT NULL`),
   ],
 );

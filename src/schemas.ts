@@ -5466,7 +5466,8 @@ const FollowupClaimSchema = z
               leadCampaignId: z.string().openapi({ description: "The due leads_campaigns row, now stopped (followup_stopped_reason relationship_not_a_lead): the queue never offers it again unless a later `scheduled` re-enters it." }),
               leadId: z.string(),
               campaignId: z.string().openapi({ description: "The held campaign whose row it is." }),
-              email: z.string().openapi({ description: "The person's canonical email (match the occurrence on it)." }),
+              email: z.string().nullable().openapi({ description: "The person's canonical email (match the occurrence on it); null for a person known by phone only." }),
+              phone: z.string().nullable().openapi({ description: "The person's phone as registered (match a phone-only occurrence on it), null when none." }),
               reason: z.enum(["not_a_lead"]).openapi({ description: "Forward verbatim. not_a_lead: the brand knows this person as something other than a prospect (tags / unsureTags say what)." }),
               tags: z.array(z.string()).openapi({ description: "Relationship tags other than prospect held as yes (personal, customer, team, investor, advisor, supplier, partner, other_professional)." }),
               unsureTags: z.array(z.string()).openapi({ description: "Tags other than prospect still unsure: never assumed a lead." }),
@@ -5479,7 +5480,8 @@ const FollowupClaimSchema = z
               leadCampaignId: z.string(),
               leadId: z.string(),
               campaignId: z.string(),
-              email: z.string(),
+              email: z.string().nullable(),
+              phone: z.string().nullable(),
               reason: z.enum(["human_unknown", "relationship_not_built", "relationship_not_judged", "same_person_question_open"]).openapi({
                 description:
                   "Why this person cannot be decided yet. human_unknown: the lead has no human id yet (identity sweep). relationship_not_built: a CRM fact of the brand names the address and the relationship sweep has not built the person yet. relationship_not_judged: a subject never judged and the on-demand judgment failed or this call's budget was spent. same_person_question_open: an unanswered \"same person?\" question names them (review page).",
@@ -5497,7 +5499,11 @@ const FollowupClaimSchema = z
         leadId: z.string().openapi({ description: "The person." }),
         campaignId: z.string().openapi({ description: "The campaign." }),
         brandId: z.string().openapi({ description: "The brand the delivery evidence was read for." }),
-        email: z.string().openapi({ description: "The person's canonical email." }),
+        email: z.string().nullable().openapi({
+          description:
+            "The person's canonical email. NULL for a person known by phone only (a WhatsApp writer, REPLY-PHONE-ONLY-1015): `phone` identifies them; their opt-out is their human's live opt_out / do_not_contact fact.",
+        }),
+        phone: z.string().nullable().openapi({ description: "The person's first registered phone (E.164 as stored), null when none." }),
         audienceId: z.string().nullable().openapi({ description: "The audience the row carries, if any." }),
         dueAt: z.string().nullable().openapi({ description: "When this action became owed." }),
         followupCount: z.number().int().openapi({ description: "Follow-ups taken so far." }),
@@ -5662,10 +5668,14 @@ registry.registerPath({
 
 const ScheduleFollowupByEmailRequestSchema = z
   .object({
-    email: z.string().openapi({
+    email: z.string().nullish().openapi({
       description:
-        "The person's email address. Matched EXACTLY (case-folded equality against the registered contact method) and never fuzzily: writing the debt onto the wrong person's row makes us email somebody who never replied, which cannot be taken back.",
+        "The person's email address. Matched EXACTLY (case-folded equality against the registered contact method) and never fuzzily: writing the debt onto the wrong person's row makes us email somebody who never replied, which cannot be taken back. Whenever present it identifies the person (phone ignored). Required unless `phone` is given.",
       example: "prospect@example.com",
+    }),
+    phone: z.string().nullish().openapi({
+      description: "Identifies the person ONLY when `email` is absent (REPLY-PHONE-ONLY-1015: a WhatsApp writer known by phone + name). Must then be E.164 (separators accepted: \"+33 6 12-34-56-78\" reads +33612345678; a national number with no country code is a 400). Matched EXACTLY on the registered phone contact method (separators ignored), never fuzzily.",
+      example: "+33612345678",
     }),
     dueAt: z.string().openapi({
       description:
@@ -5730,8 +5740,9 @@ registry.registerPath({
         "application/json": {
           schema: z.object({
             followup: FollowupStateSchema,
-            leadId: z.string().openapi({ description: "The person the address resolved to." }),
-            email: z.string().openapi({ description: "The registered address, as stored." }),
+            leadId: z.string().openapi({ description: "The person the address (or phone) resolved to." }),
+            email: z.string().nullable().openapi({ description: "The registered address, as stored; null when the person was identified by phone." }),
+            phone: z.string().optional().openapi({ description: "Present only when identified by phone: the registered phone, as stored." }),
             madeDue: z.boolean().openapi({
               description: "Whether the person is due now as stated (followup.dueAt not null). false = nobody will claim them on this statement.",
             }),
@@ -5750,16 +5761,16 @@ registry.registerPath({
     },
     400: {
       description:
-        "Missing campaignId or x-org-id, a missing/invalid email, an unparseable dueAt (code due_date_unparseable), or one outside the accepted range (code due_date_out_of_bounds, with the bounds)",
+        "Missing campaignId or x-org-id, neither an email nor a phone, a phone that is not E.164 when no email is given, an unparseable dueAt (code due_date_unparseable), or one outside the accepted range (code due_date_out_of_bounds, with the bounds)",
     },
     401: { description: "Unauthorized" },
     404: {
       description:
-        "No lead on this campaign holds that email address (code lead_not_found). A named refusal, never a silent no-op.",
+        "No lead on this campaign holds that email address (or phone) (code lead_not_found). A named refusal, never a silent no-op.",
     },
     409: {
       description:
-        "That address matches more than one lead row on this campaign (code ambiguous_lead, with the matches). Refused rather than resolved by picking one.",
+        "That address (or phone) matches more than one lead row on this campaign (code ambiguous_lead, with the matches). Refused rather than resolved by picking one.",
     },
     500: { description: "Internal server error" },
   },
@@ -7206,9 +7217,9 @@ const NamedPersonCampaignParam = z.object({
 
 const NamedPersonRequestSchema = z
   .object({
-    email: z.string().min(3).openapi({
+    email: z.string().min(3).nullish().openapi({
       description:
-        "The person's email address. Case-folded. Must already be known to the campaign's brand, unless `statedBy` states it.",
+        "The person's email address. Case-folded. Must already be known to the campaign's brand, unless `statedBy` states it. Whenever present it identifies the person (email-first, unchanged). Required unless `phone` is given.",
       example: "marie@example.com",
     }),
     statedBy: z
@@ -7233,8 +7244,12 @@ const NamedPersonRequestSchema = z
     }),
     phone: z.string().min(3).max(50).nullish().openapi({
       description:
-        "The person's phone as the statement carries it, international form preferred (+44 7700 900123). Recorded as the lead's " +
-        "phone (unless another lead already holds it) and read to infer the person's timezone when none is stated.",
+        "The person's phone as the statement carries it, international form preferred (+44 7700 900123). With an email: recorded as the lead's " +
+        "phone (unless another lead already holds it) and read to infer the person's timezone when none is stated. WITHOUT an email: it " +
+        "IDENTIFIES the person and must be E.164 (separators accepted; 400 otherwise): known to the brand = a live CRM fact of the brand " +
+        "carrying the phone, a lead of the brand carrying it, or `statedBy`; the lead is the one whose phone contact method is that number " +
+        "(several = 409 ambiguous_lead), else a new lead carrying the phone (name from the CRM fact, else `name`); suppression = the human's " +
+        "live opt_out / do_not_contact (409 person_suppressed). REPLY-PHONE-ONLY-1015.",
       example: "+447700900123",
     }),
     timezone: z.string().max(64).nullish().openapi({
@@ -7257,7 +7272,8 @@ const NamedPersonResponseSchema = z
     }),
     campaignId: z.string(),
     brandId: z.string(),
-    email: z.string(),
+    email: z.string().nullable().openapi({ description: "The canonical address; null when the person was identified by phone." }),
+    phone: z.string().optional().openapi({ description: "Present only when the person was identified by phone (E.164)." }),
     servedAt: z.string().openapi({ description: "When the person became a lead of the brand on this campaign (ISO 8601)." }),
     knownBy: z.enum(["crm_fact", "brand_lead", "statement"]).openapi({
       description:
@@ -7341,7 +7357,7 @@ registry.registerPath({
     "So the person reads as a lead of the brand at once in every read (lists, standing `not_contacted` until " +
     "something is sent, timeline, CRM pairing). IDEMPOTENT per (person, campaign): a second call answers the " +
     "same row with status already_filed. To make the person due later: `POST /orgs/campaigns/{campaignId}/" +
-    "followups/schedule-by-email` with the same email, then the campaign's worker claims them via " +
+    "followups/schedule-by-email` with the same email (or, for a person identified by phone only, the same phone), then the campaign's worker claims them via " +
     "`/followups/claim-next` (a debt scheduled after the campaign was created is never handed over as " +
     "owed_before_responder_started).",
   request: {
@@ -7355,15 +7371,15 @@ registry.registerPath({
       description: "Already filed on this campaign: the same row, nothing written",
       content: { "application/json": { schema: NamedPersonResponseSchema } },
     },
-    400: { description: "Missing x-org-id, or `email` is not an address" },
+    400: { description: "Missing x-org-id, `email` is not an address, or no email and a `phone` that is missing or not E.164" },
     401: { description: "Unauthorized" },
     404: {
       description:
-        "campaign-service holds no such campaign for this org (code campaign_not_found), or the brand does not know the address (code person_not_known). Nothing written.",
+        "campaign-service holds no such campaign for this org (code campaign_not_found), or the brand does not know the address / phone (code person_not_known). Nothing written.",
     },
     409: {
       description:
-        "The campaign states no brand (code campaign_has_no_brand), the address is registered on more than one lead (code ambiguous_lead, with leadIds), or a stated person may not be contacted (code person_suppressed, with reason). Nothing written.",
+        "The campaign states no brand (code campaign_has_no_brand), the address (or phone) is registered on more than one lead (code ambiguous_lead, with leadIds), or a stated person may not be contacted (code person_suppressed, with reason). Nothing written.",
     },
     502: { description: "campaign-service or the database did not answer (code filing_unavailable). Nothing filed; retry." },
   },
