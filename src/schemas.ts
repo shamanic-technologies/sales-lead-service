@@ -4701,6 +4701,84 @@ registry.registerPath({
   },
 });
 
+// --- Follow-up owed read (WA-REACTIVE-LOOP-1016) ---
+
+const FollowupOwedHeldSchema = z
+  .object({
+    campaignId: z.string(),
+    owedNow: z.boolean(),
+    nextOwedAt: z.string().nullable().openapi({
+      description: "Earliest moment strictly after asOf at which someone on this held campaign becomes owed; null = nobody scheduled.",
+    }),
+  })
+  .openapi("FollowupOwedHeld");
+
+export const FollowupOwedRequestSchema = z
+  .object({
+    campaigns: z
+      .array(
+        z.object({
+          campaignId: z.string().min(1).openapi({
+            description: "The ACTING (responder) campaign: the x-campaign-id its claim-next call would carry.",
+          }),
+          heldCampaignIds: z.array(z.string().min(1)).max(20).optional().openapi({
+            description:
+              "The held campaigns its claim would drain (claim-next path id + alsoCampaignIds). Default: [campaignId].",
+          }),
+        }),
+      )
+      .min(1)
+      .max(100),
+  })
+  .openapi("FollowupOwedRequest");
+
+export const FollowupOwedResponseSchema = z
+  .object({
+    asOf: z.string(),
+    answers: z.array(
+      z.object({
+        campaignId: z.string(),
+        heldCampaignIds: z.array(z.string()),
+        owedNow: z.boolean().openapi({ description: "Someone on a held campaign is owed now: dispatch the responder." }),
+        owedCampaignIds: z.array(z.string()).openapi({ description: "Held campaigns with someone owed now, in the order asked." }),
+        nextOwedAt: z.string().nullable().openapi({
+          description: "Earliest moment after asOf at which someone becomes owed (min over held); null = nobody scheduled.",
+        }),
+        held: z.array(FollowupOwedHeldSchema),
+      }),
+    ),
+  })
+  .openapi("FollowupOwedResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/followups/owed",
+  summary: "Is anyone owed a follow-up now on the campaigns a responder claims on, and if not, when (read-only)",
+  description:
+    "A READ for campaign-service (service key + x-org-id): it never claims, leases, hands over or writes anything. " +
+    "Per acting campaign and its held set (the same ids claim-next would drain), answers owedNow and the earliest " +
+    "future moment someone becomes owed. It applies the claim's own SQL predicates: due date set and reached, no live " +
+    "lease (a leased row is owed again when its lease expires), not handed (unless an open grant for the holder), " +
+    "who the due date is for (dueSetByCampaignId), no booked meeting, reachable by email or phone, and the stored " +
+    "pre-responder backlog cut. Claim-time-only gates (opt-out lookup, relationship policy) are NOT evaluated, so an " +
+    "owed answer may still claim nobody; never the reverse.",
+  request: {
+    body: { required: true, content: { "application/json": { schema: FollowupOwedRequestSchema } } },
+  },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: {
+      description: "One answer per campaign asked, in order",
+      content: { "application/json": { schema: FollowupOwedResponseSchema } },
+    },
+    400: { description: "invalid_owed_query (body shape) or missing x-org-id" },
+    401: { description: "Unauthorized" },
+  },
+});
+
 // --- Hand-stated step outcomes ---
 
 const StepStatementOrgHeaders = [

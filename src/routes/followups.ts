@@ -25,6 +25,7 @@ import {
   writeFollowupStatement,
 } from "../lib/followup-queue.js";
 import { readFollowupActions, recordActedByEmail } from "../lib/followup-actions.js";
+import { readFollowupOwed } from "../lib/followup-owed.js";
 import {
   CLAIM_RELATIONSHIP_POLICIES,
   ClaimRelationshipUnavailableError,
@@ -677,6 +678,57 @@ router.get(
 
     const result = await readFollowupActions({ brandId, campaignIds });
     res.json({ brandId, ...result });
+  }),
+);
+
+/**
+ * Is anyone owed a follow-up NOW on the held campaigns a responder would claim on, and if not, when
+ * is the earliest moment? A READ (never claims, leases or writes), batched: campaign-service asks it
+ * per reactive campaign instead of dispatching a workflow run that claims nobody (WA-REACTIVE-LOOP-1016,
+ * `src/lib/followup-owed.ts`).
+ */
+const FollowupOwedBodySchema = z
+  .object({
+    campaigns: z
+      .array(
+        z
+          .object({
+            campaignId: z.string().min(1),
+            heldCampaignIds: z.array(z.string().min(1)).max(20).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(100),
+  })
+  .strict();
+
+router.post(
+  "/internal/followups/owed",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const parsed = FollowupOwedBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        error: "Body must be {campaigns: [{campaignId, heldCampaignIds?}]} with 1 to 100 campaigns",
+        code: "invalid_owed_query",
+        details: parsed.error.flatten(),
+      });
+      return;
+    }
+    const nowMs = Date.now();
+    const answers = [];
+    for (const query of parsed.data.campaigns) {
+      answers.push(
+        await readFollowupOwed({
+          orgId: req.orgId as string,
+          query: { campaignId: query.campaignId, heldCampaignIds: query.heldCampaignIds ?? [query.campaignId] },
+          nowMs,
+        }),
+      );
+    }
+    res.json({ asOf: new Date(nowMs).toISOString(), answers });
   }),
 );
 

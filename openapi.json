@@ -4996,6 +4996,121 @@
           "lastActedAt"
         ]
       },
+      "FollowupOwedResponse": {
+        "type": "object",
+        "properties": {
+          "asOf": {
+            "type": "string"
+          },
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "campaignId": {
+                  "type": "string"
+                },
+                "heldCampaignIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "owedNow": {
+                  "type": "boolean",
+                  "description": "Someone on a held campaign is owed now: dispatch the responder."
+                },
+                "owedCampaignIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Held campaigns with someone owed now, in the order asked."
+                },
+                "nextOwedAt": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "Earliest moment after asOf at which someone becomes owed (min over held); null = nobody scheduled."
+                },
+                "held": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FollowupOwedHeld"
+                  }
+                }
+              },
+              "required": [
+                "campaignId",
+                "heldCampaignIds",
+                "owedNow",
+                "owedCampaignIds",
+                "nextOwedAt",
+                "held"
+              ]
+            }
+          }
+        },
+        "required": [
+          "asOf",
+          "answers"
+        ]
+      },
+      "FollowupOwedHeld": {
+        "type": "object",
+        "properties": {
+          "campaignId": {
+            "type": "string"
+          },
+          "owedNow": {
+            "type": "boolean"
+          },
+          "nextOwedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Earliest moment strictly after asOf at which someone on this held campaign becomes owed; null = nobody scheduled."
+          }
+        },
+        "required": [
+          "campaignId",
+          "owedNow",
+          "nextOwedAt"
+        ]
+      },
+      "FollowupOwedRequest": {
+        "type": "object",
+        "properties": {
+          "campaigns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "campaignId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The ACTING (responder) campaign: the x-campaign-id its claim-next call would carry."
+                },
+                "heldCampaignIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 20,
+                  "description": "The held campaigns its claim would drain (claim-next path id + alsoCampaignIds). Default: [campaignId]."
+                }
+              },
+              "required": [
+                "campaignId"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "campaigns"
+        ]
+      },
       "LeadStepStatementResponse": {
         "type": "object",
         "properties": {
@@ -15047,6 +15162,58 @@
           },
           "400": {
             "description": "Missing/invalid brandId or campaignIds"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/followups/owed": {
+      "post": {
+        "summary": "Is anyone owed a follow-up now on the campaigns a responder claims on, and if not, when (read-only)",
+        "description": "A READ for campaign-service (service key + x-org-id): it never claims, leases, hands over or writes anything. Per acting campaign and its held set (the same ids claim-next would drain), answers owedNow and the earliest future moment someone becomes owed. It applies the claim's own SQL predicates: due date set and reached, no live lease (a leased row is owed again when its lease expires), not handed (unless an open grant for the holder), who the due date is for (dueSetByCampaignId), no booked meeting, reachable by email or phone, and the stored pre-responder backlog cut. Claim-time-only gates (opt-out lookup, relationship policy) are NOT evaluated, so an owed answer may still claim nobody; never the reverse.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FollowupOwedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One answer per campaign asked, in order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FollowupOwedResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid_owed_query (body shape) or missing x-org-id"
           },
           "401": {
             "description": "Unauthorized"
