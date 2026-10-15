@@ -42,6 +42,7 @@ import { askAudienceFit } from "./audience-fit-client.js";
 import type { RecentlyEmailedScope, RecentlyEmailedWindow } from "./recently-emailed-sql.js";
 import { assertRecentlyEmailedReadable, leadRecentlyEmailed } from "./recently-emailed.js";
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
+import { noteLeadFound } from "./outcome-triggers.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 
 /**
@@ -425,6 +426,10 @@ export async function pullNext(
         personId,
       })
       .onConflictDoNothing();
+
+    // The person was FOUND for this brand and offer: its `lead_found` outcome trigger rings campaign-service's door
+    // once (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015). Not awaited: it never blocks, slows or fails the serve.
+    noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, campaignId: params.campaignId, offerId });
 
     // Fresh contacts only: a person the brand emailed inside the window is not handed out. Already bought and filed
     // above, so nothing is lost: this campaign's paid pool (or the source's stock) hands them out later, filtered the

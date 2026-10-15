@@ -76,6 +76,12 @@ vi.mock("../../src/lib/writer-checks.js", () => ({
   checksForWriter: (...args: unknown[]) => checksForWriter(...args),
 }));
 
+// The `lead_found` outcome trigger (src/lib/outcome-triggers.ts) has its own suites: here only WHEN a serve rings it.
+const noteLeadFound = vi.fn();
+vi.mock("../../src/lib/outcome-triggers.js", () => ({
+  noteLeadFound: (...args: unknown[]) => noteLeadFound(...args),
+}));
+
 const insertValues = vi.fn();
 vi.mock("../../src/db/index.js", () => ({
   db: {
@@ -175,6 +181,26 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(result.lead?.audienceId).toBe("aud-1");
     expect(result.lead?.apolloPersonId).toBe("apollo-person-1");
     expect(result.lead?.data).toEqual({ leadId: "lead-1", firstName: "Sara" });
+  });
+
+  it("a person FOUND rings the lead_found outcome trigger once, for the serve's brand and campaign (EVERY-OUTCOME-FIRES-1015)", async () => {
+    fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: "offer-1" });
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    await pullNext(baseParams);
+
+    expect(noteLeadFound).toHaveBeenCalledTimes(1);
+    expect(noteLeadFound).toHaveBeenCalledWith({
+      orgId: "org-1",
+      brandId: "brand-1",
+      leadId: "lead-1",
+      email: "sara@cascobay.com",
+      campaignId: "campaign-1",
+      offerId: "offer-1",
+    });
   });
 
   it("a person qualified and revealed through candidates is recorded the same way, and serve-next is never asked", async () => {
@@ -406,6 +432,8 @@ describe("pullNext (audience serve-next flow)", () => {
     expect(serveNext).not.toHaveBeenCalled();
     expect(upsertLeadFromPerson).not.toHaveBeenCalled();
     expect(insertValues).not.toHaveBeenCalled();
+    // Not a find: the person was found when first served.
+    expect(noteLeadFound).not.toHaveBeenCalled();
   });
 
   it("keeps the buying signal the served person carried, on the serve row and on the lead", async () => {
