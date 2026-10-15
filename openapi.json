@@ -5961,7 +5961,13 @@
                     },
                     "email": {
                       "type": "string",
-                      "description": "The person's canonical email (match the occurrence on it)."
+                      "nullable": true,
+                      "description": "The person's canonical email (match the occurrence on it); null for a person known by phone only."
+                    },
+                    "phone": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The person's phone as registered (match a phone-only occurrence on it), null when none."
                     },
                     "reason": {
                       "type": "string",
@@ -5990,6 +5996,7 @@
                     "leadId",
                     "campaignId",
                     "email",
+                    "phone",
                     "reason",
                     "tags",
                     "unsureTags"
@@ -6012,7 +6019,12 @@
                       "type": "string"
                     },
                     "email": {
-                      "type": "string"
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "phone": {
+                      "type": "string",
+                      "nullable": true
                     },
                     "reason": {
                       "type": "string",
@@ -6034,6 +6046,7 @@
                     "leadId",
                     "campaignId",
                     "email",
+                    "phone",
                     "reason",
                     "retryAfterSeconds"
                   ]
@@ -6069,7 +6082,13 @@
               },
               "email": {
                 "type": "string",
-                "description": "The person's canonical email."
+                "nullable": true,
+                "description": "The person's canonical email. NULL for a person known by phone only (a WhatsApp writer, REPLY-PHONE-ONLY-1015): `phone` identifies them; their opt-out is their human's live opt_out / do_not_contact fact."
+              },
+              "phone": {
+                "type": "string",
+                "nullable": true,
+                "description": "The person's first registered phone (E.164 as stored), null when none."
               },
               "audienceId": {
                 "type": "string",
@@ -6097,6 +6116,7 @@
               "campaignId",
               "brandId",
               "email",
+              "phone",
               "audienceId",
               "dueAt",
               "followupCount",
@@ -6339,8 +6359,15 @@
         "properties": {
           "email": {
             "type": "string",
-            "description": "The person's email address. Matched EXACTLY (case-folded equality against the registered contact method) and never fuzzily: writing the debt onto the wrong person's row makes us email somebody who never replied, which cannot be taken back.",
+            "nullable": true,
+            "description": "The person's email address. Matched EXACTLY (case-folded equality against the registered contact method) and never fuzzily: writing the debt onto the wrong person's row makes us email somebody who never replied, which cannot be taken back. Whenever present it identifies the person (phone ignored). Required unless `phone` is given.",
             "example": "prospect@example.com"
+          },
+          "phone": {
+            "type": "string",
+            "nullable": true,
+            "description": "Identifies the person ONLY when `email` is absent (REPLY-PHONE-ONLY-1015: a WhatsApp writer known by phone + name). Must then be E.164 (separators accepted: \"+33 6 12-34-56-78\" reads +33612345678; a national number with no country code is a 400). Matched EXACTLY on the registered phone contact method (separators ignored), never fuzzily.",
+            "example": "+33612345678"
           },
           "dueAt": {
             "type": "string",
@@ -6368,7 +6395,6 @@
           }
         },
         "required": [
-          "email",
           "dueAt"
         ],
         "description": "An answer is owed to the person at this address, on this campaign, at this time."
@@ -8162,7 +8188,13 @@
             "type": "string"
           },
           "email": {
-            "type": "string"
+            "type": "string",
+            "nullable": true,
+            "description": "The canonical address; null when the person was identified by phone."
+          },
+          "phone": {
+            "type": "string",
+            "description": "Present only when the person was identified by phone (E.164)."
           },
           "servedAt": {
             "type": "string",
@@ -8213,8 +8245,9 @@
         "properties": {
           "email": {
             "type": "string",
+            "nullable": true,
             "minLength": 3,
-            "description": "The person's email address. Case-folded. Must already be known to the campaign's brand, unless `statedBy` states it.",
+            "description": "The person's email address. Case-folded. Must already be known to the campaign's brand, unless `statedBy` states it. Whenever present it identifies the person (email-first, unchanged). Required unless `phone` is given.",
             "example": "marie@example.com"
           },
           "statedBy": {
@@ -8251,7 +8284,7 @@
             "nullable": true,
             "minLength": 3,
             "maxLength": 50,
-            "description": "The person's phone as the statement carries it, international form preferred (+44 7700 900123). Recorded as the lead's phone (unless another lead already holds it) and read to infer the person's timezone when none is stated.",
+            "description": "The person's phone as the statement carries it, international form preferred (+44 7700 900123). With an email: recorded as the lead's phone (unless another lead already holds it) and read to infer the person's timezone when none is stated. WITHOUT an email: it IDENTIFIES the person and must be E.164 (separators accepted; 400 otherwise): known to the brand = a live CRM fact of the brand carrying the phone, a lead of the brand carrying it, or `statedBy`; the lead is the one whose phone contact method is that number (several = 409 ambiguous_lead), else a new lead carrying the phone (name from the CRM fact, else `name`); suppression = the human's live opt_out / do_not_contact (409 person_suppressed). REPLY-PHONE-ONLY-1015.",
             "example": "+447700900123"
           },
           "timezone": {
@@ -8261,10 +8294,7 @@
             "description": "The person's IANA timezone, when the client knows it (400 when not an IANA zone). A stated zone always wins: it replaces an inferred or enriched one and is never replaced by them. Absent = inferred from what we hold (phone country, location, company, email country domain), or null when nothing tells it.",
             "example": "Europe/London"
           }
-        },
-        "required": [
-          "email"
-        ]
+        }
       },
       "ExistingCustomerResponse": {
         "type": "object",
@@ -15621,11 +15651,16 @@
                     },
                     "leadId": {
                       "type": "string",
-                      "description": "The person the address resolved to."
+                      "description": "The person the address (or phone) resolved to."
                     },
                     "email": {
                       "type": "string",
-                      "description": "The registered address, as stored."
+                      "nullable": true,
+                      "description": "The registered address, as stored; null when the person was identified by phone."
+                    },
+                    "phone": {
+                      "type": "string",
+                      "description": "Present only when identified by phone: the registered phone, as stored."
                     },
                     "madeDue": {
                       "type": "boolean",
@@ -15667,16 +15702,16 @@
             }
           },
           "400": {
-            "description": "Missing campaignId or x-org-id, a missing/invalid email, an unparseable dueAt (code due_date_unparseable), or one outside the accepted range (code due_date_out_of_bounds, with the bounds)"
+            "description": "Missing campaignId or x-org-id, neither an email nor a phone, a phone that is not E.164 when no email is given, an unparseable dueAt (code due_date_unparseable), or one outside the accepted range (code due_date_out_of_bounds, with the bounds)"
           },
           "401": {
             "description": "Unauthorized"
           },
           "404": {
-            "description": "No lead on this campaign holds that email address (code lead_not_found). A named refusal, never a silent no-op."
+            "description": "No lead on this campaign holds that email address (or phone) (code lead_not_found). A named refusal, never a silent no-op."
           },
           "409": {
-            "description": "That address matches more than one lead row on this campaign (code ambiguous_lead, with the matches). Refused rather than resolved by picking one."
+            "description": "That address (or phone) matches more than one lead row on this campaign (code ambiguous_lead, with the matches). Refused rather than resolved by picking one."
           },
           "500": {
             "description": "Internal server error"
@@ -17496,7 +17531,7 @@
     "/orgs/campaigns/{campaignId}/leads/by-email": {
       "post": {
         "summary": "File a person the brand already knows as a lead of this campaign (no purchase)",
-        "description": "For campaign-service, when a campaign that NAMES its people is born or gains a person (any campaign may; the Copilot's one-person follow-up is the first). No provider purchase, no human-service serve, no never-cold-contact gate: nothing is bought and the person is not cold. The person must be KNOWN to the campaign's brand: a live fact of the brand's CRM copy carrying the address (a signup, a message, a payment, any source), or a lead row of the org already filed under that brand, or STATED by the brand's own organization (`statedBy`: a trigger occurrence of the org naming the person; recorded, then suppression-checked: 409 person_suppressed with reason unsubscribed|bounced|opted_out|do_not_contact); anything else is 404 person_not_known (this door never sources strangers nobody stated). Writes what a serve writes: the lead (the lead owning the address, else a new lead with the address registered) and ONE lead row on the campaign, status served, served_at now, brand = the campaign's brand, run/user from x-run-id/x-user-id when sent. So the person reads as a lead of the brand at once in every read (lists, standing `not_contacted` until something is sent, timeline, CRM pairing). IDEMPOTENT per (person, campaign): a second call answers the same row with status already_filed. To make the person due later: `POST /orgs/campaigns/{campaignId}/followups/schedule-by-email` with the same email, then the campaign's worker claims them via `/followups/claim-next` (a debt scheduled after the campaign was created is never handed over as owed_before_responder_started).",
+        "description": "For campaign-service, when a campaign that NAMES its people is born or gains a person (any campaign may; the Copilot's one-person follow-up is the first). No provider purchase, no human-service serve, no never-cold-contact gate: nothing is bought and the person is not cold. The person must be KNOWN to the campaign's brand: a live fact of the brand's CRM copy carrying the address (a signup, a message, a payment, any source), or a lead row of the org already filed under that brand, or STATED by the brand's own organization (`statedBy`: a trigger occurrence of the org naming the person; recorded, then suppression-checked: 409 person_suppressed with reason unsubscribed|bounced|opted_out|do_not_contact); anything else is 404 person_not_known (this door never sources strangers nobody stated). Writes what a serve writes: the lead (the lead owning the address, else a new lead with the address registered) and ONE lead row on the campaign, status served, served_at now, brand = the campaign's brand, run/user from x-run-id/x-user-id when sent. So the person reads as a lead of the brand at once in every read (lists, standing `not_contacted` until something is sent, timeline, CRM pairing). IDEMPOTENT per (person, campaign): a second call answers the same row with status already_filed. To make the person due later: `POST /orgs/campaigns/{campaignId}/followups/schedule-by-email` with the same email (or, for a person identified by phone only, the same phone), then the campaign's worker claims them via `/followups/claim-next` (a debt scheduled after the campaign was created is never handed over as owed_before_responder_started).",
         "parameters": [
           {
             "in": "header",
@@ -17568,16 +17603,16 @@
             }
           },
           "400": {
-            "description": "Missing x-org-id, or `email` is not an address"
+            "description": "Missing x-org-id, `email` is not an address, or no email and a `phone` that is missing or not E.164"
           },
           "401": {
             "description": "Unauthorized"
           },
           "404": {
-            "description": "campaign-service holds no such campaign for this org (code campaign_not_found), or the brand does not know the address (code person_not_known). Nothing written."
+            "description": "campaign-service holds no such campaign for this org (code campaign_not_found), or the brand does not know the address / phone (code person_not_known). Nothing written."
           },
           "409": {
-            "description": "The campaign states no brand (code campaign_has_no_brand), the address is registered on more than one lead (code ambiguous_lead, with leadIds), or a stated person may not be contacted (code person_suppressed, with reason). Nothing written."
+            "description": "The campaign states no brand (code campaign_has_no_brand), the address (or phone) is registered on more than one lead (code ambiguous_lead, with leadIds), or a stated person may not be contacted (code person_suppressed, with reason). Nothing written."
           },
           "502": {
             "description": "campaign-service or the database did not answer (code filing_unavailable). Nothing filed; retry."

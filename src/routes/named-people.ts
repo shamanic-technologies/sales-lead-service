@@ -7,6 +7,7 @@ import { z } from "zod";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { fileNamedPerson } from "../lib/named-person.js";
 import { isIanaTimezone } from "../lib/timezone-inference.js";
+import { canonicalE164 } from "../lib/e164-phone.js";
 
 const router = Router();
 
@@ -18,8 +19,11 @@ function wrap<Req extends Request = Request>(
   };
 }
 
-const BodySchema = z.object({
-  email: z.string().trim().min(3).max(320).refine((v) => v.includes("@"), "not an email address"),
+// `email` identifies the person whenever present (email-first, byte-identical). Without it, `phone` identifies
+// them and must be E.164 (REPLY-PHONE-ONLY-1015: a WhatsApp writer known only by phone + name).
+export const NamedPersonBodySchema = z
+  .object({
+  email: z.string().trim().min(3).max(320).refine((v) => v.includes("@"), "not an email address").nullish(),
   // The brand's own organization names this person (src/lib/named-person.ts): absent = today's door.
   statedBy: z
     .object({
@@ -31,7 +35,19 @@ const BodySchema = z.object({
   phone: z.string().trim().min(3).max(50).nullish(),
   // An IANA zone the client states for the person (src/lib/lead-timezone.ts); never an offset.
   timezone: z.string().trim().max(64).refine(isIanaTimezone, "not an IANA timezone (e.g. Europe/London)").nullish(),
-});
+  })
+  .superRefine((body, ctx) => {
+    if (body.email) return;
+    if (!body.phone) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email or phone (E.164) is required" });
+    } else if (!canonicalE164(body.phone)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phone"],
+        message: "with no email, phone identifies the person and must be E.164 (e.g. +33612345678)",
+      });
+    }
+  });
 
 router.post(
   "/orgs/campaigns/:campaignId/leads/by-email",
@@ -39,7 +55,7 @@ router.post(
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
     const campaignId = req.params.campaignId;
-    const parsed = BodySchema.safeParse(req.body);
+    const parsed = NamedPersonBodySchema.safeParse(req.body);
     if (!campaignId || !parsed.success) {
       res.status(400).json({
         error: "Invalid request",
@@ -53,7 +69,7 @@ router.post(
       result = await fileNamedPerson({
         orgId: req.orgId as string,
         campaignId,
-        email: parsed.data.email,
+        email: parsed.data.email ?? null,
         userId: req.userId ?? null,
         runId: req.runId ?? null,
         statedBy: parsed.data.statedBy ?? null,
@@ -77,8 +93,9 @@ router.post(
       }
       if (result.code === "person_not_known") {
         res.status(404).json({
-          error:
-            "The brand does not know this address (no live CRM fact of the brand, no lead of the brand carries it); nothing was filed",
+          error: parsed.data.email
+            ? "The brand does not know this address (no live CRM fact of the brand, no lead of the brand carries it); nothing was filed"
+            : "The brand does not know this phone (no live CRM fact of the brand, no lead of the brand carries it, no statement names it); nothing was filed",
           code: result.code,
         });
         return;
@@ -100,7 +117,9 @@ router.post(
         return;
       }
       res.status(409).json({
-        error: "That address is registered on more than one lead; nothing was filed",
+        error: parsed.data.email
+          ? "That address is registered on more than one lead; nothing was filed"
+          : "That phone is registered on more than one lead; nothing was filed",
         code: result.code,
         leadIds: result.leadIds,
       });

@@ -55,6 +55,23 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     return { rowId: row.id, leadId: lead.id, email, human };
   }
 
+  /** A person known by PHONE only (a WhatsApp writer, REPLY-PHONE-ONLY-1015): no email contact method. */
+  async function duePhoneLead(p: { human?: string | null } = {}): Promise<{ rowId: string; leadId: string; phone: string; human: string | null }> {
+    const human = p.human === undefined ? randomUUID() : p.human;
+    const phone = `+3361${String(Math.floor(1e7 + Math.random() * 9e7))}`;
+    const [lead] = (await db.execute(sql`
+      INSERT INTO leads (name, human_id) VALUES ('itest whatsapp writer', ${human}::uuid) RETURNING id
+    `)) as unknown as Array<{ id: string }>;
+    createdLeads.push(lead.id);
+    await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'phone', ${phone}, 'itest')`);
+    const [row] = (await db.execute(sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at, followup_due_at, followup_count)
+      VALUES (${lead.id}::uuid, ${campaignId}, ${orgId}, ${sql.param([brandId])}::text[], 'served', now(), now() - interval '1 minute', 0)
+      RETURNING id
+    `)) as unknown as Array<{ id: string }>;
+    return { rowId: row.id, leadId: lead.id, phone, human };
+  }
+
   async function subject(human: string, emails: string[] = []): Promise<void> {
     await db.execute(sql`
       INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, thread_seq, has_messages, has_direct)
@@ -127,7 +144,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(r.claimed).toBeNull();
     expect(r).toMatchObject({ reason: "relationship_refused" });
     expect(r.relationships!.refused).toEqual([
-      { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, reason: "not_a_lead", tags: ["personal"], unsureTags: [] },
+      { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, phone: null, reason: "not_a_lead", tags: ["personal"], unsureTags: [] },
     ]);
     const state = await readFollowupState(orgId, p.rowId);
     expect(state).toMatchObject({ dueAt: null, claimedAt: null, stoppedReason: "relationship_not_a_lead" });
@@ -188,7 +205,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     const r = await claim("pure_prospect");
     expect(r).toMatchObject({ claimed: null, reason: "relationship_pending" });
     expect(r.relationships!.pending).toEqual([
-      { leadCampaignId: lead.rowId, leadId: lead.leadId, campaignId, email: lead.email, reason: "relationship_not_judged", retryAfterSeconds: 300 },
+      { leadCampaignId: lead.rowId, leadId: lead.leadId, campaignId, email: lead.email, phone: null, reason: "relationship_not_judged", retryAfterSeconds: 300 },
     ]);
     const state = await readFollowupState(orgId, lead.rowId);
     expect(state?.dueAt).not.toBeNull();
@@ -230,5 +247,49 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     const r = await claim();
     expect(r.claimed?.id).toBe(p.rowId);
     expect("relationships" in r).toBe(false);
+  });
+
+  describe("a person known by PHONE only (REPLY-PHONE-ONLY-1015)", () => {
+    it("hands out a phone-only prospect: email null, the phone carried", async () => {
+      const p = await duePhoneLead();
+      const r = await claim("pure_prospect");
+      expect(r.claimed).toMatchObject({ id: p.rowId, email: null, phone: p.phone });
+    });
+
+    it("refuses a phone-only team member / personal contact of the owner: not_a_lead, row stopped, nothing sent", async () => {
+      const p = await duePhoneLead();
+      await subject(p.human!);
+      await judged(p.human!, { ...LOW, team: 0.9 });
+      const r = await claim("pure_prospect");
+      expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+      expect(r.relationships!.refused).toEqual([
+        { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: null, phone: p.phone, reason: "not_a_lead", tags: ["team"], unsureTags: [] },
+      ]);
+      expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_not_a_lead" });
+    });
+
+    it("a phone-only writer the CRM copy names by phone, not built yet, is pending (never admitted blind)", async () => {
+      const p = await duePhoneLead();
+      seq += 1n;
+      await db.execute(sql`
+        INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+        VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${"phone:" + p.phone}, 'itest', '{}'::text[],
+          ${sql.param([p.phone.slice(0, 3) + " " + p.phone.slice(3)])}::text[], 'message_in', now(), 'event', 'whatsapp', ${randomUUID()}, '{}'::jsonb, '{}'::jsonb)
+      `);
+      const r = await claim("pure_prospect");
+      expect(r).toMatchObject({ claimed: null, reason: "relationship_pending" });
+      expect(r.relationships!.pending[0]).toMatchObject({ email: null, phone: p.phone, reason: "relationship_not_built" });
+    });
+
+    it("a phone-only person whose human carries a live do_not_contact is stopped opted_out, never claimed (no email-gateway read)", async () => {
+      const p = await duePhoneLead();
+      await db.execute(sql`
+        INSERT INTO human_fact_copies (fact_id, human_id, kind, event_id) VALUES (${randomUUID()}, ${p.human}::uuid, 'do_not_contact', 1)
+      `);
+      const r = await claim();
+      expect(r.claimed).toBeNull();
+      expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "opted_out" });
+      await db.execute(sql`DELETE FROM human_fact_copies WHERE human_id = ${p.human}::uuid`);
+    });
   });
 });

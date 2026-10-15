@@ -177,16 +177,18 @@ describe("loadFollowupCandidates", () => {
     });
   });
 
-  it("drops a row with no registered email — delivery evidence is keyed on it", async () => {
+  it("drops a row with neither an email nor a phone; keeps a phone-only person (REPLY-PHONE-ONLY-1015)", async () => {
     execute.mockResolvedValueOnce([
-      { id: "r1", lead_id: "l1", campaign_id: "camp-1", brand_ids: ["b1"], email: null, followup_due_at: "2026-09-01 09:00:00+00", followup_count: 0, followup_last_action_at: null, audience_id: null },
-      { id: "r2", lead_id: "l2", campaign_id: "camp-1", brand_ids: ["b1"], email: "b@c.com", followup_due_at: "2026-09-01 10:00:00+00", followup_count: 2, followup_last_action_at: null, audience_id: "aud-1" },
+      { id: "r1", lead_id: "l1", campaign_id: "camp-1", brand_ids: ["b1"], email: null, phone: null, followup_due_at: "2026-09-01 09:00:00+00", followup_count: 0, followup_last_action_at: null, audience_id: null },
+      { id: "r2", lead_id: "l2", campaign_id: "camp-1", brand_ids: ["b1"], email: "b@c.com", phone: null, followup_due_at: "2026-09-01 10:00:00+00", followup_count: 2, followup_last_action_at: null, audience_id: "aud-1" },
+      { id: "r3", lead_id: "l3", campaign_id: "camp-1", brand_ids: ["b1"], email: null, phone: "+33612345678", followup_due_at: "2026-09-01 11:00:00+00", followup_count: 0, followup_last_action_at: null, audience_id: null },
     ]);
 
     const out = await loadFollowupCandidates({ orgId: "org-1", campaignId: "camp-1", nowMs: NOW, responderStartedAtIso: RESPONDER_START, actingCampaignId: "acting-1" });
 
-    expect(out).toHaveLength(1);
-    expect(out[0]).toMatchObject({ id: "r2", email: "b@c.com", followupCount: 2, brandId: "b1" });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatchObject({ id: "r2", email: "b@c.com", phone: null, followupCount: 2, brandId: "b1" });
+    expect(out[1]).toMatchObject({ id: "r3", email: null, phone: "+33612345678" });
   });
 });
 

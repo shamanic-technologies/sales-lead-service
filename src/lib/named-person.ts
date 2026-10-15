@@ -38,6 +38,14 @@
  *
  * Idempotent on (lead, campaign): the unique index `idx_lc_lead_campaign` makes a second filing
  * answer the same row (`already_filed`), never a second one.
+ *
+ * BY PHONE ONLY (REPLY-PHONE-ONLY-1015, 2026-10-15): most people who write to a brand on WhatsApp carry
+ * no email, only their phone and the name WhatsApp shows. With NO email the person is identified by their
+ * E.164 phone (`e164-phone.ts`), with the same semantics: known = a live CRM fact of (org, brand) carrying
+ * the phone, a lead of the brand carrying it, or a statement naming it; owner = the lead whose phone
+ * contact method is that number (several = `ambiguous_lead`, never a guess); suppression = the human's
+ * live opt_out / do_not_contact (the email sender has nothing to say about a phone); a new lead carries
+ * the phone as its contact method. An email given keeps the email-first identity, byte-identical.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -47,6 +55,7 @@ import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.j
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { registerServedEmail, upsertContactMethod } from "./leads-registry.js";
 import { inferLeadTimezone, writeStatedTimezone, type TimezoneSource } from "./lead-timezone.js";
+import { canonicalE164, phoneValueSql } from "./e164-phone.js";
 
 export const NAMED_PERSON_SOURCE = "named_person";
 
@@ -64,13 +73,19 @@ export type KnownBy = "crm_fact" | "brand_lead" | "statement";
 /** Why a stated person is not filed: a protection a serve applies. */
 export type SuppressionReason = "unsubscribed" | "bounced" | "opted_out" | "do_not_contact";
 
+/** How the caller identifies the person: by email (today's door), else by E.164 phone. */
+export type PersonIdentity = { kind: "email"; value: string } | { kind: "phone"; value: string };
+
 export interface NamedPersonFiling {
   status: "filed" | "already_filed";
   leadId: string;
   leadCampaignId: string;
   campaignId: string;
   brandId: string;
-  email: string;
+  /** Null when the person was identified by phone only. */
+  email: string | null;
+  /** Present only when the person was identified by phone only (E.164). */
+  phone?: string;
   servedAt: string;
   knownBy: KnownBy;
   /** The person's zone after this filing (lead-timezone.ts), null when nothing tells it. */
@@ -115,8 +130,10 @@ interface KnownPerson {
   fullName: string | null;
 }
 
-/** Is the address known to the brand? A live CRM fact of (org, brand) or a lead row of the brand. */
-async function knownToBrand(orgId: string, brandId: string, email: string): Promise<KnownPerson> {
+/** Is the person known to the brand? A live CRM fact of (org, brand), a lead row of the brand, or a statement. */
+async function knownToBrand(orgId: string, brandId: string, who: PersonIdentity): Promise<KnownPerson> {
+  if (who.kind === "phone") return knownPhoneToBrand(orgId, brandId, who.value);
+  const email = who.value;
   const facts = (await db.execute(sql`
     SELECT f.full_name
     FROM crm_facts f
@@ -153,6 +170,44 @@ async function knownToBrand(orgId: string, brandId: string, email: string): Prom
   return { known: false, knownBy: null, fullName: null };
 }
 
+/** `knownToBrand` for a person identified by E.164 phone: the same three proofs, matched on the phone. */
+async function knownPhoneToBrand(orgId: string, brandId: string, phone: string): Promise<KnownPerson> {
+  const facts = (await db.execute(sql`
+    SELECT f.full_name
+    FROM crm_facts f
+    WHERE f.org_id = ${orgId}
+      AND f.brand_id = ${brandId}
+      AND f.type <> 'withdrawn'
+      AND EXISTS (SELECT 1 FROM unnest(f.phones) AS p WHERE ${phoneValueSql(sql`p`)} = ${phone})
+      AND NOT EXISTS (
+        SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id
+      )
+    ORDER BY (f.full_name IS NULL), f.seq DESC
+    LIMIT 1
+  `)) as unknown as Array<{ full_name: string | null }>;
+  if (facts.length > 0) return { known: true, knownBy: "crm_fact", fullName: facts[0].full_name };
+
+  const rows = (await db.execute(sql`
+    SELECT 1
+    FROM leads_campaigns lc
+    JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'phone'
+    WHERE lc.org_id = ${orgId}
+      AND ${brandId} = ANY(lc.brand_ids)
+      AND ${phoneValueSql(sql`cm.value`)} = ${phone}
+    LIMIT 1
+  `)) as unknown as unknown[];
+  if (rows.length > 0) return { known: true, knownBy: "brand_lead", fullName: null };
+
+  const stated = (await db.execute(sql`
+    SELECT full_name FROM brand_person_statements
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND email IS NULL AND phone = ${phone}
+    ORDER BY (full_name IS NULL), stated_at DESC
+    LIMIT 1
+  `)) as unknown as Array<{ full_name: string | null }>;
+  if (stated.length > 0) return { known: true, knownBy: "statement", fullName: stated[0].full_name };
+  return { known: false, knownBy: null, fullName: null };
+}
+
 /**
  * What the brand's sender says about the address: unsubscribed (global, brand, this campaign) or
  * hard-bounced fleet-wide. Pure.
@@ -180,7 +235,8 @@ async function suppressionOf(params: {
   orgId: string;
   brandId: string;
   campaignId: string;
-  email: string;
+  /** Null = identified by phone only: the email sender has nothing to say, the human's facts decide. */
+  email: string | null;
   ownerLeadIds: string[];
   userId?: string | null;
   runId?: string | null;
@@ -193,31 +249,61 @@ async function suppressionOf(params: {
       if (human?.doNotContact) return "do_not_contact";
     }
   }
+  if (params.email === null) return null;
+  const email = params.email;
   const context: Record<string, string> = { orgId: params.orgId, campaignId: params.campaignId, brandId: params.brandId };
   if (params.userId) context.userId = params.userId;
   if (params.runId) context.runId = params.runId;
-  const status = await checkDeliveryStatus(params.brandId, params.campaignId, [{ email: params.email }], context);
-  const mine = status.results.find((r) => r.email.trim().toLowerCase() === params.email);
+  const status = await checkDeliveryStatus(params.brandId, params.campaignId, [{ email }], context);
+  const mine = status.results.find((r) => r.email.trim().toLowerCase() === email);
   return senderSuppression(mine, params.campaignId);
 }
 
-/** Record the brand's statement. Idempotent on (org, brand, address, source, ref). */
+/** Record the brand's statement. Idempotent on (org, brand, address|phone, source, ref). */
 async function recordStatement(params: {
   orgId: string;
   brandId: string;
   campaignId: string;
-  email: string;
+  who: PersonIdentity;
   statement: PersonStatement;
   fullName: string | null;
 }): Promise<void> {
+  if (params.who.kind === "phone") {
+    await db.execute(sql`
+      INSERT INTO brand_person_statements
+        (org_id, brand_id, email, phone, source, source_ref, trigger_id, campaign_id, full_name)
+      VALUES
+        (${params.orgId}, ${params.brandId}, NULL, ${params.who.value}, 'trigger_event', ${params.statement.triggerEventId},
+         ${params.statement.triggerId ?? null}, ${params.campaignId}, ${params.fullName})
+      ON CONFLICT (org_id, brand_id, phone, source, source_ref) WHERE email IS NULL DO NOTHING
+    `);
+    return;
+  }
+  const email = params.who.value;
   await db.execute(sql`
     INSERT INTO brand_person_statements
       (org_id, brand_id, email, source, source_ref, trigger_id, campaign_id, full_name)
     VALUES
-      (${params.orgId}, ${params.brandId}, ${params.email}, 'trigger_event', ${params.statement.triggerEventId},
+      (${params.orgId}, ${params.brandId}, ${email}, 'trigger_event', ${params.statement.triggerEventId},
        ${params.statement.triggerId ?? null}, ${params.campaignId}, ${params.fullName})
     ON CONFLICT (org_id, brand_id, email, source, source_ref) DO NOTHING
   `);
+}
+
+/** The lead owning the person's identity. Several = a broken identity, refused by name. */
+async function leadsOwning(who: PersonIdentity): Promise<string[]> {
+  if (who.kind === "phone") return leadsOwningPhone(who.value);
+  return leadsOwningEmail(who.value);
+}
+
+/** The lead(s) whose phone contact method is this E.164 number, separators ignored. */
+export async function leadsOwningPhone(phone: string): Promise<string[]> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT lead_id FROM lead_contact_methods
+    WHERE channel = 'phone' AND ${phoneValueSql(sql`value`)} = ${phone}
+    ORDER BY lead_id
+  `)) as unknown as Array<{ lead_id: string }>;
+  return rows.map((r) => r.lead_id);
 }
 
 /** The lead owning the address, case-folded. Several = a broken identity, refused by name. */
@@ -233,19 +319,31 @@ async function leadsOwningEmail(email: string): Promise<string[]> {
 export async function fileNamedPerson(params: {
   orgId: string;
   campaignId: string;
-  email: string;
+  /** The person's email: identifies them (email-first) whenever present. */
+  email?: string | null;
   userId?: string | null;
   runId?: string | null;
   /** The brand's own organization names this person (see the module comment). */
   statedBy?: PersonStatement | null;
   /** The name the statement carries, used only for a lead created here with no CRM name. */
   fullName?: string | null;
-  /** The person's phone as the statement carries it: recorded as a contact method, read for the zone. */
+  /**
+   * The person's phone as the statement carries it: recorded as a contact method, read for the zone. With NO
+   * email it IDENTIFIES the person and must be E.164 (`canonicalE164`, the route refuses anything else).
+   */
   phone?: string | null;
   /** The zone the client STATES for the person (IANA, validated by the route): wins over any other. */
   timezone?: string | null;
 }): Promise<NamedPersonResult> {
-  const email = normalizeEmail(params.email);
+  const rawEmail = params.email?.trim() ? normalizeEmail(params.email) : null;
+  let who: PersonIdentity;
+  if (rawEmail) who = { kind: "email", value: rawEmail };
+  else {
+    const phone = canonicalE164(params.phone);
+    if (!phone) throw new Error("[lead-service] named person: neither an email nor an E.164 phone identifies the person");
+    who = { kind: "phone", value: phone };
+  }
+  const email = who.kind === "email" ? who.value : null;
 
   // Throws on campaign-service 5xx/unreachable: the route answers 502, never a guessed brand.
   const campaign = await fetchCampaign(params.campaignId, params.orgId, {
@@ -262,10 +360,10 @@ export async function fileNamedPerson(params: {
   const brandId = campaignBrandOf(row);
   if (!brandId) return { ok: false, code: "campaign_has_no_brand" };
 
-  let person = await knownToBrand(params.orgId, brandId, email);
+  let person = await knownToBrand(params.orgId, brandId, who);
   if (!person.known && !params.statedBy) return { ok: false, code: "person_not_known" };
 
-  const owners = await leadsOwningEmail(email);
+  const owners = await leadsOwning(who);
   if (owners.length > 1) return { ok: false, code: "ambiguous_lead", leadIds: owners };
 
   if (params.statedBy) {
@@ -284,7 +382,7 @@ export async function fileNamedPerson(params: {
       orgId: params.orgId,
       brandId,
       campaignId: params.campaignId,
-      email,
+      who,
       statement: params.statedBy,
       fullName: statedName,
     });
@@ -300,13 +398,17 @@ export async function fileNamedPerson(params: {
       .insert(leads)
       .values({ name: names.name, firstName: names.firstName, lastName: names.lastName })
       .returning({ id: leads.id });
-    // A concurrent filing may have registered the address first: the owner wins (email-first).
-    leadId = await registerServedEmail({
-      leadId: inserted.id,
-      email,
-      status: null,
-      source: NAMED_PERSON_SOURCE,
-    });
+    if (who.kind === "email") {
+      // A concurrent filing may have registered the address first: the owner wins (email-first).
+      leadId = await registerServedEmail({
+        leadId: inserted.id,
+        email: who.value,
+        status: null,
+        source: NAMED_PERSON_SOURCE,
+      });
+    } else {
+      leadId = await registerNamedPhone(inserted.id, who.value);
+    }
   }
 
   const featureSlug = typeof row.featureSlug === "string" ? row.featureSlug : null;
@@ -337,7 +439,7 @@ export async function fileNamedPerson(params: {
 
   // PUSHED-PERSON-TZ-1014: every sender schedules in the person's zone. A phone the client hands us is
   // the person's (recorded, unless another lead already holds it); a stated zone wins; else infer.
-  const phone = params.phone?.trim() || null;
+  const phone = who.kind === "phone" ? null : params.phone?.trim() || null;
   if (phone) {
     const recorded = await upsertContactMethod({ leadId, channel: "phone", value: phone, source: NAMED_PERSON_SOURCE });
     if (!recorded.inserted) {
@@ -359,9 +461,27 @@ export async function fileNamedPerson(params: {
     campaignId: params.campaignId,
     brandId,
     email,
+    ...(who.kind === "phone" ? { phone: who.value } : {}),
     servedAt: new Date(existing[0].served_at).toISOString(),
     knownBy: person.knownBy as KnownBy,
     timezone: zone[0]?.timezone ?? null,
     timezoneSource: zone[0]?.timezone ? (zone[0].timezone_source ?? null) : null,
   };
+}
+
+/**
+ * Register the phone on a lead created for a phone-only person and return the lead that OWNS it afterwards: a
+ * concurrent filing may have registered the number first (global `idx_lcm_channel_value`), then the owner wins.
+ */
+async function registerNamedPhone(leadId: string, phone: string): Promise<string> {
+  const result = await upsertContactMethod({ leadId, channel: "phone", value: phone, source: NAMED_PERSON_SOURCE });
+  if (result.inserted) return leadId;
+  const owners = await leadsOwningPhone(phone);
+  if (owners.length !== 1) {
+    throw new Error(
+      `[lead-service] phone ${phone} hit the one-value-one-lead index but ${owners.length} owning leads were found (leadId=${leadId})`,
+    );
+  }
+  console.log(`[lead-service] named person: phone already registered, filing on its owner lead=${owners[0]} (not ${leadId})`);
+  return owners[0];
 }
