@@ -419,7 +419,7 @@ describe("POST /orgs/campaigns/:campaignId/followups/schedule-by-email", () => {
     const res = await request(app).post(url).set(auth).send({ email: " A@B.com ", dueAt });
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ followup: state, leadId: "lead-1", email: "A@B.com" });
+    expect(res.body).toEqual({ followup: state, leadId: "lead-1", email: "A@B.com", madeDue: true, notMadeDue: null });
     expect(lookupFollowupRowByEmail).toHaveBeenCalledWith({
       orgId: "org-1",
       campaignId: "camp-1",
@@ -428,6 +428,48 @@ describe("POST /orgs/campaigns/:campaignId/followups/schedule-by-email", () => {
     expect(writeFollowupStatement).toHaveBeenCalledWith(
       expect.objectContaining({ orgId: "org-1", id: ROW, kind: "scheduled", reason: null }),
     );
+  });
+
+  it("passes the brand's occurrence statement through (PUSHED-TRUTH-1015)", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "a@b.com" });
+    writeFollowupStatement.mockResolvedValue({ ...state, handedAt: "2026-10-14T22:19:34.678Z", handedReason: "Handed" });
+
+    const res = await request(app)
+      .post(url)
+      .set(auth)
+      .send({ email: "a@b.com", dueAt: dueNow(), statedBy: { triggerEventId: "evt-1", triggerId: "email_pushed_via_api" } });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ madeDue: true, notMadeDue: null });
+    expect(writeFollowupStatement).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "scheduled", statedBy: { triggerEventId: "evt-1", triggerId: "email_pushed_via_api" } }),
+    );
+  });
+
+  it("a handed row with no statement: 200 that SAYS the person was not made due, and why", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "a@b.com" });
+    writeFollowupStatement.mockResolvedValue({
+      ...state,
+      dueAt: null,
+      handedAt: "2026-10-14T22:19:34.678Z",
+      handedReason: "Handed to the brand's team",
+      stoppedReason: "Handed to the brand's team",
+    });
+
+    const res = await request(app).post(url).set(auth).send({ email: "a@b.com", dueAt: dueNow() });
+
+    expect(res.status).toBe(200);
+    expect(res.body.followup.dueAt).toBeNull();
+    expect(res.body.madeDue).toBe(false);
+    expect(res.body.notMadeDue.code).toBe("handed");
+    expect(res.body.notMadeDue.reason).toContain("Handed to the brand's team");
+    expect(writeFollowupStatement).toHaveBeenCalledWith(expect.objectContaining({ statedBy: null }));
+  });
+
+  it("400 on a statement without an occurrence id", async () => {
+    const res = await request(app).post(url).set(auth).send({ email: "a@b.com", dueAt: dueNow(), statedBy: { triggerId: "t" } });
+    expect(res.status).toBe(400);
+    expect(writeFollowupStatement).not.toHaveBeenCalled();
   });
 
   it("404 with a NAMED code when no lead on this campaign holds that address", async () => {

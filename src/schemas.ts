@@ -5410,6 +5410,22 @@ const FollowupStateSchema = z
         "it is due (a reply, a trigger: no x-campaign-id), claimed by any campaign.",
       example: null,
     }),
+    statedOccurrence: z
+      .object({
+        triggerEventId: z.string().openapi({ description: "campaign-service trigger event id, as stated." }),
+        triggerId: z.string().nullable().openapi({ description: "Its trigger type, as stated." }),
+        statedAt: z.string().nullable().openapi({ description: "When the statement was written." }),
+        closedAt: z.string().nullable().openapi({
+          description: "When the grant was used up (a claim consumed it, or a later hand-over closed it). null = still open.",
+        }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The last trigger occurrence through which the BRAND named this person and made them due (statedBy on " +
+          "schedule-by-email). While open (closedAt null) it is the ONE thing that makes a handed row claimable: by " +
+          "the holding campaign (x-campaign-id = campaignId) only, exactly once; the claim closes it. null = none ever did.",
+      }),
   })
   .openapi("FollowupState", {
     description: "What we owe one person on one campaign, and when.",
@@ -5426,6 +5442,7 @@ const FollowupStateSchema = z
       handedReason: null,
       handoverWithdrawal: null,
       dueSetByCampaignId: null,
+      statedOccurrence: null,
     },
   });
 
@@ -5617,6 +5634,20 @@ const ScheduleFollowupByEmailRequestSchema = z
         "ISO-8601 timestamp: when the answer is owed. \"Now\" is the ordinary case (a reply just landed). Bounded, never clamped — a date in the past beyond a few minutes of clock skew, or further out than a year, is a 400 carrying the accepted range.",
       example: "2026-09-05T09:00:00.000Z",
     }),
+    statedBy: z
+      .object({
+        triggerEventId: z.string().openapi({ description: "campaign-service trigger event id of the occurrence." }),
+        triggerId: z.string().nullish().openapi({ description: "Its trigger type." }),
+      })
+      .nullish()
+      .openapi({
+        description:
+          "The trigger occurrence through which the BRAND itself names this person (e.g. an email the client pushed " +
+          "with its own key). Opens a grant: the person is made due even on a row handed to a person, and the HOLDING " +
+          "campaign may claim them ONCE (the claim closes the grant; a redelivery of the occurrence restates it). The " +
+          "hand-over stays: no other campaign (a reply responder) claims the row, and its reasons are kept. Absent = " +
+          "unchanged: a handed row is left not due.",
+      }),
   })
   .openapi("ScheduleFollowupByEmailRequest", {
     description: "An answer is owed to the person at this address, on this campaign, at this time.",
@@ -5663,6 +5694,18 @@ registry.registerPath({
             followup: FollowupStateSchema,
             leadId: z.string().openapi({ description: "The person the address resolved to." }),
             email: z.string().openapi({ description: "The registered address, as stored." }),
+            madeDue: z.boolean().openapi({
+              description: "Whether the person is due now as stated (followup.dueAt not null). false = nobody will claim them on this statement.",
+            }),
+            notMadeDue: z
+              .object({
+                code: z.enum(["handed", "not_due"]).openapi({
+                  description: "handed = the conversation was handed to the brand's team and no statedBy was given; not_due = any other reason.",
+                }),
+                reason: z.string().openapi({ description: "One English sentence the caller can show its client." }),
+              })
+              .nullable()
+              .openapi({ description: "Why the person was NOT made due; null when madeDue." }),
           }),
         },
       },

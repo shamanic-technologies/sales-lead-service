@@ -58,7 +58,36 @@ const ActedByEmailBodySchema = z.object({
 const ScheduleByEmailBodySchema = z.object({
   email: z.string().trim().min(3).max(320),
   dueAt: z.string(),
+  // The trigger occurrence through which the BRAND names this person (campaign-service, same object as on
+  // the filing): opens a grant the holding campaign may claim once, even on a handed row.
+  statedBy: z
+    .object({
+      triggerEventId: z.string().trim().min(1).max(200),
+      triggerId: z.string().trim().min(1).max(200).nullish(),
+    })
+    .nullish(),
 });
+
+/**
+ * Why a schedule-by-email statement left the person NOT due, in words a caller can hand to its client.
+ * Only a hand-over without the brand's statement leaves the due date NULL after a `scheduled` today; any
+ * other cause is named generically rather than answered as success.
+ */
+function notMadeDueOf(state: { dueAt: string | null; handedAt: string | null; handedReason: string | null; stoppedReason: string | null }) {
+  if (state.dueAt) return null;
+  if (state.handedAt) {
+    return {
+      code: "handed" as const,
+      reason:
+        "This person's conversation was handed to the brand's team, so no automated workflow writes to them on its own. " +
+        `Hand-over: ${state.stoppedReason ?? state.handedReason ?? "no reason recorded"}`,
+    };
+  }
+  return {
+    code: "not_due" as const,
+    reason: state.stoppedReason ?? "The follow-up schedule was left empty.",
+  };
+}
 
 function boundsPayload(nowMs: number) {
   const bounds = dueDateBounds(nowMs);
@@ -277,6 +306,9 @@ router.post(
       // WHO set the due date decides who may claim it: a campaign scheduling its own person (its run names
       // itself) keeps the debt for itself; an observer sends no x-campaign-id and anyone may claim it.
       actingCampaignId: req.campaignId ?? null,
+      statedBy: parsed.data.statedBy
+        ? { triggerEventId: parsed.data.statedBy.triggerEventId, triggerId: parsed.data.statedBy.triggerId ?? null }
+        : null,
     });
 
     // The lookup already proved the row is this org's, so a miss here is a row deleted between the
@@ -289,11 +321,14 @@ router.post(
       return;
     }
 
+    const notMadeDue = notMadeDueOf(state);
     console.log(
-      `[lead-service] followup scheduled by email campaign=${campaignId} leadCampaignId=${lookup.id} due=${due.iso} setBy=${req.campaignId ?? "observer"}`,
+      `[lead-service] followup scheduled by email campaign=${campaignId} leadCampaignId=${lookup.id} due=${state.dueAt ?? "NOT_DUE"} setBy=${req.campaignId ?? "observer"} statedBy=${parsed.data.statedBy?.triggerEventId ?? "-"}${notMadeDue ? ` notMadeDue=${notMadeDue.code}` : ""}`,
     );
 
-    res.json({ followup: state, leadId: lookup.leadId, email: lookup.email });
+    // 200 either way (the statement was recorded), but never one that reads as success when nobody was made
+    // due: `madeDue` + `notMadeDue` say so, and `followup.dueAt` is null.
+    res.json({ followup: state, leadId: lookup.leadId, email: lookup.email, madeDue: notMadeDue === null, notMadeDue });
   }),
 );
 

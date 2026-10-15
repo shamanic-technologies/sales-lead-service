@@ -49,6 +49,17 @@
  *  - set by no campaign (an observer: instantly-service's due-now on a reply, campaign-service's due-now
  *    on a trigger): anyone, the holder included.
  * `ownedByActingSql` is the one predicate; the read, the claim and the pre-responder hand-over all use it.
+ *
+ * The hand-over guards against a RESPONDER answering on its own initiative. It does not swallow the BRAND's
+ * own explicit act (PUSHED-TRUTH-1015, prod 2026-10-15 row 035a85fe: a client pushed a new email to a
+ * person whose earlier reply had been handed to its team, the due date stayed NULL, the run claimed nobody,
+ * the occurrence was redelivered 6 times and never sent). A `scheduled` statement carrying `statedBy`
+ * (the trigger occurrence through which the brand named this person: campaign-service) opens a GRANT
+ * (`followup_stated_*`, migration 0092): on a handed row the due date stands, and the HOLDING campaign
+ * (acting = the row's campaign) may claim it ONCE; the claim consumes the grant. Any other acting campaign
+ * (a responder on a predecessor's queue) is refused exactly as before, and the hand-over itself (time,
+ * reasons, stop reason) is untouched. A later hand-over closes an open grant. `handedClaimableSql` is
+ * the one predicate, used by the read and the claim.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -64,6 +75,15 @@ import { fetchCampaign } from "./campaign-client.js";
 export function ownedByActingSql(actingCampaignId: string, alias: "lc" | "" = "lc") {
   const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : name);
   return sql`(${col("followup_due_set_by_campaign_id")} IS NULL OR (${col("followup_due_set_by_campaign_id")} = ${col("campaign_id")}) = (${col("campaign_id")} = ${actingCampaignId}))`;
+}
+
+/**
+ * A handed row is claimable ONLY through an open grant (the brand stated this person through an occurrence
+ * and no claim has consumed it yet), and only by the holding campaign. Unhanded rows: unchanged.
+ */
+export function handedClaimableSql(actingCampaignId: string, alias: "lc" | "" = "lc") {
+  const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : name);
+  return sql`(${col("followup_handed_at")} IS NULL OR (${col("followup_stated_event_id")} IS NOT NULL AND ${col("followup_stated_closed_at")} IS NULL AND ${col("campaign_id")} = ${actingCampaignId}))`;
 }
 
 /** Why a pre-responder debt was handed over (stored on the row, `followup_handed_reason`). */
@@ -261,7 +281,7 @@ export async function loadFollowupCandidates(params: {
       AND lc.followup_due_at IS NOT NULL
       AND lc.followup_due_at <= ${now}
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
-      AND lc.followup_handed_at IS NULL
+      AND ${handedClaimableSql(params.actingCampaignId)}
       AND ${ownedByActingSql(params.actingCampaignId)}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       AND NOT EXISTS (
@@ -315,12 +335,16 @@ export async function claimFollowup(params: {
     WITH claimed AS (
       UPDATE leads_campaigns
          SET followup_claimed_at = ${now},
+             -- An open grant is consumed by this claim: the brand's statement buys exactly one claim.
+             followup_stated_closed_at = CASE
+               WHEN followup_stated_event_id IS NOT NULL AND followup_stated_closed_at IS NULL THEN ${now}::timestamptz
+               ELSE followup_stated_closed_at END,
              updated_at = ${now}
        WHERE id = ${params.id}
          AND followup_due_at IS NOT NULL
          AND followup_due_at <= ${now}
          AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
-         AND followup_handed_at IS NULL
+         AND ${handedClaimableSql(params.actingCampaignId, "")}
          AND ${ownedByActingSql(params.actingCampaignId, "")}
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
@@ -682,6 +706,24 @@ export interface FollowupState {
    * own campaign = only it; another campaign = anyone but the holder; null = an observer, anyone.
    */
   dueSetByCampaignId: string | null;
+  /**
+   * The last trigger occurrence through which the brand named this person and made them due
+   * (`statedBy` on schedule-by-email); null = none ever did. `closedAt` = when the grant was used up (a
+   * claim consumed it, or a later hand-over closed it); null = still open: on a handed row it is what lets
+   * the holding campaign claim the person once.
+   */
+  statedOccurrence: {
+    triggerEventId: string;
+    triggerId: string | null;
+    statedAt: string | null;
+    closedAt: string | null;
+  } | null;
+}
+
+/** The trigger occurrence through which the brand itself names this person (campaign-service). */
+export interface FollowupOccurrenceStatement {
+  triggerEventId: string;
+  triggerId?: string | null;
 }
 
 interface RawStateRow {
@@ -700,6 +742,10 @@ interface RawStateRow {
   followup_handover_withdrawn_reason?: string | null;
   followup_handover_withdrawn_handed_at?: Date | string | null;
   followup_handover_withdrawn_handed_reasons?: string[] | null;
+  followup_stated_event_id?: string | null;
+  followup_stated_trigger_id?: string | null;
+  followup_stated_at?: Date | string | null;
+  followup_stated_closed_at?: Date | string | null;
 }
 
 /**
@@ -727,6 +773,14 @@ function toState(row: RawStateRow): FollowupState {
     handedReason: row.followup_handed_reason ?? null,
     dueSetByCampaignId: row.followup_due_set_by_campaign_id ?? null,
     handoverWithdrawal: withdrawalOf(row),
+    statedOccurrence: row.followup_stated_event_id
+      ? {
+          triggerEventId: row.followup_stated_event_id,
+          triggerId: row.followup_stated_trigger_id ?? null,
+          statedAt: toIso(row.followup_stated_at ?? null),
+          closedAt: toIso(row.followup_stated_closed_at ?? null),
+        }
+      : null,
   };
 }
 
@@ -747,7 +801,8 @@ const STATE_COLUMNS = sql`
   followup_last_action_at, followup_stopped_reason,
   followup_handed_at, followup_handed_reason, followup_due_set_by_campaign_id,
   followup_handover_withdrawn_at, followup_handover_withdrawn_reason,
-  followup_handover_withdrawn_handed_at, followup_handover_withdrawn_handed_reasons
+  followup_handover_withdrawn_handed_at, followup_handover_withdrawn_handed_reasons,
+  followup_stated_event_id, followup_stated_trigger_id, followup_stated_at, followup_stated_closed_at
 `;
 
 /**
@@ -785,7 +840,12 @@ export async function readFollowupState(
  *    whoever observes the reply stops the schedule, and qualification re-decides what we owe.
  *  - handed: the thread is a person's. No due date, the claim is released, `followup_handed_at`
  *    is stamped once (the first hand-over's time and reason are kept). Permanent: on a handed row
- *    every later statement leaves the due date NULL and the stop reason as the hand-over wrote it.
+ *    every later statement leaves the due date NULL and the stop reason as the hand-over wrote it,
+ *    and closes any open grant.
+ *
+ * `statedBy` (scheduled only): the brand named this person through a trigger occurrence. It opens a grant
+ * (see the module header): the due date stands even on a handed row, and the holder may claim it once.
+ * The hand-over's own fields and the stop reason are left exactly as they were.
  */
 export async function writeFollowupStatement(params: {
   orgId: string;
@@ -801,11 +861,14 @@ export async function writeFollowupStatement(params: {
    */
   actingCampaignId?: string | null;
   runId?: string | null;
+  /** The occurrence through which the brand named this person (scheduled only; ignored otherwise). */
+  statedBy?: FollowupOccurrenceStatement | null;
 }): Promise<FollowupState | null> {
   const now = new Date(params.nowMs).toISOString();
   const acted = params.kind === "acted";
   const handed = params.kind === "handed";
   const setsDue = params.kind === "scheduled" || params.kind === "acted";
+  const stated = params.kind === "scheduled" && params.statedBy ? params.statedBy : null;
 
   // An 'acted' statement is also a ledger row, written by the same statement: the count on the
   // lifecycle row says HOW MANY answers were sent, the ledger says WHICH campaign's worker sent each.
@@ -815,7 +878,19 @@ export async function writeFollowupStatement(params: {
          SET followup_due_at = ${
                handed
                  ? sql`NULL`
-                 : sql`CASE WHEN followup_handed_at IS NULL THEN ${params.dueAtIso}::timestamptz ELSE NULL END`
+                 : stated
+                   ? sql`${params.dueAtIso}::timestamptz`
+                   : sql`CASE WHEN followup_handed_at IS NULL THEN ${params.dueAtIso}::timestamptz ELSE NULL END`
+             },
+             followup_stated_event_id = ${stated ? sql`${stated.triggerEventId}` : sql`followup_stated_event_id`},
+             followup_stated_trigger_id = ${stated ? sql`${stated.triggerId ?? null}` : sql`followup_stated_trigger_id`},
+             followup_stated_at = ${stated ? sql`${now}::timestamptz` : sql`followup_stated_at`},
+             followup_stated_closed_at = ${
+               stated
+                 ? sql`NULL`
+                 : handed
+                   ? sql`CASE WHEN followup_stated_event_id IS NOT NULL AND followup_stated_closed_at IS NULL THEN ${now}::timestamptz ELSE followup_stated_closed_at END`
+                   : sql`followup_stated_closed_at`
              },
              followup_due_set_by_campaign_id = ${setsDue ? sql`${params.actingCampaignId ?? null}` : sql`followup_due_set_by_campaign_id`},
              followup_handed_at = ${handed ? sql`COALESCE(followup_handed_at, ${now}::timestamptz)` : sql`followup_handed_at`},
