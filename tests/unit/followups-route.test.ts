@@ -123,6 +123,74 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
     expect(pickFollowupCandidate).not.toHaveBeenCalled();
   });
 
+  describe("relationships policy (REPLY-ANY-LEAD-1015)", () => {
+    const refused = {
+      leadCampaignId: ROW,
+      leadId: "lead-9",
+      campaignId: "camp-1",
+      email: "friend@example.com",
+      reason: "not_a_lead",
+      tags: ["personal"],
+      unsureTags: [],
+    };
+    const pending = {
+      leadCampaignId: "40000000-0000-0000-0000-000000000002",
+      leadId: "lead-8",
+      campaignId: "camp-2",
+      email: "new@example.com",
+      reason: "relationship_not_built",
+      retryAfterSeconds: 420,
+    };
+
+    it("400 on an unknown policy, nothing claimed", async () => {
+      const res = await request(app).post(url).set(claimAuth).send({ relationships: "business_only" });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe("unknown_relationship_policy");
+      expect(pickFollowupCandidate).not.toHaveBeenCalled();
+    });
+
+    it("no policy: nothing forwarded, nothing added to the answer", async () => {
+      pickFollowupCandidate.mockResolvedValue({ claimed: null, reason: "nothing_due" });
+      const res = await request(app).post(url).set(claimAuth).send({});
+      expect(res.body).toEqual({ found: false, reason: "nothing_due" });
+      expect("relationships" in (pickFollowupCandidate.mock.calls[0][0] as object)).toBe(false);
+    });
+
+    it("forwards the policy to every held campaign and names who was refused and who is pending", async () => {
+      pickFollowupCandidate
+        .mockResolvedValueOnce({ claimed: null, reason: "relationship_refused", relationships: { policy: "pure_prospect", refused: [refused], pending: [] } })
+        .mockResolvedValueOnce({ claimed: null, reason: "relationship_pending", relationships: { policy: "pure_prospect", refused: [], pending: [pending] } });
+
+      const res = await request(app).post(url).set(claimAuth).send({ relationships: "pure_prospect", alsoCampaignIds: ["camp-2"] });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        found: false,
+        reason: "relationship_pending",
+        relationships: { policy: "pure_prospect", refused: [refused], pending: [pending] },
+      });
+      for (const c of pickFollowupCandidate.mock.calls) expect((c[0] as { relationships?: string }).relationships).toBe("pure_prospect");
+    });
+
+    it("a claimed person carries the refusals made on the way", async () => {
+      pickFollowupCandidate.mockResolvedValue({
+        claimed: { id: ROW, leadId: "lead-1", campaignId: "camp-1", brandId: "brand-1", email: "a@b.com", audienceId: null, dueAt: null, followupCount: 0, lastActionAt: null },
+        relationships: { policy: "pure_prospect", refused: [refused], pending: [] },
+      });
+      const res = await request(app).post(url).set(claimAuth).send({ relationships: "pure_prospect" });
+      expect(res.body.found).toBe(true);
+      expect(res.body.relationships).toEqual({ policy: "pure_prospect", refused: [refused], pending: [] });
+    });
+
+    it("502 relationships_unavailable when who a person is cannot be read: nobody answered on a guess", async () => {
+      const { ClaimRelationshipUnavailableError } = await import("../../src/lib/followup-relationship-gate.js");
+      pickFollowupCandidate.mockRejectedValue(new ClaimRelationshipUnavailableError("db down"));
+      const res = await request(app).post(url).set(claimAuth).send({ relationships: "pure_prospect" });
+      expect(res.status).toBe(502);
+      expect(res.body.code).toBe("relationships_unavailable");
+    });
+  });
+
   it("returns the claimed person", async () => {
     pickFollowupCandidate.mockResolvedValue({
       claimed: {
