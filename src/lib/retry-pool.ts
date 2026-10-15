@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
 import { leadsCampaigns } from "../db/schema.js";
@@ -385,6 +386,8 @@ export async function loadRetryCandidates(params: {
   acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
+  /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
+  recentlyEmailed?: RecentlyEmailedScope | null;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
   const nowIso = new Date(params.nowMs).toISOString();
@@ -411,7 +414,7 @@ export async function loadRetryCandidates(params: {
       AND lc.channel_sent_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships)}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed)}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -601,6 +604,8 @@ export async function pickRetryCandidate(params: {
   acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
+  /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
+  recentlyEmailed?: RecentlyEmailedScope | null;
   /** Who states whether a person was contacted (poolSenderOf). Absent = email-gateway (today). */
   sender?: PoolSender;
 }): Promise<RetryCandidate | null> {
@@ -614,6 +619,7 @@ export async function pickRetryCandidate(params: {
     reachableBy: params.reachableBy ?? null,
     acceptedEmails: params.acceptedEmails ?? null,
     relationships: params.relationships ?? null,
+    recentlyEmailed: params.recentlyEmailed ?? null,
     ...(sender === "channel" ? { limit: CHANNEL_RETRY_CANDIDATE_BATCH_SIZE } : {}),
   });
   if (candidates.length === 0) return null;

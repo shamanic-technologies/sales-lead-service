@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
@@ -101,6 +102,8 @@ export async function claimStockedLead(params: {
   acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
+  /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
+  recentlyEmailed?: RecentlyEmailedScope | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */
   askFit: AskAudienceFit;
   /**
@@ -138,7 +141,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
          AND NOT EXISTS (
            SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
          )
-         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships)}
+         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed)}
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED

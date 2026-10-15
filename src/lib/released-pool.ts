@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
@@ -121,6 +122,8 @@ export async function claimReleasedLead(params: {
   acceptedEmails?: PoolEmailPolicy | null;
   /** The pipe's relationship policy (src/lib/relationship-tags.ts, RELATIONSHIP-TAGS-1014): absent = nothing asked. */
   relationships?: RelationshipScope | null;
+  /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
+  recentlyEmailed?: RecentlyEmailedScope | null;
   offerId: string | null;
   runId: string | null;
   parentRunId: string | null;
@@ -132,7 +135,7 @@ export async function claimReleasedLead(params: {
 }): Promise<ReleasedLead | null> {
   if (params.brandIds.length === 0) return null;
   const brands = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
-  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships);
+  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed);
   const candidates = (await db.execute(sql`
     SELECT s.id, s.campaign_id, s.lead_id, s.audience_id
       FROM leads_campaigns s
