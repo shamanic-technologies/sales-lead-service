@@ -56,7 +56,8 @@
               "origin_not_fed",
               "audience_offer_mismatch",
               "no_recent_posts",
-              "contacted_prospects_none_owed"
+              "contacted_prospects_none_owed",
+              "recently_emailed"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` names a source campaign that is off; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
@@ -1429,6 +1430,14 @@
               ]
             }
           },
+          "excludeEmailedWithin": {
+            "type": "string",
+            "enum": [
+              "3_months"
+            ],
+            "description": "Tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015): `3_months` = never hand out a person this brand EMAILED in the last 3 calendar months (any campaign of the brand, any of the person's registered addresses; evidence = the emails instantly-service actually sent, as it announces them). Applies to every pool (this campaign's already-paid people, a source's stock, people released by another pipe, contacted pure prospects): a skipped person stays where they are and is handed out later, once the 3 months are over or to a serve that does not ask. On a fresh serve the person is checked right after the buy: a hit stays filed under the asking campaign (its paid pool, or the source's stock) and the next person is bought, up to 5 times per call; if all 5 were emailed recently the answer is `found:false`, reason `recently_emailed` (not exhaustion). Absent = no such skip (today's serve, bytes unchanged): a play where the client names the person, or that re-engages people already emailed, does not state it.",
+            "example": "3_months"
+          },
           "population": {
             "type": "string",
             "enum": [
@@ -1438,7 +1447,7 @@
             "example": "contacted_pure_prospects"
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `population`), all optional; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`), all optional; an empty body is today's serve."
       },
       "LeadsResponse": {
         "type": "object",

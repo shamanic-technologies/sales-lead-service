@@ -47,6 +47,9 @@
  *                            src/lib/prospect-followup.ts): every person the brand contacted is either already in a
  *                            follow-up run of the reactive pipe, stopped (opted out, disqualified, replied, met, bought...) or not a pure
  *                            prospect. Not a population that ran out: it refills as the brand contacts more people.
+ *   recently_emailed       — the serve asked for fresh contacts only (`excludeEmailedWithin`, FRESH-CONTACTS-1015)
+ *                            and every person a fresh serve bought in this call had been emailed by the brand inside
+ *                            the window (each stays filed under the asking campaign for later). Not exhaustion.
  * A caller decides "may I stop?" by testing for `audience_exhausted` specifically, never by
  * excluding a list of known-benign reasons: a reason added here later must default to
  * not-exhaustion, and only an explicit equality test gives that.
@@ -63,6 +66,7 @@ export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
 export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_owed" as const;
+export const RECENTLY_EMAILED_REASON = "recently_emailed" as const;
 
 /** Every reason `POST /orgs/buffer/next` can attach to `{ found: false }`. */
 export const SERVE_EMPTY_REASONS = [
@@ -77,6 +81,7 @@ export const SERVE_EMPTY_REASONS = [
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
+  RECENTLY_EMAILED_REASON,
 ] as const;
 
 export type ServeEmptyReason = (typeof SERVE_EMPTY_REASONS)[number];
