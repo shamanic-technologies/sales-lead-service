@@ -66,6 +66,16 @@ import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { followupActionInsert } from "./followup-actions.js";
 import { fetchCampaign } from "./campaign-client.js";
+import {
+  ClaimJudgeBudget,
+  ClaimRelationshipUnavailableError,
+  NOT_A_LEAD_REASON,
+  RELATIONSHIP_STOP_REASON,
+  gateFollowupCandidate,
+  type ClaimPendingReason,
+  type ClaimRelationshipPolicy,
+} from "./followup-relationship-gate.js";
+import type { RelationshipTag } from "./relationship-tags.js";
 
 /**
  * May the ACTING campaign take this row's current debt? See the module header: own-set = holder only,
@@ -145,7 +155,39 @@ export type FollowupEmptyReason =
   /** No row of this campaign is due right now. */
   | "nothing_due"
   /** Every due row is either claimed by another worker or was stopped during this claim. */
-  | "all_claimed";
+  | "all_claimed"
+  /** Only under a stated relationship policy: a due person could not be decided yet (`pending[]`); asked again later. */
+  | "relationship_pending"
+  /** Only under a stated relationship policy: every due person decided was refused (`refused[]`), final. */
+  | "relationship_refused";
+
+/** A due person the claim's relationship policy refused: final for that due row (the row is stopped). */
+export interface RefusedFollowup {
+  leadCampaignId: string;
+  leadId: string;
+  campaignId: string;
+  email: string;
+  reason: typeof NOT_A_LEAD_REASON;
+  tags: RelationshipTag[];
+  unsureTags: RelationshipTag[];
+}
+
+/** A due person the claim could not decide yet: the row stays due, nothing is settled. */
+export interface PendingFollowup {
+  leadCampaignId: string;
+  leadId: string;
+  campaignId: string;
+  email: string;
+  reason: ClaimPendingReason;
+  retryAfterSeconds: number;
+}
+
+/** What a claim stating a relationship policy reports beside the person (or nobody). */
+export interface RelationshipGateReport {
+  policy: ClaimRelationshipPolicy;
+  refused: RefusedFollowup[];
+  pending: PendingFollowup[];
+}
 
 export interface FollowupCandidate {
   /** `leads_campaigns.id` — the lifecycle row, which is what is claimed. */
@@ -428,9 +470,13 @@ function forwardableContext(context: FollowupClaimContext): Record<string, strin
   return out;
 }
 
-export type FollowupClaim =
+export type FollowupClaim = (
   | { claimed: FollowupCandidate }
-  | { claimed: null; reason: FollowupEmptyReason };
+  | { claimed: null; reason: FollowupEmptyReason }
+) & {
+  /** Present ONLY when the claim stated a relationship policy. */
+  relationships?: RelationshipGateReport;
+};
 
 /**
  * campaign-service could not say when the acting responder started. A claim never proceeds on a
@@ -585,6 +631,11 @@ export async function pickFollowupCandidate(params: {
   actingCampaignId: string;
   context: FollowupClaimContext;
   nowMs?: number;
+  /**
+   * The relationship policy the claiming workflow states (REPLY-ANY-LEAD-1015, `followup-relationship-gate.ts`).
+   * Absent = today's claim, unchanged.
+   */
+  relationships?: ClaimRelationshipPolicy;
 }): Promise<FollowupClaim> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -618,7 +669,11 @@ export async function pickFollowupCandidate(params: {
     responderStartedAtIso,
     actingCampaignId: params.actingCampaignId,
   });
-  if (candidates.length === 0) return { claimed: null, reason: "nothing_due" };
+  const report: RelationshipGateReport | undefined = params.relationships
+    ? { policy: params.relationships, refused: [], pending: [] }
+    : undefined;
+  const withReport = (claim: FollowupClaim): FollowupClaim => (report ? { ...claim, relationships: report } : claim);
+  if (candidates.length === 0) return withReport({ claimed: null, reason: "nothing_due" });
 
   // One gateway call per brand present in the window — in practice exactly one, because a
   // campaign's rows share a brand.
@@ -660,23 +715,58 @@ export async function pickFollowupCandidate(params: {
   // is what keeps the next poll's window (and its gateway call) small.
   await stopFollowups(optedOutIds, "opted_out", nowMs);
 
-  for (const candidate of answerable) {
-    const claimed = await claimFollowup({
-      id: candidate.id,
-      nowMs,
-      runId: params.runId,
-      actingCampaignId: params.actingCampaignId,
-    });
-    if (claimed) {
-      console.log(
-        `[lead-service] followup claimed campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} followupCount=${candidate.followupCount} due=${candidates.length} optedOut=${optedOutIds.length}`,
-      );
-      return { claimed: candidate };
+  const budget = report ? new ClaimJudgeBudget(params.runId) : null;
+  try {
+    for (const candidate of answerable) {
+      if (report && budget) {
+        let verdict: Awaited<ReturnType<typeof gateFollowupCandidate>>;
+        try {
+          verdict = await gateFollowupCandidate({
+            orgId: params.orgId,
+            brandId: candidate.brandId,
+            leadId: candidate.leadId,
+            email: candidate.email,
+            budget,
+          });
+        } catch (err) {
+          throw new ClaimRelationshipUnavailableError(err);
+        }
+        const who = { leadCampaignId: candidate.id, leadId: candidate.leadId, campaignId: candidate.campaignId, email: candidate.email };
+        if (verdict.kind === "refuse") {
+          // Final for this due row: stopped, so the queue never offers it again (a later `scheduled` re-decides).
+          await stopFollowups([candidate.id], RELATIONSHIP_STOP_REASON, nowMs);
+          report.refused.push({ ...who, reason: verdict.reason, tags: verdict.tags, unsureTags: verdict.unsureTags });
+          console.log(
+            `[lead-service] followup refused by relationship policy ${report.policy} campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} tags=${verdict.tags.join("+")} unsure=${verdict.unsureTags.join("+")}`,
+          );
+          continue;
+        }
+        if (verdict.kind === "pending") {
+          report.pending.push({ ...who, reason: verdict.reason, retryAfterSeconds: verdict.retryAfterSeconds });
+          continue;
+        }
+      }
+      const claimed = await claimFollowup({
+        id: candidate.id,
+        nowMs,
+        runId: params.runId,
+        actingCampaignId: params.actingCampaignId,
+      });
+      if (claimed) {
+        console.log(
+          `[lead-service] followup claimed campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email} followupCount=${candidate.followupCount} due=${candidates.length} optedOut=${optedOutIds.length}`,
+        );
+        return withReport({ claimed: candidate });
+      }
+      // Lost the race to a concurrent worker — try the next one.
     }
-    // Lost the race to a concurrent worker — try the next one.
+  } finally {
+    await budget?.close();
   }
 
-  return { claimed: null, reason: "all_claimed" };
+  if (report && report.pending.length > 0) return withReport({ claimed: null, reason: "relationship_pending" });
+  if (report && report.refused.length > 0) return withReport({ claimed: null, reason: "relationship_refused" });
+  return withReport({ claimed: null, reason: "all_claimed" });
 }
 
 export interface FollowupState {

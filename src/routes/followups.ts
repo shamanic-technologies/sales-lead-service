@@ -23,6 +23,12 @@ import {
   writeFollowupStatement,
 } from "../lib/followup-queue.js";
 import { readFollowupActions, recordActedByEmail } from "../lib/followup-actions.js";
+import {
+  CLAIM_RELATIONSHIP_POLICIES,
+  ClaimRelationshipUnavailableError,
+  isClaimRelationshipPolicy,
+} from "../lib/followup-relationship-gate.js";
+import type { FollowupEmptyReason, RelationshipGateReport } from "../lib/followup-queue.js";
 
 const router = Router();
 
@@ -35,6 +41,14 @@ function wrap<Req extends Request = Request>(
     fn(req as Req, res, next).catch(next);
   };
 }
+
+/** Which "nobody" says the most when several held campaigns answered empty (the highest wins). */
+const EMPTY_REASON_RANK: Record<FollowupEmptyReason, number> = {
+  nothing_due: 0,
+  all_claimed: 1,
+  relationship_refused: 2,
+  relationship_pending: 3,
+};
 
 /** `leads_campaigns.id` is a uuid column, so anything else is a caller error, not a miss. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -144,9 +158,21 @@ router.post(
     }
     const heldCampaignIds = [...new Set([campaignId, ...((also as string[] | null | undefined) ?? [])])];
 
+    // The relationship policy of the claiming pipe's strategy (REPLY-ANY-LEAD-1015). Absent = today's claim.
+    const relationships: unknown = req.body?.relationships;
+    if (relationships !== undefined && relationships !== null && !isClaimRelationshipPolicy(relationships)) {
+      res.status(400).json({
+        error: `relationships must be one of: ${CLAIM_RELATIONSHIP_POLICIES.join(", ")}`,
+        code: "unknown_relationship_policy",
+      });
+      return;
+    }
+    const policy = isClaimRelationshipPolicy(relationships) ? relationships : undefined;
+    const report: RelationshipGateReport | undefined = policy ? { policy, refused: [], pending: [] } : undefined;
+
     try {
       let result: Awaited<ReturnType<typeof pickFollowupCandidate>> | null = null;
-      let reasonNobody: string | undefined;
+      let reasonNobody: FollowupEmptyReason | undefined;
       for (const heldCampaignId of heldCampaignIds) {
         const attempt = await pickFollowupCandidate({
           orgId: req.orgId as string,
@@ -165,17 +191,23 @@ router.post(
             featureSlug: req.featureSlug,
             audienceId: req.audienceId,
           },
+          ...(policy ? { relationships: policy } : {}),
         });
+        if (report && attempt.relationships) {
+          report.refused.push(...attempt.relationships.refused);
+          report.pending.push(...attempt.relationships.pending);
+        }
         if (attempt.claimed) {
           result = attempt;
           break;
         }
-        // "Someone was due but taken" says more than "nobody was due", whichever queue said it.
-        if (reasonNobody === undefined || reasonNobody === "nothing_due") reasonNobody = attempt.reason;
+        // "Someone was due but taken" says more than "nobody was due", whichever queue said it; a person
+        // still undecided says more than one refused (they are still owed, the caller asks again).
+        if (reasonNobody === undefined || EMPTY_REASON_RANK[attempt.reason] > EMPTY_REASON_RANK[reasonNobody]) reasonNobody = attempt.reason;
       }
 
       if (!result?.claimed) {
-        res.json({ found: false, reason: reasonNobody });
+        res.json({ found: false, reason: reasonNobody, ...(report ? { relationships: report } : {}) });
         return;
       }
 
@@ -196,8 +228,18 @@ router.post(
               ? candidate.lastActionAt.toISOString()
               : candidate.lastActionAt,
         },
+        ...(report ? { relationships: report } : {}),
       });
     } catch (err) {
+      if (err instanceof ClaimRelationshipUnavailableError) {
+        // Fail loud: never answer a person whose relationship to the brand could not be read.
+        console.error(`[lead-service] followup claim failed campaign=${campaignId}:`, err);
+        res.status(502).json({
+          error: "Who this person is to the brand could not be read, so the relationship policy cannot be honoured",
+          code: "relationships_unavailable",
+        });
+        return;
+      }
       if (err instanceof FollowupOptOutLookupError) {
         // Fail loud. A claim never proceeds on a guess about who opted out: the cost of returning
         // nobody is a wasted poll, the cost of guessing is an email to somebody who asked us to

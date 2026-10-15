@@ -5452,11 +5452,45 @@ const FollowupClaimSchema = z
       description: "Whether a person was claimed. At most one per call, and exactly once.",
       example: true,
     }),
-    reason: z.enum(["nothing_due", "all_claimed"]).optional().openapi({
+    reason: z.enum(["nothing_due", "all_claimed", "relationship_refused", "relationship_pending"]).optional().openapi({
       description:
-        "Why nobody came back, present only when found=false. nothing_due — no row of this campaign is due right now. all_claimed — every due row is held by another worker, or was stopped during this call (an opt-out). Named rather than a silent empty, so a caller never has to guess whether the queue is drained or contended.",
+        "Why nobody came back, present only when found=false. nothing_due — no row of this campaign is due right now. all_claimed — every due row is held by another worker, or was stopped during this call (an opt-out). Named rather than a silent empty, so a caller never has to guess whether the queue is drained or contended. Only when the body stated `relationships`: relationship_pending — at least one due person could not be decided yet (relationships.pending, still owed: ask again later); relationship_refused — every due person decided was refused by the policy (relationships.refused, final). The per-person truth is in relationships.refused / relationships.pending, matched by email.",
       example: "nothing_due",
     }),
+    relationships: z
+      .object({
+        policy: z.enum(["pure_prospect"]).openapi({ description: "The policy the claim stated." }),
+        refused: z
+          .array(
+            z.object({
+              leadCampaignId: z.string().openapi({ description: "The due leads_campaigns row, now stopped (followup_stopped_reason relationship_not_a_lead): the queue never offers it again unless a later `scheduled` re-enters it." }),
+              leadId: z.string(),
+              campaignId: z.string().openapi({ description: "The held campaign whose row it is." }),
+              email: z.string().openapi({ description: "The person's canonical email (match the occurrence on it)." }),
+              reason: z.enum(["not_a_lead"]).openapi({ description: "Forward verbatim. not_a_lead: the brand knows this person as something other than a prospect (tags / unsureTags say what)." }),
+              tags: z.array(z.string()).openapi({ description: "Relationship tags other than prospect held as yes (personal, customer, team, investor, advisor, supplier, partner, other_professional)." }),
+              unsureTags: z.array(z.string()).openapi({ description: "Tags other than prospect still unsure: never assumed a lead." }),
+            }),
+          )
+          .openapi({ description: "Due people the policy REFUSED during this call: final for that due row, settled." }),
+        pending: z
+          .array(
+            z.object({
+              leadCampaignId: z.string(),
+              leadId: z.string(),
+              campaignId: z.string(),
+              email: z.string(),
+              reason: z.enum(["human_unknown", "relationship_not_built", "relationship_not_judged", "same_person_question_open"]).openapi({
+                description:
+                  "Why this person cannot be decided yet. human_unknown: the lead has no human id yet (identity sweep). relationship_not_built: a CRM fact of the brand names the address and the relationship sweep has not built the person yet. relationship_not_judged: a subject never judged and the on-demand judgment failed or this call's budget was spent. same_person_question_open: an unanswered \"same person?\" question names them (review page).",
+              }),
+              retryAfterSeconds: z.number().int().openapi({ description: "When asking again can change the answer." }),
+            }),
+          )
+          .openapi({ description: "Due people NOT decided during this call: nothing settled, the row stays due, the next claim asks again." }),
+      })
+      .optional()
+      .openapi({ description: "Present ONLY when the body stated `relationships` (absent = the response is byte-identical to a claim with no policy)." }),
     followup: z
       .object({
         id: z.string().openapi({ description: "The leads_campaigns row to answer for." }),
@@ -5518,6 +5552,10 @@ registry.registerPath({
                 description:
                   "More held campaigns, each claimed on its own exact id, tried in order after the path one; the first person claimed wins (followup.campaignId names whose row it is). For a responder whose preceding leg runs on several campaigns at once (cold email and cold WhatsApp opening conversations for one offer).",
               }),
+              relationships: z.enum(["pure_prospect"]).optional().openapi({
+                description:
+                  "The relationship policy of the claiming pipe's strategy (REPLY-ANY-LEAD-1015). pure_prospect = leads only: a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. Absent = unchanged behaviour.",
+              }),
             })
             .openapi("FollowupClaimBody"),
         },
@@ -5530,12 +5568,12 @@ registry.registerPath({
       description: "The claimed person, or nobody with a named reason",
       content: { "application/json": { schema: FollowupClaimSchema } },
     },
-    400: { description: "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), or alsoCampaignIds not an array of ids (code invalid_also_campaign_ids)" },
+    400: { description: "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), alsoCampaignIds not an array of ids (code invalid_also_campaign_ids), or relationships not a known policy (code unknown_relationship_policy)" },
     401: { description: "Unauthorized" },
     500: { description: "Internal server error" },
     502: {
       description:
-        "campaign-service could not say when the claiming responder started (code responder_start_unavailable), or the delivery layer could not say who opted out (code opt_out_lookup_unavailable). Nobody is claimed rather than somebody answered on a guess: a wasted poll is recoverable, an email to somebody who asked us to stop is not.",
+        "campaign-service could not say when the claiming responder started (code responder_start_unavailable), the delivery layer could not say who opted out (code opt_out_lookup_unavailable), or, under a stated relationships policy, who a due person is to the brand could not be read (code relationships_unavailable). Nobody is claimed rather than somebody answered on a guess: a wasted poll is recoverable, an email to somebody who asked us to stop is not.",
     },
   },
 });
