@@ -25,6 +25,16 @@ import {
   type TagDetail,
 } from "./relationship-tags.js";
 import type { CompanySource } from "./relationship-company.js";
+import {
+  decideLead,
+  decideWantsBusiness,
+  EMPTY_LEAD,
+  EMPTY_WANTS_BUSINESS,
+  WANTS_BUSINESS,
+  type IntentAnswerKey,
+  type LeadAnswer,
+  type WantsBusinessAnswer,
+} from "./relationship-intent.js";
 
 export interface RelationshipCompany {
   id: string | null;
@@ -49,6 +59,13 @@ export interface RelationshipBlock {
   policies: { business_only: boolean; pure_prospect: boolean };
   /** Every merge stated from here that made this person (judge or person): undo one with its `linkId`. */
   merges: SettledMerge[];
+  /** Did the person write to the brand (a message on any mirrored channel, a signup, a form, a meeting, a payment, a reply to our outreach)? */
+  wroteToUs: boolean;
+  lastInboundAt: string | null;
+  /** HOT-INBOUND-UNANSWERED-1016: is the person a LEAD of the brand (relationship-intent.ts)? */
+  lead: LeadAnswer;
+  /** If a lead: do they WANT to do business with the brand? */
+  wantsBusiness: WantsBusinessAnswer;
 }
 
 export interface SettledMerge {
@@ -70,6 +87,10 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   subject: false,
   policies: { business_only: false, pure_prospect: false },
   merges: [],
+  wroteToUs: false,
+  lastInboundAt: null,
+  lead: EMPTY_LEAD,
+  wantsBusiness: EMPTY_WANTS_BUSINESS,
 };
 
 type Ts = Date | string;
@@ -83,11 +104,11 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   const canon = await canonicalHumans(orgId, asked);
   const humans = Array.from(new Set(asked.map((h) => canon.get(h) ?? h)));
 
-  const [subjects, statements, evidence, judgments, personal, companies, pressOnly] = await Promise.all([
+  const [subjects, statements, evidence, judgments, personal, companies, pressOnly, intents] = await Promise.all([
     db.execute(sql`
-      SELECT human_id::text AS human, company_key FROM relationship_subjects
+      SELECT human_id::text AS human, company_key, wrote_to_us, last_inbound_at FROM relationship_subjects
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
-    `) as unknown as Promise<Array<{ human: string; company_key: string }>>,
+    `) as unknown as Promise<Array<{ human: string; company_key: string; wrote_to_us: boolean; last_inbound_at: Ts | null }>>,
     db.execute(sql`
       SELECT human_id::text AS human, brand_id, company_key, tag, state, stated_at FROM relationship_statements
       WHERE org_id = ${orgId} AND brand_id IN (${brandId}, '') AND human_id = ANY(${sql.param(humans)}::uuid[]) AND withdrawn_at IS NULL
@@ -118,6 +139,10 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       WHERE bj.org_id = ${orgId} AND bj.brand_id = ${brandId} AND bj.press_only AND h.human = ANY(${sql.param(humans)}::uuid[])
       GROUP BY h.human
     `) as unknown as Promise<Array<{ human: string; at: Ts }>>,
+    db.execute(sql`
+      SELECT human_id::text AS human, p_wants_business AS p, judged_at FROM relationship_intent_judgments
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
+    `) as unknown as Promise<Array<{ human: string; p: number; judged_at: Ts }>>,
   ]);
 
   // A person with an unanswered "same person?" question may be someone we already know: held back from business-only.
@@ -152,6 +177,7 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     for (const h of new Set([linkedCanon.get(r.a) ?? r.a, linkedCanon.get(r.b) ?? r.b])) mergesOf.set(h, [...(mergesOf.get(h) ?? []), merge]);
   }
   const companyKeyOf = new Map(subjects.map((s) => [s.human, s.company_key]));
+  const subjectOf = new Map(subjects.map((s) => [s.human, s]));
   const learned = new Map(companies.map((c) => [c.human, c]));
   // A lead's own employer key (not learned here): name it from brand-service or the local organization row.
   const leadKeys = Array.from(new Set(subjects.map((s) => s.company_key).filter((k) => k && ![...learned.values()].some((c) => c.company_id === k))));
@@ -168,7 +194,12 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   for (const h of humans) {
     const key = companyKeyOf.get(h);
     const statementsOf = new Map<RelationshipTag, { state: "yes" | "no"; at: string }>();
+    let wantsStatement: { state: "yes" | "no"; at: string } | null = null;
     for (const s of statements) {
+      if (s.human === h && s.tag === WANTS_BUSINESS && s.brand_id === brandId && s.company_key === (key ?? "")) {
+        wantsStatement = { state: s.state, at: iso(s.stated_at)! };
+        continue;
+      }
       if (s.human !== h || !isRelationshipTag(s.tag)) continue;
       const humanLevel = levelOf(s.tag) === "human";
       if (humanLevel ? s.brand_id !== "" : s.brand_id !== brandId || s.company_key !== (key ?? "")) continue;
@@ -195,6 +226,10 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     const tags = tagsIn(details, "yes");
     const unsureTags = tagsIn(details, "unsure");
     const judgedAt = j ? iso(j.judged_at) : null;
+    const subj = subjectOf.get(h);
+    const wroteToUs = subj?.wrote_to_us === true;
+    const lead = decideLead(details);
+    const intent = intents.find((x) => x.human === h);
     const block: RelationshipBlock = {
       humanId: h,
       company,
@@ -208,6 +243,15 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
         pure_prospect: pureProspectAllows({ subject: companyKeyOf.has(h), tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }),
       },
       merges: mergesOf.get(h) ?? [],
+      wroteToUs,
+      lastInboundAt: subj?.last_inbound_at ? iso(subj.last_inbound_at) : null,
+      lead,
+      wantsBusiness: decideWantsBusiness({
+        lead,
+        wroteToUs,
+        statement: wantsStatement,
+        judgment: intent ? { p: Number(intent.p), at: iso(intent.judged_at)! } : null,
+      }),
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }
@@ -226,12 +270,26 @@ export interface RelationshipReview {
   brandId: string;
   mergeQuestions: Array<{ id: string; confidence: number; reason: string | null; a: MergeCard; b: MergeCard }>;
   tagQuestions: Array<{ humanId: string; name: string | null; tag: RelationshipTag; confidence: number | null; reason: string | null }>;
+  /** Leads the judge is unsure WANT to do business with the brand (HOT-INBOUND-UNANSWERED-1016): answer with the `wants_business` tag PUT. */
+  intentQuestions: Array<{ humanId: string; name: string | null; answer: IntentAnswerKey; confidence: number | null }>;
   companyQuestions: Array<{ humanId: string; name: string | null; candidates: Array<{ name: string | null; domain: string | null; source: string }> }>;
   settled: {
     merges: SettledMerge[];
     people: Array<{ humanId: string; name: string | null; company: RelationshipCompany | null; tags: RelationshipTag[]; details: TagDetail[] }>;
   };
-  counts: { subjects: number; judged: number; byTag: Record<string, number>; unsureMerges: number; unsureTags: number; companyQuestions: number };
+  counts: {
+    subjects: number;
+    judged: number;
+    byTag: Record<string, number>;
+    unsureMerges: number;
+    unsureTags: number;
+    companyQuestions: number;
+    /** People who wrote to the brand, leads among them, and leads who want business (Hot), all among `subjects`. */
+    wroteToUs: number;
+    leads: number;
+    wantsBusiness: number;
+    unsureIntent: number;
+  };
 }
 
 async function cardsOf(orgId: string, brandId: string, ids: string[]): Promise<Map<string, MergeCard>> {
@@ -295,6 +353,8 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
   `)) as unknown as Array<{ human: string; candidates: Array<{ name: string | null; domain: string | null; source: string }> }>;
 
   const tagQuestions: RelationshipReview["tagQuestions"] = [];
+  const intentQuestions: RelationshipReview["intentQuestions"] = [];
+  const intentCounts = { wroteToUs: 0, leads: 0, wantsBusiness: 0 };
   const people: RelationshipReview["settled"]["people"] = [];
   const byTag: Record<string, number> = {};
   let judged = 0;
@@ -305,6 +365,12 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
     for (const d of b.details) if (d.state === "unsure") tagQuestions.push({ humanId: s.human, name: s.name, tag: d.tag, confidence: d.confidence, reason: null });
     for (const t of b.tags) byTag[t] = (byTag[t] ?? 0) + 1;
     if (b.tags.length > 0 || b.details.some((d) => d.basis === "person")) people.push({ humanId: s.human, name: s.name, company: b.company, tags: b.tags, details: b.details });
+    if (b.wroteToUs) {
+      intentCounts.wroteToUs++;
+      if (b.lead.state === "yes") intentCounts.leads++;
+      if (b.lead.state === "yes" && b.wantsBusiness.state === "yes") intentCounts.wantsBusiness++;
+    }
+    if (b.wantsBusiness.state === "unsure") intentQuestions.push({ humanId: s.human, name: s.name, answer: WANTS_BUSINESS, confidence: b.wantsBusiness.confidence });
   }
   // Journalists of the brand nobody's CRM knows (reached only by our press pitches): shown and counted like any tag.
   const subjectHumans = new Set(subjects.map((s) => s.human));
@@ -335,6 +401,7 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
     brandId,
     mergeQuestions: open.map((q) => ({ id: q.id, confidence: q.probability, reason: q.reason, a: cards.get(q.a)!, b: cards.get(q.b)! })),
     tagQuestions,
+    intentQuestions,
     companyQuestions: companyRows.map((c) => ({ humanId: c.human, name: nameOf.get(c.human) ?? null, candidates: c.candidates })),
     settled: {
       merges: questions
@@ -342,14 +409,14 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
         .map((q) => ({ linkId: q.link_id!, humanIds: [q.a, q.b], names: [cards.get(q.a)?.name ?? null, cards.get(q.b)?.name ?? null], judgedBy: q.answered_by ?? "jev", confidence: Number(q.probability), at: iso(q.answered_at) ?? "" })),
       people,
     },
-    counts: { subjects: Number(total[0]?.n ?? 0), judged, byTag, unsureMerges: open.length, unsureTags: tagQuestions.length, companyQuestions: companyRows.length },
+    counts: { subjects: Number(total[0]?.n ?? 0), judged, byTag, unsureMerges: open.length, unsureTags: tagQuestions.length, companyQuestions: companyRows.length, ...intentCounts, unsureIntent: intentQuestions.length },
   };
 }
 
 export class TagStatementError extends Error {}
 
 /** A person of the org says yes or no about one tag of one human (personal: org-wide; others: this brand's lead). */
-export async function stateTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag; state: "yes" | "no"; userId: string }): Promise<void> {
+export async function stateTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag | IntentAnswerKey; state: "yes" | "no"; userId: string }): Promise<void> {
   const human = (await canonicalHumans(input.orgId, [input.humanId])).get(input.humanId) ?? input.humanId;
   const humanLevel = levelOf(input.tag) === "human";
   const brand = humanLevel ? "" : input.brandId;
@@ -382,7 +449,7 @@ async function refreshJournalistsAfterStatement(orgId: string, brandId: string):
 }
 
 /** Withdraw a person's word on a tag (back to evidence / judgment). Returns whether one was live. */
-export async function withdrawTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag; userId: string }): Promise<boolean> {
+export async function withdrawTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag | IntentAnswerKey; userId: string }): Promise<boolean> {
   const human = (await canonicalHumans(input.orgId, [input.humanId])).get(input.humanId) ?? input.humanId;
   const humanLevel = levelOf(input.tag) === "human";
   const rows = (await db.execute(sql`
@@ -444,4 +511,47 @@ export async function relationshipOfLead(orgId: string, brandId: string | null |
   const h = rows[0]?.h ?? null;
   if (!h) return EMPTY_RELATIONSHIP;
   return (await loadRelationships(orgId, brandId, [h])).get(h) ?? { ...EMPTY_RELATIONSHIP, humanId: h };
+}
+
+export interface BrandIntentPerson {
+  humanId: string;
+  name: string | null;
+  /** Lower-cased. */
+  emails: string[];
+  phones: string[];
+  lastInboundAt: string | null;
+  lead: LeadAnswer;
+  wantsBusiness: WantsBusinessAnswer;
+}
+
+/**
+ * EVERY person who wrote to the brand, with the two answers (HOT-INBOUND-UNANSWERED-1016): the read features-service
+ * builds the Unibox Hot / Won / Lost / Cold families from. Same blocks as the Unibox rows (`loadRelationships`), newest
+ * writer first. A person the feed names without a human yet is not here (nobody to key on); they appear once resolved.
+ */
+export async function readBrandIntent(orgId: string, brandId: string): Promise<BrandIntentPerson[]> {
+  const rows = (await db.execute(sql`
+    SELECT human_id::text AS human, name, emails, phones FROM relationship_subjects
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND wrote_to_us
+    ORDER BY last_inbound_at DESC NULLS LAST, human_id
+  `)) as unknown as Array<{ human: string; name: string | null; emails: string[]; phones: string[] }>;
+  const out: BrandIntentPerson[] = [];
+  for (let i = 0; i < rows.length; i += 1000) {
+    const part = rows.slice(i, i + 1000);
+    const blocks = await loadRelationships(orgId, brandId, part.map((r) => r.human));
+    for (const r of part) {
+      const b = blocks.get(r.human);
+      if (!b) throw new Error(`[lead-service] relationship block missing for subject ${r.human} of brand ${brandId}`);
+      out.push({
+        humanId: r.human,
+        name: r.name,
+        emails: Array.from(new Set((r.emails ?? []).map((e) => e.toLowerCase()))),
+        phones: r.phones ?? [],
+        lastInboundAt: b.lastInboundAt,
+        lead: b.lead,
+        wantsBusiness: b.wantsBusiness,
+      });
+    }
+  }
+  return out;
 }

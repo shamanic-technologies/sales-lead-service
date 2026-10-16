@@ -11082,6 +11082,112 @@
           "at"
         ]
       },
+      "RelationshipLeadAnswer": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "yes",
+              "no",
+              "unsure",
+              null
+            ],
+            "description": "yes = prospect or customer is yes; unsure = one of them unsure, none yes; no = the tags speak and both say no; null = nothing speaks yet."
+          },
+          "basis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "evidence",
+              "judgment",
+              "person",
+              null
+            ],
+            "description": "Strongest basis among the deciding tags (a person's word > a source's fact, e.g. a signup > Jev's judgment)."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "personal",
+                "customer",
+                "prospect",
+                "team",
+                "investor",
+                "advisor",
+                "supplier",
+                "partner",
+                "other_professional",
+                "journalist"
+              ]
+            },
+            "description": "The lead tags (prospect, customer) holding that state."
+          }
+        },
+        "required": [
+          "state",
+          "basis",
+          "tags"
+        ],
+        "description": "HOT-INBOUND-UNANSWERED-1016 question 1: is this person a LEAD of the brand?"
+      },
+      "RelationshipWantsBusinessAnswer": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "yes",
+              "no",
+              "unsure",
+              null
+            ],
+            "description": "Does this LEAD want to do business with the brand now? yes (>= 50% sure, or a person said so), no (< 40%, or a person said so), unsure (between: asked on the review page), null = no answer (see reason)."
+          },
+          "basis": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "judgment",
+              "person",
+              null
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "nullable": true,
+            "description": "Jev's P(wants business) when basis = judgment."
+          },
+          "at": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "lead_unknown",
+              "not_a_lead",
+              "has_not_written",
+              "not_judged_yet",
+              null
+            ],
+            "description": "Why state is null: lead_unknown (lead.state null), not_a_lead (lead.state no: the question is not asked), has_not_written (a lead who never wrote to us: nobody asked), not_judged_yet (a writer the sweep has not judged yet, minutes). null when there is an answer."
+          }
+        },
+        "required": [
+          "state",
+          "basis",
+          "confidence",
+          "at",
+          "reason"
+        ],
+        "description": "HOT-INBOUND-UNANSWERED-1016 question 2: if a lead, do they WANT to do business with the brand? Hot = lead.state yes AND wantsBusiness.state yes."
+      },
       "RelationshipBlock": {
         "type": "object",
         "properties": {
@@ -11262,6 +11368,21 @@
               "$ref": "#/components/schemas/RelationshipSettledMerge"
             },
             "description": "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId."
+          },
+          "wroteToUs": {
+            "type": "boolean",
+            "description": "Did the person write to the brand: a message on any mirrored channel (Gmail, WhatsApp, LinkedIn), a signup, a form, a meeting, a payment, or a reply to our outreach."
+          },
+          "lastInboundAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When they last wrote / acted toward the brand."
+          },
+          "lead": {
+            "$ref": "#/components/schemas/RelationshipLeadAnswer"
+          },
+          "wantsBusiness": {
+            "$ref": "#/components/schemas/RelationshipWantsBusinessAnswer"
           }
         },
         "required": [
@@ -11273,7 +11394,11 @@
           "details",
           "policies",
           "subject",
-          "merges"
+          "merges",
+          "wroteToUs",
+          "lastInboundAt",
+          "lead",
+          "wantsBusiness"
         ],
         "description": "Who a person is to a brand. `personal` is about the org and the human (every brand); every other tag about the org, the brand and the lead (the human at its company). Precedence per tag: a person's word > a source's evidence (signup -> prospect, payment -> customer) > Jev's judgment of the whole merged thread (yes >= 0.5, no < 0.4, unsure between: the true doubt, asked on the review page)."
       },
@@ -11426,6 +11551,38 @@
                 "reason"
               ]
             }
+          },
+          "intentQuestions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "humanId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "answer": {
+                  "type": "string",
+                  "enum": [
+                    "wants_business"
+                  ]
+                },
+                "confidence": {
+                  "type": "number",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "humanId",
+                "name",
+                "answer",
+                "confidence"
+              ]
+            },
+            "description": "Leads the judge is unsure WANT to do business: answer with PUT .../relationships/{humanId}/tags/wants_business."
           },
           "companyQuestions": {
             "type": "array",
@@ -11651,6 +11808,21 @@
               },
               "companyQuestions": {
                 "type": "integer"
+              },
+              "wroteToUs": {
+                "type": "integer",
+                "description": "Listed people who wrote to the brand."
+              },
+              "leads": {
+                "type": "integer",
+                "description": "Among them, leads (lead.state yes)."
+              },
+              "wantsBusiness": {
+                "type": "integer",
+                "description": "Among those leads, who want business (Hot)."
+              },
+              "unsureIntent": {
+                "type": "integer"
               }
             },
             "required": [
@@ -11659,7 +11831,11 @@
               "byTag",
               "unsureMerges",
               "unsureTags",
-              "companyQuestions"
+              "companyQuestions",
+              "wroteToUs",
+              "leads",
+              "wantsBusiness",
+              "unsureIntent"
             ]
           }
         },
@@ -11667,9 +11843,73 @@
           "brandId",
           "mergeQuestions",
           "tagQuestions",
+          "intentQuestions",
           "companyQuestions",
           "settled",
           "counts"
+        ]
+      },
+      "RelationshipBrandIntent": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "humanId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "emails": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "Lower-cased."
+                },
+                "phones": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "lastInboundAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "lead": {
+                  "$ref": "#/components/schemas/RelationshipLeadAnswer"
+                },
+                "wantsBusiness": {
+                  "$ref": "#/components/schemas/RelationshipWantsBusinessAnswer"
+                }
+              },
+              "required": [
+                "humanId",
+                "name",
+                "emails",
+                "phones",
+                "lastInboundAt",
+                "lead",
+                "wantsBusiness"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "count",
+          "people"
         ]
       },
       "FollowupDateAnswer": {
@@ -20057,6 +20297,57 @@
         }
       }
     },
+    "/internal/brands/{brandId}/relationships/intent": {
+      "get": {
+        "summary": "Every person who wrote to the brand: is a lead? wants to do business? (HOT-INBOUND-UNANSWERED-1016)",
+        "description": "One row per person (the human this org sees) who wrote to the brand on any mirrored channel (crm-service's people fact feed: Gmail / WhatsApp / LinkedIn message in, signup, form, meeting, payment) or replied to our outreach, newest writer first. Match on lower-cased `emails` or `humanId`. `lead` and `wantsBusiness` are the same answers as on the relationship block (Unibox rows). Hot = lead.state yes AND wantsBusiness.state yes. A person the feed names without a human yet is absent until resolved.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "People",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelationshipBrandIntent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "brandId not a uuid / x-org-id missing"
+          },
+          "500": {
+            "description": "Our own data unreadable (never an empty list)"
+          }
+        }
+      }
+    },
     "/orgs/brands/{brandId}/relationships/merge-questions/{questionId}/answer": {
       "post": {
         "summary": "Answer an unsure merge: yes = one person (org-scoped link in human-service), no = never asked again",
@@ -20285,7 +20576,8 @@
                 "supplier",
                 "partner",
                 "other_professional",
-                "journalist"
+                "journalist",
+                "wants_business"
               ]
             },
             "required": true,
@@ -20393,7 +20685,8 @@
                 "supplier",
                 "partner",
                 "other_professional",
-                "journalist"
+                "journalist",
+                "wants_business"
               ]
             },
             "required": true,
