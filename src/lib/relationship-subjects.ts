@@ -18,6 +18,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { HumanIdentityError, resolveHuman } from "./human-identity-client.js";
+import { INBOUND_FACT_TYPES } from "./relationship-intent.js";
+import { WORD_LABELS } from "./timeline-labels.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const E164_RE = /^\+[1-9]\d{6,14}$/;
@@ -49,6 +51,8 @@ interface PersonRow {
   max_seq: string;
   has_messages: boolean;
   has_direct: boolean;
+  wrote: boolean;
+  last_in: Date | string | null;
 }
 
 async function personRows(scope: Scope): Promise<PersonRow[]> {
@@ -59,7 +63,9 @@ async function personRows(scope: Scope): Promise<PersonRow[]> {
       array_agg(DISTINCT f.source) AS sources,
       max(f.seq)::text AS max_seq,
       bool_or(f.type IN ('message_in', 'message_out', 'group_message', 'group_member')) AS has_messages,
-      bool_or(f.type <> ALL(${sql.param(GROUP_FACT_TYPES)}::text[])) AS has_direct
+      bool_or(f.type <> ALL(${sql.param(GROUP_FACT_TYPES)}::text[])) AS has_direct,
+      bool_or(f.type = ANY(${sql.param([...INBOUND_FACT_TYPES])}::text[])) AS wrote,
+      max(f.occurred_at) FILTER (WHERE f.type = ANY(${sql.param([...INBOUND_FACT_TYPES])}::text[])) AS last_in
     FROM crm_facts f
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
@@ -187,7 +193,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
   const atomicOf = new Map(mapped.map((m) => [m.person_key, m.human]));
   const canon = await canonicalHumans(scope.orgId, [...atomicOf.values()]);
 
-  interface Acc { names: string[]; emails: Set<string>; phones: Set<string>; channels: Set<string>; keys: string[]; seq: bigint; messages: boolean; direct: boolean }
+  interface Acc { names: string[]; emails: Set<string>; phones: Set<string>; channels: Set<string>; keys: string[]; seq: bigint; messages: boolean; direct: boolean; lastIn: number | null; wrote: boolean }
   const byHuman = new Map<string, Acc>();
   let withoutHuman = 0;
   for (const p of persons) {
@@ -197,7 +203,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
       continue;
     }
     const h = canon.get(atomic) ?? atomic;
-    const acc = byHuman.get(h) ?? { names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false, direct: false };
+    const acc = byHuman.get(h) ?? { names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false, direct: false, lastIn: null, wrote: false };
     if (p.name) acc.names.push(p.name);
     for (const e of keys.get(p.person_key)?.emails ?? []) acc.emails.add(e);
     for (const ph of keys.get(p.person_key)?.phones ?? []) acc.phones.add(ph);
@@ -207,9 +213,18 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     if (seq > acc.seq) acc.seq = seq;
     acc.messages = acc.messages || p.has_messages;
     acc.direct = acc.direct || p.has_direct;
+    acc.wrote = acc.wrote || p.wrote;
+    acc.lastIn = laterOf(acc.lastIn, p.last_in);
     byHuman.set(h, acc);
   }
   const humans = [...byHuman.keys()];
+  // A reply to our outreach is the person writing to us too (HOT-INBOUND-UNANSWERED-1016), whichever mailbox got it.
+  for (const r of await outreachReplies(scope, humans)) {
+    const a = byHuman.get(r.human);
+    if (!a) continue;
+    a.wrote = true;
+    a.lastIn = laterOf(a.lastIn, r.at);
+  }
   const company = await companyKeys(scope, humans);
   const rows = humans.map((h) => {
     const a = byHuman.get(h)!;
@@ -224,6 +239,8 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
       seq: a.seq.toString(),
       messages: a.messages,
       direct: a.direct,
+      wrote: a.wrote,
+      lastIn: a.lastIn === null ? null : new Date(a.lastIn).toISOString(),
     };
   });
   for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500));
@@ -233,6 +250,30 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND human_id <> ALL(${sql.param(humans)}::uuid[])
   `);
   return { persons: persons.length, subjects: rows.length, withoutHuman };
+}
+
+function laterOf(current: number | null, v: Date | string | null): number | null {
+  if (v === null || v === undefined) return current;
+  const iso = toIsoTimestamp(v);
+  const t = iso === null ? NaN : Date.parse(iso);
+  if (!Number.isFinite(t)) return current;
+  return current === null || t > current ? t : current;
+}
+
+/** The latest word each human (this org's view) wrote back to our outreach at the brand (labelled timeline). */
+async function outreachReplies(scope: Scope, humans: readonly string[]): Promise<Array<{ human: string; at: Date | string | null }>> {
+  if (humans.length === 0) return [];
+  const rows = (await db.execute(sql`
+    SELECT l.human_id::text AS human, max(f.occurred_at) AS at
+    FROM lead_timeline_facts f JOIN leads l ON l.id = f.lead_id
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.withdrawn_at IS NULL
+      AND f.label = ANY(${sql.param([...WORD_LABELS])}::text[]) AND l.human_id IS NOT NULL
+    GROUP BY l.human_id
+  `)) as unknown as Array<{ human: string; at: Date | string | null }>;
+  if (rows.length === 0) return [];
+  const canon = await canonicalHumans(scope.orgId, rows.map((r) => r.human));
+  const wanted = new Set(humans);
+  return rows.map((r) => ({ human: canon.get(r.human) ?? r.human, at: r.at })).filter((r) => wanted.has(r.human));
 }
 
 /** A person's real name over a channel label ("Yulia (WA)", "+33... (WA)"), longest real one first. */
@@ -246,7 +287,7 @@ export function bestName(names: readonly string[]): string | null {
 
 async function writeSubjects(
   scope: Scope,
-  rows: Array<{ human: string; company: string; name: string | null; emails: string[]; phones: string[]; channels: string[]; keys: string[]; seq: string; messages: boolean; direct: boolean }>,
+  rows: Array<{ human: string; company: string; name: string | null; emails: string[]; phones: string[]; channels: string[]; keys: string[]; seq: string; messages: boolean; direct: boolean; wrote: boolean; lastIn: string | null }>,
 ): Promise<void> {
   if (rows.length === 0) return;
   const data = JSON.stringify(rows);
@@ -262,21 +303,23 @@ async function writeSubjects(
     `);
   }
   await db.execute(sql`
-    INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, phones, channels, person_keys, thread_seq, has_messages, has_direct, updated_at)
+    INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, phones, channels, person_keys, thread_seq, has_messages, has_direct, wrote_to_us, last_inbound_at, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.name,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
       ARRAY(SELECT jsonb_array_elements_text(v.channels)), ARRAY(SELECT jsonb_array_elements_text(v.keys)),
-      v.seq::bigint, v.messages, v.direct, now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, channels jsonb, keys jsonb, seq text, messages boolean, direct boolean)
+      v.seq::bigint, v.messages, v.direct, v.wrote, v."lastIn"::timestamptz, now()
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, channels jsonb, keys jsonb, seq text, messages boolean, direct boolean, wrote boolean, "lastIn" text)
     ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
       company_key = excluded.company_key, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
       channels = excluded.channels, person_keys = excluded.person_keys, thread_seq = excluded.thread_seq,
-      has_messages = excluded.has_messages, has_direct = excluded.has_direct, updated_at = now()
+      has_messages = excluded.has_messages, has_direct = excluded.has_direct, wrote_to_us = excluded.wrote_to_us,
+      last_inbound_at = excluded.last_inbound_at, updated_at = now()
     WHERE (relationship_subjects.company_key, relationship_subjects.name, relationship_subjects.emails, relationship_subjects.phones,
            relationship_subjects.channels, relationship_subjects.person_keys, relationship_subjects.thread_seq, relationship_subjects.has_messages,
-           relationship_subjects.has_direct)
+           relationship_subjects.has_direct, relationship_subjects.wrote_to_us, relationship_subjects.last_inbound_at)
       IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.channels,
-           excluded.person_keys, excluded.thread_seq, excluded.has_messages, excluded.has_direct)
+           excluded.person_keys, excluded.thread_seq, excluded.has_messages, excluded.has_direct, excluded.wrote_to_us,
+           excluded.last_inbound_at)
   `);
 }
 
@@ -293,6 +336,8 @@ export interface Subject {
   threadSeq: string;
   hasMessages: boolean;
   hasDirect: boolean;
+  wroteToUs: boolean;
+  lastInboundAt: string | null;
 }
 
 export function toSubject(r: Record<string, unknown>): Subject {
@@ -309,6 +354,8 @@ export function toSubject(r: Record<string, unknown>): Subject {
     threadSeq: String(r.thread_seq ?? "0"),
     hasMessages: Boolean(r.has_messages),
     hasDirect: r.has_direct === undefined ? true : Boolean(r.has_direct),
+    wroteToUs: Boolean(r.wrote_to_us),
+    lastInboundAt: r.last_inbound_at === null || r.last_inbound_at === undefined ? null : (toIsoTimestamp(r.last_inbound_at as Date | string) ?? null),
   };
 }
 

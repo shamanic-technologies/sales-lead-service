@@ -9,12 +9,15 @@ import { CompanyServiceError } from "../lib/company-client.js";
 import { HumanIdentityError } from "../lib/human-identity-client.js";
 import { CompanyStatementError, stateCompany } from "../lib/relationship-company.js";
 import { answerMergeQuestion, MergeQuestionNotFoundError, undoMerge } from "../lib/relationship-merges.js";
-import { EMPTY_RELATIONSHIP, loadRelationships, readReview, relationshipOfLead, stateTag, withdrawTag } from "../lib/relationship-read.js";
+import { EMPTY_RELATIONSHIP, loadRelationships, readBrandIntent, readReview, relationshipOfLead, stateTag, withdrawTag } from "../lib/relationship-read.js";
+import { WANTS_BUSINESS } from "../lib/relationship-intent.js";
 import { db } from "../db/index.js";
 import { sql } from "drizzle-orm";
 import { isRelationshipTag } from "../lib/relationship-tags.js";
 
 const router = Router();
+/** A tag, or the `wants_business` answer a person of the org may state (HOT-INBOUND-UNANSWERED-1016). */
+const isStatable = (tag: string) => isRelationshipTag(tag) || tag === WANTS_BUSINESS;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const RelationshipsQueryBody = z.object({ humanIds: z.array(z.string().regex(UUID_RE)).min(1).max(1000) });
@@ -80,6 +83,18 @@ router.get("/orgs/brands/:brandId/relationships/review", apiKeyAuth, requireOrgI
   }
 });
 
+// HOT-INBOUND-UNANSWERED-1016: every person who wrote to the brand, is a lead / wants business (features-service families).
+router.get("/internal/brands/:brandId/relationships/intent", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+  const brandId = brandOf(req, res);
+  if (!brandId) return;
+  try {
+    const people = await readBrandIntent(req.orgId!, brandId);
+    res.json({ brandId, count: people.length, people });
+  } catch (err) {
+    fail(res, "relationships intent", err);
+  }
+});
+
 router.post(
   "/orgs/brands/:brandId/relationships/merge-questions/:questionId/answer",
   apiKeyAuth,
@@ -135,7 +150,7 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAuth,
   const humanId = String(req.params.humanId);
   const tag = String(req.params.tag);
   const parsed = TagStateBody.safeParse(req.body);
-  if (!UUID_RE.test(humanId) || !isRelationshipTag(tag) || !parsed.success) {
+  if (!UUID_RE.test(humanId) || !isStatable(tag) || !parsed.success) {
     res.status(400).json({ error: "invalid_request", detail: "humanId uuid, a known tag, body {state: yes|no}" });
     return;
   }
@@ -155,7 +170,7 @@ router.delete("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAu
   if (!userId) return;
   const humanId = String(req.params.humanId);
   const tag = String(req.params.tag);
-  if (!UUID_RE.test(humanId) || !isRelationshipTag(tag)) {
+  if (!UUID_RE.test(humanId) || !isStatable(tag)) {
     res.status(400).json({ error: "invalid_request", detail: "humanId uuid and a known tag" });
     return;
   }

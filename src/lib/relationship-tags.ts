@@ -33,7 +33,7 @@ export type RelationshipTag = (typeof RELATIONSHIP_TAGS)[number];
 
 export type RelationshipLevel = "human" | "lead";
 
-export function levelOf(tag: RelationshipTag): RelationshipLevel {
+export function levelOf(tag: string): RelationshipLevel {
   return tag === "personal" ? "human" : "lead";
 }
 

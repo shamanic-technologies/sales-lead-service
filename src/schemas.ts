@@ -8615,6 +8615,29 @@ registry.registerPath({
 // --- Relationship tags (RELATIONSHIP-TAGS-1014) ---
 
 const RelationshipTagEnum = z.enum(RELATIONSHIP_TAGS);
+/** A tag, or the `wants_business` answer (HOT-INBOUND-UNANSWERED-1016): what a person of the org may state. */
+const StatableTagEnum = z.enum([...RELATIONSHIP_TAGS, "wants_business"]);
+const TagStateEnum = z.enum(["yes", "no", "unsure"]);
+
+const LeadAnswerSchema = z
+  .object({
+    state: TagStateEnum.nullable().openapi({ description: "yes = prospect or customer is yes; unsure = one of them unsure, none yes; no = the tags speak and both say no; null = nothing speaks yet." }),
+    basis: z.enum(["evidence", "judgment", "person"]).nullable().openapi({ description: "Strongest basis among the deciding tags (a person's word > a source's fact, e.g. a signup > Jev's judgment)." }),
+    tags: z.array(RelationshipTagEnum).openapi({ description: "The lead tags (prospect, customer) holding that state." }),
+  })
+  .openapi("RelationshipLeadAnswer");
+
+const WantsBusinessAnswerSchema = z
+  .object({
+    state: TagStateEnum.nullable().openapi({ description: "Does this LEAD want to do business with the brand now? yes (>= 50% sure, or a person said so), no (< 40%, or a person said so), unsure (between: asked on the review page), null = no answer (see reason)." }),
+    basis: z.enum(["judgment", "person"]).nullable(),
+    confidence: z.number().nullable().openapi({ description: "Jev's P(wants business) when basis = judgment." }),
+    at: z.string().nullable(),
+    reason: z.enum(["lead_unknown", "not_a_lead", "has_not_written", "not_judged_yet"]).nullable().openapi({
+      description: "Why state is null: lead_unknown (lead.state null), not_a_lead (lead.state no: the question is not asked), has_not_written (a lead who never wrote to us: nobody asked), not_judged_yet (a writer the sweep has not judged yet, minutes). null when there is an answer.",
+    }),
+  })
+  .openapi("RelationshipWantsBusinessAnswer");
 
 const SettledMergeSchema = z
   .object({
@@ -8666,6 +8689,14 @@ export const RelationshipBlockSchema = z
     }),
     merges: z.array(SettledMergeSchema).openapi({
       description: "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId.",
+    }),
+    wroteToUs: z.boolean().openapi({
+      description: "Did the person write to the brand: a message on any mirrored channel (Gmail, WhatsApp, LinkedIn), a signup, a form, a meeting, a payment, or a reply to our outreach.",
+    }),
+    lastInboundAt: z.string().nullable().openapi({ description: "When they last wrote / acted toward the brand." }),
+    lead: LeadAnswerSchema.openapi({ description: "HOT-INBOUND-UNANSWERED-1016 question 1: is this person a LEAD of the brand?" }),
+    wantsBusiness: WantsBusinessAnswerSchema.openapi({
+      description: "HOT-INBOUND-UNANSWERED-1016 question 2: if a lead, do they WANT to do business with the brand? Hot = lead.state yes AND wantsBusiness.state yes.",
     }),
   })
   .openapi("RelationshipBlock", {
@@ -8725,6 +8756,9 @@ registry.registerPath({
               brandId: z.string(),
               mergeQuestions: z.array(z.object({ id: z.string(), confidence: z.number(), reason: z.string().nullable(), a: MergeCardSchema, b: MergeCardSchema })),
               tagQuestions: z.array(z.object({ humanId: z.string(), name: z.string().nullable(), tag: RelationshipTagEnum, confidence: z.number().nullable(), reason: z.string().nullable() })),
+              intentQuestions: z
+                .array(z.object({ humanId: z.string(), name: z.string().nullable(), answer: z.literal("wants_business"), confidence: z.number().nullable() }))
+                .openapi({ description: "Leads the judge is unsure WANT to do business: answer with PUT .../relationships/{humanId}/tags/wants_business." }),
               companyQuestions: z.array(
                 z.object({
                   humanId: z.string(),
@@ -8751,12 +8785,54 @@ registry.registerPath({
                 unsureMerges: z.number().int(),
                 unsureTags: z.number().int(),
                 companyQuestions: z.number().int(),
+                wroteToUs: z.number().int().openapi({ description: "Listed people who wrote to the brand." }),
+                leads: z.number().int().openapi({ description: "Among them, leads (lead.state yes)." }),
+                wantsBusiness: z.number().int().openapi({ description: "Among those leads, who want business (Hot)." }),
+                unsureIntent: z.number().int(),
               }),
             })
             .openapi("RelationshipReview"),
         },
       },
     },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/relationships/intent",
+  summary: "Every person who wrote to the brand: is a lead? wants to do business? (HOT-INBOUND-UNANSWERED-1016)",
+  description:
+    "One row per person (the human this org sees) who wrote to the brand on any mirrored channel (crm-service's people fact feed: Gmail / WhatsApp / LinkedIn message in, signup, form, meeting, payment) or replied to our outreach, newest writer first. Match on lower-cased `emails` or `humanId`. `lead` and `wantsBusiness` are the same answers as on the relationship block (Unibox rows). Hot = lead.state yes AND wantsBusiness.state yes. A person the feed names without a human yet is absent until resolved.",
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "People",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              count: z.number().int(),
+              people: z.array(
+                z.object({
+                  humanId: z.string(),
+                  name: z.string().nullable(),
+                  emails: z.array(z.string()).openapi({ description: "Lower-cased." }),
+                  phones: z.array(z.string()),
+                  lastInboundAt: z.string().nullable(),
+                  lead: LeadAnswerSchema,
+                  wantsBusiness: WantsBusinessAnswerSchema,
+                }),
+              ),
+            })
+            .openapi("RelationshipBrandIntent"),
+        },
+      },
+    },
+    400: { description: "brandId not a uuid / x-org-id missing" },
+    500: { description: "Our own data unreadable (never an empty list)" },
   },
 });
 
@@ -8793,7 +8869,7 @@ registry.registerPath({
   path: "/orgs/brands/{brandId}/relationships/{humanId}/tags/{tag}",
   summary: "A person says yes or no about one relationship tag (outranks evidence and judgment)",
   request: {
-    params: z.object({ brandId: z.string(), humanId: z.string(), tag: RelationshipTagEnum }),
+    params: z.object({ brandId: z.string(), humanId: z.string(), tag: StatableTagEnum }),
     body: { content: { "application/json": { schema: z.object({ state: z.enum(["yes", "no"]) }) } } },
   },
   parameters: relationshipHeaders(true),
@@ -8804,7 +8880,7 @@ registry.registerPath({
   method: "delete",
   path: "/orgs/brands/{brandId}/relationships/{humanId}/tags/{tag}",
   summary: "Withdraw a person's word on a tag (back to evidence / judgment)",
-  request: { params: z.object({ brandId: z.string(), humanId: z.string(), tag: RelationshipTagEnum }) },
+  request: { params: z.object({ brandId: z.string(), humanId: z.string(), tag: StatableTagEnum }) },
   parameters: relationshipHeaders(true),
   responses: {
     200: { description: "Withdrawn", content: { "application/json": { schema: z.object({ withdrawn: z.boolean(), relationship: RelationshipBlockSchema }) } } },
