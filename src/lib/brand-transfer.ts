@@ -213,7 +213,16 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       // Who is a journalist of the brand, never a lead (JOURNALISTS-NOT-LEADS-1016): derived, but moved so no sales
       // pool hands one out before the next refresh rewrites it under the target.
       { table: "brand_journalists", touchesUpdatedAt: true },
+      // Every lead's next follow-up date and each "Lead follow-up due" hand-out (LEAD-FOLLOWUP-DATE-1016).
+      { table: "lead_followup_dates", touchesUpdatedAt: true },
+      { table: "lead_followup_due_serves", touchesUpdatedAt: false },
     ];
+    // A date the target already holds for the same lead is the target's own: drop the source copy.
+    await tx.execute(sql`
+      DELETE FROM lead_followup_dates s
+      WHERE ${brandScalarPending}
+        AND EXISTS (SELECT 1 FROM lead_followup_dates t WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id)
+    `);
     // A journalist row the target already holds for the same lead is rewritten by the next refresh: drop the source copy.
     await tx.execute(sql`
       DELETE FROM brand_journalists s

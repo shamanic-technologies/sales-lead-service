@@ -1021,10 +1021,11 @@ export const BufferNextRequestSchema = z
         "Tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015): `3_months` = never hand out a person this brand EMAILED in the last 3 calendar months (any campaign of the brand, any of the person's registered addresses; evidence = the emails instantly-service actually sent, as it announces them). Applies to every pool (this campaign's already-paid people, a source's stock, people released by another pipe, contacted pure prospects): a skipped person stays where they are and is handed out later, once the 3 months are over or to a serve that does not ask. On a fresh serve the person is checked right after the buy: a hit stays filed under the asking campaign (its paid pool, or the source's stock) and the next person is bought, up to 5 times per call; if all 5 were emailed recently the answer is `found:false`, reason `recently_emailed` (not exhaustion). Absent = no such skip (today's serve, bytes unchanged): a play where the client names the person, or that re-engages people already emailed, does not state it.",
       example: "3_months",
     }),
-    population: z.enum(["contacted_pure_prospects"]).optional().openapi({
+    population: z.enum(["contacted_pure_prospects", "lead_followup_due"]).optional().openapi({
       description:
-        "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion).",
-      example: "contacted_pure_prospects",
+        "WHO a SOURCE pipe finds, when it is not an audience (NEVER-NO-FOLLOWUP-1014): `contacted_pure_prospects` = people this brand already emailed who are still owed a prospect follow-up (the same answer as GET /orgs/leads/{id}/prospect-followup: no tag but prospect, not opted out, unsubscribed, bounced, disqualified, not a positive replier, never met or bought, no sequence still running), each handed to this population AT MOST ONCE per brand, ever. Only a source unit's own run (x-campaign-id = a campaign of leg start_to_lead_found) may state it, else 400 `population_needs_source_unit`. The person is filed under the source (its stock); the pipe it feeds takes them through its usual serve, re-checked right before. Nothing is bought. Empty = `found:false`, reason `contacted_prospects_none_owed` (not exhaustion). " +
+        "`lead_followup_due` = \"Lead follow-up due\" (LEAD-FOLLOWUP-DATE-1016): EVERY lead of the brand (cold-emailed, a Unibox prospect, a signup) whose next follow-up date (GET /orgs/leads/{id}/followup-date) has passed, most overdue first, REPEATABLE: a person is served again each time their date passes again. Re-checked right before with the same stops (client, personal or other non-prospect relationship, opted out, unsubscribed, bounced, disqualified, booked, positive reply); a person not owed now has their date pushed out, never served. Reached on ANY of the pipe's contact methods (`reachableBy`, default email or phone): a person known by phone alone comes out with `email: null` and `phone`. Serving moves the person's date 7 days out (so a pipe that never writes cannot hand them daily); the writer's send or stated date then decides the next round. Filed under the source (its stock); the follow-up pipe takes them through its usual serve, re-checked right before, and its row for the person is re-served each round (never retried by the paid pool). Nothing is bought. Empty = `found:false`, reason `lead_followup_none_due` (not exhaustion).",
+      example: "lead_followup_due",
     }),
     namedLead: z
       .object({
@@ -1122,11 +1123,17 @@ const ServedLeadSchema = z
       }),
     email: z
       .string()
+      .nullable()
       .openapi({
         description:
-          "The email address selected for outreach. Always populated when found=true. Same address appears in data.contacts for the 'email' channel.",
+          "The email address selected for outreach. Populated when found=true on every serve except a \"Lead follow-up due\" serve (body `population: \"lead_followup_due\"`, and the follow-up pipe's stock serve of those finds) of a person known by phone alone, where it is null and `phone` is set. Same address appears in data.contacts for the 'email' channel.",
         example: "sara@cascobay.com",
       }),
+    phone: z.string().nullable().optional().openapi({
+      description:
+        "\"Lead follow-up due\" serves only (LEAD-FOLLOWUP-DATE-1016): the person's registered phone, null when they have none. Absent on every other serve.",
+      example: "+33612345678",
+    }),
     data: FullLeadSchema,
     brandIds: z
       .array(z.string())
@@ -8840,6 +8847,133 @@ registry.registerPath({
       content: { "application/json": { schema: z.object({ leadId: z.string(), brandId: z.string().nullable(), relationship: RelationshipBlockSchema }) } },
     },
     404: { description: "No such row in this org (or not of that brand)" },
+  },
+});
+
+// --- Next follow-up date of every lead (LEAD-FOLLOWUP-DATE-1016) ---
+
+export const FollowupDateStatementSchema = z
+  .object({
+    nextFollowupAt: z.string().datetime({ offset: true }).optional().openapi({
+      description:
+        "The writer's next follow-up date (ISO). Stored as stated, never clamped; refused (400 `date_out_of_range`, bounds in the body) before now minus 5 minutes or beyond 366 days. Requires `reason`.",
+      example: "2026-10-18T09:00:00Z",
+    }),
+    reason: z.string().trim().min(1).max(500).optional().openapi({ description: "Why then, in a few words (e.g. \"waits for a price\").", example: "He waits for a price" }),
+    sent: z
+      .object({
+        channel: z.string().trim().min(1).max(40).openapi({ description: "The channel the message went out on (email, whatsapp, linkedin...).", example: "whatsapp" }),
+        at: z.string().datetime({ offset: true }).optional().openapi({ description: "When it went out; absent = now. Never in the future (400 `sent_in_future`)." }),
+      })
+      .strict()
+      .optional()
+      .openapi({
+        description:
+          "A message of ours just went out to the person. Alone = the default rule: next follow-up = this send + 7 days (a later stated date stands). With `nextFollowupAt` = that date.",
+      }),
+    stop: z
+      .object({ reason: z.string().trim().min(1).max(1000).openapi({ description: "Why the follow-ups end, in the person's own words.", example: "Please stop writing to me" }) })
+      .strict()
+      .optional()
+      .openapi({ description: "End the follow-ups: no next follow-up date at all until a writer states one again. Stated alone." }),
+  })
+  .strict()
+  .openapi("FollowupDateStatement");
+
+const FollowupDateSchema = z
+  .object({
+    nextFollowupAt: z.string().nullable().openapi({ description: "When the brand follows this person up next (ISO). null only when `basis` is `stopped`." }),
+    basis: z.enum(["default", "send", "stated", "served", "not_yet", "stop_recheck", "stopped"]).openapi({
+      description:
+        "Who set it: `default` (every lead, now), `send` (our last send + 7 days), `stated` (a writer), `served` (handed by Lead follow-up due, 7 days out until the writer sends or states), `not_yet` (owed later: the verdict's retry time), `stop_recheck` (not owed now: asked again in 30 days), `stopped` (a person's word ended the follow-ups).",
+    }),
+    reason: z.string().nullable(),
+    statedByCampaignId: z.string().nullable(),
+    statedAt: z.string().nullable(),
+    stoppedAt: z.string().nullable(),
+    lastSentAt: z.string().nullable().openapi({ description: "Our last message to the person at the brand, any channel." }),
+    lastSentChannel: z.string().nullable(),
+    sentCount: z.number().int(),
+    lastServedAt: z.string().nullable().openapi({ description: "Last time Lead follow-up due handed them out." }),
+    servedCount: z.number().int(),
+  })
+  .openapi("FollowupDate");
+
+export const FollowupDateAnswerSchema = z
+  .object({
+    leadCampaignId: z.string(),
+    leadId: z.string(),
+    brandId: z.string(),
+    followupDate: FollowupDateSchema,
+    queued: z
+      .object({
+        any: z.boolean().openapi({ description: "Anything of ours is waiting to go out to them at the brand, any channel." }),
+        emailSequence: z.boolean().openapi({ description: "The email sender still holds a sequence step for them (its send time is the sender's, not stated here)." }),
+        followups: z
+          .array(z.object({ leadCampaignId: z.string(), campaignId: z.string(), dueAt: z.string(), claimedAt: z.string().nullable() }))
+          .openapi({ description: "Every reactive follow-up owed to them at the brand, with when it is due." }),
+        inDueStock: z.boolean().openapi({ description: "They sit in a Lead follow-up due source's stock, waiting for the follow-up pipe." }),
+      })
+      .openapi({ description: "What is already queued for the person." }),
+    owed: z
+      .object({
+        owed: z.boolean(),
+        kind: z.enum(["owed", "stop", "not_yet"]),
+        retryAfter: z.string().nullable(),
+        reason: z.string().nullable(),
+        reasons: z.array(z.string()),
+        relationshipTags: z.array(z.string()),
+      })
+      .openapi({
+        description:
+          "Still owed a follow-up by the brand? Same verdict as GET /orgs/leads/{id}/prospect-followup without the \"never emailed\" stop (every lead counts): stops = client, personal or other non-prospect relationship, opted out, do not contact, unsubscribed, bounced, disqualified, meeting, positive reply.",
+      }),
+    replayed: z.boolean().optional().openapi({ description: "PUT only: true = this run already stated exactly this, nothing changed." }),
+  })
+  .openapi("FollowupDateAnswer");
+
+const followupDateHeaders = [
+  { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+  { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal org UUID" },
+  { in: "header" as const, name: "x-campaign-id", required: false, schema: { type: "string" as const }, description: "The writing campaign (recorded on a statement)" },
+  { in: "header" as const, name: "x-run-id", required: false, schema: { type: "string" as const }, description: "The writing run: a statement is idempotent on (run, body)" },
+];
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/{id}/followup-date",
+  summary: "The next follow-up date of the person of this lead row, what is queued for them, and whether they are still owed one",
+  description:
+    "`{id}` = a lead row id (`leadCampaignId` on a buffer/next serve, the list row `id`). Every lead of a brand carries a date (default now), moved by every send of ours on any channel (+7 days), by a writer's statement, and by the Lead follow-up due serve. Fail loud: a source of the verdict unreadable = 502.",
+  request: { params: z.object({ id: z.string() }), query: z.object({ brandId: z.string().optional() }) },
+  parameters: followupDateHeaders,
+  responses: {
+    200: { description: "The date", content: { "application/json": { schema: FollowupDateAnswerSchema } } },
+    400: { description: "Not a row id" },
+    404: { description: "No such row in this org (or not of that brand)" },
+    409: { description: "The row names no brand" },
+    502: { description: "The verdict could not be read" },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/leads/{id}/followup-date",
+  summary: "State the person's next follow-up date, a send, or a stop in their own words",
+  description:
+    "One write per person at the brand: `{nextFollowupAt, reason}` (postpone, or the date after the message just sent: add `sent`), `{sent}` alone (default +7 days), or `{stop: {reason}}` (ends the follow-ups). Idempotent on (x-run-id, body): the same run restating the same thing changes nothing (`replayed: true`). Answers the same shape as the GET.",
+  request: {
+    params: z.object({ id: z.string() }),
+    query: z.object({ brandId: z.string().optional() }),
+    body: { content: { "application/json": { schema: FollowupDateStatementSchema } } },
+  },
+  parameters: followupDateHeaders,
+  responses: {
+    200: { description: "Stated", content: { "application/json": { schema: FollowupDateAnswerSchema } } },
+    400: { description: "Invalid body; `nothing_stated`, `reason_required`, `stop_excludes_date`, `date_out_of_range` (with `earliest`/`latest`), `invalid_date`, `sent_in_future`" },
+    404: { description: "No such row in this org (or not of that brand)" },
+    409: { description: "The row names no brand" },
+    502: { description: "The verdict could not be read (the statement was stored)" },
   },
 });
 

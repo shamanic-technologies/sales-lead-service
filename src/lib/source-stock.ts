@@ -6,6 +6,8 @@ import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import { journalistScopeOf } from "./brand-journalists.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
+import { contactOf, dueReachClauses, markDueServe, openDueServeOfSourceRow, openDueServeSql, postponeDue } from "./lead-followup-date.js";
+import type { ProspectFollowupVerdict } from "./prospect-followup.js";
 
 /**
  * THE STOCK A SOURCE FOUND ON ITS OWN, HANDED TO THE PIPE AFTER IT (LEADS-ONLY-FUNNEL-CAMPAIGN, 2026-10-12).
@@ -39,7 +41,10 @@ export interface StockedLead {
   sourceRowId: string;
   sourceCampaignId: string;
   leadId: string;
-  email: string;
+  /** null only for a "Lead follow-up due" find known by phone alone (LEAD-FOLLOWUP-DATE-1016). */
+  email: string | null;
+  /** The person's phone, stated for a "Lead follow-up due" find only. */
+  phone?: string | null;
   audienceId: string | null;
   buyingSignal: BuyingSignal | null;
   personId: string | null;
@@ -112,6 +117,12 @@ export async function claimStockedLead(params: {
    * person still owed a prospect follow-up NOW? null = the row is not such a find (a bug: it throws).
    */
   askStillOwed?: (sourceRowId: string) => Promise<StillOwedVerdict | null>;
+  /**
+   * A "Lead follow-up due" find (LEAD-FOLLOWUP-DATE-1016, src/lib/lead-followup-date.ts): is the person still owed a
+   * follow-up by the brand NOW? Its finds are handed REPEATEDLY (one round per date that passes) and reach the pipe on
+   * ANY of its contact methods (a multichannel follow-up writes on whichever the person holds).
+   */
+  askDueOwed?: (q: { orgId: string; brandId: string; leadId: string }) => Promise<ProspectFollowupVerdict>;
 }): Promise<StockClaim> {
   const setAside: SetAsideLead[] = [];
   if (params.sourceCampaignIds.length === 0) return { lead: null, setAside };
@@ -139,10 +150,15 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
          AND s.status = 'served'
          AND s.source_handed_at IS NULL
          AND s.source_set_aside_at IS NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
+         AND (
+           (NOT ${openDueServeSql(sql`s.id`)}
+             AND NOT EXISTS (
+               SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
+             )
+             ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))})
+           OR (${params.askDueOwed ? sql`TRUE` : sql`FALSE`} AND ${openDueServeSql(sql`s.id`)}
+             ${dueReachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))})
          )
-         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))}
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED
@@ -157,6 +173,9 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
     }>;
     const row = candidates[0];
     if (!row) return { kind: "empty" };
+
+    const due = params.askDueOwed ? await openDueServeOfSourceRow(tx, row.id) : null;
+    if (due) return handDueFind(tx, params, row, due);
 
     const [email] = (await tx.execute(sql`
       SELECT cm.value FROM lead_contact_methods cm
@@ -236,4 +255,78 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
       },
     };
   });
+}
+
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/**
+ * Hand a "Lead follow-up due" find to the follow-up pipe, inside the claim's transaction. Still owed = the outreach row
+ * is filed (or RE-SERVED for this round: a person followed up before holds a row there already) and the run now holding
+ * it recorded; not owed now = the find is set aside and the person's date moved to when to ask again.
+ */
+async function handDueFind(
+  tx: Tx,
+  params: Parameters<typeof claimStockedLead>[0],
+  row: { id: string; campaign_id: string; lead_id: string; audience_id: string | null; buying_signal: unknown; person_id: string | null; goal: string | null },
+  due: { id: string; orgId: string; brandId: string; leadId: string },
+): Promise<ClaimStep> {
+  const contact = await contactOf(tx, row.lead_id);
+  if (!contact.email && !contact.phone) throw new Error(`[source-stock] due find ${row.id} (lead ${row.lead_id}) carries neither an email nor a phone`);
+  const verdict = await params.askDueOwed!({ orgId: due.orgId, brandId: due.brandId, leadId: due.leadId });
+  if (!verdict.owed) {
+    const reason = `${verdict.kind === "not_yet" ? "not yet owed" : "no longer owed"} a follow-up: ${verdict.reasons.join(", ")}`;
+    await tx.execute(sql`
+      UPDATE leads_campaigns SET source_set_aside_at = now(), source_set_aside_reason = ${reason}, updated_at = now() WHERE id = ${row.id}
+    `);
+    await markDueServe(tx, due.id, { setAsideReason: reason });
+    await postponeDue(tx, due, verdict);
+    return {
+      kind: "set_aside",
+      row: { sourceRowId: row.id, sourceCampaignId: row.campaign_id, leadId: row.lead_id, email: contact.email ?? contact.phone!, audienceId: null, reason },
+    };
+  }
+  await tx.execute(sql`
+    UPDATE leads_campaigns SET source_handed_at = now(), source_handed_to_campaign_id = ${params.outreachCampaignId}, updated_at = now()
+    WHERE id = ${row.id}
+  `);
+  const goal = params.goal ?? row.goal;
+  const brandIds = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
+  const [filed] = (await tx.execute(sql`
+    INSERT INTO leads_campaigns (
+      lead_id, campaign_id, org_id, brand_ids, status, status_reason, status_details, served_at,
+      parent_run_id, run_id, push_run_id, user_id, workflow_slug, feature_slug, goal, active_goal_id, brand_profile_id
+    ) VALUES (
+      ${row.lead_id}, ${params.outreachCampaignId}, ${params.orgId}, ARRAY[${brandIds}]::text[], 'served', 'served',
+      ${`Lead follow-up due, from the stock of source campaign ${row.campaign_id} (row ${row.id}), ${contact.email ? `email=${contact.email}` : `phone=${contact.phone}`}, leadId=${row.lead_id}, campaign=${params.outreachCampaignId}`},
+      now(), ${params.parentRunId}, ${params.runId}, ${params.runId}, ${params.userId}, ${params.workflowSlug}, ${params.featureSlug},
+      ${goal}, ${params.activeGoalId}, ${params.brandProfileId}
+    )
+    ON CONFLICT (lead_id, campaign_id) DO UPDATE SET
+      status = 'served', status_details = EXCLUDED.status_details, served_at = now(),
+      parent_run_id = EXCLUDED.parent_run_id, run_id = EXCLUDED.run_id, push_run_id = EXCLUDED.push_run_id,
+      user_id = EXCLUDED.user_id, workflow_slug = EXCLUDED.workflow_slug, goal = EXCLUDED.goal,
+      active_goal_id = EXCLUDED.active_goal_id, brand_profile_id = EXCLUDED.brand_profile_id, updated_at = now()
+    RETURNING id::text AS id, (xmax <> 0) AS reserved
+  `)) as unknown as Array<{ id: string; reserved: boolean }>;
+  if (filed.reserved) {
+    await tx.execute(sql`
+      INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
+      VALUES (${filed.id}::uuid, ${params.runId}, ${params.workflowSlug}, now(), 'followup_due')
+    `);
+  }
+  await markDueServe(tx, due.id, { handedTo: params.outreachCampaignId, handedRowId: filed.id });
+  return {
+    kind: "handed",
+    lead: {
+      sourceRowId: row.id,
+      sourceCampaignId: row.campaign_id,
+      leadId: row.lead_id,
+      email: contact.email,
+      phone: contact.phone,
+      audienceId: null,
+      buyingSignal: null,
+      personId: row.person_id,
+      goal,
+    },
+  };
 }

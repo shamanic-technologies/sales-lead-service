@@ -31,6 +31,8 @@ import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
+import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
+import { fileUniboxLeads } from "./lib/unibox-leads.js";
 import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
@@ -84,6 +86,15 @@ startChannelSendReconcileWorker();
 // Who each brand only ever pitched to the press (or a person / Jev says is a journalist): never a lead, refused by
 // every sales pool and claim (brand-journalists.ts, JOURNALISTS-NOT-LEADS-1016).
 startBrandJournalistsWorker();
+// Every lead of every brand carries a next follow-up date, moved by every send we observe on any channel; the brand's
+// Unibox prospects are filed as its leads first (lead-followup-date.ts, unibox-leads.ts, LEAD-FOLLOWUP-DATE-1016).
+let uniboxTicks = 0;
+startLeadFollowupDatesWorker(async () => {
+  // The intake reads every relationship of every candidate: every 7th tick (~15 min) is plenty.
+  if (uniboxTicks++ % 7 !== 0) return;
+  const r = await fileUniboxLeads();
+  if (r.filed > 0 || r.ambiguous > 0) console.log(`[lead-service] unibox intake: candidates=${r.candidates} filed=${r.filed} notProspect=${r.notProspect} ambiguous=${r.ambiguous}`);
+});
 
 // The Leads search's trigram index, built CONCURRENTLY after boot and never awaited by anything
 // (read-model-search-index.ts, DASH-LATENCY-1014). Until it exists a search is slow, not wrong.
