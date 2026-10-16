@@ -92,6 +92,12 @@ export const TREG_BASE_URL = "https://treg.to";
 export const SOCIAL_SERVICE_URL = required("SOCIAL_SERVICE_URL");
 export const SOCIAL_SERVICE_API_KEY = required("SOCIAL_SERVICE_API_KEY");
 
+// --- What an earlier run paid to find a lead (src/lib/source-reused-acquisitions.ts) ---
+// apollo-service holds every paid reveal / email find / verification; a source's own-run finds are priced on it.
+// Read-only: people are still sourced through human-service, never apollo-service directly.
+export const APOLLO_SERVICE_URL = required("APOLLO_SERVICE_URL");
+export const APOLLO_SERVICE_API_KEY = required("APOLLO_SERVICE_API_KEY");
+
 // --- Conversion tracking (beta) ---
 // Public URL of the api-service gateway a client's website hits for
 // POST /public/conversions. This is the PUBLIC gateway host, NOT the internal

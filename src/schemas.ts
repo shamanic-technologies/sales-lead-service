@@ -8395,6 +8395,54 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/internal/source-campaigns/reused-acquisitions",
+  summary: "Per source campaign: leads found in its own runs that reused an acquisition an earlier run paid for, and its cost (internal, service-auth)",
+  description:
+    "A lead keeps the price paid to find it (owner 2026-10-17). Sibling of `GET /internal/source-campaigns/leads-found`: over the SAME own-run " +
+    "finds (`leads_campaigns.status_reason = 'source_found'`, leads-found `ownRuns`), per source campaign, how many were already revealed, " +
+    "email-found or verified by an EARLIER run (another campaign, or none, started before the find) and what those earlier runs actually cost, " +
+    "as apollo-service `POST /internal/acquisition-costs` answers it (one call per org). Add `earlierAcquisitionCostInUsdCents` to the " +
+    "campaign's own spend to price its leads. On-demand finds (leads-found `onDemand`) are NOT covered: their row is the outreach campaign's " +
+    "and their purchase runs inside the source's serve run. An org apollo-service could not answer for: its campaigns serve `reusedLeads`, " +
+    "both costs = null and `unavailableReason` (`apollo_service_unavailable`, `apollo_answer_incomplete`, `org_id_not_uuid`), never 0. " +
+    "Read-only: nothing billed, served or moved.",
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Reused acquisitions per source campaign",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              basis: z.literal("own_runs").openapi({ description: "Which finds are covered: own-run finds only." }),
+              recordedSince: z.string().openapi({ description: "Own-run finds are recorded from this instant (= leads-found `modes.ownRuns.recordedSince`)." }),
+              counts: z.array(
+                z.object({
+                  campaignId: z.string(),
+                  orgId: z.string(),
+                  ownRuns: z.number().int().openapi({ description: "Leads the campaign found in its own runs (= leads-found `ownRuns`)." }),
+                  checkedLeads: z.number().int().openapi({ description: "Of them, finds asked of apollo-service (an Apollo person id or an email)." }),
+                  uncheckedLeads: z.number().int().openapi({ description: "Of them, finds with neither: never asked, never reused. checkedLeads + uncheckedLeads = ownRuns." }),
+                  reusedLeads: z.number().int().nullable().openapi({ description: "Checked finds with at least one earlier paid acquisition. null = unavailable." }),
+                  earlierAcquisitionCostInUsdCents: z.string().nullable().openapi({
+                    description: "What earlier runs actually paid to find those leads, USD cents (decimal string, 10 decimals). null = unavailable, never 0.",
+                  }),
+                  paidByOtherOrgsCostInUsdCents: z.string().nullable().openapi({ description: "Part of that sum paid by OTHER orgs (the reveal cache is fleet-wide), USD cents." }),
+                  unavailableReason: z.string().nullable(),
+                }),
+              ),
+              unpricedRunIds: z.array(z.string()).openapi({ description: "Paying runs runs-service did not return: left out of every sum (apollo-service's own list). Expected empty." }),
+            })
+            .openapi("SourceReusedAcquisitionsResponse"),
+        },
+      },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 const MeetingArmCounts = z.object({
   handled: z.number().int().openapi({ description: "People who replied positively whose handler is on this side (the rate's population)." }),
   booked: z.number().int().openapi({ description: "Of them, people whose first meeting after the positive reply this side booked." }),
