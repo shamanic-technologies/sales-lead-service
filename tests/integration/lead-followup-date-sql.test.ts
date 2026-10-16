@@ -298,8 +298,25 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await fd.syncSendFeeds(30_000);
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
     expect((await serveDue())?.leadId).toBe(emailedOnly.leadId);
-    // The never-contacted one visits the site: served next.
-    await act(never.leadId);
+    // The never-contacted one: an open, an auto-reply and an Instantly-reported click prove nothing (machines).
+    const machine = async (label: string, sourceRef: string) =>
+      db.execute(sql`
+        INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, label, source, source_ref, occurred_at, attribution_basis)
+        VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${never.leadId}::uuid, ${label}, 'outreach', ${sourceRef}, now(), 'reaction_to_our_email')`);
+    await machine("opened", randomUUID());
+    await machine("auto_reply", randomUUID());
+    const unverified = `ievt:${randomUUID()}`;
+    await db.execute(sql`
+      INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, brand_ids, raw)
+      VALUES (${nextSeq()}::bigint, ${unverified}, 'link_clicked', now(), ${never.email}, ${orgId}, ARRAY[${brandId}]::text[], '{"transport":"instantly"}'::jsonb)`);
+    await machine("website_visit", unverified);
+    expect(await serveDue()).toBeNull();
+    // A click our own tracker classified human counts.
+    const human = `ievt:${randomUUID()}`;
+    await db.execute(sql`
+      INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, brand_ids, raw)
+      VALUES (${nextSeq()}::bigint, ${human}, 'link_clicked', now(), ${never.email}, ${orgId}, ARRAY[${brandId}]::text[], '{"transport":"smtp"}'::jsonb)`);
+    await machine("website_visit", human);
     expect((await serveDue())?.leadId).toBe(never.leadId);
   });
 });

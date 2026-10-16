@@ -309,12 +309,27 @@ export async function applyActions(messages: readonly ObservedSend[]): Promise<v
   }
 }
 
-/** SQL: the person (row alias `d` of lead_followup_dates) did at least one thing toward the brand (see above). */
+/**
+ * Timeline labels a MACHINE produces, never the person: an email open (security scanners and image prefetch open
+ * everything; opens are deprecated fleet-wide) and an auto-reply.
+ */
+export const MACHINE_TIMELINE_LABELS = ["opened", "auto_reply"] as const;
+
+/**
+ * SQL: the person (row alias `d` of lead_followup_dates) did at least one thing toward the brand (see above). A click
+ * counts only when OUR tracker saw a human (instantly-service `transport = 'smtp'`: only a hit classified `human` is
+ * promoted, a scanner's is withdrawn); a click Instantly reports (`transport = 'instantly'`) carries no verdict and is
+ * no proof. Our sends, opens and auto-replies never count.
+ */
 export function actedTowardUsSql(d: SQL): SQL {
   return sql`(${d}.last_action_at IS NOT NULL OR EXISTS (
     SELECT 1 FROM lead_timeline_facts t_x
     WHERE t_x.org_id = ${d}.org_id AND t_x.brand_id = ${d}.brand_id AND t_x.lead_id = ${d}.lead_id
-      AND t_x.withdrawn_at IS NULL AND t_x.attribution_basis IS DISTINCT FROM 'our_email'))`;
+      AND t_x.withdrawn_at IS NULL AND t_x.attribution_basis IS DISTINCT FROM 'our_email'
+      AND t_x.label <> ALL(${sql.param([...MACHINE_TIMELINE_LABELS])}::text[])
+      AND NOT (t_x.source = 'outreach' AND EXISTS (
+        SELECT 1 FROM outreach_facts o_x
+        WHERE o_x.subject_key = t_x.source_ref AND o_x.type = 'link_clicked' AND o_x.raw->>'transport' IS DISTINCT FROM 'smtp'))))`;
 }
 
 async function readCursor(feed: string): Promise<bigint | null> {
