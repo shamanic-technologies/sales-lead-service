@@ -96,13 +96,13 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
     expect(sourceRows.every((r) => r.status === "served")).toBe(true);
   });
 
-  it("as_found stock never hands an outreach pipe a person whose address the verifier judged unknown (CATCHALL-BOUNCE-1016)", async () => {
+  it("as_found stock hands the person as the source found them, unknown verdict included (UNKNOWN-RESTORE-1016)", async () => {
     const s = `itest-src-${randomUUID()}`;
-    await seedFound(s, "2026-10-12T01:00:00Z", { verdict: "unknown" });
+    const unknown = await seedFound(s, "2026-10-12T01:00:00Z", { verdict: "unknown" });
     const catchAll = await seedFound(s, "2026-10-12T02:00:00Z", { verdict: "catch_all" });
     const first = await claimAll(`itest-out-${randomUUID()}`, [s], fitsAlways, "as_found");
-    expect(first.lead?.leadId).toBe(catchAll);
-    expect((await claimAll(`itest-out-${randomUUID()}`, [s], fitsAlways, "as_found")).lead).toBeNull();
+    const second = await claimAll(`itest-out-${randomUUID()}`, [s], fitsAlways, "as_found");
+    expect([first.lead?.leadId, second.lead?.leadId].sort()).toEqual([unknown, catchAll].sort());
   });
 
   it("two outreach runs racing never take the same person", async () => {
