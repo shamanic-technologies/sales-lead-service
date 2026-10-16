@@ -203,6 +203,15 @@ export class AudienceOfferMismatchError extends Error {
  * (no offer stated). Throws SourcingOriginUnresolvedError when it cannot be read.
  */
 export async function fetchAudienceOfferId(audienceId: string, orgId: string): Promise<string | null> {
+  return (await fetchAudienceRecord(audienceId, orgId)).offerId;
+}
+
+/**
+ * The audience as human-service serves it (`GET /orgs/audiences/{id}`): its offer (null = brand-wide) and its raw
+ * `channels[]` (own list, then one entry per SOURCE of the audience: AUDIENCE-SOURCES-1016). Throws
+ * SourcingOriginUnresolvedError when it cannot be read.
+ */
+export async function fetchAudienceRecord(audienceId: string, orgId: string): Promise<{ offerId: string | null; channels: unknown }> {
   const url = `${HUMAN_SERVICE_URL}/orgs/audiences/${encodeURIComponent(audienceId)}`;
   const response = await fetchWithRetry(url, {
     headers: { "X-API-Key": HUMAN_SERVICE_API_KEY, "x-org-id": orgId },
@@ -213,13 +222,12 @@ export async function fetchAudienceOfferId(audienceId: string, orgId: string): P
       `human-service audience read failed for audience=${audienceId}: ${response.status} ${await response.text()}`,
     );
   }
-  const body = (await response.json()) as { audience?: { offerId?: unknown } };
+  const body = (await response.json()) as { audience?: { offerId?: unknown; channels?: unknown } };
   const offerId = body.audience?.offerId;
-  if (offerId === null || offerId === undefined) return null;
-  if (typeof offerId !== "string") {
+  if (offerId !== null && offerId !== undefined && typeof offerId !== "string") {
     throw new SourcingOriginUnresolvedError(`human-service audience ${audienceId} answered an unreadable offerId`);
   }
-  return offerId;
+  return { offerId: offerId ?? null, channels: body.audience?.channels };
 }
 
 /**
