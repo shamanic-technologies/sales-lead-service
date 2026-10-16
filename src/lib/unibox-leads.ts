@@ -69,27 +69,51 @@ async function candidatePage(scope: { orgId: string; brandId: string } | null, a
       AND NOT EXISTS (
         SELECT 1 FROM leads l
         JOIN leads_campaigns lc ON lc.lead_id = l.id AND lc.org_id = s.org_id AND s.brand_id = ANY(lc.brand_ids)
-        WHERE l.human_id = s.human_id
-           OR l.human_id IN (SELECT o.atomic_human_id FROM org_human_aliases o WHERE o.org_id = s.org_id AND o.human_id = s.human_id))
-      AND NOT EXISTS (
-        SELECT 1 FROM unnest(s.emails) AS e
-        JOIN lead_contact_methods cm ON cm.channel = 'email' AND lower(cm.value) = lower(trim(e))
-        JOIN leads_campaigns lc ON lc.lead_id = cm.lead_id AND lc.org_id = s.org_id AND s.brand_id = ANY(lc.brand_ids))
+        WHERE l.human_id = s.human_id)
       AND (${after?.at ?? null}::timestamptz IS NULL OR (s.first_seen_at, s.human_id) > (${after?.at ?? null}::timestamptz, ${after?.human ?? null}::uuid))
     ORDER BY s.first_seen_at ASC, s.human_id
     LIMIT ${CANDIDATE_LIMIT}
   `)) as unknown as Candidate[];
 }
 
+/**
+ * The candidates already a lead of their brand through an aliased human or one of their addresses: asked in two
+ * batched, indexed statements per brand (as NOT EXISTS per subject the planner scanned every address: 120 s timeout).
+ */
+async function alreadyLeads(orgId: string, brandId: string, group: Candidate[]): Promise<Set<string>> {
+  const emails = [...new Set(group.flatMap((c) => c.emails.map((e) => e.trim().toLowerCase())).filter((e) => e.length > 0))];
+  const [byAlias, byEmail] = await Promise.all([
+    db.execute(sql`
+      SELECT DISTINCT o.human_id::text AS human_id FROM org_human_aliases o
+      JOIN leads l ON l.human_id = o.atomic_human_id
+      JOIN leads_campaigns lc ON lc.lead_id = l.id AND lc.org_id = ${orgId} AND ${brandId} = ANY(lc.brand_ids)
+      WHERE o.org_id = ${orgId} AND o.human_id = ANY(${sql.param(group.map((c) => c.human_id))}::uuid[])
+    `) as unknown as Promise<Array<{ human_id: string }>>,
+    emails.length === 0
+      ? Promise.resolve([] as Array<{ email: string }>)
+      : (db.execute(sql`
+          SELECT DISTINCT lower(cm.value) AS email FROM lead_contact_methods cm
+          JOIN leads_campaigns lc ON lc.lead_id = cm.lead_id AND lc.org_id = ${orgId} AND ${brandId} = ANY(lc.brand_ids)
+          WHERE cm.channel = 'email' AND lower(cm.value) = ANY(${sql.param(emails)}::text[])
+        `) as unknown as Promise<Array<{ email: string }>>),
+  ]);
+  const aliased = new Set(byAlias.map((r) => r.human_id));
+  const held = new Set(byEmail.map((r) => r.email));
+  return new Set(group.filter((c) => aliased.has(c.human_id) || c.emails.some((e) => held.has(e.trim().toLowerCase()))).map((c) => c.human_id));
+}
+
 async function fileCandidates(candidates: Candidate[], result: UniboxIntakeResult): Promise<void> {
-  result.candidates += candidates.length;
   const byBrand = new Map<string, Candidate[]>();
   for (const c of candidates) {
     const k = `${c.org_id}|${c.brand_id}`;
     byBrand.set(k, [...(byBrand.get(k) ?? []), c]);
   }
-  for (const group of byBrand.values()) {
-    const { org_id: orgId, brand_id: brandId } = group[0];
+  for (const all of byBrand.values()) {
+    const { org_id: orgId, brand_id: brandId } = all[0];
+    const known = await alreadyLeads(orgId, brandId, all);
+    const group = all.filter((c) => !known.has(c.human_id));
+    result.candidates += group.length;
+    if (group.length === 0) continue;
     const relationships = await loadRelationships(orgId, brandId, group.map((c) => c.human_id));
     for (const c of group) {
       if (!relationships.get(c.human_id)?.policies.pure_prospect) {
