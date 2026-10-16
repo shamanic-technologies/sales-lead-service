@@ -680,6 +680,13 @@
       "when": 1787897900000,
       "tag": "0096_lead_campaign_run_repoints",
       "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1787897950000,
+      "tag": "0097_qualification_title_role",
+      "breakpoints": true
     }
   ]
 }

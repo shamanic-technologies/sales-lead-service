@@ -110,9 +110,11 @@ async function serializeCriterion(row: QualificationCriterionRow, passRate: Pass
   return {
     id: row.id,
     offerId: row.offerId as string,
+    title: row.title,
     question: row.question,
     why: row.why,
     mode: row.mode,
+    recommendation: row.recommendedMode ? { mode: row.recommendedMode, reason: row.recommendedModeReason ?? "" } : null,
     enabled: row.enabled,
     origin: row.origin,
     availability: spec.kind === "company_data" ? "in_our_data" : "custom_check",

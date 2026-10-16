@@ -8684,6 +8684,11 @@
             "type": "string",
             "description": "The offer the criterion belongs to. It applies to every audience of that offer, never to another offer of the brand."
           },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "description": "A few plain words naming the check on a card (suggested criteria); null on a hand-made one and on suggestions written before 2026-10-16."
+          },
           "question": {
             "type": "string"
           },
@@ -8698,7 +8703,29 @@
               "mention",
               "must_pass"
             ],
-            "description": "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is declined before its reveal is paid, on every audience of the offer."
+            "description": "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is declined before its reveal is paid, on every audience of the offer. A suggestion is written with mode = its recommendation (still OFF); PATCH changes it."
+          },
+          "recommendation": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "mention",
+                  "must_pass"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "One sentence a client reads on why this role."
+              }
+            },
+            "required": [
+              "mode",
+              "reason"
+            ],
+            "description": "The AI's recommended role, frozen when suggested (a person's later PATCH of mode never changes it). Must have is recommended sparingly: at most ONE per suggestion run, and only on a check answered from data already held (availability in_our_data). null on hand-made criteria and older suggestions."
           },
           "enabled": {
             "type": "boolean",
@@ -8743,9 +8770,11 @@
         "required": [
           "id",
           "offerId",
+          "title",
           "question",
           "why",
           "mode",
+          "recommendation",
           "enabled",
           "origin",
           "availability",
@@ -18158,7 +18187,7 @@
     "/orgs/brands/{brandId}/offers/{offerId}/qualification/suggestions": {
       "post": {
         "summary": "Suggest qualification checks for an offer, written as criteria turned OFF (spends: AI)",
-        "description": "Reads the offer from brand-service and proposes up to 8 yes/no NEED signals on a prospect's company (why it needs this offer), valid for every audience of the offer. Firmographic checks (industry, size, geography, roles) are the audience's job and are dropped unless universal for the offer. Each is written as a criterion of the offer with enabled=false, origin=suggested; suggestions from an earlier run that nobody touched are archived, and one asking what a live criterion already asks is skipped. Read them back with GET .../criteria (no spend).",
+        "description": "Reads the offer from brand-service and proposes up to 8 yes/no NEED signals on a prospect's company (why it needs this offer), valid for every audience of the offer. Firmographic checks (industry, size, geography, roles) are the audience's job and are dropped unless universal for the offer. Each is written as a criterion of the offer with enabled=false, origin=suggested, a short card title, and the AI recommendation ({mode, reason}; mode is prefilled with it): at most ONE must_pass per run, only on a check answered from data already held, everything else mention; suggestions from an earlier run that nobody touched are archived, and one asking what a live criterion already asks is skipped. Read them back with GET .../criteria (no spend).",
         "parameters": [
           {
             "in": "header",
@@ -18237,7 +18266,7 @@
                           },
                           "reason": {
                             "type": "string",
-                            "description": "firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)"
+                            "description": "firmographic_not_universal | unclassified_kind:<x> | untitled (the AI gave no card title) | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)"
                           }
                         },
                         "required": [

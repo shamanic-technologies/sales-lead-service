@@ -171,8 +171,8 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     const scope = { orgId, brandId, offerId: offer };
     draftJson = {
       checks: [
-        { question: `Is the homepage slow on mobile? ${tag}`, why: "Slow sites lose buyers.", kind: "need", source: "homepage_text" },
-        { question: `Is the company in retail? ${tag}`, why: "x", kind: "firmographic", universal: false, source: "company_data" },
+        { title: "Card", question: `Is the homepage slow on mobile? ${tag}`, why: "Slow sites lose buyers.", kind: "need", source: "homepage_text" },
+        { title: "Card", question: `Is the company in retail? ${tag}`, why: "x", kind: "firmographic", universal: false, source: "company_data" },
       ],
     };
     const { rows: first, dropped } = await generateSuggestions({ ...scope, identity });
@@ -183,13 +183,13 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     await db.update(qualificationCriteria).set({ enabled: true, updatedAt: new Date() }).where(sql`id = ${first[0].id}`);
     draftJson = {
       checks: [
-        { question: `Is the homepage slow on mobile? ${tag}`, why: "dup", kind: "need", source: "homepage_text" },
-        { question: `Does the homepage lack a newsletter form? ${tag}`, why: "No list to sell to.", kind: "need", source: "homepage_text" },
+        { title: "Card", question: `Is the homepage slow on mobile? ${tag}`, why: "dup", kind: "need", source: "homepage_text" },
+        { title: "Card", question: `Does the homepage lack a newsletter form? ${tag}`, why: "No list to sell to.", kind: "need", source: "homepage_text" },
       ],
     };
     await generateSuggestions({ ...scope, identity });
     // The bare list the model also answers with.
-    draftJson = [{ question: `Is the site missing a blog? ${tag}`, why: "No content.", kind: "need", source: "homepage_text" }] as unknown as Record<string, unknown>;
+    draftJson = [{ title: "Card", question: `Is the site missing a blog? ${tag}`, why: "No content.", kind: "need", source: "homepage_text" }] as unknown as Record<string, unknown>;
     await generateSuggestions({ ...scope, identity });
     const live = await listCriteria(scope);
     expect(live.map((r) => [r.question.replace(` ${tag}`, ""), r.enabled])).toEqual([
@@ -199,10 +199,35 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     draftJson = null;
   });
 
+  it("each suggestion carries its title and recommended role; one must have at most, on data we hold, written OFF", async () => {
+    const scope = { orgId, brandId, offerId: randomUUID() };
+    draftJson = {
+      checks: [
+        { title: "Sells online", question: `Does the company sell online? ${tag}`, why: "w", kind: "firmographic", universal: true, universalWhy: "Only online sellers.", role: "must_pass", roleWhy: "Only online sellers can use it.", source: "company_data" },
+        { title: "Slow \u2014 homepage", question: `Is the homepage slow? ${tag}`, why: "w", kind: "need", role: "must_pass", roleWhy: "x", source: "homepage_text" },
+        { title: "Uses Shopify", question: `Does the company use Shopify? ${tag}`, why: "w", kind: "need", role: "must_pass", roleWhy: "y", source: "company_data" },
+        { question: `Untitled check? ${tag}`, why: "w", kind: "need", source: "homepage_text" },
+      ],
+    };
+    const { rows, dropped } = await generateSuggestions({ ...scope, identity });
+    expect(dropped).toEqual([{ question: `Untitled check? ${tag}`, reason: "untitled" }]);
+    expect(rows.map((r) => [r.title, r.mode, r.recommendedMode, r.enabled])).toEqual([
+      ["Sells online", "must_pass", "must_pass", false],
+      ["Slow, homepage", "mention", "mention", false],
+      ["Uses Shopify", "mention", "mention", false],
+    ]);
+    expect(rows[0].recommendedModeReason).toBe("Only online sellers can use it.");
+    expect(rows[1].recommendedModeReason).toMatch(/lookup per company/);
+    expect(rows[2].recommendedModeReason).toMatch(/one must have is enough/);
+    // Off until a person turns it on: nothing filters the serve yet.
+    expect(await mustPassCriteria(orgId, brandId, scope.offerId)).toEqual([]);
+    draftJson = null;
+  });
+
   it("invalid JSON from the model is asked once more; twice in a row is named suggestion_draft_unreadable", async () => {
     const { SuggestionDraftUnreadableError } = await import("../../src/lib/qualification-run.js");
     const scope = { orgId, brandId, offerId: randomUUID() };
-    draftJson = { checks: [{ question: `Is the homepage slow? ${tag}`, why: "w", kind: "need", source: "homepage_text" }] };
+    draftJson = { checks: [{ title: "Card", question: `Is the homepage slow? ${tag}`, why: "w", kind: "need", source: "homepage_text" }] };
     invalidJsonAnswers = 1;
     expect((await generateSuggestions({ ...scope, identity })).rows).toHaveLength(1);
     invalidJsonAnswers = 2;
@@ -217,8 +242,8 @@ describe.skipIf(!hasRealDatabase)("qualification checks, against a real database
     await insertCriterion({ offerId: scope.offerId, question: `Has the company posted on LinkedIn less than twice in the last month? ${tag}`, probe: linkedin, enabled: false, origin: "suggested", updatedAt: new Date() });
     draftJson = {
       checks: [
-        { question: `Has the company posted on its LinkedIn page less than twice in the last thirty days? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
-        { question: `Do the company's posts get fewer than ten reactions? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
+        { title: "Card", question: `Has the company posted on its LinkedIn page less than twice in the last thirty days? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
+        { title: "Card", question: `Do the company's posts get fewer than ten reactions? ${tag}`, why: "w", kind: "need", source: "linkedin_company_posts" },
       ],
     };
     const { rows, dropped } = await generateSuggestions({ ...scope, identity });
