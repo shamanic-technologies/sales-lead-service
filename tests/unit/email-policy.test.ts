@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { acceptedVerdicts, emailPolicyClause, readEmailVerdict } from "../../src/lib/email-policy.js";
+import { acceptedVerdicts, emailPolicyClause, normalizeEmailPolicy, readEmailVerdict } from "../../src/lib/email-policy.js";
 import { serveBody } from "../../src/lib/people-client.js";
 import { BufferNextRequestSchema } from "../../src/schemas.js";
 
@@ -12,7 +12,16 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(acceptedVerdicts(undefined)).toEqual(["valid"]);
     expect(acceptedVerdicts("valid_only")).toEqual(["valid"]);
     expect(acceptedVerdicts("valid_and_catch_all")).toEqual(["valid", "catch_all"]);
-    expect(acceptedVerdicts("valid_catch_all_and_unknown")).toEqual(["valid", "catch_all", "unknown"]);
+    // CATCHALL-BOUNCE-1016: the deprecated value accepts exactly what valid_and_catch_all accepts.
+    expect(acceptedVerdicts("valid_catch_all_and_unknown")).toEqual(["valid", "catch_all"]);
+  });
+
+  it("normalizes the deprecated value to valid_and_catch_all, leaves the others alone (CATCHALL-BOUNCE-1016)", () => {
+    expect(normalizeEmailPolicy("valid_catch_all_and_unknown")).toBe("valid_and_catch_all");
+    expect(normalizeEmailPolicy("valid_and_catch_all")).toBe("valid_and_catch_all");
+    expect(normalizeEmailPolicy("valid_only")).toBe("valid_only");
+    expect(normalizeEmailPolicy(undefined)).toBeNull();
+    expect(normalizeEmailPolicy(null)).toBeNull();
   });
 
   it("the pool clause refuses a recorded verdict outside the policy and keeps NULL", () => {
@@ -21,12 +30,14 @@ describe("email policy (CATCHALL-SERVE-OPTION-1013)", () => {
     expect(q.params).toEqual(["valid"]);
     const wide = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "valid_and_catch_all"));
     expect(wide.params).toEqual(["valid", "catch_all"]);
-    const widest = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "valid_catch_all_and_unknown"));
-    expect(widest.params).toEqual(["valid", "catch_all", "unknown"]);
+    const legacy = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "valid_catch_all_and_unknown"));
+    expect(legacy.params).toEqual(["valid", "catch_all"]);
   });
 
-  it("as_found (a stock pipe stating nothing) adds no clause: the source's strategy chose the emails", () => {
-    expect(dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "as_found")).sql).toBe("");
+  it("as_found (a stock pipe stating nothing) keeps the source's choice but never an address no pipe may email", () => {
+    const q = dialect.sqlToQuery(emailPolicyClause(sql`lc.lead_id`, "as_found"));
+    expect(q.sql).toContain("cm_v.verification_verdict IN ($1, $2, $3)");
+    expect(q.params).toEqual(["unknown", "invalid", "risky"]);
   });
 
   it("serve body: no option = today's bytes; option rides beside reachableBy", () => {
