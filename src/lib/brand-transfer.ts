@@ -210,7 +210,16 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "outcome_trigger_fires", touchesUpdatedAt: false },
       // Which trigger occurrences named which person on which campaign (LEAD-NAMED-SERVE-1015).
       { table: "named_lead_serves", touchesUpdatedAt: false },
+      // Who is a journalist of the brand, never a lead (JOURNALISTS-NOT-LEADS-1016): derived, but moved so no sales
+      // pool hands one out before the next refresh rewrites it under the target.
+      { table: "brand_journalists", touchesUpdatedAt: true },
     ];
+    // A journalist row the target already holds for the same lead is rewritten by the next refresh: drop the source copy.
+    await tx.execute(sql`
+      DELETE FROM brand_journalists s
+      WHERE ${brandScalarPending}
+        AND EXISTS (SELECT 1 FROM brand_journalists t WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id)
+    `);
     // A person's outcome trigger fires ONCE per (org, brand, offer, outcome): a live fire the target already holds
     // for the same person makes the source's copy redundant, so it is dropped rather than colliding on the move.
     await tx.execute(sql`

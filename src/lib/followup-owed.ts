@@ -23,6 +23,7 @@ import {
   FOLLOWUP_BOOKED_OUTCOMES,
   FOLLOWUP_CLAIM_LEASE_MS,
   handedClaimableSql,
+  notJournalistSql,
   ownedByActingSql,
 } from "./followup-queue.js";
 
@@ -91,6 +92,7 @@ export async function readFollowupOwed(params: {
         AND lc.followup_due_at IS NOT NULL
         AND ${handedClaimableSql(acting)}
         AND ${ownedByActingSql(acting)}
+        AND ${notJournalistSql()}
         AND NOT (
           fr.first_responder_started_at IS NOT NULL
           AND COALESCE(lc.followup_count, 0) = 0

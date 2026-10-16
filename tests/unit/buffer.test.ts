@@ -47,6 +47,11 @@ vi.mock("../../src/lib/sourcing-origin.js", () => ({
 // Tactic "Fresh contacts only" (FRESH-CONTACTS-1015): its SQL runs in tests/integration/recently-emailed-sql.test.ts.
 const leadRecentlyEmailed = vi.fn(async () => false);
 const assertRecentlyEmailedReadable = vi.fn(async () => undefined);
+// A journalist of the brand (brand-journalists.ts, JOURNALISTS-NOT-LEADS-1016): nobody by default.
+const leadIsJournalist = vi.fn(async (_leadId: string, _orgId: string, _brandIds: string[]) => false);
+vi.mock("../../src/lib/brand-journalists.js", () => ({
+  leadIsJournalist: (...args: unknown[]) => leadIsJournalist(...(args as [string, string, string[]])),
+}));
 vi.mock("../../src/lib/recently-emailed.js", () => ({
   leadRecentlyEmailed: (...args: unknown[]) => leadRecentlyEmailed(...(args as [])),
   assertRecentlyEmailedReadable: (...args: unknown[]) => assertRecentlyEmailedReadable(...(args as [])),
@@ -867,6 +872,23 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     await expect(pullNext({ ...baseParams, excludeEmailedWithin: "3_months" })).rejects.toThrow("not caught up");
     expect(serveNext).not.toHaveBeenCalled();
     expect(pickRetryCandidate).not.toHaveBeenCalled();
+  });
+
+  it("never hands out a journalist of the brand: kept filed under the campaign, no lead_found, the next one is bought (JOURNALISTS-NOT-LEADS-1016)", async () => {
+    served("lead-journalist", "troush@forbes.com");
+    served("lead-prospect", "buyer@x.com");
+    leadIsJournalist.mockImplementation(async (leadId: string) => leadId === "lead-journalist");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-prospect" });
+
+    const result = await pullNext(baseParams);
+
+    expect(result.found).toBe(true);
+    expect(result.lead?.leadId).toBe("lead-prospect");
+    expect(serveNext).toHaveBeenCalledTimes(2);
+    expect(leadIsJournalist).toHaveBeenCalledWith("lead-journalist", "org-1", ["brand-1"]);
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-journalist", campaignId: "campaign-1", status: "served" }));
+    expect(buildFullLead).toHaveBeenCalledTimes(1);
+    leadIsJournalist.mockImplementation(async () => false);
   });
 
   it("not asked: today's serve, a recently emailed person is handed out, nothing is looked up", async () => {

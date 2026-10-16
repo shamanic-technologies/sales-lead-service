@@ -65,7 +65,7 @@ describe("prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014)", () => {
     expect(v.reason).toBe(reason);
   });
 
-  it.each([["personal"], ["customer"], ["investor"], ["team"], ["advisor"], ["supplier"], ["partner"], ["other_professional"]] as const)(
+  it.each([["personal"], ["customer"], ["investor"], ["team"], ["advisor"], ["supplier"], ["partner"], ["other_professional"], ["journalist"]] as const)(
     "tagged %s (yes or unsure): not a pure prospect",
     (tag) => {
       for (const block of [rel({ subject: true, judgedAt: "2026-10-14T00:00:00Z", tags: [tag, "prospect"] }), rel({ subject: true, judgedAt: "2026-10-14T00:00:00Z", unsureTags: [tag] }), rel({ tags: [tag] })]) {

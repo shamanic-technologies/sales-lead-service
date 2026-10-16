@@ -9,6 +9,7 @@
  * Checks, in order (first refusal wins):
  *   1. the person holds a row on THIS campaign of the org (`named_lead_not_filed`, final);
  *   2. a registered email (`named_lead_no_email`, final: the sender's records are keyed on it);
+ *   2b. not a journalist of the brand (`named_lead_journalist`, final; JOURNALISTS-NOT-LEADS-1016);
  *   3. not opted out / do-not-contact (the human's facts), not unsubscribed / hard-bounced (the sender's answer)
  *      (`named_lead_suppressed`, final);
  *   4. per OCCURRENCE (`named_lead_serves`): a redelivered run of an occurrence already handed out is refused once
@@ -31,6 +32,7 @@ import { db } from "../db/index.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { fetchChannelSendsBatch, channelSendKey, type ChannelSend } from "./channel-send-client.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
+import { leadIsJournalist } from "./brand-journalists.js";
 import { senderSuppression, type SuppressionReason } from "./named-person.js";
 import { campaignScopeFlags, type CandidateStatusFlags, type PoolSender } from "./retry-pool.js";
 import { recordEmploymentHistory } from "./leads-registry.js";
@@ -326,6 +328,10 @@ export async function prepareNamedServe(params: {
     return { ok: false, ...refuse("named_lead_no_email", "We have no email address for this person, so this campaign cannot write to them.") };
   }
   const email = row.email.trim().toLowerCase();
+  // A brand never sells to a journalist (JOURNALISTS-NOT-LEADS-1016, brand-journalists.ts).
+  if (await leadIsJournalist(named.leadId, orgId, [brandId])) {
+    return { ok: false, ...refuse("named_lead_journalist", "This person is a journalist you pitch for press coverage, so no sales campaign writes to them.") };
+  }
 
   const human = (await loadHumanFacts([named.leadId])).get(named.leadId);
   if (human?.optedOut) return { ok: false, ...refuse("named_lead_suppressed", SUPPRESSION_SENTENCE.opted_out) };

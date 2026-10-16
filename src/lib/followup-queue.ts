@@ -93,6 +93,16 @@ export function ownedByActingSql(actingCampaignId: string, alias: "lc" | "" = "l
  * A handed row is claimable ONLY through an open grant (the brand stated this person through an occurrence
  * and no claim has consumed it yet), and only by the holding campaign. Unhanded rows: unchanged.
  */
+/**
+ * A journalist of the brand is never claimed (JOURNALISTS-NOT-LEADS-1016, brand-journalists.ts): no follow-up, no
+ * reactive booking. Same predicate in the read, the claim and the owed read.
+ */
+export function notJournalistSql(alias: "lc" | "" = "lc") {
+  const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : `leads_campaigns.${name}`);
+  return sql`NOT EXISTS (SELECT 1 FROM brand_journalists bj_f WHERE bj_f.lead_id = ${col("lead_id")} AND bj_f.journalist
+    AND bj_f.org_id = ${col("org_id")} AND bj_f.brand_id = ANY(${col("brand_ids")}))`;
+}
+
 export function handedClaimableSql(actingCampaignId: string, alias: "lc" | "" = "lc") {
   const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : name);
   return sql`(${col("followup_handed_at")} IS NULL OR (${col("followup_stated_event_id")} IS NOT NULL AND ${col("followup_stated_closed_at")} IS NULL AND ${col("campaign_id")} = ${actingCampaignId}))`;
@@ -345,6 +355,7 @@ export async function loadFollowupCandidates(params: {
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
       AND ${handedClaimableSql(params.actingCampaignId)}
       AND ${ownedByActingSql(params.actingCampaignId)}
+      AND ${notJournalistSql()}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       AND NOT EXISTS (
         SELECT 1
@@ -410,6 +421,7 @@ export async function claimFollowup(params: {
          AND (followup_claimed_at IS NULL OR followup_claimed_at < ${leaseCutoff})
          AND ${handedClaimableSql(params.actingCampaignId, "")}
          AND ${ownedByActingSql(params.actingCampaignId, "")}
+         AND ${notJournalistSql("")}
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
       ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now)}

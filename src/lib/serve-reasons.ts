@@ -51,6 +51,11 @@
  *                            and every person a fresh serve bought in this call had been emailed by the brand inside
  *                            the window (each stays filed under the asking campaign for later). Not exhaustion.
  *
+ *   journalist             — every person a fresh serve bought in this call is a JOURNALIST of the brand (reached
+ *                            only through a press pitch, or said / judged one: src/lib/brand-journalists.ts,
+ *                            JOURNALISTS-NOT-LEADS-1016). A brand never sells to a journalist: each stays filed under
+ *                            the asking campaign, refused by every pool. Not exhaustion.
+ *
  *   sales_funnel_max_budget_reached / sales_funnel_max_budget_unreadable
  *                          — billing refused a spend of this serve because the campaign's SALES FUNNEL max budget was
  *                            reached (or could not be read); the org may well have credit. Billing's own `reason`,
@@ -80,6 +85,7 @@ export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_owed" as const;
 export const RECENTLY_EMAILED_REASON = "recently_emailed" as const;
+export const JOURNALIST_REASON = "journalist" as const;
 /** Named-person serves (src/lib/named-lead-serve.ts): why the named person cannot be worked by this run. */
 export const NAMED_LEAD_REASONS = [
   "named_lead_not_filed",
@@ -91,6 +97,7 @@ export const NAMED_LEAD_REASONS = [
   "named_lead_sender_finished",
   "named_lead_unwritable",
   "named_lead_sender_unreadable",
+  "named_lead_journalist",
 ] as const;
 export type NamedLeadReason = (typeof NAMED_LEAD_REASONS)[number];
 
@@ -108,6 +115,7 @@ export const SERVE_EMPTY_REASONS = [
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
   RECENTLY_EMAILED_REASON,
+  JOURNALIST_REASON,
   ...SALES_FUNNEL_CAP_REASONS,
   ...NAMED_LEAD_REASONS,
 ] as const;

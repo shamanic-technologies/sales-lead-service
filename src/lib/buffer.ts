@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
+import { leadIsJournalist } from "./brand-journalists.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
@@ -32,6 +33,7 @@ import {
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
   RECENTLY_EMAILED_REASON,
+  JOURNALIST_REASON,
   isNoRecentPostsAnswer,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
@@ -137,8 +139,13 @@ interface PullNextParams {
   freshServeRefused?: { reason: ServeEmptyReason; detail: string };
 }
 
-/** How many people one call may buy on a fresh serve when each was emailed by the brand inside the asked window. */
+/**
+ * How many people one call may buy on a fresh serve when each was emailed by the brand inside the asked window, or is
+ * a journalist of the brand.
+ */
 export const FRESH_SERVE_ATTEMPTS = 5;
+/** A fresh serve that bought someone it cannot hand out keeps them filed and buys the next. */
+const BUY_NEXT_REASONS: ReadonlySet<string> = new Set([RECENTLY_EMAILED_REASON, JOURNALIST_REASON]);
 
 interface PullNextResult {
   found: boolean;
@@ -485,6 +492,15 @@ export async function pullNext(
       })
       .onConflictDoNothing();
 
+    // A journalist of the brand is never a lead (JOURNALISTS-NOT-LEADS-1016): kept filed (every pool refuses them), the
+    // next person is bought. Checked before the `lead_found` trigger rings and before the Bonus checks are paid.
+    if (await leadIsJournalist(leadId, params.orgId, params.brandIds)) {
+      console.log(
+        `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${JOURNALIST_REASON}: a journalist of the brand, kept filed under the campaign`,
+      );
+      return { found: false, reason: JOURNALIST_REASON };
+    }
+
     // The person was FOUND for this brand and offer: its `lead_found` outcome trigger rings campaign-service's door
     // once (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015). Not awaited: it never blocks, slows or fails the serve.
     noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, campaignId: params.campaignId, offerId });
@@ -745,7 +761,7 @@ export async function pullNext(
         }
         await clearEmptyAnswer(walked);
         const result = await recordServed(served, candidateAudienceId);
-        if (result.found || result.reason !== RECENTLY_EMAILED_REASON) return result;
+        if (result.found || !BUY_NEXT_REASONS.has(result.reason!)) return result;
         if (++recentlyEmailedHits >= FRESH_SERVE_ATTEMPTS) return result;
       }
     }
@@ -785,7 +801,7 @@ export async function pullNext(
   // Fresh contacts only: a person the brand emailed recently stays filed under the campaign, the next one is bought.
   for (let attempt = 1; ; attempt++) {
     const result = await serveFresh();
-    if (result.found || result.reason !== RECENTLY_EMAILED_REASON || attempt >= FRESH_SERVE_ATTEMPTS) return result;
+    if (result.found || !BUY_NEXT_REASONS.has(result.reason!) || attempt >= FRESH_SERVE_ATTEMPTS) return result;
     if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
   }
 

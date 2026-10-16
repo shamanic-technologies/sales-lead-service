@@ -12,6 +12,7 @@ import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { getCompanies } from "./company-client.js";
 import { canonicalHumans } from "./relationship-subjects.js";
+import { canonicalHumanSql, JOURNALIST_TAG, PRESS_ONLY_EVIDENCE, refreshBrandJournalists } from "./brand-journalists.js";
 import {
   BUSINESS_ONLY_EXCLUDED,
   decideTags,
@@ -82,7 +83,7 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   const canon = await canonicalHumans(orgId, asked);
   const humans = Array.from(new Set(asked.map((h) => canon.get(h) ?? h)));
 
-  const [subjects, statements, evidence, judgments, personal, companies] = await Promise.all([
+  const [subjects, statements, evidence, judgments, personal, companies, pressOnly] = await Promise.all([
     db.execute(sql`
       SELECT human_id::text AS human, company_key FROM relationship_subjects
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
@@ -108,6 +109,15 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       SELECT human_id::text AS human, company_id, name, domain, source FROM relationship_companies
       WHERE org_id = ${orgId} AND human_id = ANY(${sql.param(humans)}::uuid[]) AND (company_id IS NOT NULL OR (name IS NOT NULL AND NOT conflict))
     `) as unknown as Promise<Array<{ human: string; company_id: string | null; name: string | null; domain: string | null; source: CompanySource }>>,
+    // Journalist evidence (brand-journalists.ts): a lead of the human the brand reached ONLY through a press pitch.
+    db.execute(sql`
+      SELECT h.human::text AS human, COALESCE(min(bj.first_pitched_at), min(bj.updated_at)) AS at
+      FROM brand_journalists bj
+      JOIN leads l ON l.id = bj.lead_id
+      CROSS JOIN LATERAL (SELECT ${canonicalHumanSql(sql`${orgId}`, "l")} AS human) h
+      WHERE bj.org_id = ${orgId} AND bj.brand_id = ${brandId} AND bj.press_only AND h.human = ANY(${sql.param(humans)}::uuid[])
+      GROUP BY h.human
+    `) as unknown as Promise<Array<{ human: string; at: Ts }>>,
   ]);
 
   // A person with an unanswered "same person?" question may be someone we already know: held back from business-only.
@@ -166,6 +176,8 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     }
     const evidenceOf = new Map<RelationshipTag, { evidence: string; at: string }>();
     for (const e of evidence) if (e.human === h && e.company_key === (key ?? "") && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
+    const pitched = pressOnly.find((x) => x.human === h);
+    if (pitched) evidenceOf.set(JOURNALIST_TAG, { evidence: PRESS_ONLY_EVIDENCE, at: iso(pitched.at)! });
     const j = judgments.find((x) => x.human === h && x.company_key === (key ?? ""));
     const p = personal.find((x) => x.human === h);
     let judgment: { probabilities: Partial<Record<RelationshipTag, number>>; at: string } | null = null;
@@ -294,6 +306,26 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
     for (const t of b.tags) byTag[t] = (byTag[t] ?? 0) + 1;
     if (b.tags.length > 0 || b.details.some((d) => d.basis === "person")) people.push({ humanId: s.human, name: s.name, company: b.company, tags: b.tags, details: b.details });
   }
+  // Journalists of the brand nobody's CRM knows (reached only by our press pitches): shown and counted like any tag.
+  const subjectHumans = new Set(subjects.map((s) => s.human));
+  const journalistRows = (await db.execute(sql`
+    SELECT DISTINCT ON (h.human) h.human::text AS human, NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') AS name
+    FROM brand_journalists bj
+    JOIN leads l ON l.id = bj.lead_id
+    CROSS JOIN LATERAL (SELECT ${canonicalHumanSql(sql`${orgId}`, "l")} AS human) h
+    WHERE bj.org_id = ${orgId} AND bj.brand_id = ${brandId} AND (bj.journalist OR bj.press_only) AND h.human IS NOT NULL
+    ORDER BY h.human, bj.first_pitched_at DESC NULLS LAST
+  `)) as unknown as Array<{ human: string; name: string | null }>;
+  const outside = journalistRows.filter((r) => !subjectHumans.has(r.human));
+  for (let i = 0; i < outside.length; i += 1000) {
+    const part = await loadRelationships(orgId, brandId, outside.slice(i, i + 1000).map((r) => r.human));
+    for (const r of outside.slice(i, i + 1000)) {
+      const b = part.get(r.human);
+      if (!b) continue;
+      for (const t of b.tags) byTag[t] = (byTag[t] ?? 0) + 1;
+      if (b.tags.length > 0 || b.details.some((d) => d.basis === "person")) people.push({ humanId: r.human, name: r.name, company: b.company, tags: b.tags, details: b.details });
+    }
+  }
   // The questions that decide who a business-only pipe may write to come first (a "maybe a friend" matters more
   // than a "maybe a prospect"), then the closest calls.
   const weight = (t: RelationshipTag) => (BUSINESS_ONLY_EXCLUDED.includes(t) ? 0 : t === "customer" ? 1 : 2);
@@ -334,6 +366,19 @@ export async function stateTag(input: { orgId: string; brandId: string; humanId:
     `);
   });
   for (const b of humanLevel ? await brandsOfHuman(input.orgId, human) : [input.brandId]) await recomputePolicy(input.orgId, b, [human]);
+  if (input.tag === JOURNALIST_TAG) await refreshJournalistsAfterStatement(input.orgId, input.brandId);
+}
+
+/**
+ * A person's word on `journalist` moves who the sales pools refuse (brand-journalists.ts): rewrite the brand's rows now.
+ * The word itself is already stored; a refresh that fails is logged and redone by the background thread within minutes.
+ */
+async function refreshJournalistsAfterStatement(orgId: string, brandId: string): Promise<void> {
+  try {
+    await refreshBrandJournalists({ orgId, brandId });
+  } catch (err) {
+    console.error(`[lead-service] journalist statement stored but brand ${brandId} not refreshed yet (background thread will):`, err);
+  }
 }
 
 /** Withdraw a person's word on a tag (back to evidence / judgment). Returns whether one was live. */
@@ -347,6 +392,7 @@ export async function withdrawTag(input: { orgId: string; brandId: string; human
     RETURNING 1
   `)) as unknown as unknown[];
   for (const b of humanLevel ? await brandsOfHuman(input.orgId, human) : [input.brandId]) await recomputePolicy(input.orgId, b, [human]);
+  if (input.tag === JOURNALIST_TAG) await refreshJournalistsAfterStatement(input.orgId, input.brandId);
   return rows.length > 0;
 }
 

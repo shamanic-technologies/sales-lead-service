@@ -30,6 +30,7 @@ import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
+import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
 import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
@@ -80,6 +81,9 @@ startRelationshipSweepWorker();
 // Every served row of a non-email pipe carries what its sender (crm-service) states it sent, live or stopped
 // campaign alike (channel-send-reconcile.ts, WA-SENDS-BATCH-1014).
 startChannelSendReconcileWorker();
+// Who each brand only ever pitched to the press (or a person / Jev says is a journalist): never a lead, refused by
+// every sales pool and claim (brand-journalists.ts, JOURNALISTS-NOT-LEADS-1016).
+startBrandJournalistsWorker();
 
 // The Leads search's trigram index, built CONCURRENTLY after boot and never awaited by anything
 // (read-model-search-index.ts, DASH-LATENCY-1014). Until it exists a search is slow, not wrong.
@@ -91,7 +95,7 @@ ensureReadModelSearchIndex(connectionString).catch((error: unknown) => {
 // keeps the thread alive.
 setInterval(() => undefined, 60 * 60_000);
 
-console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, outcome-triggers, lead-identity, human-events, human-opt-outs, lead-timezone, relationship-sweep, channel-send-reconcile");
+console.log("[lead-service] background thread running: crm-evidence, crm-fact-feed, read-model, change-feed, outcome-cause, outreach-fact-feed, timeline, brand-signups, trigger-event-outbox, outcome-triggers, lead-identity, human-events, human-opt-outs, lead-timezone, relationship-sweep, channel-send-reconcile, brand-journalists");
 
 process.on("unhandledRejection", (err) => {
   console.error("[lead-service] background thread unhandled rejection:", err);

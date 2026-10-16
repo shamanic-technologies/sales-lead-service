@@ -7,7 +7,8 @@
  *
  * Bases, read with precedence person > evidence > judgment:
  *   - a person of the org said yes or no (review page, MCP): that is the answer, withdrawable;
- *   - a source stated a fact (signup -> prospect, payment / sale -> customer): yes;
+ *   - a source stated a fact (signup -> prospect, payment / sale -> customer, reached ONLY through a press pitch ->
+ *     journalist, src/lib/brand-journalists.ts): yes;
  *   - Jev judged the person's whole merged thread: more likely than not (>= JUDGED_YES, 50%) is a yes,
  *     below JUDGED_NO (40%) a no, the true doubt between is a question for the owner (owner 2026-10-14,
  *     RELATIONSHIP-TAGS-1014b: the same edges as a merge, `relationship-merges.ts`).
@@ -24,6 +25,9 @@ export const RELATIONSHIP_TAGS = [
   "supplier",
   "partner",
   "other_professional",
+  // JOURNALISTS-NOT-LEADS-1016 (owner 2026-10-16): a person the brand pitches to the PRESS, never a lead. Evidence =
+  // reached ONLY through a press pitch (src/lib/brand-journalists.ts); no sales pipe ever hands one out.
+  "journalist",
 ] as const;
 export type RelationshipTag = (typeof RELATIONSHIP_TAGS)[number];
 
@@ -44,7 +48,7 @@ export function isRelationshipTag(v: unknown): v is RelationshipTag {
  */
 export const RELATIONSHIP_POLICIES = ["business_only"] as const;
 export type RelationshipPolicy = (typeof RELATIONSHIP_POLICIES)[number];
-export const BUSINESS_ONLY_EXCLUDED: readonly RelationshipTag[] = ["personal", "investor", "supplier", "team", "partner", "advisor"];
+export const BUSINESS_ONLY_EXCLUDED: readonly RelationshipTag[] = ["personal", "investor", "supplier", "team", "partner", "advisor", "journalist"];
 
 /**
  * A PURE PROSPECT (NEVER-NO-FOLLOWUP-1014, owner 2026-10-14: "qui n'ont pas de tag autre, pas personal, pas client,
