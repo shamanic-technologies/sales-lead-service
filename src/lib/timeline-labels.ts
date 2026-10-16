@@ -103,7 +103,7 @@ export const TIMELINE_ATTRIBUTION_BASES = [
 export type TimelineAttributionBasis = (typeof TIMELINE_ATTRIBUTION_BASES)[number];
 
 /** The replies that are a person's word (a machine's answer is not). */
-const WORD_LABELS: ReadonlySet<TimelineItemLabel> = new Set([
+export const WORD_LABELS: ReadonlySet<TimelineItemLabel> = new Set([
   "interested",
   "not_interested",
   "question_answerable",

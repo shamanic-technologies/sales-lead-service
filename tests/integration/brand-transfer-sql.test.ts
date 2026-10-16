@@ -39,6 +39,7 @@ const BRAND_SCALAR_TABLES = [
   "relationship_subjects",
   "relationship_evidence",
   "relationship_judgments",
+  "relationship_intent_judgments",
   "relationship_statements",
   "relationship_merge_questions",
   "prospect_followup_handouts",
@@ -196,6 +197,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
       VALUES (${org}, ${brand}, ${human}::uuid, '{"personal":0.1}'::jsonb, 1, 'jev-test', 'run')`);
+    await db.execute(sql`
+      INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, p_wants_business, thread_seq, model, run_id)
+      VALUES (${org}, ${brand}, ${human}::uuid, 0.9, 1, 'jev-test', 'run')`);
     await db.execute(sql`
       INSERT INTO relationship_statements (org_id, brand_id, human_id, tag, state, stated_by_user_id) VALUES (${org}, ${brand}, ${human}::uuid, 'customer', 'yes', 'itest-user')`);
     await db.execute(sql`
