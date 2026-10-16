@@ -8918,6 +8918,13 @@
               "$ref": "#/components/schemas/JourneyAct"
             },
             "description": "Campaigns that acted on the person, one entry per (campaign, kind), earliest first."
+          },
+          "emailSends": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyEmailSend"
+            },
+            "description": "Every (campaign, workflow) under which the person was actually EMAILED (sends only, no bounces), earliest first: a person emailed by two workflows lists both. The input for crediting a reply to the workflow that emailed before it."
           }
         },
         "required": [
@@ -8925,7 +8932,8 @@
           "offerId",
           "firstActedAt",
           "facts",
-          "acts"
+          "acts",
+          "emailSends"
         ]
       },
       "JourneyFact": {
@@ -9015,6 +9023,53 @@
           "kind",
           "firstAt",
           "lastAt",
+          "count"
+        ]
+      },
+      "JourneyEmailSend": {
+        "type": "object",
+        "properties": {
+          "campaignId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The campaign the send went out under."
+          },
+          "workflowSlug": {
+            "type": "string",
+            "nullable": true,
+            "description": "The workflow of the run that SENT: the run holding the person's `leads_campaigns` row of this campaign at the send (latest retry-pool claim or named serve at or before it, else the row's serve). null = no record names it."
+          },
+          "workflowSource": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "serve",
+              "retry_claim",
+              "named_serve",
+              null
+            ],
+            "description": "Which record named `workflowSlug`. null = the person holds no serve row under this campaign (workflowSlug null too)."
+          },
+          "firstSentAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "ISO-8601, first send under this campaign x workflow."
+          },
+          "lastSentAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "count": {
+            "type": "integer",
+            "description": "Sends (initial + follow-ups; never a bounce)."
+          }
+        },
+        "required": [
+          "campaignId",
+          "workflowSlug",
+          "workflowSource",
+          "firstSentAt",
+          "lastSentAt",
           "count"
         ]
       },
@@ -18800,7 +18855,7 @@
     "/internal/brands/{brandId}/timeline-journeys": {
       "get": {
         "summary": "Every person x offer journey of a brand, off the silver timeline (internal, service-auth)",
-        "description": "One entry per person x offer of the (x-org-id, brand) on `lead_timeline_facts` (offer null = facts stated on no offer). `facts` = every live non-email fact with its label verbatim, date, campaign, attribution and stated amount; `acts` = the campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows). Withdrawn facts are excluded. A person on two offers appears once per offer, each with only that offer's facts. ONE streamed statement, ordered by leadId then offerId (null first); `count` (journeys) and `factCount` close the body. 503 while the outreach fact copy has not caught up; 502 when campaign-service cannot name the campaigns' offers; failure after the first byte destroys the socket (never a short body that parses).",
+        "description": "One entry per person x offer of the (x-org-id, brand) on `lead_timeline_facts` (offer null = facts stated on no offer). `facts` = every live non-email fact with its label verbatim, date, campaign, attribution and stated amount; `acts` = the campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows); `emailSends` = our sends per (campaign, sending workflow) with first/last send and count. Withdrawn facts are excluded. A person on two offers appears once per offer, each with only that offer's facts. ONE streamed statement, ordered by leadId then offerId (null first); `count` (journeys) and `factCount` close the body. 503 while the outreach fact copy has not caught up; 502 when campaign-service cannot name the campaigns' offers; failure after the first byte destroys the socket (never a short body that parses).",
         "parameters": [
           {
             "in": "header",
