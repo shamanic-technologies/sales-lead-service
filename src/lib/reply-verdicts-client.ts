@@ -13,6 +13,7 @@
  */
 import { INSTANTLY_SERVICE_URL, INSTANTLY_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { isZodEmail, keepAccepted } from "./receiver-email-format.js";
 
 export class ReplyVerdictsUnavailableError extends Error {
   constructor(message: string) {
@@ -178,9 +179,15 @@ async function queryOnce(
 export async function fetchReplyVerdicts(
   emails: readonly string[],
   ctx: ReplyVerdictsContext,
+  leadOf?: ReadonlyMap<string, string>,
 ): Promise<ReplyVerdictView[]> {
-  const unique = Array.from(
-    new Set(emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0)),
+  // instantly-service validates `emails` with z.string().email() and 400s the whole request on one
+  // it refuses (LEAD-CHANGES-INVALID-EMAIL-1016): such an address is dropped, logged, and has no reply.
+  const unique = keepAccepted(
+    Array.from(new Set(emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0))),
+    isZodEmail,
+    `instantly-service /orgs/reply-verdicts/query (org ${ctx.orgId})`,
+    leadOf,
   );
   const out: ReplyVerdictView[] = [];
   for (let i = 0; i < unique.length; i += REPLY_VERDICTS_MAX_EMAILS) {
@@ -204,19 +211,19 @@ export async function fetchReplyVerdicts(
  * remembered: whoever was waiting on it fails as before, a later ask goes out again.
  */
 export interface ReplyVerdictsMemo {
-  fetch(emails: readonly string[], ctx: ReplyVerdictsContext): Promise<ReplyVerdictView[]>;
+  fetch(emails: readonly string[], ctx: ReplyVerdictsContext, leadOf?: ReadonlyMap<string, string>): Promise<ReplyVerdictView[]>;
 }
 
 export function createReplyVerdictsMemo(): ReplyVerdictsMemo {
   const byEmail = new Map<string, Promise<ReplyVerdictView[]>>();
   return {
-    async fetch(emails, ctx) {
+    async fetch(emails, ctx, leadOf) {
       const unique = Array.from(
         new Set(emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0)),
       );
       const missing = unique.filter((e) => !byEmail.has(e));
       if (missing.length > 0) {
-        const batch = fetchReplyVerdicts(missing, ctx).then((replies) => {
+        const batch = fetchReplyVerdicts(missing, ctx, leadOf).then((replies) => {
           const grouped = new Map<string, ReplyVerdictView[]>();
           for (const reply of replies) {
             const key = reply.leadEmail.trim().toLowerCase();

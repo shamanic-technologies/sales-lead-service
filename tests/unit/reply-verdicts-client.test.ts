@@ -36,6 +36,29 @@ describe("reply-verdicts client — instantly-service's locked contract, read fa
     expect(first.length + second.length).toBe(1_500);
   });
 
+  it("never sends an address instantly-service refuses: one valid + two malformed asks only the valid one, logs each skip with its lead (LEAD-CHANGES-INVALID-EMAIL-1016)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchSpy.mockResolvedValue(ok({ replies: [{ replyId: "r1", leadEmail: "valid@x.com", receivedAt: "2026-10-16T10:00:00Z", verdict: null, verdictCount: 0 }] }));
+    const bad1 = "32.mrtvistno5kueqkng5lxqukqjuyxgvkeifng2z2mfvxwy3ckpjghuwkpnjcvgx2jjztt2pi=@unsubscribe2.customer.io";
+    const bad2 = "32.kjfxeu2co5kucqk2offe4tkdkvus2sklkzcwkm3wge2girtxhu6q====@unsubscribe2.customer.io";
+    const out = await fetchReplyVerdicts(["valid@x.com", bad1, bad2], { orgId: "org-1" }, new Map([[bad1, "lead-bad-1"], [bad2, "lead-bad-2"]]));
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchSpy.mock.calls[0][1].body).emails).toEqual(["valid@x.com"]);
+    expect(out.map((r) => r.replyId)).toEqual(["r1"]);
+    const logged = errors.mock.calls.map((c) => String(c[0]));
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).toContain("lead-bad-1");
+    expect(logged[0]).toContain("reply-verdicts");
+    expect(logged[1]).toContain("lead-bad-2");
+    errors.mockRestore();
+  });
+
+  it("asks nothing when every address is malformed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await fetchReplyVerdicts(["foo@bar"], { orgId: "org-1" })).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("asks nothing for no address", async () => {
     expect(await fetchReplyVerdicts([], { orgId: "org-1" })).toEqual([]);
     expect(fetchSpy).not.toHaveBeenCalled();

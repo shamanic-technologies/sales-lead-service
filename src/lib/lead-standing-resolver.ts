@@ -232,6 +232,9 @@ export function createLeadStandingResolver(
       const replyEmails = deliveryQueried && legs !== null
         ? rows.filter((r) => r.status === "served" && r.email).map((r) => r.email!.toLowerCase())
         : [];
+      const leadOfEmail = new Map(
+        rows.filter((r) => r.email).map((r) => [r.email!.toLowerCase(), r.leadId] as const),
+      );
       const verdictCtx = {
         orgId: ctx.orgId,
         userId: ctx.userId ?? null,
@@ -250,8 +253,8 @@ export function createLeadStandingResolver(
       const [repliesRead, outcomeRead, neverRead, leadMarksRead, levelsRead] = await Promise.allSettled([
         settle(() => replyEmails.length > 0
           ? (replyVerdicts
-              ? replyVerdicts.fetch(replyEmails, verdictCtx)
-              : fetchReplyVerdicts(replyEmails, verdictCtx))
+              ? replyVerdicts.fetch(replyEmails, verdictCtx, leadOfEmail)
+              : fetchReplyVerdicts(replyEmails, verdictCtx, leadOfEmail))
           : ([] as ReplyVerdictView[])),
         // Outcomes credited to these people for these brands — hand-stated, tracker-reported or
         // CRM-evidenced alike, all matched on the PERSON and the brand, exactly as the panel reads.
