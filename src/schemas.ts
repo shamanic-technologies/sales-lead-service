@@ -7260,7 +7260,7 @@ registry.registerPath({
     "succeeded and was not wholly refunded; a fact withdrawn by crm-service does not count) and the outcome ledger (tracked, hand-stated, CRM, reply; " +
     "live rows only; `sale` = `paid_client`, `form_submission` = `form_submitted`). This is \"did the person reach the step\", not a count. " +
     "A person = a canonical email; reach rows sharing an address are one person; a reach with no email is not returned. " +
-    "Answerable steps: website_visit, signup, form_submitted, meeting_booked, meeting_attended, paid_client. " +
+    "Answerable steps: website_visit, signup, form_submitted, meeting_booked, meeting_attended, paid_client, purchase (Direct purchase: a sale the brand's website tag reported). " +
     "Sorted by reachedAt ascending.",
   request: {
     params: z.object({ brandId: z.string() }),
@@ -7300,7 +7300,7 @@ registry.registerPath({
     400: {
       description:
         "Missing x-org-id; step missing (step_required); unknown step (unknown_step); a catalogue step whose reach no store here sees per person, " +
-        "lead_found, conversation, industry_update_video, purchase (step_not_observable); not exactly one of since/email (since_or_email_required); " +
+        "lead_found, conversation, industry_update_video (step_not_observable); not exactly one of since/email (since_or_email_required); " +
         "unparseable since (invalid_since) or email (invalid_email).",
     },
     401: { description: "Unauthorized" },

@@ -10,7 +10,7 @@
  * pass read brand-transfer-sql's seeded sale and moved its count).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
@@ -35,6 +35,7 @@ const CATALOGUE = {
     { id: "meeting_attended", type: "outcome", outcomeKey: "meeting_attended", firedBy: "lead-service", coded: false },
     { id: "signed_up", type: "outcome", outcomeKey: "signup", firedBy: "lead-service", coded: false },
     { id: "form_submitted", type: "outcome", outcomeKey: "form_submitted", firedBy: "crm-service", coded: true },
+    { id: "purchase_made", type: "outcome", outcomeKey: "purchase", firedBy: "lead-service", coded: false },
     { id: "lead_found", type: "outcome", outcomeKey: "lead_found", firedBy: "lead-service", coded: false },
     { id: "paid_client", type: "outcome", outcomeKey: "paid_client", firedBy: "crm-service", coded: false },
   ],
@@ -55,6 +56,9 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
   let tag: string;
   let door: DoorCall[];
   let doorAnswer: () => Response;
+  /** What campaign-service's for-person read answers (another caller's earlier event of the trigger, or null). */
+  let priorAnswer: (url: URL) => Response;
+  let priorAsks: URL[];
   const addr = (name: string) => `${name}-${tag}@example.com`;
 
   function stubSiblings(): void {
@@ -65,6 +69,11 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
         const headers = new Headers(init?.headers);
         const org = headers.get("x-org-id");
         if (url.endsWith("/public/channels")) return new Response(JSON.stringify(CATALOGUE), { status: 200 });
+        if (url.includes("/trigger-events/for-person?")) {
+          const asked = new URL(url);
+          priorAsks.push(asked);
+          return priorAnswer(asked);
+        }
         if (url.endsWith("/internal/trigger-events")) {
           door.push({ orgId: org, body: JSON.parse(String(init?.body)) });
           return doorAnswer();
@@ -150,6 +159,8 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     tag = randomUUID().slice(0, 8);
     door = [];
     doorAnswer = () => new Response(JSON.stringify({ event: { id: randomUUID() }, replayed: false }), { status: 201 });
+    priorAnswer = () => new Response(JSON.stringify({ event: null, idempotencyKey: null }), { status: 200 });
+    priorAsks = [];
     resetOutcomeTriggerCatalogue();
     stubSiblings();
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -377,5 +388,102 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours()).toEqual([]);
     expect((await rowsOf()).map((r) => [r.status, r.skipReason])).toEqual([["skipped", "offer_unknown"]]);
+  });
+
+  it("AC (STD-VOCAB 1016): each of the 8 outcomes, reached once, records exactly ONE event; reached again, none", async () => {
+    const leadId = await seedLead("all");
+    const [lc] = await db.select({ id: leadsCampaigns.id }).from(leadsCampaigns).where(eq(leadsCampaigns.leadId, leadId));
+    const reachAll = async (servedBy: string) => {
+      noteLeadFound({ orgId, brandId, leadId, email: addr("all"), campaignId: servedBy, offerId });
+      await crmFact("website_visit", addr("all"));
+      await crmFact("signup", addr("all"));
+      await crmFact("meeting_attended", addr("all"));
+      await db.insert(followupActions).values({
+        orgId, brandIds: [brandId], leadCampaignId: lc.id, leadId, heldByCampaignId: outreachId, action: "acted",
+        occurredAt: new Date(), actingCampaignId: callCampaignId,
+      });
+      const ledger = {
+        orgId, brandId, matchedLeadId: leadId, matchConfidence: "deterministic", attributionStatus: "attributed",
+        campaignId: outreachId, costCents: 0, receivedAt: new Date(),
+      } as const;
+      await db.insert(conversionEvents).values({ ...ledger, event: "meeting_booked", source: "manual" });
+      // A sale the brand's website tag reported: bought on the site (Direct purchase) AND a paying client.
+      await db.insert(conversionEvents).values({ ...ledger, event: "sale", source: "tracker" });
+      await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+      await until(async () => (await rowsOf({ step: "lead_found" })).length > 0 && ours().some((c) => c.body.triggerId === "lead_found"));
+    };
+
+    await reachAll(outreachId);
+    const fired = ours().map((c) => c.body.triggerId).sort();
+    expect(fired).toEqual([
+      "booking_call_started", "lead_found", "meeting_attended", "meeting_booked", "paid_client", "purchase_made", "signed_up", "website_visited",
+    ]);
+    expect(ours().every((c) => c.body.leadId === leadId && c.body.offerId === offerId)).toBe(true);
+
+    // Found again by another campaign of the offer (the same serve record is never read twice).
+    await reachAll(otherCampaignId);
+    await until(async () => (await rowsOf({ step: "lead_found" })).length === 2);
+    expect(ours().map((c) => c.body.triggerId).sort()).toEqual(fired);
+    const statuses = (await rowsOf()).map((r) => r.status);
+    expect(statuses.filter((s) => s === "delivered")).toHaveLength(8);
+    expect(statuses.filter((s) => s === "already_fired")).toHaveLength(8);
+  });
+
+  it("Direct purchase is a sale the website tag reported; a stated sale is a paid client only", async () => {
+    await db.insert(conversionEvents).values({
+      orgId, brandId, event: "sale", email: addr("hand"), matchConfidence: "unmatched", attributionStatus: "unmatched",
+      source: "manual", costCents: 0, receivedAt: new Date(),
+    });
+    await db.insert(conversionEvents).values({
+      orgId, brandId, event: "sale", email: addr("site"), matchConfidence: "unmatched", attributionStatus: "unmatched",
+      source: "tracker", receivedAt: new Date(),
+    });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    const sent = ours().map((c) => [c.body.triggerId, (c.body.person as { email: string }).email]).sort();
+    expect(sent).toEqual([
+      ["paid_client", addr("hand")],
+      ["paid_client", addr("site")],
+      ["purchase_made", addr("site")],
+    ]);
+  });
+
+  it("an occurrence another caller already pushed for the person is that fire: nothing sent, kept already_recorded", async () => {
+    priorAnswer = (url) =>
+      url.searchParams.get("triggerId") === "signed_up" && url.searchParams.get("email") === addr("pushed")
+        ? new Response(JSON.stringify({ event: { id: "evt-client", recordedVia: "trigger_events" }, idempotencyKey: "client-key" }), { status: 200 })
+        : new Response(JSON.stringify({ event: null, idempotencyKey: null }), { status: 200 });
+    await crmFact("signup", addr("pushed"));
+    await crmFact("signup", addr("fresh"));
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours().map((c) => (c.body.person as { email: string }).email)).toEqual([addr("fresh")]);
+    const pushed = (await rowsOf({ step: "signup" })).find((r) => r.email === addr("pushed"));
+    expect(pushed).toMatchObject({ status: "skipped", skipReason: "already_recorded", campaignEventId: "evt-client", triggerId: "signed_up" });
+    const asked = priorAsks.find((u) => u.searchParams.get("email") === addr("pushed"));
+    expect(asked?.pathname).toBe(`/internal/offers/${offerId}/trigger-events/for-person`);
+    expect(asked?.searchParams.get("brandId")).toBe(brandId);
+  });
+
+  it("our own earlier event (same key) is replayed through the door, never mistaken for another caller's", async () => {
+    priorAnswer = (url) => {
+      const email = url.searchParams.get("email") ?? "";
+      const key = `lead-service:outcome:signup:${brandId}:${offerId}:email:${createHash("sha256").update(`email:${email}`).digest("hex").slice(0, 32)}`;
+      return new Response(JSON.stringify({ event: { id: "evt-ours", recordedVia: "trigger_events" }, idempotencyKey: key }), { status: 200 });
+    };
+    await crmFact("signup", addr("replayed"));
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours()).toHaveLength(1);
+    expect((await rowsOf({ step: "signup" }))[0].status).toBe("delivered");
+  });
+
+  it("a for-person read that fails keeps the fire pending (never fired on a guess)", async () => {
+    priorAnswer = () => new Response("down", { status: 503 });
+    await crmFact("signup", addr("blind"));
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours()).toEqual([]);
+    const [row] = await rowsOf({ step: "signup" });
+    expect(row.status).toBe("pending");
+    expect(row.lastError).toMatch(/prior occurrence unreadable.*503/);
   });
 });
