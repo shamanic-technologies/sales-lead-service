@@ -24,6 +24,8 @@
  *     ours with its first event.
  *   - The trigger is read off features-service's catalogue at delivery (`outcomeKey`); an outcome another
  *     service fires (Positive reply, Form submitted) is `skipped` `fired_by_another_service`, never sent.
+ *   - ONE fire per person whoever rings: an event of the trigger another caller already recorded for the person
+ *     (a client pushing the same fact through the public door) is `skipped` `already_recorded`, never sent.
  *   - A delivery that fails (campaign-service down, catalogue unreadable) stays `pending` and is retried with
  *     backoff, logged loud each time; a 400 is `refused`, kept, never resent. Nothing is ever swallowed.
  */
@@ -57,7 +59,10 @@ import {
   personKeyOf,
   pickOffers,
   stepOfCrmFact,
-  stepOfLedgerEvent,
+  LEDGER_ANY_SOURCE_EVENTS,
+  LEDGER_SOURCE_BOUND_STEPS,
+  ledgerSourceRef,
+  stepsOfLedgerRow,
   type CatalogueOutcomeTrigger,
 } from "./outcome-trigger-rules.js";
 
@@ -383,6 +388,45 @@ async function keepForRetry(row: FireRow, error: string): Promise<DeliveryResult
   return "retry";
 }
 
+/** A row whose person already has an event of the trigger at campaign-service, recorded by another caller. */
+export const ALREADY_RECORDED = "already_recorded";
+
+type PriorDoorEvent = { eventId: string; recordedVia: string | null; idempotencyKey: string | null } | null;
+
+/**
+ * The first event of the trigger about the person on the offer at campaign-service, any door or caller
+ * (`GET /internal/offers/{offerId}/trigger-events/for-person`), or null. THROWS when it cannot answer.
+ */
+async function priorDoorEvent(
+  row: FireRow,
+  triggerId: string,
+  person: { email?: string; phone?: string } | null,
+): Promise<PriorDoorEvent> {
+  const query = new URLSearchParams({ brandId: row.brand_id, triggerId });
+  if (row.lead_id) query.set("leadId", row.lead_id);
+  if (person?.email) query.set("email", person.email);
+  if (person?.phone) query.set("phone", person.phone);
+  if (!row.lead_id && !person?.email && !person?.phone) return null;
+  const response = await fetchWithRetry(
+    `${CAMPAIGN_SERVICE_URL}/internal/offers/${encodeURIComponent(row.offer_id)}/trigger-events/for-person?${query}`,
+    {
+      headers: { "x-api-key": CAMPAIGN_SERVICE_API_KEY, "x-org-id": row.org_id },
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    },
+  );
+  const text = await response.text();
+  if (!response.ok) throw new Error(`campaign-service trigger-events/for-person failed: ${response.status} ${text.slice(0, 300)}`);
+  const body = JSON.parse(text) as { event?: { id?: unknown; recordedVia?: unknown } | null; idempotencyKey?: unknown };
+  if (body.event === undefined) throw new Error(`campaign-service trigger-events/for-person answered without an event field: ${text.slice(0, 300)}`);
+  if (body.event === null) return null;
+  if (typeof body.event.id !== "string") throw new Error(`campaign-service trigger-events/for-person event without an id: ${text.slice(0, 300)}`);
+  return {
+    eventId: body.event.id,
+    recordedVia: typeof body.event.recordedVia === "string" ? body.event.recordedVia : null,
+    idempotencyKey: typeof body.idempotencyKey === "string" ? body.idempotencyKey : null,
+  };
+}
+
 /** One attempt to ring campaign-service's door for one pending row. Never throws. */
 export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): Promise<DeliveryResult> {
   try {
@@ -401,11 +445,31 @@ export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): 
 
     const occurredAt = toIsoTimestamp(row.occurred_at);
     const person = eventPerson(row.email, row.name, row.phone);
+    const idempotencyKey = outcomeIdempotencyKey({ step: row.step, brandId: row.brand_id, offerId: row.offer_id, personKey: row.person_key, hash: sha256 });
+
+    // ONE fire per person, whoever rings: an occurrence of this trigger another caller already recorded for the
+    // person (a client pushing the same fact through the public door) is that fire. Ours (same key) is replayed.
+    let prior: PriorDoorEvent;
+    try {
+      prior = await priorDoorEvent(row, verdict.triggerId, person);
+    } catch (err) {
+      return await keepForRetry(row, `prior occurrence unreadable: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (prior && prior.idempotencyKey !== idempotencyKey) {
+      const detail = `already recorded at campaign-service (event ${prior.eventId}, ${prior.recordedVia})`;
+      console.log(`[lead-service] outcome trigger ${verdict.triggerId} not fired again (${ALREADY_RECORDED}: ${detail}): ${describe(row)}`);
+      await settle(
+        row,
+        sql`status = 'skipped', skip_reason = ${ALREADY_RECORDED}, trigger_id = ${verdict.triggerId}, campaign_event_id = ${prior.eventId}, last_error = ${detail}`,
+      );
+      return "skipped";
+    }
+
     const body = {
       triggerId: verdict.triggerId,
       brandId: row.brand_id,
       offerId: row.offer_id,
-      idempotencyKey: outcomeIdempotencyKey({ step: row.step, brandId: row.brand_id, offerId: row.offer_id, personKey: row.person_key, hash: sha256 }),
+      idempotencyKey,
       // A reach dated ahead of now is due now: campaign-service would otherwise hold it as a planned event.
       ...(occurredAt ? { occurredAt: new Date(Math.min(Date.parse(occurredAt), now.getTime())).toISOString() } : {}),
       ...(row.lead_id ? { leadId: row.lead_id } : {}),
@@ -651,6 +715,19 @@ interface LedgerRow {
 
 /** Outcome-ledger rows (not the CRM's: their record is the fact copy) inside the fresh window, not yet read. */
 async function sweepLedger(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
+  // A row is read once per step it reaches: `ce:<id>` for the any-source step, `ce:<id>:<step>` for a source-bound
+  // one (a sale the website tag reported is ALSO a Direct purchase).
+  const unread = (ref: ReturnType<typeof sql>) => sql`NOT EXISTS (SELECT 1 FROM outcome_trigger_fires o WHERE o.source_ref = ${ref})`;
+  const notYetRead = sql`(
+    (ce.event = ANY(${sql.param([...LEDGER_ANY_SOURCE_EVENTS])}::text[]) AND ${unread(sql`'ce:' || ce.id::text`)})
+    ${sql.join(
+      LEDGER_SOURCE_BOUND_STEPS.map(
+        (b) => sql` OR (ce.event = ANY(${sql.param([...b.events])}::text[]) AND ce.source = ANY(${sql.param([...b.sources])}::text[])
+          AND ${unread(sql`'ce:' || ce.id::text || ${`:${b.step}`}`)})`,
+      ),
+      sql``,
+    )}
+  )`;
   const rows = (await db.execute(sql`
     SELECT ce.id::text AS id, ce.org_id, ce.brand_id, ce.event, ce.email, ce.phone,
       NULLIF(trim(concat_ws(' ', ce.first_name, ce.last_name)), '') AS name,
@@ -661,38 +738,48 @@ async function sweepLedger(state: SweepState, now: Date, lookups: Lookups, pendi
       AND ce.source <> 'crm'
       AND ce.event = ANY(${sql.param([...LEDGER_REACH_EVENTS])}::text[])
       AND ce.received_at >= ${freshSince(state.armedAt, now).toISOString()}::timestamptz
-      AND NOT EXISTS (SELECT 1 FROM outcome_trigger_fires o WHERE o.source_ref = 'ce:' || ce.id::text)
+      AND ${notYetRead}
     ORDER BY ce.received_at
     LIMIT ${LEDGER_BATCH}
   `)) as unknown as LedgerRow[];
+  const wanted = rows.flatMap((ce) => stepsOfLedgerRow(ce.event, ce.source).map((step) => ledgerSourceRef(ce.id, step)));
+  const alreadyRead = new Set(
+    wanted.length === 0
+      ? []
+      : ((await db.execute(sql`
+          SELECT DISTINCT source_ref FROM outcome_trigger_fires WHERE source_ref = ANY(${sql.param(wanted)}::text[])
+        `)) as unknown as Array<{ source_ref: string }>).map((r) => r.source_ref),
+  );
   let failed: unknown = null;
   for (const ce of rows) {
-    const step = stepOfLedgerEvent(ce.event);
-    if (!step) continue;
-    // One row failing never holds the others: it is read again next pass (nothing was written for it).
-    try {
-      pending.push(
-        ...(await recordSwept(
-          {
-            orgId: ce.org_id,
-            brandId: ce.brand_id,
-            step,
-            source: ce.source,
-            sourceRef: `ce:${ce.id}`,
-            occurredAt: toIsoTimestamp(ce.received_at),
-            leadId: ce.lead_id,
-            emails: canonicalEmails([ce.email]),
-            name: ce.name,
-            phone: ce.phone,
-            statedOfferId: null,
-            statedCampaignId: ce.campaign_id,
-          },
-          lookups,
-          now,
-        )),
-      );
-    } catch (err) {
-      failed ??= err;
+    for (const step of stepsOfLedgerRow(ce.event, ce.source)) {
+      const sourceRef = ledgerSourceRef(ce.id, step);
+      if (alreadyRead.has(sourceRef)) continue;
+      // One reach failing never holds the others: it is read again next pass (nothing was written for it).
+      try {
+        pending.push(
+          ...(await recordSwept(
+            {
+              orgId: ce.org_id,
+              brandId: ce.brand_id,
+              step,
+              source: ce.source,
+              sourceRef,
+              occurredAt: toIsoTimestamp(ce.received_at),
+              leadId: ce.lead_id,
+              emails: canonicalEmails([ce.email]),
+              name: ce.name,
+              phone: ce.phone,
+              statedOfferId: null,
+              statedCampaignId: ce.campaign_id,
+            },
+            lookups,
+            now,
+          )),
+        );
+      } catch (err) {
+        failed ??= err;
+      }
     }
   }
   if (failed) throw failed;

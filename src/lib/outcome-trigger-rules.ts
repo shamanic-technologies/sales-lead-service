@@ -9,7 +9,8 @@
  *    Positive reply = instantly-service, Form submitted = crm-service) is never fired a second time here
  *    (`fired_by_another_service`). Every other outcome trigger this service sees a reach of, it fires.
  *  - WHAT reaches a step: this service's own vocabulary, the one `step-reached.ts` already states for
- *    campaign-service's delay detector (crm fact types + outcome-ledger events), plus `lead_found` (a person
+ *    campaign-service's delay detector (crm fact types + outcome-ledger events; a sale the brand's website tag
+ *    reported is Direct purchase AND Paid client), plus `lead_found` (a person
  *    FOUND by a serve) and `booking_call` (an `acted` row of an AI Instant Call campaign, booking-calls.ts).
  *  - FROM NOW ON (no back-fill): a reach fires only when it happened after the detector was armed AND within
  *    `OUTCOME_FRESH_WINDOW_MS` of now. An undated reach never fires (nothing says it is not years old), and
@@ -17,7 +18,7 @@
  *  - ONCE per person (lead x brand x offer) and trigger: the idempotency key names the outcome, the brand, the
  *    offer and the person, so our own retry and a replay both answer the first event at campaign-service.
  */
-import { STEP_REACHED_EVIDENCE } from "./step-reached.js";
+import { STEP_REACHED_EVIDENCE, ledgerRowReachesStep } from "./step-reached.js";
 import { canonicalE164 } from "./e164-phone.js";
 
 /** How this service is named in features-service's catalogue (`triggers[].firedBy`). */
@@ -87,16 +88,35 @@ export function stepOfCrmFact(type: string): string | null {
   return null;
 }
 
-/** The catalogue step an outcome-ledger event (`conversion_events.event`) reaches, or null. */
-export function stepOfLedgerEvent(event: string): string | null {
-  for (const [step, evidence] of Object.entries(STEP_REACHED_EVIDENCE)) {
-    if (evidence.ledgerEvents.includes(event)) return step;
-  }
-  return null;
+/**
+ * Every catalogue step an outcome-ledger row (`conversion_events.event` + `source`) reaches, in catalogue order.
+ * One row can reach two: a sale the brand's website tag reported is a Direct purchase AND a Paid client.
+ */
+export function stepsOfLedgerRow(event: string, source: string): string[] {
+  return Object.keys(STEP_REACHED_EVIDENCE).filter((step) => ledgerRowReachesStep(step, event, source));
 }
 
+/**
+ * The record a reach of `step` off ledger row `ceId` is kept under: `ce:<id>` for a step any source reaches (every
+ * row read before a row could reach two steps), `ce:<id>:<step>` for a step only some sources reach (Direct purchase).
+ */
+export function ledgerSourceRef(ceId: string, step: string): string {
+  return STEP_REACHED_EVIDENCE[step]?.ledgerSources ? `ce:${ceId}:${step}` : `ce:${ceId}`;
+}
+
+/** Ledger events a step reachable from ANY source reads (their reach is kept under the bare `ce:<id>`). */
+export const LEDGER_ANY_SOURCE_EVENTS: readonly string[] = [
+  ...new Set(Object.values(STEP_REACHED_EVIDENCE).filter((e) => !e.ledgerSources).flatMap((e) => e.ledgerEvents)),
+];
+
+/** Steps only some ledger sources reach, with what reaches them (each kept under `ce:<id>:<step>`). */
+export const LEDGER_SOURCE_BOUND_STEPS: ReadonlyArray<{ step: string; events: readonly string[]; sources: readonly string[] }> =
+  Object.entries(STEP_REACHED_EVIDENCE)
+    .filter(([, e]) => e.ledgerSources && e.ledgerEvents.length > 0)
+    .map(([step, e]) => ({ step, events: e.ledgerEvents, sources: e.ledgerSources! }));
+
 export const CRM_FACT_REACH_TYPES: readonly string[] = Object.values(STEP_REACHED_EVIDENCE).flatMap((e) => e.crmFactTypes);
-export const LEDGER_REACH_EVENTS: readonly string[] = Object.values(STEP_REACHED_EVIDENCE).flatMap((e) => e.ledgerEvents);
+export const LEDGER_REACH_EVENTS: readonly string[] = [...new Set(Object.values(STEP_REACHED_EVIDENCE).flatMap((e) => e.ledgerEvents))];
 
 /** The earliest instant a reach may have happened at and still fire (armed, and inside the window). */
 export function freshSince(armedAt: Date, now: Date): Date {

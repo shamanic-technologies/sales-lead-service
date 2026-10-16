@@ -15,7 +15,10 @@ import {
   personKeyOf,
   pickOffers,
   stepOfCrmFact,
-  stepOfLedgerEvent,
+  stepsOfLedgerRow,
+  ledgerSourceRef,
+  LEDGER_ANY_SOURCE_EVENTS,
+  LEDGER_SOURCE_BOUND_STEPS,
 } from "../../src/lib/outcome-trigger-rules.js";
 
 /** The served catalogue's trigger list as features-service served it on 2026-10-15 (the fields read). */
@@ -94,12 +97,21 @@ describe("what reaches a step: step-reached.ts's vocabulary", () => {
     expect(stepOfCrmFact("sale")).toBe("paid_client");
     expect(stepOfCrmFact("website_visit")).toBe("website_visit");
     expect(stepOfCrmFact("message_in")).toBeNull();
-    expect(stepOfLedgerEvent("form_submission")).toBe("form_submitted");
-    expect(stepOfLedgerEvent("sale")).toBe("paid_client");
-    expect(stepOfLedgerEvent("purchase")).toBe("paid_client");
-    expect(stepOfLedgerEvent("meeting_booked")).toBe("meeting_booked");
+    expect(stepsOfLedgerRow("form_submission", "tracker")).toEqual(["form_submitted"]);
+    expect(stepsOfLedgerRow("sale", "manual")).toEqual(["paid_client"]);
+    expect(stepsOfLedgerRow("purchase", "reply")).toEqual(["paid_client"]);
+    expect(stepsOfLedgerRow("meeting_booked", "manual")).toEqual(["meeting_booked"]);
     // A positive reply is the delivery layer's (instantly-service fires it): never a reach here.
-    expect(stepOfLedgerEvent("positive_reply")).toBeNull();
+    expect(stepsOfLedgerRow("positive_reply", "crm")).toEqual([]);
+  });
+
+  it("a sale the brand's website tag reported is a Direct purchase AND a paid client, each read under its own record", () => {
+    expect(stepsOfLedgerRow("sale", "tracker")).toEqual(["paid_client", "purchase"]);
+    expect(stepsOfLedgerRow("purchase", "tracker")).toEqual(["paid_client", "purchase"]);
+    expect(ledgerSourceRef("x", "paid_client")).toBe("ce:x");
+    expect(ledgerSourceRef("x", "purchase")).toBe("ce:x:purchase");
+    expect(LEDGER_ANY_SOURCE_EVENTS).toContain("sale");
+    expect(LEDGER_SOURCE_BOUND_STEPS).toEqual([{ step: "purchase", events: ["sale", "purchase"], sources: ["tracker"] }]);
   });
 });
 
