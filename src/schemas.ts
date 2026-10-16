@@ -7987,6 +7987,78 @@ registry.registerPath({
   },
 });
 
+const ProvenanceSourceSchema = z
+  .object({
+    audienceId: z.string(),
+    offerId: z.string().nullable(),
+    list: z.string().nullable().openapi({ description: "human-service's audience list kind (apollo_search, linkedin_engagement, crm...); null when the audience states none." }),
+    origin: z
+      .object({ slug: z.string(), name: z.string() })
+      .nullable()
+      .openapi({ description: "The sourcing origin features-service names for that list kind; null when the catalogue names none (never guessed)." }),
+    servedLead: z.boolean().openapi({ description: "True for the source whose serve handed this person out (provenance `served`); false = that source found them while already taken (`found_taken`)." }),
+    foundAt: z.string().nullable().openapi({ description: "When that audience found the person, ISO-8601; null when human-service stated none." }),
+  })
+  .openapi("ProvenanceSource");
+
+const PersonProvenanceSchema = z
+  .object({
+    email: z.string().openapi({ description: "The asked address, trimmed and lowercased." }),
+    tags: z.array(z.string()).openapi({
+      description:
+        "Every source tag of the person, sorted, deduped: the origin slug of each named source (e.g. `sourcing-apollo-cold-filters`), " +
+        "`list:<kind>` for a list kind the catalogue does not name, `list:none` for an audience stating no list, plus lead-service's " +
+        "audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`. Multi: a person found by several sources carries every tag. " +
+        "Empty = nobody recorded where the person came from.",
+    }),
+    sources: z.array(ProvenanceSourceSchema).openapi({ description: "Every audience of the brand that found the person (human-service memberships), the serving one first." }),
+    filings: z
+      .array(z.object({ kind: z.enum(["crm_signup", "social_engagement", "stated_by_org"]), firstAt: z.string().nullable() }))
+      .openapi({ description: "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated." }),
+  })
+  .openapi("PersonProvenance");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/lead-provenance/by-email",
+  summary: "Every lead-source tag of each address at a brand, in bulk (internal, service-auth)",
+  description:
+    "For the sending side (instantly-service) to join sends, bounces, refusals and blocklist hits to the lead SOURCES that produced the people. " +
+    "One answer per distinct asked address (trimmed, lowercased), in the order asked, every address answered (empty `tags` when nothing is recorded). " +
+    "Sources = human-service's memberships of the brand named by features-service's origin catalogue (same as `sources` on Leads list rows) + " +
+    "lead-service's audience-less filings. Read only. Up to 1000 addresses per call. 502 when human-service or the origin catalogue cannot be read (never `no source`).",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ emails: z.array(z.string()).min(1).max(1000) }).openapi("LeadProvenanceRequest"),
+        },
+      },
+    },
+  },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "Every asked address with its source tags",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ brandId: z.string(), people: z.array(PersonProvenanceSchema), count: z.number().int() })
+            .openapi("LeadProvenanceResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id missing, or body unreadable (emails: 1 to 1000 strings)" },
+    401: { description: "Unauthorized" },
+    500: { description: "Internal server error" },
+    502: { description: "human-service memberships or the features-service origin catalogue could not be read" },
+  },
+});
+
 const ServeRecordSchema = z
   .object({
     runId: z.string().openapi({ description: "The `lead-service:lead-serve` run that handed this person out (`leads_campaigns.run_id`)." }),
