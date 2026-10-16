@@ -1,6 +1,6 @@
 import { EMAIL_GATEWAY_SERVICE_URL, EMAIL_GATEWAY_SERVICE_API_KEY } from "../config.js";
-import { z } from "zod";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { isZodEmail } from "./receiver-email-format.js";
 
 export interface DeliveryStatusItem {
   email: string;
@@ -14,11 +14,9 @@ export interface DeliveryStatusItem {
  * the WHOLE batch, so a single malformed address (LEAD-CHANGES-INVALID-EMAIL-1016: two customer.io
  * unsubscribe addresses filed by the Unibox intake) took the lead changes feed down for every scope.
  */
-const gatewayEmail = z.string().email();
-
-/** Whether email-gateway accepts `email` as an address (send or status). */
+/** Whether email-gateway accepts `email` as an address (send or status). See receiver-email-format.ts. */
 export function isGatewayEmail(email: string): boolean {
-  return gatewayEmail.safeParse(email).success;
+  return isZodEmail(email);
 }
 
 export interface ScopedStatus {

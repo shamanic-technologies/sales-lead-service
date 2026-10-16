@@ -18,6 +18,7 @@
  */
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { isCrmMatchableEmail, keepAccepted } from "./receiver-email-format.js";
 
 const REQUEST_TIMEOUT_MS = 10_000;
 /** crm-service's own cap on `emails` per query. */
@@ -85,9 +86,18 @@ export async function fetchChannelSendsBatch(
   campaignId: string,
   emails: readonly string[],
   ctx: ChannelSendContext,
+  leadOf?: ReadonlyMap<string, string>,
 ): Promise<Map<string, ChannelSend[]>> {
   const out = new Map<string, ChannelSend[]>();
-  const unique = [...new Set(emails.map(channelSendKey))];
+  // An address crm-service cannot match is named in `invalidEmails`, which fails the whole pull: it is
+  // dropped here, logged with its lead, and has no send (crm-service stores sends under a matchable
+  // address only) — LEAD-CHANGES-INVALID-EMAIL-1016.
+  const unique = keepAccepted(
+    [...new Set(emails.map(channelSendKey))],
+    isCrmMatchableEmail,
+    `crm-service /orgs/whatsapp/sends/query (campaign ${campaignId})`,
+    leadOf,
+  );
   if (unique.length === 0) return out;
   if (unique.length > CHANNEL_SENDS_QUERY_MAX_EMAILS) {
     throw new ChannelSendsUnavailableError(
