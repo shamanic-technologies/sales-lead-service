@@ -51,6 +51,11 @@
  *                            and every person a fresh serve bought in this call had been emailed by the brand inside
  *                            the window (each stays filed under the asking campaign for later). Not exhaustion.
  *
+ *   sales_funnel_max_budget_reached / sales_funnel_max_budget_unreadable
+ *                          — billing refused a spend of this serve because the campaign's SALES FUNNEL max budget was
+ *                            reached (or could not be read); the org may well have credit. Billing's own `reason`,
+ *                            verbatim, with its `sales_funnel_cap` beside it (FUNNEL-CAP-NAMED-402-1016). A wait,
+ *                            never exhaustion: raising the max budget (or the next period) lets the serve run.
  *   named_lead_*           — a serve that NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
  *                            src/lib/named-lead-serve.ts) could not hand that person out. Each answer also
  *                            carries `message` (a sentence a client can read) and `final` (true = a retry cannot
@@ -59,6 +64,9 @@
  * excluding a list of known-benign reasons: a reason added here later must default to
  * not-exhaustion, and only an explicit equality test gives that.
  */
+
+/** billing-service's funnel-cap refusal reasons, relayed verbatim as the serve's reason. */
+export const SALES_FUNNEL_CAP_REASONS = ["sales_funnel_max_budget_reached", "sales_funnel_max_budget_unreadable"] as const;
 
 export const AUDIENCE_EXHAUSTED_REASON = "audience_exhausted" as const;
 export const NO_AUDIENCE_REASON = "no_audience" as const;
@@ -100,6 +108,7 @@ export const SERVE_EMPTY_REASONS = [
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
   RECENTLY_EMAILED_REASON,
+  ...SALES_FUNNEL_CAP_REASONS,
   ...NAMED_LEAD_REASONS,
 ] as const;
 

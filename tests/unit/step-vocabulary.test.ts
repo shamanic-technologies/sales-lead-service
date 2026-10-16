@@ -38,6 +38,14 @@ const SELF = "tests/unit/step-vocabulary.test.ts";
 /** The retired sales-funnel surface, spelled so this file does not match itself. */
 const RETIRED_FUNNEL = new RegExp(["funnel", "Key|funnel_", "key|sales-", "funnels|sales", "Funnel"].join(""), "i");
 
+/**
+ * The one funnel word this service may publish: billing-service's own MONEY cap, relayed verbatim on a
+ * refusal (`sales_funnel_cap`, FUNNEL-CAP-NAMED-402-1016). Owner 2026-10-14: what a campaign may spend
+ * is its sales funnel cap, enforced by billing at every authorization. Not a funnel this service reads
+ * or serves: the field is passed through untouched, under billing's name, so a client sees the cause.
+ */
+const ALLOWED_FUNNEL_PROPERTIES = ["sales_funnel_cap"];
+
 function stripAllowed(text: string): string {
   let out = text.toLowerCase();
   for (const phrase of ALLOWED_PHRASES) out = out.split(phrase).join("");
@@ -108,7 +116,7 @@ describe("no sales funnel is read or served", () => {
   it("publishes no funnel property and no funnel parameter", () => {
     const offenders: string[] = [];
     walkSpec(spec, "$", (path, key, value) => {
-      if (path.endsWith(".properties") && /funnel/i.test(key)) offenders.push(`${path}.${key}`);
+      if (path.endsWith(".properties") && /funnel/i.test(key) && !ALLOWED_FUNNEL_PROPERTIES.includes(key)) offenders.push(`${path}.${key}`);
       if (key === "name" && typeof value === "string" && /funnel/i.test(value)) offenders.push(`${path}.name=${value}`);
     });
     expect(offenders).toEqual([]);

@@ -10,7 +10,7 @@ import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
-import { CREDIT_INSUFFICIENT_REASON, isCreditInsufficientError } from "../lib/credit-errors.js";
+import { CREDIT_INSUFFICIENT_REASON, fundingCapOf, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError, isStepFilterRefusal } from "../lib/people-client.js";
 import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
 import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
@@ -486,19 +486,34 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     res.json(result);
   } catch (error) {
     if (isCreditInsufficientError(error)) {
-      console.log(`[lead-service] buffer/next found=false reason=credit_insufficient campaign=${campaignId}`);
+      // A refusal for the campaign's sales-funnel MAX BUDGET (the org may have credit) names that cause:
+      // billing's `reason` + `sales_funnel_cap` verbatim, never "add credit" (FUNNEL-CAP-NAMED-402-1016).
+      const cap = fundingCapOf(error);
+      const reason = cap ? cap.reason : CREDIT_INSUFFICIENT_REASON;
+      console.log(`[lead-service] buffer/next found=false reason=${reason} campaign=${campaignId}`);
+      const capMessage = cap
+        ? cap.reason === "sales_funnel_max_budget_unreadable"
+          ? "This campaign's max budget could not be read, so nothing was bought. We will try again shortly."
+          : "This campaign reached the max budget set for it. Raise its max budget to keep it running."
+        : null;
       // A named serve's wait is stated as one (the occurrence is redelivered once credit is back).
-      const result = named
-        ? { found: false, reason: CREDIT_INSUFFICIENT_REASON, message: "Your balance cannot cover looking this person up. We will try again once it is topped up.", final: false }
-        : { found: false, reason: CREDIT_INSUFFICIENT_REASON };
-      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-credit-insufficient", detail: `campaignId=${campaignId}` }, req.headers).catch(() => {});
+      const result = cap
+        ? { found: false, reason, sales_funnel_cap: cap.sales_funnel_cap, message: capMessage, ...(named ? { final: false } : {}) }
+        : named
+          ? { found: false, reason: CREDIT_INSUFFICIENT_REASON, message: "Your balance cannot cover looking this person up. We will try again once it is topped up.", final: false }
+          : { found: false, reason: CREDIT_INSUFFICIENT_REASON };
+      traceEvent(
+        serveRunId,
+        { service: "lead-service", event: "buffer-next-credit-insufficient", detail: `campaignId=${campaignId}${cap ? ` reason=${cap.reason}` : ""}` },
+        req.headers,
+      ).catch(() => {});
       try {
         await updateRun(serveRunId, "completed", runMeta);
         await closeOnDemand("completed");
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after credit-insufficient response:", runErr);
       }
-      recordAsk({ outcome: "skipped", reason: CREDIT_INSUFFICIENT_REASON });
+      recordAsk({ outcome: "skipped", reason });
       return res.json(result);
     }
 

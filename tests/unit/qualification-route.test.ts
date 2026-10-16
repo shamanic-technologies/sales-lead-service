@@ -257,6 +257,32 @@ describe("POST suggestions, chat-service refuses for lack of money", () => {
   });
 });
 
+describe("a sales-funnel MAX BUDGET refusal (FUNNEL-CAP-NAMED-402-1016)", () => {
+  it("billing's cap refusal stays a 402 insufficient_credit, names the cause and carries reason + sales_funnel_cap verbatim", async () => {
+    const { InsufficientCreditError } = await import("../../src/lib/treg-client.js");
+    const cap = { salesFunnelId: "sf-1", salesFunnelCampaignId: "c-1", amountCents: 5000, period: "day", consumedCents: 5000, reservedCents: 0 };
+    generateSuggestions.mockRejectedValue(new InsufficientCreditError(90000, 3, { reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap }));
+    const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
+    expect(res.status).toBe(402);
+    expect(res.body).toEqual({
+      error: "Sales funnel max budget reached",
+      code: "insufficient_credit",
+      balanceCents: 90000,
+      requiredCents: 3,
+      reason: "sales_funnel_max_budget_reached",
+      sales_funnel_cap: cap,
+    });
+  });
+
+  it("a balance refusal (no reason) is byte-identical to today", async () => {
+    const { InsufficientCreditError } = await import("../../src/lib/treg-client.js");
+    generateSuggestions.mockRejectedValue(new InsufficientCreditError(0, 3));
+    const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
+    expect(res.status).toBe(402);
+    expect(res.body).toEqual({ error: "Insufficient credit", code: "insufficient_credit", balanceCents: 0, requiredCents: 3 });
+  });
+});
+
 describe("GET lead qualification", () => {
   const lead = { leadId: LEAD_A, organization: null };
   beforeEach(() => {
