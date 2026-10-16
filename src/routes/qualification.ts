@@ -40,7 +40,7 @@ import {
   runCriterionOnLeads,
 } from "../lib/qualification-run.js";
 import { TregEndpointUnknownError } from "../lib/treg-catalog-client.js";
-import type { SpendIdentity } from "../lib/treg-client.js";
+import { fundingCapLabel, type SpendIdentity } from "../lib/treg-client.js";
 import type { QualificationCriterionRow } from "../db/schema.js";
 
 const router = Router();
@@ -53,7 +53,16 @@ function wrap<Req extends Request = Request>(fn: (req: Req, res: Response, next:
 
 function fail(res: Response, error: unknown, what: string): void {
   if (error instanceof InsufficientCreditError) {
-    res.status(402).json({ error: "Insufficient credit", code: "insufficient_credit", balanceCents: error.balanceCents, requiredCents: error.requiredCents });
+    // 402 + `code` unchanged (callers key on them). A sales-funnel MAX BUDGET refusal names its cause and
+    // carries billing's `reason` + `sales_funnel_cap` verbatim (FUNNEL-CAP-NAMED-402-1016).
+    const cap = error.fundingCap;
+    res.status(402).json({
+      error: cap ? fundingCapLabel(cap.reason) : "Insufficient credit",
+      code: "insufficient_credit",
+      balanceCents: error.balanceCents,
+      requiredCents: error.requiredCents,
+      ...(cap ? { reason: cap.reason, sales_funnel_cap: cap.sales_funnel_cap } : {}),
+    });
     return;
   }
   console.error(`[lead-service] ${what} failed:`, error);

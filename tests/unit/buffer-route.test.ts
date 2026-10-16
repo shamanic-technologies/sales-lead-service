@@ -994,6 +994,38 @@ describe("POST /orgs/buffer/next — a serve that NAMES its person (LEAD-NAMED-S
     expect(res.body).toMatchObject({ found: false, reason: "credit_insufficient", final: false });
   });
 
+  it("a sales-funnel MAX BUDGET refusal names its cause: billing's reason + sales_funnel_cap verbatim, a wait (FUNNEL-CAP-NAMED-402-1016)", async () => {
+    const { InsufficientCreditError } = await import("../../src/lib/treg-client.js");
+    const cap = { salesFunnelId: "sf-1", salesFunnelCampaignId: "c-1", amountCents: 5000, period: "day", consumedCents: 5000, reservedCents: 0 };
+    pullNext.mockRejectedValueOnce(new InsufficientCreditError(90000, 3, { reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap }));
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-cap" } });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      found: false,
+      reason: "sales_funnel_max_budget_reached",
+      sales_funnel_cap: cap,
+      message: "This campaign reached the max budget set for it. Raise its max budget to keep it running.",
+      final: false,
+    });
+    expect(JSON.stringify(res.body)).not.toMatch(/credit_insufficient|topped up/);
+  });
+
+  it("apollo's cap 402 relayed through human-service keeps the cause on the serve", async () => {
+    const cap = { salesFunnelId: "sf-2", salesFunnelCampaignId: "c-2", amountCents: 100, period: "week", consumedCents: 100, reservedCents: 0 };
+    const apolloBody = JSON.stringify({ type: "credit_insufficient", error: "Sales funnel max budget reached", reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap });
+    const humanBody = JSON.stringify({ error: `Apollo serve failed: 402 - ${apolloBody}`, provider: "apollo", upstreamStatus: 402 });
+    pullNext.mockRejectedValueOnce(Object.assign(new Error(`People gateway call failed: 502 - ${humanBody}`), { status: 502, body: JSON.parse(humanBody) }));
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-cap-2" } });
+    expect(res.body).toMatchObject({ found: false, reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap, final: false });
+  });
+
+  it("a balance refusal (no reason) is byte-identical to today", async () => {
+    const { InsufficientCreditError } = await import("../../src/lib/treg-client.js");
+    pullNext.mockRejectedValueOnce(new InsufficientCreditError(0, 3));
+    const res = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-bal" } });
+    expect(res.body).toEqual({ found: false, reason: "credit_insufficient", message: "Your balance cannot cover looking this person up. We will try again once it is topped up.", final: false });
+  });
+
   it("refuses namedLead with population (400), and a malformed namedLead (400)", async () => {
     const both = await postNamed({ namedLead: { leadId: LEAD, triggerEventId: "evt-5" }, population: "contacted_pure_prospects" });
     expect(both.status).toBe(400);
