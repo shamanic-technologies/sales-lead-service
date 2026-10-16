@@ -400,10 +400,16 @@ export async function prepareNamedServe(params: {
       refused_at = NULL
   `);
   // The run that will now contact the person (as a retry claim re-points them): `served_at` untouched.
+  // Recorded with its workflow (migration 0096, WORKFLOW-SEND-HISTORY-1016): this run's workflow sends, not the serving one.
   await db.execute(sql`
-    UPDATE leads_campaigns
-       SET run_id = ${params.runId}, push_run_id = ${params.runId}, parent_run_id = ${params.parentRunId}, updated_at = now()
-     WHERE id = ${row.leadCampaignId}::uuid
+    WITH repointed AS (
+      UPDATE leads_campaigns
+         SET run_id = ${params.runId}, push_run_id = ${params.runId}, parent_run_id = ${params.parentRunId}, updated_at = now()
+       WHERE id = ${row.leadCampaignId}::uuid
+      RETURNING id
+    )
+    INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
+    SELECT id, ${params.runId}, ${params.context.workflowSlug ?? null}, now(), 'named_serve' FROM repointed
   `);
   return { ok: true, email, leadCampaignId: row.leadCampaignId };
 }

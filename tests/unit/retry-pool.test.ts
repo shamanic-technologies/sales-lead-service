@@ -80,7 +80,7 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
     return Promise.resolve([]);
   }
 
-  if (/retry_claimed_at =/.test(text) && /^\s*UPDATE leads_campaigns/.test(text)) {
+  if (/retry_claimed_at =/.test(text) && /^\s*(WITH claimed AS \(\s*)?UPDATE leads_campaigns/.test(text)) {
     const now = paramAfter(params, /SET\s+retry_claimed_at = $/) as string;
     const id = paramAfter(params, /WHERE id = $/) as string;
     const leaseCutoff = paramAfter(params, /retry_claimed_at < $/) as string;

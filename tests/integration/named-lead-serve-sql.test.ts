@@ -109,6 +109,7 @@ describe.skipIf(!hasRealDatabase)("named serve against a real database", () => {
       runId: randomUUID(),
       parentRunId: randomUUID(),
       userId: randomUUID(),
+      workflowSlug: "wf-named-itest",
       mode: { kind: "named", named: { leadId, triggerEventId } },
     });
   }
@@ -125,6 +126,13 @@ describe.skipIf(!hasRealDatabase)("named serve against a real database", () => {
     `)) as unknown as Array<{ serve_count: number; baseline_sent_count: number; baseline_contacted: boolean }>;
     expect(rows).toEqual([{ serve_count: 1, baseline_sent_count: 0, baseline_contacted: false }]);
     expect(enrichCalls).not.toContain(addr("ann"));
+    // The re-point is recorded with the serving run's workflow: that run is the one that will email.
+    const repoints = (await db.execute(sql`
+      SELECT r.workflow_slug, r.cause, r.run_id = lc.run_id AS same_run FROM lead_campaign_run_repoints r
+        JOIN leads_campaigns lc ON lc.id = r.lead_campaign_id
+       WHERE lc.lead_id = ${filed.leadId}::uuid AND lc.campaign_id = ${campaignId}
+    `)) as unknown as Array<{ workflow_slug: string; cause: string; same_run: boolean }>;
+    expect(repoints).toEqual([{ workflow_slug: "wf-named-itest", cause: "named_serve", same_run: true }]);
   });
 
   it("a redelivered run after a run that failed before sending gets the person again; after a send it is refused for good", async () => {

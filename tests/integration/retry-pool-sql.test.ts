@@ -13,7 +13,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { leadContactMethods, leads, leadsCampaigns } from "../../src/db/schema.js";
 import {
@@ -147,6 +147,23 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
 
     expect(first).toBe(true);
     expect(second).toBe(false);
+  });
+
+  it("records the claiming run's workflow with the claim, and nothing for a refused claim", async () => {
+    const id = await seedServedRow();
+    const now = Date.now();
+    const runId = randomUUID();
+
+    expect(await claimCandidate({ id, nowMs: now, runId, parentRunId: null, workflowSlug: "wf-claimant" })).toBe(true);
+    expect(await claimCandidate({ id, nowMs: now, runId: randomUUID(), parentRunId: null, workflowSlug: "wf-loser" })).toBe(false);
+
+    const repoints = (await db.execute(sql`
+      SELECT run_id, workflow_slug, cause, recorded_by, repointed_at::text AS at
+        FROM lead_campaign_run_repoints WHERE lead_campaign_id = ${id}::uuid
+    `)) as unknown as Array<{ run_id: string; workflow_slug: string; cause: string; recorded_by: string; at: string }>;
+    expect(repoints).toHaveLength(1);
+    expect(repoints[0]).toMatchObject({ run_id: runId, workflow_slug: "wf-claimant", cause: "retry_claim", recorded_by: "live" });
+    expect(new Date(repoints[0].at).getTime()).toBe(now);
   });
 
   it("closes a candidate the sender is finished with: out of the pool, never claimable, not sent", async () => {

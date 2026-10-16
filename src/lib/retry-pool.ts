@@ -528,11 +528,20 @@ export async function claimCandidate(params: {
   nowMs: number;
   runId: string | null;
   parentRunId: string | null;
+  /**
+   * The claiming run's workflow (x-workflow-slug). Recorded with the claim in
+   * `lead_campaign_run_repoints` (migration 0096): the claimant may run another workflow of
+   * the campaign than the one that served the row, and it is the one that sends
+   * (WORKFLOW-SEND-HISTORY-1016). Null = the claimant stated none.
+   */
+  workflowSlug?: string | null;
 }): Promise<boolean> {
   const now = new Date(params.nowMs).toISOString();
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
 
+  // ONE statement: the claim and its re-point record land together or not at all.
   const rows = (await db.execute(sql`
+    WITH claimed AS (
     UPDATE leads_campaigns
        SET retry_claimed_at = ${now},
            retry_count = COALESCE(retry_count, 0) + 1,
@@ -548,6 +557,12 @@ export async function claimCandidate(params: {
        AND (send_refused_at IS NULL OR (send_refused_until IS NOT NULL AND send_refused_until <= ${now}))
        AND (retry_claimed_at IS NULL OR retry_claimed_at < ${leaseCutoff})
     RETURNING id
+    ),
+    noted AS (
+      INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
+      SELECT id, ${params.runId}, ${params.workflowSlug ?? null}, ${now}::timestamptz, 'retry_claim' FROM claimed
+    )
+    SELECT id FROM claimed
   `)) as unknown as Array<{ id: string }>;
 
   return rows.length > 0;
@@ -711,6 +726,7 @@ export async function pickRetryCandidate(params: {
       nowMs,
       runId: params.runId,
       parentRunId: params.parentRunId,
+      workflowSlug: params.context.workflowSlug ?? null,
     });
     if (claimed) {
       console.log(
@@ -768,7 +784,13 @@ async function pickChannelCandidate(
   }
 
   for (const candidate of retryable) {
-    const claimed = await claimCandidate({ id: candidate.id, nowMs, runId: params.runId, parentRunId: params.parentRunId });
+    const claimed = await claimCandidate({
+      id: candidate.id,
+      nowMs,
+      runId: params.runId,
+      parentRunId: params.parentRunId,
+      workflowSlug: params.context.workflowSlug ?? null,
+    });
     if (claimed) {
       console.log(
         `[lead-service] retry-pool claimed (channel sender) campaign=${params.campaignId} leadId=${candidate.leadId} attempt=${candidate.retryCount + 1} candidates=${candidates.length} channelSent=${sent.length} sending=${queuedCount}`,

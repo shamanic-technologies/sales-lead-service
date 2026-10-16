@@ -19,6 +19,14 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
  *     follow-up ledger's `acted` rows (`kind: "followup"`, the acting campaign, offer read from
  *     campaign-service). Each act states first/last instant and how many times. Sends are the bulk of
  *     the table (~90%), so they are counted, never listed.
+ *   - `emailSends` (WORKFLOW-SEND-HISTORY-1016): our SENDS only (`initial_email`, `followup`; never a
+ *     bounce), compacted per (campaign, WORKFLOW that sent): every campaign x workflow under which the
+ *     person was actually emailed, first/last send and count. A send's workflow = the run holding the
+ *     person's `leads_campaigns` row of that campaign WHEN it was sent: the latest re-point at or before
+ *     the send (`lead_campaign_run_repoints`: a retry-pool claim or a named serve hands the paid person
+ *     to another run, maybe another workflow, which is the one that sends), else the row's own serve
+ *     (`workflow_slug`). `workflowSource` says which; both null when the person holds no row under that
+ *     campaign (nothing local names the sender's workflow; never guessed from another row).
  *
  * Aggregated in Postgres (~0.4 s on the largest brand, 63k facts / 17.5k journeys) and streamed
  * through a server-side cursor: the response never holds the population.
@@ -44,13 +52,31 @@ export interface JourneyAct {
   count: number;
 }
 
+/** Which record named the sending workflow: the row's serve, or a re-point of the row to the sending run. */
+export type EmailSendWorkflowSource = "serve" | "retry_claim" | "named_serve";
+
+export interface JourneyEmailSend {
+  campaignId: string | null;
+  /** The workflow of the run that sent; null = no record names it (see `workflowSource`). */
+  workflowSlug: string | null;
+  /** null = the person holds no serve row under this campaign. */
+  workflowSource: EmailSendWorkflowSource | null;
+  firstSentAt: string | null;
+  lastSentAt: string | null;
+  count: number;
+}
+
 export interface BrandJourney {
   leadId: string;
   offerId: string | null;
   firstActedAt: string | null;
   facts: JourneyFact[];
   acts: JourneyAct[];
+  emailSends: JourneyEmailSend[];
 }
+
+/** The timeline labels of OUR sends (bounces share the `our_email` basis but are not sends). */
+export const EMAIL_SEND_LABELS = ["initial_email", "followup"] as const;
 
 interface RawJourney {
   lead_id: string;
@@ -58,6 +84,13 @@ interface RawJourney {
   first_acted_at: RawTimestamp;
   facts: Array<Record<string, unknown>> | null;
   acts: Array<Record<string, unknown>> | null;
+  email_sends: Array<Record<string, unknown>> | null;
+}
+
+function workflowSource(v: unknown): EmailSendWorkflowSource | null {
+  if (v === null || v === undefined) return null;
+  if (v === "serve" || v === "retry_claim" || v === "named_serve") return v;
+  throw new Error(`[lead-service] timeline-journeys: unknown email send workflow source ${JSON.stringify(v)}`);
 }
 
 function iso(v: unknown): string | null {
@@ -93,6 +126,14 @@ export function toBrandJourney(r: RawJourney): BrandJourney {
       firstAt: iso(a.firstAt),
       lastAt: iso(a.lastAt),
       count: Number(a.count),
+    })),
+    emailSends: (r.email_sends ?? []).map((e) => ({
+      campaignId: (e.campaignId as string | null) ?? null,
+      workflowSlug: (e.workflowSlug as string | null) ?? null,
+      workflowSource: workflowSource(e.workflowSource),
+      firstSentAt: iso(e.firstAt),
+      lastSentAt: iso(e.lastAt),
+      count: Number(e.count),
     })),
   };
 }
@@ -144,12 +185,42 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
         FROM act_rows GROUP BY lead_id, offer_id, campaign_id, kind
       ) g
       GROUP BY lead_id, offer_id
+    ),
+    -- Each send credited to the run holding the person's row of its campaign when it went out.
+    sends AS (
+      SELECT f.lead_id, f.offer_id, f.campaign_id, f.occurred_at,
+        CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.workflow_slug ELSE lc.workflow_slug END AS workflow_slug,
+        CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.cause ELSE 'serve' END AS workflow_source
+      FROM f
+      LEFT JOIN leads_campaigns lc
+        ON lc.lead_id = f.lead_id AND lc.campaign_id = f.campaign_id AND lc.org_id = ${orgId}
+      LEFT JOIN LATERAL (
+        SELECT r.workflow_slug, r.cause FROM lead_campaign_run_repoints r
+        WHERE r.lead_campaign_id = lc.id AND r.repointed_at <= f.occurred_at
+        ORDER BY r.repointed_at DESC, r.id DESC
+        LIMIT 1
+      ) rp ON true
+      WHERE f.attribution_basis = 'our_email' AND f.label IN ('initial_email', 'followup') -- EMAIL_SEND_LABELS
+    ),
+    email_sends AS (
+      SELECT lead_id, offer_id,
+        jsonb_agg(jsonb_build_object(
+          'campaignId', campaign_id, 'workflowSlug', workflow_slug, 'workflowSource', workflow_source,
+          'firstAt', first_at, 'lastAt', last_at, 'count', n
+        ) ORDER BY first_at ASC NULLS LAST, campaign_id ASC NULLS LAST, workflow_slug ASC NULLS LAST) AS email_sends
+      FROM (
+        SELECT lead_id, offer_id, campaign_id, workflow_slug, workflow_source, min(occurred_at) AS first_at,
+          max(occurred_at) AS last_at, count(*)::int AS n
+        FROM sends GROUP BY lead_id, offer_id, campaign_id, workflow_slug, workflow_source
+      ) g
+      GROUP BY lead_id, offer_id
     )
     SELECT COALESCE(facts.lead_id, acts.lead_id)::text AS lead_id,
       CASE WHEN facts.lead_id IS NOT NULL THEN facts.offer_id ELSE acts.offer_id END AS offer_id,
-      acts.first_acted_at, facts.facts, acts.acts
+      acts.first_acted_at, facts.facts, acts.acts, email_sends.email_sends
     FROM facts
     FULL JOIN acts ON acts.lead_id = facts.lead_id AND COALESCE(acts.offer_id, '') = COALESCE(facts.offer_id, '')
+    LEFT JOIN email_sends ON email_sends.lead_id = acts.lead_id AND COALESCE(email_sends.offer_id, '') = COALESCE(acts.offer_id, '')
     ORDER BY 1 ASC, 2 ASC NULLS FIRST
   `;
 }
