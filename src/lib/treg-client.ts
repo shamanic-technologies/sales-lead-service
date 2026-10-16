@@ -16,6 +16,7 @@
  * apollo-service's linkedin-engagement meter, which this mirrors.
  */
 import { randomUUID } from "node:crypto";
+import { SALES_FUNNEL_CAP_REASONS } from "./serve-reasons.js";
 import {
   BILLING_SERVICE_API_KEY,
   BILLING_SERVICE_URL,
@@ -63,10 +64,79 @@ export function identityHeaders(id: SpendIdentity): Record<string, string> {
  * The figures are null when the refusing service did not state them.
  */
 export class InsufficientCreditError extends Error {
-  constructor(public readonly balanceCents: number | null, public readonly requiredCents: number | null) {
-    super(`insufficient credit: balance ${balanceCents ?? "?"}c, required ${requiredCents ?? "?"}c`);
+  constructor(
+    public readonly balanceCents: number | null,
+    public readonly requiredCents: number | null,
+    /**
+     * Set when billing refused because a SALES FUNNEL's max budget was reached (or could not be read),
+     * not for lack of balance (FUNNEL-CAP-NAMED-402-1016). Billing's `reason` + `sales_funnel_cap`,
+     * verbatim; null on a real balance shortfall.
+     */
+    public readonly fundingCap: FundingCapRefusal | null = null,
+  ) {
+    super(
+      fundingCap
+        ? `${fundingCapLabel(fundingCap.reason).toLowerCase()} (${fundingCap.reason}): balance ${balanceCents ?? "?"}c, required ${requiredCents ?? "?"}c`
+        : `insufficient credit: balance ${balanceCents ?? "?"}c, required ${requiredCents ?? "?"}c`,
+    );
     this.name = "InsufficientCreditError";
   }
+}
+
+/**
+ * billing-service `POST /v1/customer_balance/authorize` answers `sufficient:false` with `reason` +
+ * `sales_funnel_cap` ONLY when a sales funnel's max budget refused the spend (the org may well have
+ * credit). Those are the two reasons billing states; anything else is a balance refusal.
+ */
+export { SALES_FUNNEL_CAP_REASONS };
+export type FundingCapReason = (typeof SALES_FUNNEL_CAP_REASONS)[number];
+
+export interface FundingCapRefusal {
+  reason: FundingCapReason;
+  /** billing's `sales_funnel_cap` object verbatim (the cap id, its campaign, amount, period, consumed and reserved cents); null when not stated. */
+  sales_funnel_cap: Record<string, unknown> | null;
+}
+
+/** The fleet's wording for a cap refusal (chat-service's reference sentence). */
+export function fundingCapLabel(reason: FundingCapReason): string {
+  return reason === "sales_funnel_max_budget_unreadable" ? "Sales funnel max budget unreadable" : "Sales funnel max budget reached";
+}
+
+function isFundingCapReason(value: unknown): value is FundingCapReason {
+  return typeof value === "string" && (SALES_FUNNEL_CAP_REASONS as readonly string[]).includes(value);
+}
+
+/**
+ * Billing's cap refusal read off a refusal body, wherever a hop put it: the body itself, an object one
+ * or two levels down, or a JSON body embedded in a relayed error string (human-service relays an
+ * apollo-service 402 as `error: "... 402 - {...}"`). Null when the body names no cap.
+ */
+export function readFundingCap(value: unknown, depth = 0): FundingCapRefusal | null {
+  if (depth > 3 || value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    for (let i = value.indexOf("{"); i !== -1; i = value.indexOf("{", i + 1)) {
+      try {
+        const found = readFundingCap(JSON.parse(value.slice(i)), depth + 1);
+        if (found) return found;
+      } catch {
+        // not a JSON tail from here; try the next brace
+      }
+    }
+    return null;
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return null;
+  const body = value as Record<string, unknown>;
+  if (isFundingCapReason(body.reason)) {
+    const cap = body.sales_funnel_cap;
+    return { reason: body.reason, sales_funnel_cap: cap && typeof cap === "object" && !Array.isArray(cap) ? (cap as Record<string, unknown>) : null };
+  }
+  for (const v of Object.values(body)) {
+    if (v && (typeof v === "object" || typeof v === "string")) {
+      const found = readFundingCap(v, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
 }
 
 /** treg's own refusal (tool withdrawn, our ceiling, out of balance), as opposed to the provider's answer. */
@@ -172,8 +242,10 @@ async function authorize(id: SpendIdentity, maxMicro: number, description: strin
     signal: AbortSignal.timeout(SIBLING_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`[lead-service] billing-service authorize failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
-  const body = (await res.json()) as { sufficient?: unknown; balance_cents?: number; required_cents?: number };
-  if (body.sufficient !== true) throw new InsufficientCreditError(Number(body.balance_cents ?? 0), Number(body.required_cents ?? 0));
+  const body = (await res.json()) as { sufficient?: unknown; balance_cents?: number; required_cents?: number; reason?: unknown; sales_funnel_cap?: unknown };
+  if (body.sufficient !== true) {
+    throw new InsufficientCreditError(Number(body.balance_cents ?? 0), Number(body.required_cents ?? 0), readFundingCap({ reason: body.reason, sales_funnel_cap: body.sales_funnel_cap }));
+  }
 }
 
 export interface TregCallResult {

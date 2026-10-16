@@ -1257,7 +1257,9 @@ export const BufferNextResponseSchema = z
           "serve budget expired before the look finished; `audience_not_serveable` means the named " +
           "audience has no committed provider yet, so its population is unknown rather than empty; " +
           "`credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM " +
-          "action was performed; `source_campaign_off` names a source campaign that is off; " +
+          "action was performed; `sales_funnel_max_budget_reached` / `sales_funnel_max_budget_unreadable` mean billing refused " +
+          "a spend because the campaign's sales funnel MAX BUDGET was reached (or could not be read), not for lack of credit: " +
+          "billing's own reason verbatim, with `sales_funnel_cap` and `message` beside it (a wait: raise the max budget, never add credit); `source_campaign_off` names a source campaign that is off; " +
           "`source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet " +
           "(nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold " +
           "no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that " +
@@ -1269,8 +1271,13 @@ export const BufferNextResponseSchema = z
           "not-exhaustion.",
         example: "audience_exhausted",
       }),
+    sales_funnel_cap: z.record(z.string(), z.unknown()).nullable().optional().openapi({
+      description:
+        "Only with reason `sales_funnel_max_budget_reached` / `sales_funnel_max_budget_unreadable`: billing-service's `sales_funnel_cap` verbatim " +
+        "(the cap id, its campaign, amountCents, period, consumedCents, reservedCents); null when billing did not state it.",
+    }),
     message: z.string().optional().openapi({
-      description: "Named serves only (body `namedLead`), on found=false: one sentence a client can read saying why the named person was not handed out.",
+      description: "Named serves (body `namedLead`) and sales-funnel max budget refusals, on found=false: one sentence a client can read saying why nothing was handed out.",
       example: "This person was already emailed for this request.",
     }),
     final: z.boolean().optional().openapi({
@@ -7753,7 +7760,7 @@ registry.registerPath({
       },
     },
     400: { description: "Missing x-user-id or x-run-id" },
-    402: { description: "Insufficient credit" },
+    402: { description: "Insufficient credit (`code: insufficient_credit`). When a sales funnel's MAX BUDGET refused the spend, `error` names it (\"Sales funnel max budget reached\") and billing's `reason` + `sales_funnel_cap` ride verbatim beside `code`." },
     502: { description: "code suggestion_draft_unreadable: the AI answer could not be read (retry); otherwise a sibling (brand-service, chat-service, treg catalogue) could not answer" },
   },
 });
@@ -7842,7 +7849,7 @@ registry.registerPath({
       },
     },
     400: { description: "Invalid body, missing x-user-id or x-run-id" },
-    402: { description: "Insufficient credit" },
+    402: { description: "Insufficient credit (`code: insufficient_credit`). When a sales funnel's MAX BUDGET refused the spend, `error` names it (\"Sales funnel max budget reached\") and billing's `reason` + `sales_funnel_cap` ride verbatim beside `code`." },
     404: { description: "Unknown criterion, or a lead that is not the brand's" },
     502: { description: "A sibling could not answer" },
   },

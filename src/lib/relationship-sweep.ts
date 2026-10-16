@@ -85,7 +85,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; merges?: 
     failed = true;
     tick.error = err instanceof Error ? err.message : String(err);
     if (!(err instanceof InsufficientCreditError)) throw err;
-    console.warn(`[lead-service] relationship sweep: org ${scope.orgId} cannot pay (${tick.error}); skipped this tick`);
+    console.warn(`[lead-service] relationship sweep: org ${scope.orgId} spend refused (${tick.error}); skipped this tick`);
   } finally {
     const r = run as { id: string } | null;
     if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));

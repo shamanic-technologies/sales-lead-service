@@ -58,6 +58,8 @@
               "no_recent_posts",
               "contacted_prospects_none_owed",
               "recently_emailed",
+              "sales_funnel_max_budget_reached",
+              "sales_funnel_max_budget_unreadable",
               "named_lead_not_filed",
               "named_lead_no_email",
               "named_lead_suppressed",
@@ -68,12 +70,20 @@
               "named_lead_unwritable",
               "named_lead_sender_unreadable"
             ],
-            "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `source_campaign_off` names a source campaign that is off; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
+            "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `sales_funnel_max_budget_reached` / `sales_funnel_max_budget_unreadable` mean billing refused a spend because the campaign's sales funnel MAX BUDGET was reached (or could not be read), not for lack of credit: billing's own reason verbatim, with `sales_funnel_cap` and `message` beside it (a wait: raise the max budget, never add credit); `source_campaign_off` names a source campaign that is off; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
+          },
+          "sales_funnel_cap": {
+            "type": "object",
+            "nullable": true,
+            "additionalProperties": {
+              "nullable": true
+            },
+            "description": "Only with reason `sales_funnel_max_budget_reached` / `sales_funnel_max_budget_unreadable`: billing-service's `sales_funnel_cap` verbatim (the cap id, its campaign, amountCents, period, consumedCents, reservedCents); null when billing did not state it."
           },
           "message": {
             "type": "string",
-            "description": "Named serves only (body `namedLead`), on found=false: one sentence a client can read saying why the named person was not handed out.",
+            "description": "Named serves (body `namedLead`) and sales-funnel max budget refusals, on found=false: one sentence a client can read saying why nothing was handed out.",
             "example": "This person was already emailed for this request."
           },
           "final": {
@@ -18198,7 +18208,7 @@
             "description": "Missing x-user-id or x-run-id"
           },
           "402": {
-            "description": "Insufficient credit"
+            "description": "Insufficient credit (`code: insufficient_credit`). When a sales funnel's MAX BUDGET refused the spend, `error` names it (\"Sales funnel max budget reached\") and billing's `reason` + `sales_funnel_cap` ride verbatim beside `code`."
           },
           "502": {
             "description": "code suggestion_draft_unreadable: the AI answer could not be read (retry); otherwise a sibling (brand-service, chat-service, treg catalogue) could not answer"
@@ -18707,7 +18717,7 @@
             "description": "Invalid body, missing x-user-id or x-run-id"
           },
           "402": {
-            "description": "Insufficient credit"
+            "description": "Insufficient credit (`code: insufficient_credit`). When a sales funnel's MAX BUDGET refused the spend, `error` names it (\"Sales funnel max budget reached\") and billing's `reason` + `sales_funnel_cap` ride verbatim beside `code`."
           },
           "404": {
             "description": "Unknown criterion, or a lead that is not the brand's"

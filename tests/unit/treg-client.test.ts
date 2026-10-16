@@ -82,6 +82,32 @@ describe("TregMeter", () => {
     expect(calls.some((c) => c.init.method === "PATCH")).toBe(true);
   });
 
+  it("a sales-funnel MAX BUDGET refusal keeps billing's reason + sales_funnel_cap verbatim", async () => {
+    const cap = { salesFunnelId: "sf-1", salesFunnelCampaignId: "c-1", amountCents: 5000, period: "day", consumedCents: 4990, reservedCents: 20 };
+    script([
+      ...keys("platform"),
+      runsPost,
+      runsCancel,
+      { match: (u) => u.includes("authorize"), respond: () => json({ sufficient: false, balance_cents: 90000, required_cents: 1, reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap }) },
+    ]);
+    const err = await new TregMeter(identity).call({ endpointId: "a.b", method: "GET", params: {}, maxMicro: 1000 }).catch((e) => e);
+    expect(err).toBeInstanceOf(InsufficientCreditError);
+    expect(err.fundingCap).toEqual({ reason: "sales_funnel_max_budget_reached", sales_funnel_cap: cap });
+    expect(err.message).toMatch(/sales funnel max budget reached/);
+  });
+
+  it("a balance refusal (no reason) carries no funding cap, message unchanged", async () => {
+    script([
+      ...keys("platform"),
+      runsPost,
+      runsCancel,
+      { match: (u) => u.includes("authorize"), respond: () => json({ sufficient: false, balance_cents: 0, required_cents: 1 }) },
+    ]);
+    const err = await new TregMeter(identity).call({ endpointId: "a.b", method: "GET", params: {}, maxMicro: 1000 }).catch((e) => e);
+    expect(err.fundingCap).toBeNull();
+    expect(err.message).toBe("insufficient credit: balance 0c, required 1c");
+  });
+
   it("a 2xx without its charge fails loud and leaves the hold open", async () => {
     const calls = script([
       ...keys("platform"),
