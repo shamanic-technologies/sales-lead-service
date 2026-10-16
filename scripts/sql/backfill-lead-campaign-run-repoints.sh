@@ -18,7 +18,8 @@
 #   bash backfill-lead-campaign-run-repoints.sh          # dry run
 #   APPLY=1 bash backfill-lead-campaign-run-repoints.sh  # write
 set -euo pipefail
-PSQL=(docker exec -i distribute-postgres-1 psql -U postgres -v ON_ERROR_STOP=1 -At)
+# -q: no command tags (CREATE TABLE / COPY n) mixed into the TSV a later COPY reads.
+PSQL=(docker exec -i distribute-postgres-1 psql -U postgres -v ON_ERROR_STOP=1 -At -q)
 WORK=$(mktemp -d /tmp/lcrr-backfill.XXXXXX)
 
 "${PSQL[@]}" -d lead_service -c "COPY (
@@ -37,9 +38,10 @@ WORK=$(mktemp -d /tmp/lcrr-backfill.XXXXXX)
 ) TO STDOUT" > "$WORK/candidates.tsv"
 echo "candidates: $(wc -l < "$WORK/candidates.tsv")"
 
-# runs-service: the workflow of each re-pointing run (a run id that is not a uuid is skipped by the cast filter).
+# runs-service: the workflow of each re-pointing run (a run id that is not a uuid is skipped, never cast-failed).
 "${PSQL[@]}" -d runs_service -c "CREATE TEMP TABLE c(lc_id uuid, run_id text, at timestamptz, cause text); COPY c FROM STDIN;" \
-  -c "COPY (SELECT c.lc_id, c.run_id, r.workflow_slug, c.at, c.cause FROM c JOIN runs r ON r.id::text = c.run_id) TO STDOUT" \
+  -c "COPY (SELECT c.lc_id, c.run_id, r.workflow_slug, c.at, c.cause FROM c JOIN runs r
+      ON c.run_id ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' AND r.id = c.run_id::uuid) TO STDOUT" \
   < "$WORK/candidates.tsv" > "$WORK/resolved.tsv"
 echo "resolved by runs-service: $(wc -l < "$WORK/resolved.tsv")"
 
