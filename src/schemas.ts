@@ -7680,9 +7680,20 @@ const QualificationCriterionSchema = z
   .object({
     id: z.string(),
     offerId: z.string().openapi({ description: "The offer the criterion belongs to. It applies to every audience of that offer, never to another offer of the brand." }),
+    title: z.string().nullable().openapi({ description: "A few plain words naming the check on a card (suggested criteria); null on a hand-made one and on suggestions written before 2026-10-16." }),
     question: z.string(),
     why: z.string().nullable().openapi({ description: "Why it shows a company needs the offer (suggested criteria); null on a hand-made one." }),
-    mode: z.enum(QUALIFICATION_MODES).openapi({ description: "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is declined before its reveal is paid, on every audience of the offer." }),
+    mode: z.enum(QUALIFICATION_MODES).openapi({ description: "mention = the evidence is offered to the email writer, nobody is dropped; must_pass = a company failing it is declined before its reveal is paid, on every audience of the offer. A suggestion is written with mode = its recommendation (still OFF); PATCH changes it." }),
+    recommendation: z
+      .object({
+        mode: z.enum(QUALIFICATION_MODES),
+        reason: z.string().openapi({ description: "One sentence a client reads on why this role." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The AI's recommended role, frozen when suggested (a person's later PATCH of mode never changes it). Must have is recommended sparingly: at most ONE per suggestion run, and only on a check answered from data already held (availability in_our_data). null on hand-made criteria and older suggestions.",
+      }),
     enabled: z.boolean().openapi({ description: "The client's on/off switch. Suggestions are written off. Only enabled criteria apply at serve and show on a lead." }),
     origin: z.enum(["suggested", "custom"]),
     availability: QualificationAvailability,
@@ -7743,7 +7754,7 @@ registry.registerPath({
   path: "/orgs/brands/{brandId}/offers/{offerId}/qualification/suggestions",
   summary: "Suggest qualification checks for an offer, written as criteria turned OFF (spends: AI)",
   description:
-    "Reads the offer from brand-service and proposes up to 8 yes/no NEED signals on a prospect's company (why it needs this offer), valid for every audience of the offer. Firmographic checks (industry, size, geography, roles) are the audience's job and are dropped unless universal for the offer. Each is written as a criterion of the offer with enabled=false, origin=suggested; suggestions from an earlier run that nobody touched are archived, and one asking what a live criterion already asks is skipped. Read them back with GET .../criteria (no spend).",
+    "Reads the offer from brand-service and proposes up to 8 yes/no NEED signals on a prospect's company (why it needs this offer), valid for every audience of the offer. Firmographic checks (industry, size, geography, roles) are the audience's job and are dropped unless universal for the offer. Each is written as a criterion of the offer with enabled=false, origin=suggested, a short card title, and the AI recommendation ({mode, reason}; mode is prefilled with it): at most ONE must_pass per run, only on a check answered from data already held, everything else mention; suggestions from an earlier run that nobody touched are archived, and one asking what a live criterion already asks is skipped. Read them back with GET .../criteria (no spend).",
   request: { params: OfferParams },
   parameters: QualificationSpendHeaders,
   responses: {
@@ -7753,7 +7764,7 @@ registry.registerPath({
         "application/json": {
           schema: z.object({
             criteria: z.array(QualificationCriterionSchema),
-            dropped: z.array(z.object({ question: z.string(), reason: z.string().openapi({ description: "firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)" }) })),
+            dropped: z.array(z.object({ question: z.string(), reason: z.string().openapi({ description: "firmographic_not_universal | unclassified_kind:<x> | untitled (the AI gave no card title) | no_usable_source | already_asked (a check the offer keeps asks the same thing, reworded or not)" }) })),
             runId: z.string(),
           }),
         },
