@@ -76,6 +76,10 @@ describe.skipIf(!hasRealDatabase)("brand journeys read against a real database",
       { campaignId: cA, kind: "email", firstAt: "2026-09-01T00:00:00.000Z", lastAt: "2026-09-05T00:00:00.000Z", count: 2 },
     ]);
     expect(j1a.firstActedAt).toBe("2026-09-01T00:00:00.000Z");
+    // Emailed under a campaign the person holds no row of: nothing local names the sending workflow.
+    expect(j1a.emailSends).toEqual([
+      { campaignId: cA, workflowSlug: null, workflowSource: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 2 },
+    ]);
 
     const j1b = journeys.find((j) => j.leadId === p1 && j.offerId === offerB)!;
     expect(j1b.facts.map((f) => f.label)).toEqual(["interested"]);
@@ -89,6 +93,51 @@ describe.skipIf(!hasRealDatabase)("brand journeys read against a real database",
     expect(p2Journeys[1].acts).toEqual([
       { campaignId: cAct, kind: "followup", firstAt: "2026-09-10T00:00:00.000Z", lastAt: "2026-09-10T00:00:00.000Z", count: 1 },
     ]);
+    expect(p2Journeys[1].emailSends).toEqual([]);
     expect(journeys).toHaveLength(4);
+  });
+
+  it("lists every campaign x workflow that emailed a person, crediting each send to the run holding the row then", async () => {
+    // WORKFLOW-SEND-HISTORY-1016: emailed by workflow alpha under campaign cS1, replied, later served by another
+    // workflow under cS2 whose row a retry claim then a named serve re-pointed before each send.
+    const brand = randomUUID();
+    const cS1 = `cS1-${tag}`;
+    const cS2 = `cS2-${tag}`;
+    const p = await lead("p3");
+    const f = (id: string, label: string, campaign: string, at: string, basis = "our_email") =>
+      fact(id, p, label, { brand_id: brand, campaign_id: campaign, occurred_at: at, attribution_basis: basis });
+    await upsertTimelineFacts([
+      f("w1", "initial_email", cS1, "2026-09-01T00:00:00.000Z"),
+      f("w2", "followup", cS1, "2026-09-04T00:00:00.000Z"),
+      f("w3", "bounced", cS1, "2026-09-05T00:00:00.000Z"),
+      f("w4", "interested", cS1, "2026-09-06T00:00:00.000Z", "reaction_to_our_email"),
+      f("w5", "initial_email", cS2, "2026-10-12T00:00:00.000Z"),
+      f("w6", "followup", cS2, "2026-10-20T00:00:00.000Z"),
+    ]);
+    await sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, feature_slug, workflow_slug, served_at)
+      VALUES (${p}::uuid, ${cS1}, ${orgId}, ARRAY[${brand}]::text[], 'served', 'itest', 'wf-alpha', '2026-08-30T00:00:00Z')
+    `;
+    const [row2] = (await sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, feature_slug, workflow_slug, served_at)
+      VALUES (${p}::uuid, ${cS2}, ${orgId}, ARRAY[${brand}]::text[], 'served', 'itest', 'wf-serving', '2026-10-10T00:00:00Z')
+      RETURNING id::text AS id
+    `) as unknown as Array<{ id: string }>;
+    await sql`
+      INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
+      VALUES (${row2.id}::uuid, 'run-claim', 'wf-claimant', '2026-10-11T00:00:00Z', 'retry_claim'),
+             (${row2.id}::uuid, 'run-named', 'wf-named', '2026-10-15T00:00:00Z', 'named_serve')
+    `;
+
+    const journeys = [];
+    for await (const chunk of streamBrandJourneys(orgId, brand, new Map(), 50)) journeys.push(...chunk);
+    expect(journeys).toHaveLength(1);
+    expect(journeys[0].emailSends).toEqual([
+      { campaignId: cS1, workflowSlug: "wf-alpha", workflowSource: "serve", firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-04T00:00:00.000Z", count: 2 },
+      { campaignId: cS2, workflowSlug: "wf-claimant", workflowSource: "retry_claim", firstSentAt: "2026-10-12T00:00:00.000Z", lastSentAt: "2026-10-12T00:00:00.000Z", count: 1 },
+      { campaignId: cS2, workflowSlug: "wf-named", workflowSource: "named_serve", firstSentAt: "2026-10-20T00:00:00.000Z", lastSentAt: "2026-10-20T00:00:00.000Z", count: 1 },
+    ]);
+    // `acts` is unchanged: one entry per (campaign, kind), bounces included.
+    expect(journeys[0].acts.map((a) => [a.campaignId, a.count])).toEqual([[cS1, 3], [cS2, 2]]);
   });
 });

@@ -7902,6 +7902,23 @@ const JourneyActSchema = z
   })
   .openapi("JourneyAct");
 
+const JourneyEmailSendSchema = z
+  .object({
+    campaignId: z.string().nullable().openapi({ description: "The campaign the send went out under." }),
+    workflowSlug: z.string().nullable().openapi({
+      description:
+        "The workflow of the run that SENT: the run holding the person's `leads_campaigns` row of this campaign at the send " +
+        "(latest retry-pool claim or named serve at or before it, else the row's serve). null = no record names it.",
+    }),
+    workflowSource: z.enum(["serve", "retry_claim", "named_serve"]).nullable().openapi({
+      description: "Which record named `workflowSlug`. null = the person holds no serve row under this campaign (workflowSlug null too).",
+    }),
+    firstSentAt: z.string().nullable().openapi({ description: "ISO-8601, first send under this campaign x workflow." }),
+    lastSentAt: z.string().nullable(),
+    count: z.number().int().openapi({ description: "Sends (initial + follow-ups; never a bounce)." }),
+  })
+  .openapi("JourneyEmailSend");
+
 const BrandJourneySchema = z
   .object({
     leadId: z.string().uuid(),
@@ -7909,6 +7926,11 @@ const BrandJourneySchema = z
     firstActedAt: z.string().nullable().openapi({ description: "Earliest act on this person x offer; null when no campaign acted." }),
     facts: z.array(JourneyFactSchema).openapi({ description: "Every LIVE timeline fact that is not one of our emails, date order (undated last)." }),
     acts: z.array(JourneyActSchema).openapi({ description: "Campaigns that acted on the person, one entry per (campaign, kind), earliest first." }),
+    emailSends: z.array(JourneyEmailSendSchema).openapi({
+      description:
+        "Every (campaign, workflow) under which the person was actually EMAILED (sends only, no bounces), earliest first: " +
+        "a person emailed by two workflows lists both. The input for crediting a reply to the workflow that emailed before it.",
+    }),
   })
   .openapi("BrandJourney");
 
@@ -7919,7 +7941,8 @@ registry.registerPath({
   description:
     "One entry per person x offer of the (x-org-id, brand) on `lead_timeline_facts` (offer null = facts stated on no offer). " +
     "`facts` = every live non-email fact with its label verbatim, date, campaign, attribution and stated amount; `acts` = the " +
-    "campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows). " +
+    "campaigns that acted (our emails compacted per campaign with first/last instant and count; follow-up ledger `acted` rows); " +
+    "`emailSends` = our sends per (campaign, sending workflow) with first/last send and count. " +
     "Withdrawn facts are excluded. A person on two offers appears once per offer, each with only that offer's facts. ONE streamed " +
     "statement, ordered by leadId then offerId (null first); `count` (journeys) and `factCount` close the body. 503 while the " +
     "outreach fact copy has not caught up; 502 when campaign-service cannot name the campaigns' offers; failure after the first " +
