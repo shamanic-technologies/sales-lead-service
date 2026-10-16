@@ -41,6 +41,8 @@ export class EvidenceUnavailableError extends Error {
 export interface EvidenceRequest {
   brandId: string;
   email: string;
+  /** The lead the address belongs to: named in the gateway client's log if the address is skipped. */
+  leadId?: string;
 }
 
 export interface EvidenceReadOptions {
@@ -150,9 +152,11 @@ export async function readDeliveryEvidence(
 
   const campaignKey = options.campaignId ?? "";
   const byBrand = new Map<string, Set<string>>();
+  const leadOf = new Map<string, string>();
   for (const r of requests) {
     if (!byBrand.has(r.brandId)) byBrand.set(r.brandId, new Set());
     byBrand.get(r.brandId)!.add(r.email);
+    if (r.leadId) leadOf.set(r.email, r.leadId);
   }
 
   const toFetch: Array<{ brandId: string; emails: string[] }> = [];
@@ -203,7 +207,7 @@ export async function readDeliveryEvidence(
       response = await checkDeliveryStatus(
         batch.brandId,
         options.campaignId,
-        batch.emails.map((email) => ({ email })),
+        batch.emails.map((email) => ({ email, leadId: leadOf.get(email) })),
         options.context,
       );
     } catch (error) {

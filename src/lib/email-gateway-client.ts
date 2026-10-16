@@ -1,8 +1,24 @@
 import { EMAIL_GATEWAY_SERVICE_URL, EMAIL_GATEWAY_SERVICE_API_KEY } from "../config.js";
+import { z } from "zod";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 export interface DeliveryStatusItem {
   email: string;
+  /** The lead the address belongs to, when the caller knows it: named in the log if it is skipped. Never sent. */
+  leadId?: string;
+}
+
+/**
+ * email-gateway's own rule for an address it will answer about (and send to): `StatusItemSchema` /
+ * the send `to` field are `z.string().email()`, same zod major. One address it refuses makes it 400
+ * the WHOLE batch, so a single malformed address (LEAD-CHANGES-INVALID-EMAIL-1016: two customer.io
+ * unsubscribe addresses filed by the Unibox intake) took the lead changes feed down for every scope.
+ */
+const gatewayEmail = z.string().email();
+
+/** Whether email-gateway accepts `email` as an address (send or status). */
+export function isGatewayEmail(email: string): boolean {
+  return gatewayEmail.safeParse(email).success;
 }
 
 export interface ScopedStatus {
@@ -146,6 +162,25 @@ export async function checkDeliveryStatus(
   items: DeliveryStatusItem[],
   context?: ServiceContext,
 ): Promise<DeliveryStatusResponse> {
+  if (items.length === 0) return { results: [] };
+
+  // An address email-gateway refuses is never sent to it: the gateway sends to nothing it refuses
+  // here (same validator on `to`), so no email can have gone to it and "no delivery evidence" is the
+  // TRUE answer for it, not a guess. It is named loudly so the row that carries it gets fixed; the
+  // rest of the batch is still asked.
+  const accepted: DeliveryStatusItem[] = [];
+  for (const item of items) {
+    if (isGatewayEmail(item.email)) {
+      accepted.push({ email: item.email });
+      continue;
+    }
+    console.error(
+      `[email-gateway-client] delivery status SKIPPED for a malformed address ${JSON.stringify(item.email)} ` +
+        `(lead ${item.leadId ?? "unknown"}, brand ${brandId}, campaign ${campaignId ?? "none"}, org ${context?.orgId ?? "unknown"}): ` +
+        `email-gateway refuses it, so nothing was ever sent to it; it is answered with no evidence`,
+    );
+  }
+  items = accepted;
   if (items.length === 0) return { results: [] };
 
   const headers: Record<string, string> = {

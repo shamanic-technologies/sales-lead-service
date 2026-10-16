@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   checkDeliveryStatus,
+  isGatewayEmail,
   isContacted,
   checkEmailStatus,
   type StatusResult,
@@ -21,6 +22,41 @@ describe("email-gateway-client", () => {
   });
 
   describe("checkDeliveryStatus", () => {
+    it("never sends a malformed address: the valid one still gets its status, each skipped one is logged with its lead", async () => {
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const valid = { email: "valid@acme.com", broadcast: { brand: { contacted: true } } };
+      mockFetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({ results: [valid] }) });
+
+      const result = await checkDeliveryStatus("brand-1", undefined, [
+        { email: "valid@acme.com", leadId: "lead-valid" },
+        { email: "32.abc====@unsubscribe2.customer.io", leadId: "lead-bad-1" },
+        { email: "not an address", leadId: "lead-bad-2" },
+      ]);
+
+      expect(result.results).toEqual([valid]);
+      expect(mockFetch).toHaveBeenCalledOnce();
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body).items).toEqual([{ email: "valid@acme.com" }]);
+      const logged = errors.mock.calls.map((c) => String(c[0]));
+      expect(logged).toHaveLength(2);
+      expect(logged[0]).toContain("lead-bad-1");
+      expect(logged[0]).toContain("32.abc====@unsubscribe2.customer.io");
+      expect(logged[1]).toContain("lead-bad-2");
+    });
+
+    it("asks the gateway nothing when every address is malformed", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const result = await checkDeliveryStatus("brand-1", undefined, [{ email: "foo@bar" }]);
+      expect(result).toEqual({ results: [] });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("accepts exactly what email-gateway's z.string().email() accepts", () => {
+      expect(isGatewayEmail("jane.doe+tag@acme.co.uk")).toBe(true);
+      expect(isGatewayEmail("32.x=@unsubscribe2.customer.io")).toBe(false);
+      expect(isGatewayEmail("a..b@acme.com")).toBe(false);
+      expect(isGatewayEmail(" jane@acme.com")).toBe(false);
+    });
+
     it("returns status results on success", async () => {
       const responseBody = {
         results: [

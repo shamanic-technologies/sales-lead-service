@@ -93,7 +93,7 @@ startLeadFollowupDatesWorker(async () => {
   // The intake reads every relationship of every candidate: every 7th tick (~15 min) is plenty.
   if (uniboxTicks++ % 7 !== 0) return;
   const r = await fileUniboxLeads();
-  if (r.filed > 0 || r.ambiguous > 0) console.log(`[lead-service] unibox intake: candidates=${r.candidates} filed=${r.filed} notProspect=${r.notProspect} ambiguous=${r.ambiguous}`);
+  if (r.filed > 0 || r.ambiguous > 0 || r.malformed > 0) console.log(`[lead-service] unibox intake: candidates=${r.candidates} filed=${r.filed} notProspect=${r.notProspect} ambiguous=${r.ambiguous} malformed=${r.malformed}`);
 });
 
 // The Leads search's trigram index, built CONCURRENTLY after boot and never awaited by anything
