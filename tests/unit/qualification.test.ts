@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { contentOfAnswer, criterionKey, findImageUrl, normalizeDomain, subjectFromOrganization } from "../../src/lib/qualification.js";
 import { BUILTIN_PROBES } from "../../src/lib/qualification-probes.js";
 import type { OrganizationView } from "../../src/lib/lead-shape.js";
-import { keepsDraft, readDraftChecks, SuggestionDraftUnreadableError } from "../../src/lib/qualification-run.js";
+import { keepsDraft, readDraftChecks, recommendRoles, ROLE_REASONS, SuggestionDraftUnreadableError, type KeptDraft } from "../../src/lib/qualification-run.js";
 
 describe("qualification helpers", () => {
   it("normalizes a domain from any spelling, refuses garbage", () => {
@@ -63,5 +63,46 @@ describe("the suggestion draft is read in both shapes the model answers", () => 
   it("anything else throws with the raw answer", () => {
     expect(() => readDraftChecks({ suggestions: [] }, '{"suggestions":[]}')).toThrow(SuggestionDraftUnreadableError);
     expect(() => readDraftChecks(null, "not json")).toThrow(/not json/);
+  });
+});
+
+describe("the recommended role: must have sparingly (SIGNALS-TITLE-AND-ROLE-1016)", () => {
+  const draft = (over: Partial<KeptDraft>): KeptDraft => ({
+    title: "t",
+    question: "q?",
+    why: "w",
+    spec: BUILTIN_PROBES.company_data.spec,
+    role: "mention",
+    roleWhy: "",
+    ...over,
+  });
+
+  it("keeps at most ONE must have, the first asked for on data we already hold", () => {
+    const roles = recommendRoles([
+      draft({ role: "mention", roleWhy: "Proof for the email." }),
+      draft({ role: "must_pass", roleWhy: "Only online sellers can use it." }),
+      draft({ role: "must_pass", roleWhy: "Second one." }),
+    ]);
+    expect(roles).toEqual([
+      { mode: "mention", reason: "Proof for the email." },
+      { mode: "must_pass", reason: "Only online sellers can use it." },
+      { mode: "mention", reason: ROLE_REASONS.oneMustHave },
+    ]);
+  });
+
+  it("a must have needing a paid lookup is recommended as a mention, and leaves the slot free", () => {
+    const roles = recommendRoles([
+      draft({ role: "must_pass", spec: BUILTIN_PROBES.homepage_text.spec, roleWhy: "x" }),
+      draft({ role: "must_pass", roleWhy: "" }),
+    ]);
+    expect(roles).toEqual([
+      { mode: "mention", reason: ROLE_REASONS.needsLookup },
+      { mode: "must_pass", reason: ROLE_REASONS.mustPass },
+    ]);
+  });
+
+  it("no must have asked = every check a mention", () => {
+    expect(recommendRoles([draft({}), draft({ spec: BUILTIN_PROBES.job_postings.spec })]).map((r) => r.mode)).toEqual(["mention", "mention"]);
+    expect(recommendRoles([draft({})])[0].reason).toBe(ROLE_REASONS.mention);
   });
 });

@@ -222,11 +222,18 @@ Sources you may use:
 ${BUILTIN_PROBE_KEYS.map((k) => `- "${k}": ${BUILTIN_PROBES[k].description}`).join("\n")}
 - "search": any other public web data about a company (reviews, traffic, ads running, tech stack, press...). Give a short search phrase describing the data needed, e.g. "google reviews of a business".
 Questions are short and concrete ("Has the company posted on LinkedIn less than twice in the last month?"). No dashes.
-Answer JSON: {"checks":[{"question":"...","why":"one short sentence on why it shows a need for this offer","kind":"need|firmographic","universal":true|false,"universalWhy":"only for a firmographic check","source":"company_data|homepage_text|homepage_screenshot|job_postings|linkedin_company_posts|search","search":"only when source is search"}]}`;
+Each check also has a "title": 2 to 5 plain English words naming it on a card ("Rarely posts on LinkedIn"), and a recommended role:
+- "must_pass": a company that fails it is dropped before we pay for its contact. Recommend it rarely: at most ONE check, only when its source is "company_data" (data we already hold), and only when a company failing it truly cannot buy this offer. A wrong must have silently drops good prospects.
+- "mention": the fact goes in the email as proof, nobody is dropped. This is the default.
+Give "roleWhy": one short sentence a client reads on why this role.
+Answer JSON: {"checks":[{"title":"...","question":"...","why":"one short sentence on why it shows a need for this offer","role":"must_pass|mention","roleWhy":"...","kind":"need|firmographic","universal":true|false,"universalWhy":"only for a firmographic check","source":"company_data|homepage_text|homepage_screenshot|job_postings|linkedin_company_posts|search","search":"only when source is search"}]}`;
 
 export interface DraftCheck {
+  title?: string;
   question: string;
   why: string;
+  role?: string;
+  roleWhy?: string;
   kind?: string;
   universal?: boolean;
   universalWhy?: string;
@@ -236,7 +243,7 @@ export interface DraftCheck {
 
 export interface DroppedSuggestion {
   question: string;
-  /** firmographic_not_universal | unclassified_kind:<x> | no_usable_source | already_asked */
+  /** firmographic_not_universal | unclassified_kind:<x> | untitled | no_usable_source | already_asked */
   reason: string;
 }
 
@@ -289,6 +296,48 @@ export function keepsDraft(c: DraftCheck): { keep: true } | { keep: false; reaso
   if (c.kind === "firmographic") return c.universal === true && typeof c.universalWhy === "string" && c.universalWhy.trim() ? { keep: true } : { keep: false, reason: "firmographic_not_universal" };
   return { keep: false, reason: `unclassified_kind:${String(c.kind)}` };
 }
+/** A drafted check kept for the offer, before its role is settled. */
+export interface KeptDraft {
+  title: string;
+  question: string;
+  why: string;
+  spec: ProbeSpec;
+  /** What the model asked for: `must_pass` only when it said so, anything else is `mention`. */
+  role: QualificationMode;
+  roleWhy: string;
+}
+
+export interface RoleRecommendation {
+  mode: QualificationMode;
+  reason: string;
+}
+
+export const ROLE_REASONS = {
+  needsLookup: "Nice to have: this check needs a lookup per company, so its proof goes in the email instead of dropping companies before we know how many pass.",
+  oneMustHave: "Nice to have: one must have is enough to start; more would drop good prospects before we know how many companies pass.",
+  mention: "Nice to have: its proof goes in the email and nobody is dropped.",
+  mustPass: "Must have: a company that fails it cannot use this offer, and we check it from data we already hold.",
+} as const;
+
+/**
+ * The role each kept check is RECOMMENDED for (owner-approved 2026-10-16, SIGNALS-TITLE-AND-ROLE-1016).
+ * At signup no pass rate exists yet, and a wrong must have silently starves a campaign (every failing
+ * company is declined before its reveal). So: at most ONE must have per run, and only on a check
+ * answered from data we already hold (`company_data`, no paid probe); the first such check the model
+ * asked for wins, everything else is a mention. The model's own sentence is kept when its pick stands.
+ */
+export function recommendRoles(drafts: KeptDraft[]): RoleRecommendation[] {
+  let mustPassTaken = false;
+  return drafts.map((d) => {
+    const own = d.roleWhy.trim();
+    if (d.role !== "must_pass") return { mode: "mention", reason: own || ROLE_REASONS.mention };
+    if (d.spec.kind !== "company_data") return { mode: "mention", reason: ROLE_REASONS.needsLookup };
+    if (mustPassTaken) return { mode: "mention", reason: ROLE_REASONS.oneMustHave };
+    mustPassTaken = true;
+    return { mode: "must_pass", reason: own || ROLE_REASONS.mustPass };
+  });
+}
+
 /** Pick the treg endpoint that best answers a question, among usable ones from a catalogue search. */
 async function pickCatalogProbe(question: string, phrase: string, identity: SpendIdentity): Promise<ProbeSpec | null> {
   const results = await searchCatalog(phrase, 25);
@@ -349,7 +398,7 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
   }
   const checks = readDraftChecks(drafted.json, drafted.content);
 
-  const drafts: Array<{ question: string; why: string; spec: ProbeSpec }> = [];
+  const drafts: KeptDraft[] = [];
   const dropped: DroppedSuggestion[] = [];
   for (const c of checks.slice(0, 8)) {
     if (typeof c.question !== "string" || !c.question.trim()) continue;
@@ -357,6 +406,13 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
     if (!kept.keep) {
       console.log(`[lead-service] qualification suggestion dropped (${kept.reason}) for offer ${params.offerId}: ${c.question}`);
       dropped.push({ question: stripDashes(c.question), reason: kept.reason });
+      continue;
+    }
+    const title = typeof c.title === "string" ? stripDashes(c.title).replace(/\s+/g, " ").trim() : "";
+    if (!title) {
+      // The card needs a title; a truncated question is not one. Named, never invented.
+      console.log(`[lead-service] qualification suggestion dropped (untitled) for offer ${params.offerId}: ${c.question}`);
+      dropped.push({ question: stripDashes(c.question), reason: "untitled" });
       continue;
     }
     let spec: ProbeSpec | null = null;
@@ -376,7 +432,14 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
       dropped.push({ question: stripDashes(c.question), reason: "already_asked" });
       continue;
     }
-    drafts.push({ question: stripDashes(c.question), why: stripDashes(String(c.why ?? "")), spec });
+    drafts.push({
+      title,
+      question: stripDashes(c.question),
+      why: stripDashes(String(c.why ?? "")),
+      spec,
+      role: c.role === "must_pass" ? "must_pass" : "mention",
+      roleWhy: stripDashes(typeof c.roleWhy === "string" ? c.roleWhy : ""),
+    });
   }
 
   const rows = await db.transaction(async (tx) => {
@@ -399,17 +462,23 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
       return true;
     });
     if (fresh.length === 0) return [];
+    // Roles are settled on what is actually written, so the one must have is never a skipped twin.
+    const roles = recommendRoles(fresh);
     return tx
       .insert(qualificationCriteria)
       .values(
-        fresh.map((d) => ({
+        fresh.map((d, i) => ({
           orgId: params.orgId,
           brandId: params.brandId,
           offerId: params.offerId,
           question: d.question,
           why: d.why,
+          title: d.title,
           probe: d.spec,
-          mode: "mention",
+          // The toggle is prefilled with the recommendation; the row stays OFF until a person turns it on.
+          mode: roles[i].mode,
+          recommendedMode: roles[i].mode,
+          recommendedModeReason: roles[i].reason,
           enabled: false,
           origin: "suggested",
           createdByUserId: params.identity.userId ?? null,

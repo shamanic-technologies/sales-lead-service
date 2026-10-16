@@ -963,6 +963,11 @@ export const qualificationCriteria = pgTable(
     /** suggested = written by the AI suggestion run (off); custom = created by a person. */
     origin: text("origin").notNull().default("custom"),
     why: text("why"),
+    /** Short card title written by the suggestion run (migration 0097); NULL on hand-made rows and older suggestions. */
+    title: text("title"),
+    /** The AI's recommended role (`must_pass` | `mention`) and why, frozen at suggestion; `mode` is what applies. */
+    recommendedMode: text("recommended_mode"),
+    recommendedModeReason: text("recommended_mode_reason"),
     createdByUserId: text("created_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     /** Set when a person changes the row; a suggestion nobody touched is replaced by the next list. */

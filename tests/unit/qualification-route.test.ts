@@ -82,6 +82,9 @@ const criterion = {
   offerId: "offer-a",
   question: "Is the site slow?",
   why: null,
+  title: null,
+  recommendedMode: null,
+  recommendedModeReason: null,
   probe: { kind: "company_data" },
   mode: "mention",
   enabled: true,
@@ -219,14 +222,32 @@ describe("PATCH / DELETE criterion", () => {
 describe("POST suggestions", () => {
   it("writes them as criteria of the offer and returns them with pass rates", async () => {
     generateSuggestions.mockResolvedValue({
-      rows: [{ ...criterion, enabled: false, origin: "suggested", why: "Slow sites lose buyers." }],
+      rows: [
+        {
+          ...criterion,
+          enabled: false,
+          origin: "suggested",
+          why: "Slow sites lose buyers.",
+          title: "Slow site",
+          mode: "must_pass",
+          recommendedMode: "must_pass",
+          recommendedModeReason: "Must have: a fast site cannot use this offer.",
+        },
+      ],
       dropped: [{ question: "Is it in retail?", reason: "firmographic_not_universal" }],
     });
     const res = await request(app).post("/orgs/brands/b1/offers/offer-a/qualification/suggestions").set(H).send({});
     expect(res.status).toBe(200);
     expect(res.body.dropped).toEqual([{ question: "Is it in retail?", reason: "firmographic_not_universal" }]);
     expect(generateSuggestions.mock.calls[0][0]).toMatchObject({ orgId: "org-1", brandId: "b1", offerId: "offer-a", identity: { runId: "run-child" } });
-    expect(res.body.criteria[0]).toMatchObject({ enabled: false, origin: "suggested", why: "Slow sites lose buyers." });
+    expect(res.body.criteria[0]).toMatchObject({
+      enabled: false,
+      origin: "suggested",
+      why: "Slow sites lose buyers.",
+      title: "Slow site",
+      mode: "must_pass",
+      recommendation: { mode: "must_pass", reason: "Must have: a fast site cannot use this offer." },
+    });
   });
 });
 
