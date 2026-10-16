@@ -17610,7 +17610,7 @@
     "/internal/brands/{brandId}/step-reached": {
       "get": {
         "summary": "Who reached a catalogue step at the brand, and when",
-        "description": "For campaign-service's `delay` trigger detector (a fact + a delay + \"still not Y\"). `step` is a features-service catalogue step key. With `since`: every person whose reach of the step falls at/after `since`, `reachedAt` = their earliest reach at/after it. With `email`: that one person at any time (`people` empty = never reached). Exactly one of `since` / `email`. What reaches a step is decided HERE, off two stores: the brand's copy of crm-service's people facts (the fact TYPE whatever tool saw it: signup, website_visit (a PostHog session), form_submitted, meeting_booked, meeting_attended, sale; a payment reaches `paid_client` only when it succeeded and was not wholly refunded; a fact withdrawn by crm-service does not count) and the outcome ledger (tracked, hand-stated, CRM, reply; live rows only; `sale` = `paid_client`, `form_submission` = `form_submitted`). This is \"did the person reach the step\", not a count. A person = a canonical email; reach rows sharing an address are one person; a reach with no email is not returned. Answerable steps: website_visit, signup, form_submitted, meeting_booked, meeting_attended, paid_client. Sorted by reachedAt ascending.",
+        "description": "For campaign-service's `delay` trigger detector (a fact + a delay + \"still not Y\"). `step` is a features-service catalogue step key. With `since`: every person whose reach of the step falls at/after `since`, `reachedAt` = their earliest reach at/after it. With `email`: that one person at any time (`people` empty = never reached). Exactly one of `since` / `email`. What reaches a step is decided HERE, off two stores: the brand's copy of crm-service's people facts (the fact TYPE whatever tool saw it: signup, website_visit (a PostHog session), form_submitted, meeting_booked, meeting_attended, sale; a payment reaches `paid_client` only when it succeeded and was not wholly refunded; a fact withdrawn by crm-service does not count) and the outcome ledger (tracked, hand-stated, CRM, reply; live rows only; `sale` = `paid_client`, `form_submission` = `form_submitted`). This is \"did the person reach the step\", not a count. A person = a canonical email; reach rows sharing an address are one person; a reach with no email is not returned. Answerable steps: website_visit, signup, form_submitted, meeting_booked, meeting_attended, paid_client, purchase (Direct purchase: a sale the brand's website tag reported). Sorted by reachedAt ascending.",
         "parameters": [
           {
             "in": "header",
@@ -17681,7 +17681,7 @@
             }
           },
           "400": {
-            "description": "Missing x-org-id; step missing (step_required); unknown step (unknown_step); a catalogue step whose reach no store here sees per person, lead_found, conversation, industry_update_video, purchase (step_not_observable); not exactly one of since/email (since_or_email_required); unparseable since (invalid_since) or email (invalid_email)."
+            "description": "Missing x-org-id; step missing (step_required); unknown step (unknown_step); a catalogue step whose reach no store here sees per person, lead_found, conversation, industry_update_video (step_not_observable); not exactly one of since/email (since_or_email_required); unparseable since (invalid_since) or email (invalid_email)."
           },
           "401": {
             "description": "Unauthorized"

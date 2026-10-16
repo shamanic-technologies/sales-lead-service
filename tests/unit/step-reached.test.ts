@@ -13,7 +13,7 @@ const row = (emails: string[], at: string | null, over: Record<string, unknown> 
 
 describe("step-reached rules", () => {
   it("answers the catalogue steps it sees and refuses the rest by name", () => {
-    expect(STEP_REACHED_STEPS).toEqual(["website_visit", "signup", "form_submitted", "meeting_booked", "meeting_attended", "paid_client"]);
+    expect(STEP_REACHED_STEPS).toEqual(["website_visit", "signup", "form_submitted", "meeting_booked", "meeting_attended", "paid_client", "purchase"]);
     for (const s of STEP_REACHED_STEPS) expect(refuseStep(s)).toBeNull();
     expect(refuseStep("conversation")?.code).toBe("step_not_observable");
     expect(refuseStep("sale")?.code).toBe("unknown_step");

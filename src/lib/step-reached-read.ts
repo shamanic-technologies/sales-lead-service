@@ -107,6 +107,7 @@ export async function readStepReached(q: StepReachedQuery): Promise<ReachedPerso
       WHERE ce.org_id = ${q.orgId}
         AND ce.brand_id = ${q.brandId}
         AND ce.event = ANY(${sql.param([...evidence.ledgerEvents])}::text[])
+        ${evidence.ledgerSources ? sql`AND ce.source = ANY(${sql.param([...evidence.ledgerSources])}::text[])` : sql``}
         AND ce.withdrawn_at IS NULL
         ${email === null ? sql`AND ce.received_at >= ${q.since}::timestamptz` : sql``}
     ) r

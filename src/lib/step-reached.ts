@@ -12,7 +12,8 @@
  *      a fact counts until a `withdrawn` fact names it;
  *   2. the outcome ledger (`conversion_events`: tracked, hand-stated, CRM, reply), live rows only (`withdrawn_at IS
  *      NULL`), in this service's statable vocabulary (`sale`/legacy `purchase` = `paid_client`, `form_submission` =
- *      `form_submitted`). The person is the event's own reported email, plus the matched lead's registered emails
+ *      `form_submitted`; a sale the brand's website tag reported is ALSO `purchase`, Direct purchase: bought on
+ *      the site). The person is the event's own reported email, plus the matched lead's registered emails
  *      when the row is attributed.
  * This is "did the person reach the step", NOT a count: a measured visit and a hand-stated one are the same reach,
  * and no count's suppression or attribution rule applies.
@@ -28,7 +29,16 @@ interface StepEvidence {
   crmFactTypes: readonly string[];
   /** Outcome ledger events (this service's stored spellings) that reach the step. */
   ledgerEvents: readonly string[];
+  /**
+   * Only ledger rows recorded by one of these sources reach the step (absent = any source). Direct purchase is
+   * a sale the brand's WEBSITE TAG reported (`tracker`): the person bought on the site; a sale a person states
+   * or a CRM syncs is a paid client, never a site checkout.
+   */
+  ledgerSources?: readonly string[];
 }
+
+/** The outcome ledger source written by the brand's website tag (the public conversion ingest). */
+export const SITE_TAG_SOURCE = "tracker";
 
 /** crm-service's fact for money a person paid: reaches `paid_client` only when it stands. */
 const PAYMENT_FACT = "payment";
@@ -41,21 +51,28 @@ export const STEP_REACHED_EVIDENCE: Readonly<Record<string, StepEvidence>> = {
   meeting_booked: { crmFactTypes: ["meeting_booked"], ledgerEvents: ["meeting_booked"] },
   meeting_attended: { crmFactTypes: ["meeting_attended"], ledgerEvents: ["meeting_attended"] },
   paid_client: { crmFactTypes: ["sale", PAYMENT_FACT], ledgerEvents: ["sale", "purchase"] },
+  purchase: { crmFactTypes: [], ledgerEvents: ["sale", "purchase"], ledgerSources: [SITE_TAG_SOURCE] },
 };
+
+/** Whether an outcome-ledger row (its stored event and source) reaches the step. */
+export function ledgerRowReachesStep(step: string, event: string, source: string): boolean {
+  const evidence = Object.prototype.hasOwnProperty.call(STEP_REACHED_EVIDENCE, step) ? STEP_REACHED_EVIDENCE[step] : null;
+  if (!evidence || !evidence.ledgerEvents.includes(event)) return false;
+  return !evidence.ledgerSources || evidence.ledgerSources.includes(source);
+}
 
 export const STEP_REACHED_STEPS: readonly string[] = Object.keys(STEP_REACHED_EVIDENCE);
 
 /**
  * Catalogue steps this service knows (the leg graph) but whose reach no store here SEES per person by email:
- * a positive reply is measured by the delivery layer, `lead_found` is a serve, a social engagement has no email,
- * the direct-purchase rung ends in `paid_client`. Asking for one is a named refusal, never an empty answer
+ * a positive reply is measured by the delivery layer, `lead_found` is a serve, a social engagement has no email.
+ * Asking for one is a named refusal, never an empty answer
  * (empty would read as "nobody reached it").
  */
 export const STEP_REACHED_UNOBSERVED_STEPS: readonly string[] = [
   "lead_found",
   "conversation",
   "industry_update_video",
-  "purchase",
 ];
 
 export type StepReachedRefusal =
