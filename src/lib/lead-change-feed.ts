@@ -195,7 +195,7 @@ function evidenceRequests(rows: readonly BasicLeadRow[]): EvidenceRequest[] {
   const out: EvidenceRequest[] = [];
   for (const row of rows) {
     if (row.status !== "served" || !row.email?.value) continue;
-    out.push({ brandId: row.brandIds[0] ?? "unknown", email: row.email.value });
+    out.push({ brandId: row.brandIds[0] ?? "unknown", email: row.email.value, leadId: row.leadId });
   }
   return out;
 }

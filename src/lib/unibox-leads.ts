@@ -20,6 +20,7 @@ import { db } from "../db/index.js";
 import { fileBrandIntakePerson } from "./brand-signups.js";
 import { loadRelationships } from "./relationship-read.js";
 import { toIsoTimestamp } from "./basic-leads.js";
+import { isGatewayEmail } from "./email-gateway-client.js";
 
 export const UNIBOX_INTAKE_SOURCE = "unibox_conversation";
 const CANDIDATE_LIMIT = 2_000;
@@ -42,11 +43,13 @@ export interface UniboxIntakeResult {
   filed: number;
   notProspect: number;
   ambiguous: number;
+  /** Pure prospects not filed because none of their addresses is one email-gateway accepts. */
+  malformed: number;
 }
 
 /** File every Unibox pure prospect that is not a lead of its brand yet (of one brand when scoped). */
 export async function fileUniboxLeads(scope: { orgId: string; brandId: string } | null = null): Promise<UniboxIntakeResult> {
-  const result: UniboxIntakeResult = { candidates: 0, filed: 0, notProspect: 0, ambiguous: 0 };
+  const result: UniboxIntakeResult = { candidates: 0, filed: 0, notProspect: 0, ambiguous: 0, malformed: 0 };
   // Keyset walk: a subject refused today (not a pure prospect) stays a candidate and must not hide the ones after it.
   let after: { at: string; human: string } | null = null;
   for (;;) {
@@ -120,8 +123,21 @@ async function fileCandidates(candidates: Candidate[], result: UniboxIntakeResul
         result.notProspect++;
         continue;
       }
-      const email = [...c.emails].map((e) => e.trim()).filter((e) => e.length > 0).sort()[0];
-      if (!email) continue;
+      // Only an address email-gateway accepts can be filed: a lead is served to be emailed, and one
+      // malformed address in a delivery-status batch makes the gateway refuse the whole batch
+      // (LEAD-CHANGES-INVALID-EMAIL-1016: two customer.io unsubscribe addresses, `...====@unsubscribe2.customer.io`).
+      const addresses = [...c.emails].map((e) => e.trim()).filter((e) => e.length > 0).sort();
+      const email = addresses.find(isGatewayEmail);
+      if (!email) {
+        if (addresses.length > 0) {
+          result.malformed++;
+          console.error(
+            `[lead-service] unibox intake: subject ${c.human_id} (brand ${brandId}) has no address email-gateway accepts ` +
+              `(${addresses.map((e) => JSON.stringify(e)).join(", ")}); not filed`,
+          );
+        }
+        continue;
+      }
       const filing = await fileBrandIntakePerson({
         orgId,
         brandId,

@@ -256,7 +256,7 @@ function evidenceRequests(rows: readonly LeadIndexRow[]): EvidenceRequest[] {
   const out: EvidenceRequest[] = [];
   for (const row of rows) {
     if (row.status !== "served" || !row.email) continue;
-    out.push({ brandId: row.brandIds[0] ?? "unknown", email: row.email });
+    out.push({ brandId: row.brandIds[0] ?? "unknown", email: row.email, leadId: row.leadId });
   }
   return out;
 }

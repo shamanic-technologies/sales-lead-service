@@ -56,4 +56,17 @@ describe.skipIf(!hasRealDatabase)("unibox intake (LEAD-FOLLOWUP-DATE-1016)", () 
     expect(again.filed).toBe(0);
     expect(again.candidates).toBe(1); // the friend only
   });
+
+  it("never files an address email-gateway refuses (LEAD-CHANGES-INVALID-EMAIL-1016)", async () => {
+    const orgBrand = { orgId, brandId };
+    // The prod shape: a customer.io unsubscribe address, base32 padding `=` in the local part.
+    await subject("Newsletter Sender", { prospect: 0.9 }, `32.kjfxeu2co5kucqk2offe4tkdkvus${randomUUID().slice(0, 6)}====@unsubscribe2.customer.io`);
+    const r = await fileUniboxLeads(orgBrand);
+    expect(r).toMatchObject({ filed: 0, malformed: 1 });
+    const filed = (await db.execute(sql`
+      SELECT cm.value FROM leads_campaigns lc
+      JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
+      WHERE lc.org_id = ${orgId} AND cm.value LIKE '%customer.io'`)) as unknown as unknown[];
+    expect(filed).toEqual([]);
+  });
 });
