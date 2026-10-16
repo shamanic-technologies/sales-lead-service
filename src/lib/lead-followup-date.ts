@@ -116,38 +116,83 @@ async function applyPastSends(orgId: string, brandId: string, leadIds: string[])
       WHERE cm.channel = 'email' AND cm.lead_id = ANY(${ids}::uuid[])
       GROUP BY cm.lead_id
     `) as unknown as Promise<Array<{ lead_id: string; at: Date | string }>>,
-    db.execute(sql`
-      ${uniboxSendsSql(sql`f.org_id = ${orgId} AND f.brand_id = ${brandId}`)}
-      AND m.lead_id = ANY(${ids}::uuid[])
-    `) as unknown as Promise<Array<{ org_id: string; brand_id: string; lead_id: string; at: Date | string; channel: string }>>,
+    loadUniboxFacts(sql`f.org_id = ${orgId} AND f.brand_id = ${brandId}`).then(matchUniboxSends),
   ]);
+  const wanted = new Set(leadIds);
   const sends: ObservedSend[] = [
     ...email.map((r) => ({ orgId, brandId, leadId: r.lead_id, sentAt: toIsoTimestamp(r.at)!, channel: "email" })),
-    ...unibox.map((r) => ({ orgId, brandId, leadId: r.lead_id, sentAt: toIsoTimestamp(r.at)!, channel: r.channel })),
+    ...unibox.filter((u) => wanted.has(u.leadId)),
   ];
   await applySends(sends);
 }
 
-/**
- * Every message of ours in the Unibox (crm `message_out`) matched to the leads it names: by the human crm-service
- * states, by any of its email addresses, by any of its phones. One row per (fact, lead); the caller narrows facts.
- */
-function uniboxSendsSql(factFilter: SQL): SQL {
-  return sql`
-    SELECT DISTINCT f.org_id, f.brand_id, m.lead_id::text AS lead_id, f.occurred_at AS at,
-      COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel
+interface UniboxFact {
+  org_id: string;
+  brand_id: string;
+  at: Date | string;
+  channel: string;
+  emails: string[];
+  phones: string[];
+  human_id: string | null;
+}
+
+/** Every message of ours in the Unibox (crm `message_out`) the filter names, dated. */
+async function loadUniboxFacts(factFilter: SQL): Promise<UniboxFact[]> {
+  return (await db.execute(sql`
+    SELECT f.org_id, f.brand_id, f.occurred_at AS at, COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel,
+      f.emails, f.phones, CASE WHEN (f.raw->>'humanId') ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human_id
     FROM crm_facts f
-    CROSS JOIN LATERAL (
-      SELECT cm.lead_id FROM unnest(f.emails) AS e JOIN lead_contact_methods cm ON cm.channel = 'email' AND lower(cm.value) = lower(trim(e))
-      UNION
-      SELECT cm.lead_id FROM unnest(f.phones) AS p
-        JOIN lead_contact_methods cm ON cm.channel = 'phone'
-          AND regexp_replace(cm.value, '\\D', '', 'g') = regexp_replace(p, '\\D', '', 'g')
-          AND regexp_replace(p, '\\D', '', 'g') <> ''
-      UNION
-      SELECT l.id FROM leads l WHERE (f.raw->>'humanId') ~* '^[0-9a-f-]{36}$' AND l.human_id = (f.raw->>'humanId')::uuid
-    ) m
-    WHERE f.type = 'message_out' AND f.occurred_at IS NOT NULL AND ${factFilter}`;
+    WHERE f.type = 'message_out' AND f.occurred_at IS NOT NULL AND ${factFilter}
+  `)) as unknown as UniboxFact[];
+}
+
+const digitsOf = (p: string) => p.replace(/\D/g, "");
+
+/**
+ * Each Unibox message matched to the leads it names: by the human crm-service states, by any of its email addresses,
+ * by any of its phones (digits). Three batched, indexed lookups for the whole batch (as a per-fact join the planner
+ * scanned every address: 120 s statement timeout in prod).
+ */
+async function matchUniboxSends(facts: readonly UniboxFact[]): Promise<ObservedSend[]> {
+  if (facts.length === 0) return [];
+  const emails = [...new Set(facts.flatMap((f) => f.emails.map((e) => e.trim().toLowerCase())).filter((e) => e.length > 0))];
+  const digits = [...new Set(facts.flatMap((f) => f.phones.map(digitsOf)).filter((d) => d.length > 0))];
+  const humans = [...new Set(facts.map((f) => f.human_id).filter((h): h is string => !!h))];
+  const [byEmail, byPhone, byHuman] = await Promise.all([
+    emails.length === 0
+      ? Promise.resolve([] as Array<{ k: string; lead_id: string }>)
+      : (db.execute(sql`
+          SELECT lower(value) AS k, lead_id::text AS lead_id FROM lead_contact_methods
+          WHERE channel = 'email' AND lower(value) = ANY(${sql.param(emails)}::text[])
+        `) as unknown as Promise<Array<{ k: string; lead_id: string }>>),
+    digits.length === 0
+      ? Promise.resolve([] as Array<{ k: string; lead_id: string }>)
+      : (db.execute(sql`
+          SELECT regexp_replace(value, '\\D', '', 'g') AS k, lead_id::text AS lead_id FROM lead_contact_methods
+          WHERE channel = 'phone' AND regexp_replace(value, '\\D', '', 'g') = ANY(${sql.param(digits)}::text[])
+        `) as unknown as Promise<Array<{ k: string; lead_id: string }>>),
+    humans.length === 0
+      ? Promise.resolve([] as Array<{ k: string; lead_id: string }>)
+      : (db.execute(sql`
+          SELECT human_id::text AS k, id::text AS lead_id FROM leads WHERE human_id = ANY(${sql.param(humans)}::uuid[])
+        `) as unknown as Promise<Array<{ k: string; lead_id: string }>>),
+  ]);
+  const index = (rows: Array<{ k: string; lead_id: string }>) => {
+    const m = new Map<string, string[]>();
+    for (const r of rows) m.set(r.k, [...(m.get(r.k) ?? []), r.lead_id]);
+    return m;
+  };
+  const [e, p, h] = [index(byEmail), index(byPhone), index(byHuman)];
+  const out: ObservedSend[] = [];
+  for (const f of facts) {
+    const leads = new Set<string>([
+      ...f.emails.flatMap((x) => e.get(x.trim().toLowerCase()) ?? []),
+      ...f.phones.flatMap((x) => p.get(digitsOf(x)) ?? []),
+      ...(f.human_id ? (h.get(f.human_id) ?? []) : []),
+    ]);
+    for (const leadId of leads) out.push({ orgId: f.org_id, brandId: f.brand_id, leadId, sentAt: toIsoTimestamp(f.at)!, channel: f.channel });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -234,16 +279,26 @@ async function stepOutreachFeed(): Promise<boolean> {
   `)) as unknown as Array<{ m: string | null }>;
   if (!edge?.m) return false;
   const to = BigInt(edge.m);
-  const rows = (await db.execute(sql`
-    SELECT o.org_id, b AS brand_id, cm.lead_id::text AS lead_id, max(o.occurred_at) AS at
-    FROM outreach_facts o
-    CROSS JOIN LATERAL unnest(o.brand_ids) AS b
-    JOIN lead_contact_methods cm ON cm.channel = 'email' AND lower(cm.value) = lower(o.lead_email)
+  const facts = (await db.execute(sql`
+    SELECT o.org_id, b AS brand_id, lower(o.lead_email) AS email, max(o.occurred_at) AS at
+    FROM outreach_facts o CROSS JOIN LATERAL unnest(o.brand_ids) AS b
     WHERE o.seq > ${from.toString()}::bigint AND o.seq <= ${to.toString()}::bigint
       AND o.type IN ('email_sent', 'reply_sent') AND o.org_id IS NOT NULL AND o.occurred_at IS NOT NULL
-    GROUP BY o.org_id, b, cm.lead_id
-  `)) as unknown as Array<{ org_id: string; brand_id: string; lead_id: string; at: Date | string }>;
-  await applySends(rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id, leadId: r.lead_id, sentAt: toIsoTimestamp(r.at)!, channel: "email" })));
+    GROUP BY o.org_id, b, lower(o.lead_email)
+  `)) as unknown as Array<{ org_id: string; brand_id: string; email: string; at: Date | string }>;
+  const emails = [...new Set(facts.map((f) => f.email))];
+  const owners =
+    emails.length === 0
+      ? []
+      : ((await db.execute(sql`
+          SELECT lower(value) AS email, lead_id::text AS lead_id FROM lead_contact_methods
+          WHERE channel = 'email' AND lower(value) = ANY(${sql.param(emails)}::text[])
+        `)) as unknown as Array<{ email: string; lead_id: string }>);
+  const leadsOf = new Map<string, string[]>();
+  for (const o of owners) leadsOf.set(o.email, [...(leadsOf.get(o.email) ?? []), o.lead_id]);
+  await applySends(
+    facts.flatMap((f) => (leadsOf.get(f.email) ?? []).map((leadId) => ({ orgId: f.org_id, brandId: f.brand_id, leadId, sentAt: toIsoTimestamp(f.at)!, channel: "email" }))),
+  );
   await writeCursor("outreach_facts", to);
   return true;
 }
@@ -256,10 +311,8 @@ async function stepUniboxFeed(): Promise<boolean> {
   `)) as unknown as Array<{ m: string | null }>;
   if (!edge?.m) return false;
   const to = BigInt(edge.m);
-  const rows = (await db.execute(sql`
-    ${uniboxSendsSql(sql`f.seq > ${from.toString()}::bigint AND f.seq <= ${to.toString()}::bigint`)}
-  `)) as unknown as Array<{ org_id: string; brand_id: string; lead_id: string; at: Date | string; channel: string }>;
-  await applySends(rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id, leadId: r.lead_id, sentAt: toIsoTimestamp(r.at)!, channel: r.channel })));
+  const facts = await loadUniboxFacts(sql`f.seq > ${from.toString()}::bigint AND f.seq <= ${to.toString()}::bigint`);
+  await applySends(await matchUniboxSends(facts));
   await writeCursor("crm_facts", to);
   return true;
 }
