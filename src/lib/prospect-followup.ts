@@ -135,6 +135,12 @@ export interface ProspectFollowupFacts {
   relationship: RelationshipBlock | null;
   /** Their latest word waiting on an answer is newer than our latest answer. */
   waitingOnAnswer: boolean;
+  /**
+   * Must the brand have emailed them (`not_contacted` otherwise)? true for the contacted pure prospects population;
+   * false for "Lead follow-up due" (LEAD-FOLLOWUP-DATE-1016, src/lib/lead-followup-date.ts): every lead of the brand,
+   * a person known only from the Unibox or a signup included. Absent = true.
+   */
+  contactedRequired?: boolean;
 }
 
 /** Pure: is the person still owed a prospect follow-up, and if not, every reason (strongest first). */
@@ -155,7 +161,7 @@ export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new
     else if (f.relationship.subject && f.relationship.judgedAt === null) stops.add("relationship_not_judged");
     else stops.add("same_person_question_open");
   }
-  if (!SENT_LABELS.some((l) => f.labels.has(l))) stops.add("not_contacted");
+  if (f.contactedRequired !== false && !SENT_LABELS.some((l) => f.labels.has(l))) stops.add("not_contacted");
   if (f.sender.queued) stops.add("sequence_running");
   if (f.waitingOnAnswer) stops.add("in_conversation");
   const reasons = PROSPECT_FOLLOWUP_STOP_REASONS.filter((r) => stops.has(r));
@@ -175,6 +181,8 @@ export async function loadProspectFollowupVerdicts(input: {
   brandId: string;
   leadIds: readonly string[];
   context?: { userId?: string | null; runId?: string | null };
+  /** false = any lead of the brand is owed, emailed or not ("Lead follow-up due"). Absent = true. */
+  contactedRequired?: boolean;
 }): Promise<Map<string, ProspectFollowupVerdict>> {
   const out = new Map<string, ProspectFollowupVerdict>();
   const leadIds = [...new Set(input.leadIds)];
@@ -291,6 +299,7 @@ export async function loadProspectFollowupVerdicts(input: {
         sender,
         relationship: human ? (relationships.get(human) ?? null) : null,
         waitingOnAnswer: waitingOnAnswer.has(leadId),
+        contactedRequired: input.contactedRequired,
       }),
     );
   }

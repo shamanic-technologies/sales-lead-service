@@ -32,6 +32,7 @@ import {
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
+  LEAD_FOLLOWUP_NONE_DUE_REASON,
   RECENTLY_EMAILED_REASON,
   JOURNALIST_REASON,
   isNoRecentPostsAnswer,
@@ -39,6 +40,7 @@ import {
 } from "./serve-reasons.js";
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
 import { claimContactedProspect, handoutOfSourceRow, loadProspectFollowupVerdicts } from "./prospect-followup.js";
+import { claimDueFollowupLead, dueVerdict } from "./lead-followup-date.js";
 import type { RelationshipScope } from "./reach-sql.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 import { askAudienceFit } from "./audience-fit-client.js";
@@ -60,6 +62,10 @@ import { prepareNamedServe, type NamedLeadRequest } from "./named-lead-serve.js"
  *   find_contacted — a source unit's own run whose lead strategy is the brand's CONTACTED PURE PROSPECTS
  *           (body `population: "contacted_pure_prospects"`, NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts):
  *           like `find`, but from people the brand already emailed, each at most once per brand; nothing is bought.
+ *   find_due — a source unit's own run whose lead strategy is "Lead follow-up due" (body `population:
+ *           "lead_followup_due"`, LEAD-FOLLOWUP-DATE-1016, src/lib/lead-followup-date.ts): the brand's leads whose next
+ *           follow-up date passed, most overdue first, REPEATABLE (served again each time their date passes again);
+ *           nothing is bought, a person known by phone alone comes out with `email: null` and their `phone`.
  *   named — the run's trigger occurrence NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
  *           src/lib/named-lead-serve.ts): exactly that person, filed on this campaign, or a named refusal. No pool, no
  *           audience, nothing bought but the one enrichment of a person known only by an email.
@@ -69,6 +75,7 @@ export type PullNextMode =
   | { kind: "named"; named: NamedLeadRequest }
   | { kind: "find"; audienceIds: string[] }
   | { kind: "find_contacted" }
+  | { kind: "find_due" }
   | { kind: "stock"; sourceCampaignIds: string[] };
 
 interface PullNextParams {
@@ -160,7 +167,10 @@ interface PullNextResult {
   final?: boolean;
   lead?: {
     leadId: string;
-    email: string;
+    /** null only on a "Lead follow-up due" serve of a person known by phone alone. */
+    email: string | null;
+    /** Stated on "Lead follow-up due" serves (source run and the follow-up pipe's stock): the person's phone, null when none. */
+    phone?: string | null;
     data: unknown;
     brandIds: string[];
     orgId: string | null;
@@ -646,6 +656,59 @@ export async function pullNext(
     };
   }
 
+  // LEAD FOLLOW-UP DUE: the brand's leads whose next follow-up date passed, most overdue first, every round.
+  if (mode.kind === "find_due") {
+    const find = await claimDueFollowupLead({
+      orgId: params.orgId,
+      brandId: params.brandId,
+      brandIds: params.brandIds,
+      sourceCampaignId: params.campaignId,
+      featureSlug: params.featureSlug,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+      reachableBy: params.reachableBy ?? null,
+      // Nothing is bought: the people are the brand's own, so a source stating no email choice takes them as found.
+      acceptedEmails: params.acceptedEmails ?? "as_found",
+      relationships,
+      recentlyEmailed,
+      signal,
+    });
+    if (!find) {
+      if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+      console.log(`[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${LEAD_FOLLOWUP_NONE_DUE_REASON} brand=${params.brandId}`);
+      return { found: false, reason: LEAD_FOLLOWUP_NONE_DUE_REASON };
+    }
+    const foundLead = await buildFullLead(find.leadId);
+    const qualification = await writerChecks(foundLead);
+    console.log(
+      `[lead-service] pullNext found=true source=lead-followup-due campaign=${params.campaignId} email=${find.email} phone=${find.phone} leadId=${find.leadId} row=${find.leadCampaignId} dueAt=${find.dueAt}`,
+    );
+    return {
+      found: true,
+      lead: {
+        leadId: find.leadId,
+        email: find.email,
+        phone: find.phone,
+        data: foundLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: foundLead.apolloPersonId ?? null,
+        goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: null,
+        buyingSignal: null,
+        qualification,
+      },
+    };
+  }
+
   // STOCK: the oldest lead the feeding sources found on their own and nobody worked yet. Never a find on demand.
   if (mode.kind === "stock") {
     const judgeSourceAudience = createSourceAudienceJudge({ orgId: params.orgId, userId: params.userId ?? null, runId: params.runId ?? null });
@@ -686,6 +749,8 @@ export async function pullNext(
         if (verdict.kind === "not_yet") return { fits: false, release: true, reason: `not yet owed a prospect follow-up (${verdict.reasons.join(", ")}): released` };
         return { fits: false, reason: `no longer owed a prospect follow-up: ${verdict.reasons.join(", ")}` };
       },
+      // A "Lead follow-up due" find: still owed a follow-up by the brand now (any lead, emailed or not)?
+      askDueOwed: (q) => dueVerdict(q, { userId: params.userId ?? null, runId: params.runId ?? null }),
     });
     const stocked = claim.lead;
     if (!stocked) {
@@ -704,6 +769,7 @@ export async function pullNext(
       lead: {
         leadId: stocked.leadId,
         email: stocked.email,
+        ...(stocked.phone !== undefined ? { phone: stocked.phone } : {}),
         data: stockLead,
         brandIds: params.brandIds,
         orgId: params.orgId,

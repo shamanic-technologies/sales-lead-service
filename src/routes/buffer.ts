@@ -207,7 +207,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         } else {
           // What it may spend is its sales funnel's caps, enforced by billing at every spend authorization.
           if (population) {
-            // Found among the brand's own contacted people (src/lib/prospect-followup.ts): nothing to walk, nothing bought.
+            // Found among the brand's own people (src/lib/prospect-followup.ts, src/lib/lead-followup-date.ts): nothing to walk, nothing bought.
           } else {
             const found = await resolveSourceAudiences({
               orgId: req.orgId!,
@@ -399,7 +399,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   const pullMode: PullNextMode | null = named
     ? { kind: "named", named }
     : ownRunUnit
-    ? population
+    ? population === "lead_followup_due"
+      ? { kind: "find_due" }
+      : population
       ? { kind: "find_contacted" }
       : { kind: "find", audienceIds: findAudienceIds }
     : stockSourceIds
