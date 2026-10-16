@@ -7,6 +7,7 @@ const serveNext = vi.fn();
 // The candidate path (qualify before paying) has its own suite: tests/unit/candidate-serve.test.ts.
 // Here every audience answers "not served through candidates", so pullNext uses serve-next.
 vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: vi.fn(async () => null) }));
+vi.mock("../../src/lib/brand-journalists.js", () => ({ leadIsJournalist: vi.fn(async () => false) }));
 vi.mock("../../src/lib/serve-identity.js", () => ({ resolveServedIdentity: vi.fn(async () => null) }));
 
 vi.mock("../../src/lib/people-client.js", () => ({

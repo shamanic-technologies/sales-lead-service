@@ -414,7 +414,7 @@ export async function loadRetryCandidates(params: {
       AND lc.channel_sent_at IS NULL
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed)}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, { orgId: sql`lc.org_id`, brandIds: sql`lc.brand_ids` })}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];

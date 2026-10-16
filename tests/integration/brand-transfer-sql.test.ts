@@ -44,6 +44,7 @@ const BRAND_SCALAR_TABLES = [
   "prospect_followup_handouts",
   "outcome_trigger_fires",
   "named_lead_serves",
+  "brand_journalists",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
@@ -168,6 +169,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO named_lead_serves (org_id, brand_id, campaign_id, lead_id, lead_campaign_id, trigger_event_id)
       VALUES (${org}, ${brand}, ${campaignId}, ${leadId}::uuid, ${randomUUID()}::uuid, ${`evt-${randomUUID()}`})`);
+    await db.execute(sql`
+      INSERT INTO brand_journalists (org_id, brand_id, lead_id, press_only, journalist, basis, pitch_campaign_ids)
+      VALUES (${org}, ${brand}, ${leadId}::uuid, true, true, 'press_only', ${sql.param([campaignId])}::text[])`);
     await db.execute(sql`
       INSERT INTO lead_disqualification_marks (org_id, brand_id, lead_id, offer_key, source, note, stated_by_user_id)
       VALUES (${org}, ${brand}, ${leadId}::uuid, '', 'manual', 'itest note', 'itest-user')`);

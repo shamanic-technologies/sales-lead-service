@@ -3,6 +3,7 @@ import type { ReachMethod } from "./people-client.js";
 import { emailPolicyClause, type PoolEmailPolicy } from "./email-policy.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 import { recentlyEmailedClause, type RecentlyEmailedScope } from "./recently-emailed-sql.js";
+import { journalistClause, type JournalistScope } from "./brand-journalists.js";
 
 /**
  * `AND EXISTS (...)` per contact method the serving pipe needs (src/lib/channel-reach.ts), on the lead the row names.
@@ -11,13 +12,15 @@ import { recentlyEmailedClause, type RecentlyEmailedScope } from "./recently-ema
  * words (`email`, `phone`). The pipe's email policy (src/lib/email-policy.ts, absent = `valid_only`) keeps out a lead
  * whose address carries a verdict it refuses (a catch-all person never reaches a valid-only campaign from a pool).
  * The tactic "Fresh contacts only" (src/lib/recently-emailed.ts) keeps out a lead the brand emailed inside its window.
+ * A journalist of the brand (src/lib/brand-journalists.ts) is never handed out: REQUIRED, every pool states its scope.
  */
 export function reachClauses(
   leadId: SQL,
   reachableBy: readonly ReachMethod[] | null | undefined,
-  acceptedEmails?: PoolEmailPolicy | null,
-  relationships?: RelationshipScope | null,
-  recentlyEmailed?: RecentlyEmailedScope | null,
+  acceptedEmails: PoolEmailPolicy | null | undefined,
+  relationships: RelationshipScope | null | undefined,
+  recentlyEmailed: RecentlyEmailedScope | null | undefined,
+  journalists: JournalistScope,
 ): SQL {
   const methods = [...new Set<ReachMethod>(["email", ...(reachableBy ?? [])])].sort();
   return sql.join(
@@ -28,6 +31,7 @@ export function reachClauses(
       emailPolicyClause(leadId, acceptedEmails),
       relationshipClause(leadId, relationships ?? null),
       recentlyEmailedClause(leadId, recentlyEmailed),
+      journalistClause(leadId, journalists),
     ],
     sql` `,
   );
