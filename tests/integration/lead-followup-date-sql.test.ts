@@ -1,0 +1,263 @@
+/**
+ * LEAD-FOLLOWUP-DATE-1016 against a REAL database: every lead of a brand carries a next follow-up date, every send we
+ * observe moves it (email and Unibox channels alike), a writer's statement wins as stated, and "Lead follow-up due"
+ * hands a due person again each time their date passes again, never a client or a personal conversation.
+ * The sender (email-gateway) is the one remote read, stated per test. Staff test addresses only.
+ */
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
+import { sql } from "drizzle-orm";
+
+const queued = new Set<string>();
+vi.mock("../../src/lib/email-gateway-client.js", () => ({
+  checkDeliveryStatus: vi.fn(async (_brandId: string, _campaignId: string | undefined, items: Array<{ email: string }>) => ({
+    results: items.map(({ email }) => ({
+      email,
+      broadcast: { brand: { queued: queued.has(email), unsubscribed: false, bounced: false }, global: { email: { unsubscribed: false, bounced: false } } },
+    })),
+  })),
+}));
+
+const { db } = await import("../../src/db/index.js");
+const fd = await import("../../src/lib/lead-followup-date.js");
+const { claimStockedLead } = await import("../../src/lib/source-stock.js");
+
+const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
+const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
+
+// Feed positions above anything another suite inserts (they draw seqs below 1e15).
+let seq = BigInt(Date.now()) * 10_000n;
+const nextSeq = () => (seq += 1n).toString();
+
+describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016)", () => {
+  const orgId = randomUUID();
+  const brandId = randomUUID();
+  const sourceCampaignId = randomUUID();
+  const followupCampaignId = randomUUID();
+  const leads: string[] = [];
+
+  async function person(name: string, opts: { email?: boolean; phone?: string } = {}): Promise<{ leadId: string; email: string | null; humanId: string; rowId: string }> {
+    const humanId = randomUUID();
+    const [row] = (await db.execute(sql`INSERT INTO leads (first_name, human_id) VALUES (${name}, ${humanId}::uuid) RETURNING id::text AS id`)) as unknown as Array<{ id: string }>;
+    leads.push(row.id);
+    const email = opts.email === false ? null : `kevin+lfd-${name}-${randomUUID().slice(0, 6)}@distribute.you`;
+    if (email) await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${row.id}::uuid, 'email', ${email}, 'itest')`);
+    if (opts.phone) await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${row.id}::uuid, 'phone', ${opts.phone}, 'itest')`);
+    const [lc] = (await db.execute(sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at)
+      VALUES (${row.id}::uuid, ${`cold-${randomUUID()}`}, ${orgId}, ARRAY[${brandId}]::text[], 'served', now())
+      RETURNING id::text AS id`)) as unknown as Array<{ id: string }>;
+    return { leadId: row.id, email, humanId, rowId: lc.id };
+  }
+
+  async function dateOf(leadId: string) {
+    return fd.loadFollowupDate(orgId, brandId, leadId);
+  }
+
+  async function setDue(leadId: string, at = "2026-01-01T00:00:00Z") {
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = ${at}::timestamptz WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${leadId}::uuid`);
+  }
+
+  const serveDue = () =>
+    fd.claimDueFollowupLead({
+      orgId,
+      brandId,
+      brandIds: [brandId],
+      sourceCampaignId,
+      featureSlug: "lead-sourcing",
+      runId: null,
+      parentRunId: null,
+      userId: null,
+      workflowSlug: null,
+      goal: null,
+      activeGoalId: null,
+      brandProfileId: null,
+      acceptedEmails: "as_found",
+    });
+
+  const takeStock = () =>
+    claimStockedLead({
+      orgId,
+      sourceCampaignIds: [sourceCampaignId],
+      outreachCampaignId: followupCampaignId,
+      brandIds: [brandId],
+      featureSlug: "ai-follow-up",
+      runId: `run-${randomUUID()}`,
+      parentRunId: null,
+      userId: null,
+      workflowSlug: "follow-up",
+      goal: null,
+      activeGoalId: null,
+      brandProfileId: null,
+      reachableBy: ["email", "phone"],
+      acceptedEmails: "as_found",
+      askFit: async () => {
+        throw new Error("a due find has no audience");
+      },
+      askDueOwed: (q) => fd.dueVerdict(q, {}),
+    });
+
+  beforeEach(() => queued.clear());
+
+  afterAll(async () => {
+    await db.execute(sql`DELETE FROM lead_followup_due_serves WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM lead_followup_dates WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
+    for (const t of ["conversion_events", "relationship_subjects", "relationship_judgments", "crm_facts"]) {
+      await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
+    }
+    await db.execute(sql`DELETE FROM outreach_facts WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(leads)}::uuid[])`);
+  });
+
+  it("gives every lead of the brand a date, default now", async () => {
+    const a = await person("a");
+    const phoneOnly = await person("wa", { email: false, phone: "+33 6 11 22 33 44" });
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    for (const p of [a, phoneOnly]) {
+      const d = await dateOf(p.leadId);
+      expect(d.basis).toBe("default");
+      expect(Math.abs(new Date(d.nextFollowupAt!).getTime() - Date.now())).toBeLessThan(60_000);
+    }
+    const rows = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM leads_campaigns lc
+      WHERE lc.org_id = ${orgId} AND NOT EXISTS (SELECT 1 FROM lead_followup_dates d WHERE d.org_id = lc.org_id AND d.brand_id = ${brandId} AND d.lead_id = lc.lead_id)
+    `)) as unknown as Array<{ n: number }>;
+    expect(rows[0].n).toBe(0);
+  });
+
+  it("moves the date on every send we observe: an email send and a WhatsApp message of ours", async () => {
+    const emailed = await person("emailed");
+    const wa = await person("wa2", { email: false, phone: "+33 6 99 88 77 66" });
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    await fd.syncSendFeeds(30_000); // walk whatever is already there first
+
+    await db.execute(sql`
+      INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, brand_ids, raw)
+      VALUES (${nextSeq()}::bigint, ${`s:${randomUUID()}`}, 'email_sent', '2026-10-10T10:00:00Z', ${emailed.email!.toUpperCase()}, ${orgId}, ARRAY[${brandId}]::text[], '{}'::jsonb)`);
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, 'Wa Two', '{}', ARRAY['+33699887766']::text[],
+        'message_out', '2026-10-11T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
+    await fd.syncSendFeeds(30_000);
+
+    const e = await dateOf(emailed.leadId);
+    expect(e).toMatchObject({ basis: "send", lastSentChannel: "email", nextFollowupAt: "2026-10-17T10:00:00.000Z", reason: "Last email send + 7 days" });
+    const w = await dateOf(wa.leadId);
+    expect(w).toMatchObject({ basis: "send", lastSentChannel: "whatsapp", nextFollowupAt: "2026-10-18T08:00:00.000Z", sentCount: 1 });
+
+    // An OLDER send arriving late moves nothing.
+    await fd.applySends([{ orgId, brandId, leadId: emailed.leadId, sentAt: "2026-10-01T00:00:00Z", channel: "email" }]);
+    expect((await dateOf(emailed.leadId)).nextFollowupAt).toBe("2026-10-17T10:00:00.000Z");
+  });
+
+  it("keeps a writer's stated date: as stated, a later sequence step never shortens it, a stop ends the follow-ups", async () => {
+    const p = await person("stated");
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    const now = new Date();
+    const j20 = new Date(now.getTime() + 20 * 86_400_000).toISOString();
+    await fd.stateLeadFollowupDate({ orgId, brandId, leadId: p.leadId, statement: { kind: "date", nextFollowupAt: j20, reason: "after the last queued step" }, campaignId: "content-gen", runId: "r1" });
+    // The J+3 step goes out after the statement: J+3+7 < J+20, the stated date stands.
+    await fd.applySends([{ orgId, brandId, leadId: p.leadId, sentAt: new Date(now.getTime() + 1_000).toISOString(), channel: "email" }]);
+    expect(await dateOf(p.leadId)).toMatchObject({ basis: "stated", nextFollowupAt: j20, reason: "after the last queued step", lastSentChannel: "email" });
+
+    // A writer who just sent states "in 2 days": that is the date, even shorter than the default.
+    const in2 = new Date(Date.now() + 2 * 86_400_000).toISOString();
+    const sentAt = new Date(Date.now() - 1_000).toISOString();
+    await fd.stateLeadFollowupDate({ orgId, brandId, leadId: p.leadId, statement: { kind: "date", nextFollowupAt: in2, reason: "He waits for a price", sent: { channel: "whatsapp", at: sentAt } }, campaignId: "follow-up", runId: "r2" });
+    // The observed copy of that same send arriving afterwards does not override the writer.
+    await fd.applySends([{ orgId, brandId, leadId: p.leadId, sentAt, channel: "whatsapp" }]);
+    expect(await dateOf(p.leadId)).toMatchObject({ basis: "stated", nextFollowupAt: in2, reason: "He waits for a price" });
+
+    // Same run, same body: replayed, nothing changes.
+    const replay = await fd.stateLeadFollowupDate({ orgId, brandId, leadId: p.leadId, statement: { kind: "date", nextFollowupAt: in2, reason: "He waits for a price", sent: { channel: "whatsapp", at: sentAt } }, campaignId: "follow-up", runId: "r2" });
+    expect(replay.replayed).toBe(true);
+
+    await expect(
+      fd.stateLeadFollowupDate({ orgId, brandId, leadId: p.leadId, statement: { kind: "date", nextFollowupAt: "2020-01-01T00:00:00Z", reason: "x" }, campaignId: null, runId: null }),
+    ).rejects.toMatchObject({ code: "date_out_of_range" });
+
+    await fd.stateLeadFollowupDate({ orgId, brandId, leadId: p.leadId, statement: { kind: "stop", reason: "Please stop writing to me" }, campaignId: "follow-up", runId: "r3" });
+    await fd.applySends([{ orgId, brandId, leadId: p.leadId, sentAt: new Date().toISOString(), channel: "email" }]);
+    expect(await dateOf(p.leadId)).toMatchObject({ basis: "stopped", nextFollowupAt: null, reason: "Please stop writing to me" });
+  });
+
+  it("serves a due person, most overdue first, again each time the date passes again; never a client or a personal conversation", async () => {
+    // Everyone of the earlier tests is pushed out: only the people of this test can be due.
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+    const older = await person("older");
+    const waOnly = await person("waonly", { email: false, phone: "+33 6 55 44 33 22" });
+    const client = await person("client");
+    const friend = await person("friend");
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    await setDue(older.leadId, "2026-01-01T00:00:00Z");
+    await setDue(waOnly.leadId, "2026-02-01T00:00:00Z");
+    await setDue(client.leadId, "2025-01-01T00:00:00Z");
+    await setDue(friend.leadId, "2025-02-01T00:00:00Z");
+    await db.execute(sql`
+      INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
+      VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
+    await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id) VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid)`);
+    await db.execute(sql`
+      INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
+      VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid, ${JSON.stringify({ personal: 0.95 })}::jsonb, 1, 'jev', 'run')`);
+
+    const first = await serveDue();
+    expect(first?.leadId).toBe(older.leadId);
+    expect(first?.email).toBe(older.email);
+    const second = await serveDue();
+    expect(second).toMatchObject({ leadId: waOnly.leadId, email: null, phone: "+33 6 55 44 33 22" });
+    expect(await serveDue()).toBeNull();
+
+    // The client and the friend were never served: their dates moved out with the reason.
+    expect(await dateOf(client.leadId)).toMatchObject({ basis: "stop_recheck" });
+    expect((await dateOf(client.leadId)).reason).toContain("customer");
+    expect((await dateOf(friend.leadId)).reason).toContain("not_pure_prospect");
+    // Served = 7 days out until the writer sends or states.
+    const served = await dateOf(older.leadId);
+    expect(served).toMatchObject({ basis: "served", servedCount: 1 });
+    expect(new Date(served.nextFollowupAt!).getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+
+    // The follow-up pipe takes both from the stock, the phone-only one included.
+    const t1 = await takeStock();
+    const t2 = await takeStock();
+    expect([t1.lead?.leadId, t2.lead?.leadId].sort()).toEqual([older.leadId, waOnly.leadId].sort());
+    expect([t1.lead, t2.lead].find((l) => l?.leadId === waOnly.leadId)).toMatchObject({ email: null, phone: "+33 6 55 44 33 22" });
+    expect((await takeStock()).lead).toBeNull();
+
+    // Their date passes again: served again (the source row re-opened), handed again (the follow-up row re-served).
+    await setDue(older.leadId);
+    const again = await serveDue();
+    expect(again?.leadId).toBe(older.leadId);
+    expect(again?.leadCampaignId).toBe(first?.leadCampaignId);
+    const t3 = await takeStock();
+    expect(t3.lead?.leadId).toBe(older.leadId);
+    const rounds = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM lead_followup_due_serves WHERE org_id = ${orgId} AND lead_id = ${older.leadId}::uuid AND handed_at IS NOT NULL
+    `)) as unknown as Array<{ n: number }>;
+    expect(rounds[0].n).toBe(2);
+    expect((await dateOf(older.leadId)).servedCount).toBe(2);
+    const repoints = (await db.execute(sql`
+      SELECT count(*)::int AS n FROM lead_campaign_run_repoints r JOIN leads_campaigns lc ON lc.id = r.lead_campaign_id
+      WHERE lc.lead_id = ${older.leadId}::uuid AND r.cause = 'followup_due'
+    `)) as unknown as Array<{ n: number }>;
+    expect(repoints[0].n).toBe(2); // source row re-opened + follow-up row re-served
+  });
+
+  it("a find no longer owed at handover is set aside and its date pushed out; never handed", async () => {
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+    const later = await person("later");
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    await setDue(later.leadId);
+    expect((await serveDue())?.leadId).toBe(later.leadId);
+    queued.add(later.email!); // a sequence started meanwhile: not yet
+    const t = await takeStock();
+    expect(t.lead).toBeNull();
+    expect(t.setAside.map((r) => r.leadId)).toEqual([later.leadId]);
+    expect(await dateOf(later.leadId)).toMatchObject({ basis: "not_yet" });
+    // Once due again and owed, served again.
+    queued.clear();
+    await setDue(later.leadId);
+    expect((await serveDue())?.leadId).toBe(later.leadId);
+  });
+});

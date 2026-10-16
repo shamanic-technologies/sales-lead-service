@@ -84,6 +84,8 @@ export const ORIGIN_NOT_FED_REASON = "origin_not_fed" as const;
 export const AUDIENCE_OFFER_MISMATCH_REASON = "audience_offer_mismatch" as const;
 export const NO_RECENT_POSTS_REASON = "no_recent_posts" as const;
 export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_owed" as const;
+/** "Lead follow-up due" (LEAD-FOLLOWUP-DATE-1016): nobody of the brand is due and owed a follow-up right now (not exhaustion: dates pass every day). */
+export const LEAD_FOLLOWUP_NONE_DUE_REASON = "lead_followup_none_due" as const;
 export const RECENTLY_EMAILED_REASON = "recently_emailed" as const;
 export const JOURNALIST_REASON = "journalist" as const;
 /** Named-person serves (src/lib/named-lead-serve.ts): why the named person cannot be worked by this run. */
@@ -114,6 +116,7 @@ export const SERVE_EMPTY_REASONS = [
   AUDIENCE_OFFER_MISMATCH_REASON,
   NO_RECENT_POSTS_REASON,
   CONTACTED_PROSPECTS_NONE_OWED_REASON,
+  LEAD_FOLLOWUP_NONE_DUE_REASON,
   RECENTLY_EMAILED_REASON,
   JOURNALIST_REASON,
   ...SALES_FUNNEL_CAP_REASONS,

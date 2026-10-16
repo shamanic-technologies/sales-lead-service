@@ -107,6 +107,30 @@ export async function fileSignup(p: {
   fullName: string | null;
   signedUpAt: string | null;
 }): Promise<SignupFiling> {
+  return fileBrandIntakePerson({
+    orgId: p.orgId,
+    brandId: p.brandId,
+    email: p.email,
+    fullName: p.fullName,
+    at: p.signedUpAt,
+    campaignId: brandSignupsCampaignId(p.brandId),
+    source: BRAND_SIGNUPS_SOURCE,
+  });
+}
+
+/**
+ * File ONE person the brand itself knows (a signup, a Unibox conversation) as a lead of the brand under one of its own
+ * intakes (`campaignId`, never a campaign-service campaign): email-first lead, ONE `served` row dated `at`.
+ */
+export async function fileBrandIntakePerson(p: {
+  orgId: string;
+  brandId: string;
+  email: string;
+  fullName: string | null;
+  at: string | null;
+  campaignId: string;
+  source: string;
+}): Promise<SignupFiling> {
   const email = normalizeEmail(p.email);
   const owners = await leadsOwningEmail(email);
   if (owners.length > 1) return { status: "ambiguous_lead", leadIds: owners };
@@ -121,14 +145,14 @@ export async function fileSignup(p: {
       .values({ name: names.name, firstName: names.firstName, lastName: names.lastName })
       .returning({ id: leads.id });
     // A concurrent filing may have registered the address first: the owner wins (email-first).
-    leadId = await registerServedEmail({ leadId: inserted.id, email, status: null, source: BRAND_SIGNUPS_SOURCE });
+    leadId = await registerServedEmail({ leadId: inserted.id, email, status: null, source: p.source });
   }
 
-  const campaignId = brandSignupsCampaignId(p.brandId);
+  const campaignId = p.campaignId;
   const created = (await db.execute(sql`
     INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, status_reason, served_at)
-    VALUES (${leadId}, ${campaignId}, ${p.orgId}, ${sql.param([p.brandId])}::text[], 'served', ${BRAND_SIGNUPS_SOURCE},
-      COALESCE(${p.signedUpAt}::timestamptz, now()))
+    VALUES (${leadId}, ${campaignId}, ${p.orgId}, ${sql.param([p.brandId])}::text[], 'served', ${p.source},
+      COALESCE(${p.at}::timestamptz, now()))
     ON CONFLICT (lead_id, campaign_id) DO NOTHING
     RETURNING id::text AS id
   `)) as unknown as Array<{ id: string }>;
@@ -137,7 +161,7 @@ export async function fileSignup(p: {
     SELECT id::text AS id FROM leads_campaigns WHERE lead_id = ${leadId} AND campaign_id = ${campaignId} LIMIT 1
   `)) as unknown as Array<{ id: string }>;
   if (existing.length === 0) {
-    throw new Error(`[lead-service] brand signups: no leads_campaigns row after insert lead=${leadId} campaign=${campaignId}`);
+    throw new Error(`[lead-service] brand intake: no leads_campaigns row after insert lead=${leadId} campaign=${campaignId}`);
   }
   return { status: "already_filed", leadId, leadCampaignId: existing[0].id };
 }

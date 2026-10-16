@@ -11,6 +11,7 @@ import { dirname, join } from "path";
 import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
 import prospectFollowupRoutes from "./routes/prospect-followup.js";
+import leadFollowupDateRoutes from "./routes/lead-followup-date.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
 import awaitingReplyRoutes from "./routes/awaiting-reply.js";
@@ -104,6 +105,7 @@ app.use(socialEngagementsRoutes);
 app.use(leadIdentityRoutes);
 app.use(relationshipsRoutes);
 app.use(prospectFollowupRoutes);
+app.use(leadFollowupDateRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
