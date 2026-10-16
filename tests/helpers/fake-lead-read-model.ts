@@ -172,6 +172,8 @@ export function fakeReadModelModule(real: Real): Real {
     ensureReadModel,
     readModelDelivery: (scope, requests) =>
       gatewayMap(scope, real.statusCampaignIdOf(scope), requests, real),
+    readModelPageDelivery: (model, requests) =>
+      gatewayMap(model.scope, real.statusCampaignIdOf(model.scope), requests, real),
     readModelBucketCounts: async (model, tokens) => {
       const rows = filtered(model, tokens, null, null);
       const counts = zeroBucketCounts();

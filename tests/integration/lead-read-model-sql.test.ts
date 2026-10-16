@@ -9,8 +9,9 @@
  *
  * The properties under test are the ones the Leads page is owed: the counts and the pages describe
  * the same set; a person's statement is on the VERY NEXT read; a pushed evidence change is too; a
- * read that has nothing new to apply asks the delivery layer nothing; and a model past its bound is
- * rebuilt rather than served.
+ * read that has nothing new to apply asks the delivery layer nothing; a model past its bound is
+ * served at once with its age stated (the worker refreshes it), an older one rebuilt; and a sibling
+ * down serves the model held rather than refusing the read.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
@@ -18,9 +19,11 @@ import { eq, inArray } from "drizzle-orm";
 
 let gatewayCalls: string[][] = [];
 let statusByEmail: Record<string, Record<string, unknown>> = {};
+let gatewayDown = false;
 vi.mock("../../src/lib/email-gateway-client.js", () => ({
   checkDeliveryStatus: (_brandId: string, _campaignId: string | undefined, items: Array<{ email: string }>) => {
     gatewayCalls.push(items.map((i) => i.email));
+    if (gatewayDown) return Promise.reject(new Error("[email-gateway-client] Status check failed: 502 - Upstream"));
     return Promise.resolve({
       results: items
         .filter((i) => statusByEmail[i.email])
@@ -121,6 +124,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
       "ten@disco.test": [{ receivedAt: "2026-02-03T00:00:00.000Z", kind: "positive_kind", classification: "positive" }],
     };
     gatewayCalls = [];
+    gatewayDown = false;
     legByCampaign = new Map([[campaignId, "start_to_website_visit"]]);
     statusByEmail = {
       "jane@acme.test": { contacted: true, sent: true, firstSentAt: "2026-02-01T00:00:00.000Z" },
@@ -324,11 +328,11 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
   it("refreshes a model past its bound IN PLACE instead of serving it, asking everyone again", async () => {
     const before = await model.ensureReadModel(scope);
     await sql`
-      UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${before.id}
+      UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${before.id}
     `;
     // What the model was built from is as old as the model: nothing recent enough to reuse.
     await sql`
-      UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}
+      UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}
     `;
     evidence.resetEvidenceConfirmations();
     gatewayCalls = [];
@@ -346,6 +350,83 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect((await model.readModelBucketCounts(after, null)).total).toBe(4);
   });
 
+  it("serves a model past its bound AT ONCE, stating why, instead of waiting for a rebuild", async () => {
+    const before = await model.ensureReadModel(scope);
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${before.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayCalls = [];
+    const served = await model.ensureReadModel(scope);
+    // Nobody was asked again and nothing was rebuilt: the read did not wait on the refresh.
+    expect(gatewayCalls).toEqual([]);
+    expect(served.id).toBe(before.id);
+    expect(served.evidenceAt.getTime()).toBeLessThan(Date.now() - 5 * 60_000);
+    expect(served.servedStale).toBe("refresh_behind");
+    expect((await model.readModelBucketCounts(served, null)).total).toBe(4);
+    // The worker's refresh brings it back inside its bound; the next read states nothing.
+    await model.refreshReadModel(scope);
+    const fresh = await model.ensureReadModel(scope);
+    expect(fresh.servedStale).toBeUndefined();
+  });
+
+  it("a model older than serve-without-wait whose rebuild hits a DOWN sibling is served, not refused", async () => {
+    const before = await model.ensureReadModel(scope);
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${before.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayDown = true;
+    const served = await model.ensureReadModel(scope);
+    expect(gatewayCalls.length).toBeGreaterThan(0);
+    expect(served.id).toBe(before.id);
+    expect(served.servedStale).toBe("rebuild_failed");
+    expect((await model.readModelBucketCounts(served, null)).total).toBe(4);
+    gatewayDown = false;
+    await model.refreshReadModel(scope);
+  });
+
+  it("past the outage ceiling a failed rebuild still refuses (502), never an old model", async () => {
+    const before = await model.ensureReadModel(scope);
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '25 hours' WHERE id = ${before.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '25 hours' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayDown = true;
+    await expect(model.ensureReadModel(scope)).rejects.toBeInstanceOf(model.ReadModelUnavailableError);
+    gatewayDown = false;
+    await model.refreshReadModel(scope);
+  });
+
+  it("a pushed change that cannot be applied while a sibling is down serves the model as held", async () => {
+    await model.ensureReadModel(scope);
+    await model.noteEvidenceChanged(orgId, ["jane@acme.test"]);
+    gatewayDown = true;
+    const served = await model.ensureReadModel(scope);
+    expect(served.servedStale).toBe("catch_up_failed");
+    expect((await model.readModelBucketCounts(served, null)).total).toBe(4);
+    gatewayDown = false;
+    // Applied on the next read once the sibling is back.
+    gatewayCalls = [];
+    const caught = await model.ensureReadModel(scope);
+    expect(gatewayCalls).toEqual([["jane@acme.test"]]);
+    expect(caught.servedStale).toBeUndefined();
+  });
+
+  it("a page overlay reads the evidence the model holds, whatever its age, and asks the gateway nothing", async () => {
+    const m = await model.ensureReadModel(scope);
+    // An unchanged answer is only confirmed in the refreshing thread's memory, so its stored row can
+    // be older than the model: a request thread (no confirmations) must still not re-ask it.
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '20 minutes' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayCalls = [];
+    gatewayDown = true;
+    const overlay = await model.readModelPageDelivery(
+      m,
+      people.map((p) => ({ brandId, email: p.email })),
+    );
+    expect(gatewayCalls).toEqual([]);
+    expect(overlay.get("john@globex.test")).toBeDefined();
+    gatewayDown = false;
+  });
+
   it("a refresh where nothing moved writes NO model row and NO evidence row", async () => {
     const m = await model.ensureReadModel(scope);
     const rowVersions = async () =>
@@ -358,8 +439,8 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
       `;
     const rowsBefore = await rowVersions();
     const evidenceBefore = await evidenceVersions();
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
-    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
     const evidenceStaled = await evidenceVersions();
     evidence.resetEvidenceConfirmations();
     gatewayCalls = [];
@@ -387,8 +468,8 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const adaBefore = await version(people[3].rowId);
     const janeBefore = await version(people[0].rowId);
     statusByEmail["ada@engines.test"] = { contacted: true, sent: true, firstSentAt: "2026-02-04T00:00:00.000Z" };
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
-    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '6 minutes' WHERE org_id = ${orgId}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
     evidence.resetEvidenceConfirmations();
     const after = await model.ensureReadModel(scope);
     expect((await model.readModelBucketCounts(after, null)).counts.contacted).toBe(4);
@@ -401,14 +482,14 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const m = await model.ensureReadModel(scope);
     await db.update(leadsCampaigns).set({ status: "skipped" }).where(eq(leadsCampaigns.id, people[2].rowId));
     try {
-      await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+      await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
       const after = await model.ensureReadModel(scope);
       expect(after.id).toBe(m.id);
       expect((await model.readModelBucketCounts(after, null)).total).toBe(3);
     } finally {
       await db.update(leadsCampaigns).set({ status: "served" }).where(eq(leadsCampaigns.id, people[2].rowId));
     }
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '6 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
     expect((await model.readModelBucketCounts(await model.ensureReadModel(scope), null)).total).toBe(4);
   });
 

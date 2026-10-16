@@ -24,9 +24,11 @@
  *     an opt-out, a reply somebody classified, a click the provider observed) is asked again and
  *     shows on the next read, the same way.
  *  3. Everything else — delivery evidence nobody pushed, new serves, a campaign's leg, a name —
- *     is at most `READ_MODEL_MAX_EVIDENCE_AGE_MS` old, ENFORCED: a model older than that is rebuilt
- *     before it is read, never served. The worker (lead-read-model-worker.ts) rebuilds every model
- *     somebody reads once it is `READ_MODEL_REFRESH_AFTER_MS` old, so a read normally never waits.
+ *     is kept within `READ_MODEL_MAX_EVIDENCE_AGE_MS` by the worker (lead-read-model-worker.ts),
+ *     which rebuilds every model somebody reads once it is `READ_MODEL_REFRESH_AFTER_MS` old. When
+ *     the worker is behind, a read does NOT wait for a rebuild of a model younger than
+ *     `READ_MODEL_SERVE_WITHOUT_WAIT_MS`: it is served at once, stating its age (`servedStale`,
+ *     `evidenceAt`). An older model is rebuilt before it is read.
  *
  * What does NOT change. Buckets, standing and activity are computed by the SAME functions the list
  * row uses (enrichLeadIndex, the standing resolver) over the SAME relation (streamLeadIndex over
@@ -35,7 +37,9 @@
  * the set the tab pages through, and standing counts sum to `total` because a row has exactly one.
  *
  * FAIL LOUD. A model that cannot be built (email-gateway unreachable, statements unreadable) is an
- * error the route answers 502 with — never an empty model, never a model past its bound.
+ * error the route answers 502 with — never an empty model — unless a model younger than
+ * `READ_MODEL_SERVE_ON_OUTAGE_MS` is held: then that one is served, its age stated and logged as an
+ * error, so one sibling down never takes a brand's whole list down.
  */
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
@@ -91,6 +95,22 @@ import {
  */
 export const READ_MODEL_MAX_EVIDENCE_AGE_MS = 5 * 60_000;
 /**
+ * How old a model may be and still be served AT ONCE, without the read waiting for a rebuild
+ * (HOT-INBOUND-UNANSWERED-1016 follow-up, 2026-10-16). A read that queued on a rebuild paid the
+ * whole refresh: 78s for Distribute.you's 59k people right after a deploy, so crm-service's Unibox
+ * build (30s per page) failed every 15 minutes for two hours and ~9,100 people showed no standing.
+ * Past the bound the worker is behind (a deploy restarted it, a sibling blipped); the background
+ * thread refreshes any model read within the hour, so the next read is fresh again. Older than this
+ * (a model nobody read for an hour, which the worker stopped refreshing) a read still rebuilds first.
+ */
+export const READ_MODEL_SERVE_WITHOUT_WAIT_MS = 60 * 60_000;
+/**
+ * When a rebuild FAILS because a sibling is down (email-gateway, instantly-service), the model
+ * already held is served if it is younger than this, rather than taking the whole list down with a
+ * 502: one sibling being down never empties a brand's Leads page or Unibox. Older = 502.
+ */
+export const READ_MODEL_SERVE_ON_OUTAGE_MS = 24 * 60 * 60_000;
+/**
  * The worker refreshes a model once its evidence is this old. Three minutes, not two: the bound
  * above is what consumers rely on and it is unchanged; this is only how early inside it the worker
  * starts, and every refresh re-derives the whole scope. Two minutes (effectively every 90s after
@@ -135,6 +155,11 @@ export interface ReadModel {
   scope: ReadModelScope;
   evidenceAt: Date;
   appliedXmin: string;
+  /**
+   * Set when this read is answered from a model past `READ_MODEL_MAX_EVIDENCE_AGE_MS` rather than
+   * waiting for a rebuild (see `ensureReadModel`): why. Absent on a model inside its bound.
+   */
+  servedStale?: "refresh_behind" | "rebuild_failed" | "catch_up_failed";
 }
 
 /** Raised when a model could not be built or brought up to date. The route answers 502. */
@@ -288,6 +313,25 @@ export async function readModelDelivery(
     throw error;
   }
 }
+
+/**
+ * The overlay of a page hydrated from `model`: the evidence STORED for each address, whatever its
+ * `fetched_at`. The model was derived from exactly those rows (an unchanged answer is confirmed in
+ * the refreshing thread's memory, not rewritten, so its row can predate `model.evidenceAt`), so the
+ * row a page shows and the count it was counted in read one answer, and a page never re-asks
+ * email-gateway for what the model already holds. Before 2026-10-16 the page passed
+ * `model.evidenceAt`: the request thread never sees the background thread's confirmations, so a
+ * 2,000-row page re-asked the gateway about most of its people (20 requests) and one gateway blip
+ * 502'd the whole list. An address with nothing stored (not in the model's evidence) is asked.
+ */
+export function readModelPageDelivery(
+  model: ReadModel,
+  requests: readonly EvidenceRequest[],
+): Promise<Map<string, StatusResult>> {
+  return readModelDelivery(model.scope, requests, STORED_EVIDENCE_OF_ANY_AGE);
+}
+
+const STORED_EVIDENCE_OF_ANY_AGE = new Date(0);
 
 type Resolver = ReturnType<typeof createLeadStandingResolver>;
 
@@ -737,7 +781,7 @@ const MAX_REMEMBERED_CHANGES = 20_000;
  * Per-scope serialization, held across the request thread and the background thread (see
  * scope-lock.ts). SCOPE_LOCK is short: one catch-up, one refresh chunk, one swap. REFRESH_LOCK spans
  * a whole refresh or build, so two of them never run for one scope; a read only queues on it when
- * the model is past its bound, which is exactly when it must wait.
+ * there is no model or it is older than `READ_MODEL_SERVE_WITHOUT_WAIT_MS`.
  */
 const SCOPE_LOCK = "read-model";
 const REFRESH_LOCK = "read-model-refresh";
@@ -747,30 +791,75 @@ function isWithinBound(model: ReadModel, now: number): boolean {
 }
 
 /**
- * The model a read answers from: built if there is none or it is past its bound, otherwise brought
- * up to date with every change it has not seen. Never returns a model past its bound.
+ * The model a read answers from. Inside its bound: brought up to date with every change it has not
+ * seen. Past its bound but younger than `READ_MODEL_SERVE_WITHOUT_WAIT_MS`: served at once (the
+ * background worker refreshes it), never queued behind a rebuild. Older, or none: built first. A
+ * sibling outage (`ReadModelUnavailableError`) during that build or catch-up serves the model held
+ * when it is younger than `READ_MODEL_SERVE_ON_OUTAGE_MS`, loudly; otherwise it throws (502).
+ * Whenever a model past its bound is served, `servedStale` says why and `evidenceAt` says how old.
  */
 export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel> {
   const key = readModelKey(scope);
-  let model = await loadModel(key);
-  if (model && isWithinBound(model, Date.now())) {
-    await catchUpModel(model);
+  const held = await loadModel(key);
+  let model: ReadModel;
+  if (held && servableWithoutWait(held, Date.now())) {
+    model = held;
+    if (!isWithinBound(model, Date.now())) {
+      model.servedStale = "refresh_behind";
+      console.warn(
+        `[lead-read-model] serving scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) ` +
+          `from evidence ${ageSeconds(model)}s old without waiting: its background refresh is behind`,
+      );
+    }
+    try {
+      await catchUpModel(model);
+    } catch (error) {
+      if (!(error instanceof ReadModelUnavailableError)) throw error;
+      model.servedStale = "catch_up_failed";
+      console.error(
+        `[lead-read-model] scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) served ` +
+          `WITHOUT its pending changes: a sibling is down (${error.source}): ${error.message}`,
+      );
+    }
   } else {
-    model = await withScopeLock(REFRESH_LOCK, key, async () => {
-      // Somebody may have refreshed it while this read queued.
-      const current = await loadModel(key);
-      if (current && isWithinBound(current, Date.now())) {
-        await catchUpModel(current);
-        return current;
+    try {
+      model = await withScopeLock(REFRESH_LOCK, key, async () => {
+        // Somebody may have refreshed it while this read queued.
+        const current = await loadModel(key);
+        if (current && isWithinBound(current, Date.now())) {
+          await catchUpModel(current);
+          return current;
+        }
+        return buildModel(scope, key, current);
+      });
+    } catch (error) {
+      if (!(error instanceof ReadModelUnavailableError)) throw error;
+      const fallback = await loadModel(key);
+      if (!fallback || fallback.evidenceAt.getTime() < Date.now() - READ_MODEL_SERVE_ON_OUTAGE_MS) {
+        throw error;
       }
-      return buildModel(scope, key, current);
-    });
+      fallback.servedStale = "rebuild_failed";
+      console.error(
+        `[lead-read-model] scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) could ` +
+          `not be rebuilt, a sibling is down (${error.source}); serving evidence ` +
+          `${ageSeconds(fallback)}s old rather than refusing the read: ${error.message}`,
+      );
+      model = fallback;
+    }
   }
   await sql`
     UPDATE lead_read_models SET last_read_at = now()
     WHERE id = ${model.id} AND last_read_at < now() - interval '30 seconds'
   `;
   return model;
+}
+
+function servableWithoutWait(model: ReadModel, now: number): boolean {
+  return model.evidenceAt.getTime() >= now - READ_MODEL_SERVE_WITHOUT_WAIT_MS;
+}
+
+function ageSeconds(model: ReadModel): number {
+  return Math.round((Date.now() - model.evidenceAt.getTime()) / 1000);
 }
 
 /**

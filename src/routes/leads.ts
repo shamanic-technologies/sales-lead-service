@@ -44,7 +44,7 @@ import {
   ensureReadModel,
   noteEvidenceChanged,
   readModelBucketCounts,
-  readModelDelivery,
+  readModelPageDelivery,
   readModelPage,
   readModelScopeFor,
   readModelStandingAndStageCounts,
@@ -591,6 +591,17 @@ class LeadReadRefused extends Error {
   }
 }
 
+/**
+ * States how old the delivery evidence of a model-backed answer is (`x-lead-evidence-at`, ISO) and,
+ * when the model was served past its freshness bound rather than waited for, why
+ * (`x-lead-evidence-stale`: refresh_behind | catch_up_failed | rebuild_failed). Headers, so every
+ * body stays byte-identical.
+ */
+function stateModelEvidence(res: Response, model: ReadModel): void {
+  res.setHeader("x-lead-evidence-at", model.evidenceAt.toISOString());
+  if (model.servedStale) res.setHeader("x-lead-evidence-stale", model.servedStale);
+}
+
 /** What a caller asks the response to be. Absent means JSON, exactly as today. */
 type LeadListFormat = "json" | "csv";
 
@@ -976,6 +987,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
     if (indexed) {
       try {
         model = await ensureReadModel(readModelScopeFor(scope, brandIdStr, hasScopeForStatus));
+        stateModelEvidence(res, model);
       } catch (error) {
         if (error instanceof ReadModelUnavailableError) {
           console.error(
@@ -1059,12 +1071,11 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         const statusMap = !hasScopeForStatus
           ? new Map<string, StatusResult>()
           : model
-            ? await readModelDelivery(
-                model.scope,
+            ? await readModelPageDelivery(
+                model,
                 basicRows
                   .filter((r) => r.status === "served" && r.email?.value)
                   .map((r) => ({ brandId: r.brandIds[0] ?? "unknown", email: r.email!.value })),
-                model.evidenceAt,
               )
             : await buildStatusMapForBasicRows(basicRows, statusCampaignIdStr, context);
 
@@ -1264,15 +1275,14 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       // Delivery-status overlay, scoped to this chunk's served rows only.
       const statusMap = new Map<string, StatusResult>();
       if (hasScopeForStatus && model) {
-        const fromModel = await readModelDelivery(
-          model.scope,
+        const fromModel = await readModelPageDelivery(
+          model,
           chunkRows.flatMap((row) => {
             const email = primaryEmail(fullLeadByLeadId.get(row.leadId))?.value;
             return row.status === "served" && email
               ? [{ brandId: row.brandIds[0] ?? "unknown", email }]
               : [];
           }),
-          model.evidenceAt,
         );
         for (const [email, result] of fromModel) statusMap.set(email, result);
       } else if (hasScopeForStatus) {
@@ -1454,6 +1464,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
       model = await ensureReadModel(
         readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
       );
+      stateModelEvidence(res, model);
     } catch (error) {
       if (error instanceof ReadModelUnavailableError) {
         console.error(
@@ -1577,6 +1588,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       model = await ensureReadModel(
         readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
       );
+      stateModelEvidence(res, model);
     } catch (error) {
       if (error instanceof ReadModelUnavailableError) {
         console.error(
