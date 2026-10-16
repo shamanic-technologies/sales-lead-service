@@ -142,10 +142,10 @@ describe("resolveSourceAudiences", () => {
       [list]: () =>
         json({
           audiences: [
-            { id: "a-small", availableToContactCount: 10 },
-            { id: "a-signal", availableToContactCount: 900 },
-            { id: "a-big", availableToContactCount: 500 },
-            { id: "a-unknown" },
+            { id: "a-small", availableToContactCount: 10, channels: [] },
+            { id: "a-signal", availableToContactCount: 900, channels: [] },
+            { id: "a-big", availableToContactCount: 500, channels: [] },
+            { id: "a-unknown", channels: [] },
           ],
           total: 4,
         }),
@@ -167,7 +167,7 @@ describe("resolveSourceAudiences", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string, init?: { headers?: Record<string, string> }) => {
-        if (url === list) return json({ audiences: [{ id: "a-apollo", availableToContactCount: 900 }, { id: "a-crm", availableToContactCount: 5 }], total: 2 });
+        if (url === list) return json({ audiences: [{ id: "a-apollo", availableToContactCount: 900, channels: [] }, { id: "a-crm", availableToContactCount: 5, channels: [] }], total: 2 });
         const id = Object.keys(ownOrigin).find((k) => url === origin(k));
         if (!id) throw new Error(`unexpected ${url}`);
         const headers = init?.headers ?? {};
@@ -187,7 +187,7 @@ describe("resolveSourceAudiences", () => {
 
   it("the audience the caller named goes first when it is one of them", async () => {
     stubFetch({
-      [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 900 }, { id: "a-2", availableToContactCount: 1 }], total: 2 }),
+      [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 900, channels: [] }, { id: "a-2", availableToContactCount: 1, channels: [] }], total: 2 }),
       [origin("a-1")]: () => json({ sourcingFeatureSlug: COLD }),
       [origin("a-2")]: () => json({ sourcingFeatureSlug: COLD }),
     });
@@ -197,7 +197,7 @@ describe("resolveSourceAudiences", () => {
 
   it("Lead Sourcing walks the audiences of the origins human-service CHOSE for the brand", async () => {
     stubFetch({
-      [list]: () => json({ audiences: [{ id: "a-cold", availableToContactCount: 5 }, { id: "a-sig", availableToContactCount: 9 }], total: 2 }),
+      [list]: () => json({ audiences: [{ id: "a-cold", availableToContactCount: 5, channels: [] }, { id: "a-sig", availableToContactCount: 9, channels: [] }], total: 2 }),
       [`http://human/orgs/lead-sourcing/sources?brandId=brand-1&offerId=offer-1`]: () => json({ chosenOriginSlugs: ["sourcing-apollo-buying-signals"] }),
       [origin("a-cold")]: () => json({ sourcingFeatureSlug: COLD }),
       [origin("a-sig")]: () => json({ sourcingFeatureSlug: "sourcing-apollo-buying-signals" }),
@@ -206,9 +206,71 @@ describe("resolveSourceAudiences", () => {
     expect(await resolveSourceAudiences({ orgId: ORG, brandId: "brand-1", offerId: "offer-1", unitSlug: "lead-sourcing", preferredAudienceId: null })).toEqual({ kind: "walk", audienceIds: ["a-sig"] });
   });
 
+  // AUDIENCE-SOURCES-1016: a source is not an audience. "Employed chiros" (own list Apollo cold) holds a "Hiring now"
+  // source; the Buying Signals unit walks it through that source, the Cold Filters unit through its own list.
+  describe("an audience found through a SOURCE", () => {
+    const catalogue = () =>
+      json({
+        originsByChannel: {},
+        origins: [
+          { slug: COLD, name: "Apollo Cold Filters", audienceLists: ["apollo_search"] },
+          { slug: "sourcing-apollo-buying-signals", name: "Apollo Buying Signals", audienceLists: ["apollo_buying_signal"] },
+          { slug: "sourcing-linkedin-engagement", name: "LinkedIn engagement", audienceLists: ["linkedin_engagement"] },
+          { slug: "sourcing-crm-contacts", name: "CRM", audienceLists: ["crm_contacts"] },
+        ],
+      });
+    const own = { list: "apollo_search", audienceId: "a-employed" };
+    const routes = (hiringStatus: string) => ({
+      [list]: () =>
+        json({
+          audiences: [
+            {
+              id: "a-employed",
+              availableToContactCount: 40,
+              channels: [own, { list: "apollo_buying_signal", audienceId: "a-employed", sourceId: "src-hiring", name: "Hiring now", status: hiringStatus }],
+            },
+            { id: "a-owners", availableToContactCount: 90, channels: [{ list: "apollo_search", audienceId: "a-owners" }] },
+            { id: "a-crm", availableToContactCount: 5, channels: [{ list: "crm_contacts", audienceId: "a-crm" }] },
+          ],
+          total: 3,
+        }),
+      [origin("a-employed")]: () => json({ sourcingFeatureSlug: COLD }),
+      [origin("a-owners")]: () => json({ sourcingFeatureSlug: COLD }),
+      [origin("a-crm")]: () => json({ sourcingFeatureSlug: "sourcing-crm-contacts" }),
+      ["http://features/public/sourcing-origins"]: catalogue,
+    });
+    const base = { orgId: ORG, brandId: "brand-1", offerId: "offer-1", preferredAudienceId: null };
+
+    it("the Buying Signals unit walks the audience holding an ON hiring source, never one without it", async () => {
+      stubFetch(routes("active"));
+      const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
+      expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-apollo-buying-signals" })).toEqual({ kind: "walk", audienceIds: ["a-employed"] });
+    });
+
+    it("the Cold Filters unit still walks it through its own list", async () => {
+      stubFetch(routes("active"));
+      const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
+      expect(await resolveSourceAudiences({ ...base, unitSlug: COLD })).toEqual({ kind: "walk", audienceIds: ["a-owners", "a-employed"] });
+    });
+
+    it("an OFF source is not walked; no source makes a CRM unit walk an Apollo audience", async () => {
+      stubFetch(routes("paused"));
+      const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
+      expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-apollo-buying-signals" })).toEqual({ kind: "walk", audienceIds: [] });
+      expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-linkedin-engagement" })).toEqual({ kind: "walk", audienceIds: [] });
+      expect(await resolveSourceAudiences({ ...base, unitSlug: "sourcing-crm-contacts" })).toEqual({ kind: "walk", audienceIds: ["a-crm"] });
+    });
+
+    it("an audience without channels throws (never read as no sources)", async () => {
+      stubFetch({ [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 1 }], total: 1 }) });
+      const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
+      await expect(resolveSourceAudiences({ ...base, unitSlug: COLD })).rejects.toThrow(/without channels/);
+    });
+  });
+
   it("an audience serving from no list (422) is left out", async () => {
     stubFetch({
-      [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 5 }], total: 1 }),
+      [list]: () => json({ audiences: [{ id: "a-1", availableToContactCount: 5, channels: [] }], total: 1 }),
       [origin("a-1")]: () => json({ error: "no committed provider" }, 422),
     });
     const { resolveSourceAudiences } = await import("../../src/lib/source-audiences.js");
