@@ -107,7 +107,7 @@ async function feedsStarted(): Promise<boolean> {
 /** The latest past send to each of these leads at the brand, on both feeds, applied with the send rule. */
 async function applyPastSends(orgId: string, brandId: string, leadIds: string[]): Promise<void> {
   const ids = sql.param(leadIds);
-  const [email, unibox] = await Promise.all([
+  const [email, unibox, uniboxTheirs] = await Promise.all([
     db.execute(sql`
       SELECT cm.lead_id::text AS lead_id, max(o.occurred_at) AS at
       FROM lead_contact_methods cm
@@ -117,6 +117,7 @@ async function applyPastSends(orgId: string, brandId: string, leadIds: string[])
       GROUP BY cm.lead_id
     `) as unknown as Promise<Array<{ lead_id: string; at: Date | string }>>,
     loadUniboxFacts(sql`f.org_id = ${orgId} AND f.brand_id = ${brandId}`).then(matchUniboxSends),
+    loadUniboxFacts(sql`f.org_id = ${orgId} AND f.brand_id = ${brandId}`, "theirs").then(matchUniboxSends),
   ]);
   const wanted = new Set(leadIds);
   const sends: ObservedSend[] = [
@@ -124,6 +125,7 @@ async function applyPastSends(orgId: string, brandId: string, leadIds: string[])
     ...unibox.filter((u) => wanted.has(u.leadId)),
   ];
   await applySends(sends);
+  await applyActions(uniboxTheirs.filter((u) => wanted.has(u.leadId)));
 }
 
 interface UniboxFact {
@@ -136,13 +138,18 @@ interface UniboxFact {
   human_id: string | null;
 }
 
-/** Every message of ours in the Unibox (crm `message_out`) the filter names, dated. */
-async function loadUniboxFacts(factFilter: SQL): Promise<UniboxFact[]> {
+/**
+ * The crm facts the filter names, dated: `ours` = our Unibox messages (`message_out`); `theirs` = every fact that is
+ * not ours nor bookkeeping (CRM_NOT_THEIR_ACT), so a kind of act crm-service starts stating counts the day it lands.
+ */
+async function loadUniboxFacts(factFilter: SQL, whose: "ours" | "theirs" = "ours"): Promise<UniboxFact[]> {
+  const kind =
+    whose === "ours" ? sql`f.type = 'message_out'` : sql`f.type <> ALL(${sql.param([...CRM_NOT_THEIR_ACT])}::text[])`;
   return (await db.execute(sql`
     SELECT f.org_id, f.brand_id, f.occurred_at AS at, COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel,
       f.emails, f.phones, CASE WHEN (f.raw->>'humanId') ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human_id
     FROM crm_facts f
-    WHERE f.type = 'message_out' AND f.occurred_at IS NOT NULL AND ${factFilter}
+    WHERE ${kind} AND f.occurred_at IS NOT NULL AND ${factFilter}
   `)) as unknown as UniboxFact[];
 }
 
@@ -259,6 +266,57 @@ export async function applySends(sends: readonly ObservedSend[]): Promise<number
   return moved;
 }
 
+/**
+ * Did they DO something toward the brand? (owner 2026-10-16: "ce n'est pas qu'on a déjà échangé, mais au moins qu'ils
+ * ont fait une action envers nous (website visit, quelque chose)"; "Il ne faut pas un Unibox vide de leurs actions.")
+ * Read off the same facts the person's Unibox timeline is built from, never a list of action kinds:
+ *   - the labelled timeline (`lead_timeline_facts`, GET /orgs/leads/{id}/timeline): any live fact whose basis is not
+ *     `our_email` (our sends and bounces): a reply, a click, a visit, an open, a signup, a form, a meeting, a sale...;
+ *   - crm-service's fact copy (the Unibox threads, every channel): any fact that is not ours (`message_out`) nor a
+ *     record about them nobody acted (CRM_NOT_THEIR_ACT: corrections, CRM bookkeeping, a no-show), recorded here as
+ *     `last_action_at` (it moves no date).
+ * A person we only sent to, or never contacted, is cold: "Lead follow-up due" never serves them until they act.
+ */
+export const CRM_NOT_THEIR_ACT = [
+  "message_out",
+  "withdrawn",
+  "person_merged",
+  "person_split",
+  "added_to_crm",
+  "group_member",
+  "deal_status_changed",
+  "disqualified",
+  "meeting_not_held",
+] as const;
+
+export async function applyActions(messages: readonly ObservedSend[]): Promise<void> {
+  const rows = latestPerLead(messages);
+  for (let i = 0; i < rows.length; i += 1_000) {
+    const chunk = rows.slice(i, i + 1_000);
+    await db.execute(sql`
+      UPDATE lead_followup_dates d SET last_action_at = s.at, updated_at = now()
+      FROM (
+        SELECT * FROM unnest(
+          ${sql.param(chunk.map((r) => r.orgId))}::text[],
+          ${sql.param(chunk.map((r) => r.brandId))}::text[],
+          ${sql.param(chunk.map((r) => r.leadId))}::uuid[],
+          ${sql.param(chunk.map((r) => r.sentAt))}::timestamptz[]
+        ) AS x(org_id, brand_id, lead_id, at)
+      ) s
+      WHERE d.org_id = s.org_id AND d.brand_id = s.brand_id AND d.lead_id = s.lead_id
+        AND (d.last_action_at IS NULL OR s.at > d.last_action_at)
+    `);
+  }
+}
+
+/** SQL: the person (row alias `d` of lead_followup_dates) did at least one thing toward the brand (see above). */
+export function actedTowardUsSql(d: SQL): SQL {
+  return sql`(${d}.last_action_at IS NOT NULL OR EXISTS (
+    SELECT 1 FROM lead_timeline_facts t_x
+    WHERE t_x.org_id = ${d}.org_id AND t_x.brand_id = ${d}.brand_id AND t_x.lead_id = ${d}.lead_id
+      AND t_x.withdrawn_at IS NULL AND t_x.attribution_basis IS DISTINCT FROM 'our_email'))`;
+}
+
 async function readCursor(feed: string): Promise<bigint | null> {
   const rows = (await db.execute(sql`SELECT cursor::text AS c FROM lead_followup_date_cursors WHERE feed = ${feed}`)) as unknown as Array<{ c: string }>;
   return rows[0] ? BigInt(rows[0].c) : null;
@@ -273,7 +331,9 @@ async function writeCursor(feed: string, cursor: bigint): Promise<void> {
 
 /** One batch of instantly-service's email facts: sends and replies of ours move the date. false = caught up. */
 async function stepOutreachFeed(): Promise<boolean> {
-  const from = (await readCursor("outreach_facts")) ?? 0n;
+  const feed = "outreach_facts";
+  const types = ["email_sent", "reply_sent"];
+  const from = (await readCursor(feed)) ?? 0n;
   const [edge] = (await db.execute(sql`
     SELECT max(seq)::text AS m FROM (SELECT seq FROM outreach_facts WHERE seq > ${from.toString()}::bigint ORDER BY seq LIMIT ${FEED_BATCH}) b
   `)) as unknown as Array<{ m: string | null }>;
@@ -283,7 +343,7 @@ async function stepOutreachFeed(): Promise<boolean> {
     SELECT o.org_id, b AS brand_id, lower(o.lead_email) AS email, max(o.occurred_at) AS at
     FROM outreach_facts o CROSS JOIN LATERAL unnest(o.brand_ids) AS b
     WHERE o.seq > ${from.toString()}::bigint AND o.seq <= ${to.toString()}::bigint
-      AND o.type IN ('email_sent', 'reply_sent') AND o.org_id IS NOT NULL AND o.occurred_at IS NOT NULL
+      AND o.type = ANY(${sql.param(types)}::text[]) AND o.org_id IS NOT NULL AND o.occurred_at IS NOT NULL
     GROUP BY o.org_id, b, lower(o.lead_email)
   `)) as unknown as Array<{ org_id: string; brand_id: string; email: string; at: Date | string }>;
   const emails = [...new Set(facts.map((f) => f.email))];
@@ -296,24 +356,34 @@ async function stepOutreachFeed(): Promise<boolean> {
         `)) as unknown as Array<{ email: string; lead_id: string }>);
   const leadsOf = new Map<string, string[]>();
   for (const o of owners) leadsOf.set(o.email, [...(leadsOf.get(o.email) ?? []), o.lead_id]);
-  await applySends(
-    facts.flatMap((f) => (leadsOf.get(f.email) ?? []).map((leadId) => ({ orgId: f.org_id, brandId: f.brand_id, leadId, sentAt: toIsoTimestamp(f.at)!, channel: "email" }))),
+  const observed = facts.flatMap((f) =>
+    (leadsOf.get(f.email) ?? []).map((leadId) => ({ orgId: f.org_id, brandId: f.brand_id, leadId, sentAt: toIsoTimestamp(f.at)!, channel: "email" })),
   );
-  await writeCursor("outreach_facts", to);
+  await applySends(observed);
+  await writeCursor(feed, to);
   return true;
 }
 
-/** One batch of crm-service's people facts: every message of ours in the Unibox moves the date. false = caught up. */
-async function stepUniboxFeed(): Promise<boolean> {
-  const from = (await readCursor("crm_facts")) ?? 0n;
+/**
+ * One batch of crm-service's people facts. `out`: every message of ours in the Unibox moves the date. `in`: every act of
+ * theirs is recorded (`last_action_at`), on a cursor of its own. false = caught up.
+ */
+async function stepUniboxFeed(direction: "out" | "in" = "out"): Promise<boolean> {
+  const feed = direction === "out" ? "crm_facts" : "crm_facts:theirs";
+  const from = (await readCursor(feed)) ?? 0n;
   const [edge] = (await db.execute(sql`
     SELECT max(seq)::text AS m FROM (SELECT seq FROM crm_facts WHERE seq > ${from.toString()}::bigint ORDER BY seq LIMIT ${FEED_BATCH}) b
   `)) as unknown as Array<{ m: string | null }>;
   if (!edge?.m) return false;
   const to = BigInt(edge.m);
-  const facts = await loadUniboxFacts(sql`f.seq > ${from.toString()}::bigint AND f.seq <= ${to.toString()}::bigint`);
-  await applySends(await matchUniboxSends(facts));
-  await writeCursor("crm_facts", to);
+  const facts = await loadUniboxFacts(
+    sql`f.seq > ${from.toString()}::bigint AND f.seq <= ${to.toString()}::bigint`,
+    direction === "out" ? "ours" : "theirs",
+  );
+  const observed = await matchUniboxSends(facts);
+  if (direction === "out") await applySends(observed);
+  else await applyActions(observed);
+  await writeCursor(feed, to);
   return true;
 }
 
@@ -321,11 +391,11 @@ async function stepUniboxFeed(): Promise<boolean> {
 export async function syncSendFeeds(budgetMs = SWEEP_BUDGET_MS): Promise<{ batches: number }> {
   const until = Date.now() + budgetMs;
   let batches = 0;
-  let outreach = true;
-  let unibox = true;
-  while ((outreach || unibox) && Date.now() < until) {
-    if (outreach) outreach = await stepOutreachFeed();
-    if (unibox) unibox = await stepUniboxFeed();
+  const open = { outreach: true, unibox: true, theirs: true };
+  while (Object.values(open).some(Boolean) && Date.now() < until) {
+    if (open.outreach) open.outreach = await stepOutreachFeed();
+    if (open.unibox) open.unibox = await stepUniboxFeed("out");
+    if (open.theirs) open.theirs = await stepUniboxFeed("in");
     batches++;
   }
   return { batches };
@@ -347,6 +417,10 @@ export interface FollowupDateRow {
   sentCount: number;
   lastServedAt: string | null;
   servedCount: number;
+  /** Their latest act toward the brand read off the crm facts (null = none there; the timeline may still hold one). */
+  lastActionAt: string | null;
+  /** Did they ever do something toward the brand? "Lead follow-up due" serves only people who did. */
+  actedTowardUs: boolean;
 }
 
 type Ts = Date | string | null;
@@ -363,6 +437,8 @@ interface RawDateRow {
   sent_count: number;
   last_served_at: Ts;
   served_count: number;
+  last_action_at: Ts;
+  acted: boolean;
 }
 const iso = (v: Ts): string | null => (v === null || v === undefined ? null : toIsoTimestamp(v));
 
@@ -379,6 +455,8 @@ function toRow(r: RawDateRow): FollowupDateRow {
     sentCount: Number(r.sent_count),
     lastServedAt: iso(r.last_served_at),
     servedCount: Number(r.served_count),
+    lastActionAt: iso(r.last_action_at),
+    actedTowardUs: r.acted === true,
   };
 }
 
@@ -390,7 +468,8 @@ export async function loadFollowupDate(orgId: string, brandId: string, leadId: s
     ON CONFLICT (org_id, brand_id, lead_id) DO NOTHING
   `);
   const [r] = (await db.execute(sql`
-    SELECT * FROM lead_followup_dates WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${leadId}::uuid
+    SELECT d.*, ${actedTowardUsSql(sql`d`)} AS acted FROM lead_followup_dates d
+    WHERE d.org_id = ${orgId} AND d.brand_id = ${brandId} AND d.lead_id = ${leadId}::uuid
   `)) as unknown as RawDateRow[];
   return toRow(r);
 }
@@ -610,6 +689,7 @@ export async function claimDueFollowupLead(p: {
     const candidates = (await db.execute(sql`
       SELECT d.lead_id::text AS lead_id FROM lead_followup_dates d
       WHERE d.org_id = ${p.orgId} AND d.brand_id = ${p.brandId} AND d.next_followup_at <= now()
+        AND ${actedTowardUsSql(sql`d`)}
         AND d.lead_id <> ALL(${sql.param(skipped)}::uuid[])
         AND NOT EXISTS (
           SELECT 1 FROM lead_followup_due_serves ds WHERE ds.org_id = d.org_id AND ds.brand_id = d.brand_id AND ds.lead_id = d.lead_id
@@ -646,6 +726,7 @@ async function fileDueFind(p: Parameters<typeof claimDueFollowupLead>[0], leadId
     const [due] = (await tx.execute(sql`
       SELECT next_followup_at FROM lead_followup_dates
       WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid AND next_followup_at <= now()
+        AND ${actedTowardUsSql(sql`lead_followup_dates`)}
       FOR UPDATE SKIP LOCKED
     `)) as unknown as Array<{ next_followup_at: Ts }>;
     if (!due) return null;
@@ -735,7 +816,14 @@ export async function dueVerdict(
 ): Promise<ProspectFollowupVerdict> {
   const v = (await loadProspectFollowupVerdicts({ ...scope, leadIds: [scope.leadId], context, contactedRequired: false })).get(scope.leadId);
   if (!v) throw new Error(`[lead-followup-date] no verdict for lead ${scope.leadId} (brand ${scope.brandId})`);
-  return v;
+  // No action of theirs toward the brand (only our sends, or nothing) = a follow-up would be cold: not owed until one.
+  const [x] = (await db.execute(sql`
+    SELECT ${actedTowardUsSql(sql`d`)} AS exchanged FROM lead_followup_dates d
+    WHERE d.org_id = ${scope.orgId} AND d.brand_id = ${scope.brandId} AND d.lead_id = ${scope.leadId}::uuid
+  `)) as unknown as Array<{ exchanged: boolean }>;
+  if (x?.exchanged) return v;
+  const reasons = ["no_action_toward_us" as const, ...v.reasons];
+  return { ...v, owed: false, kind: "stop", retryAfter: null, reason: "no_action_toward_us", reasons };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

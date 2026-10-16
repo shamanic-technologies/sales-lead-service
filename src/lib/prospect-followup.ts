@@ -61,6 +61,8 @@ export const PROSPECT_FOLLOWUP_STOP_REASONS = [
   "positive_reply",
   "not_pure_prospect",
   "not_contacted",
+  // "Lead follow-up due" only (src/lib/lead-followup-date.ts `dueVerdict`): the person never acted toward the brand.
+  "no_action_toward_us",
   // Not yet (NOT_YET_REASONS): owed, just not now.
   "in_conversation",
   "sequence_running",

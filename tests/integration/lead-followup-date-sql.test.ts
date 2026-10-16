@@ -58,6 +58,13 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = ${at}::timestamptz WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${leadId}::uuid`);
   }
 
+  /** Something they did toward the brand, on their labelled timeline (a click to the site). */
+  async function act(leadId: string) {
+    await db.execute(sql`
+      INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, label, source, source_ref, occurred_at, attribution_basis)
+      VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${leadId}::uuid, 'website_visit', 'outreach', ${randomUUID()}, now(), 'reaction_to_our_email')`);
+  }
+
   const serveDue = () =>
     fd.claimDueFollowupLead({
       orgId,
@@ -194,6 +201,13 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await setDue(waOnly.leadId, "2026-02-01T00:00:00Z");
     await setDue(client.leadId, "2025-01-01T00:00:00Z");
     await setDue(friend.leadId, "2025-02-01T00:00:00Z");
+    for (const p of [older, client, friend]) await act(p.leadId);
+    // The phone-only person wrote to us on WhatsApp: an act of theirs read off the Unibox facts.
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
+        'message_in', '2026-10-01T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
+    await fd.syncSendFeeds(30_000);
     await db.execute(sql`
       INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
       VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
@@ -249,6 +263,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     const later = await person("later");
     await fd.ensureLeadFollowupDates({ orgId, brandId });
     await setDue(later.leadId);
+    await act(later.leadId);
     expect((await serveDue())?.leadId).toBe(later.leadId);
     queued.add(later.email!); // a sequence started meanwhile: not yet
     const t = await takeStock();
@@ -259,5 +274,32 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     queued.clear();
     await setDue(later.leadId);
     expect((await serveDue())?.leadId).toBe(later.leadId);
+  });
+
+  it("never serves a lead who did nothing toward the brand (only emailed, or never contacted), until they act", async () => {
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+    const emailedOnly = await person("emailedonly");
+    const never = await person("nevercontacted");
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    await fd.applySends([{ orgId, brandId, leadId: emailedOnly.leadId, sentAt: "2026-09-01T10:00:00Z", channel: "email" }]);
+    await setDue(emailedOnly.leadId);
+    await setDue(never.leadId);
+    expect(await serveDue()).toBeNull();
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false, lastSentChannel: "email" });
+    // Untouched: their date stays, nothing set aside, nothing postponed.
+    expect((await dateOf(never.leadId)).nextFollowupAt).toBe("2026-01-01T00:00:00.000Z");
+    expect((await fd.dueVerdict({ orgId, brandId, leadId: emailedOnly.leadId }, {})).reason).toBe("no_action_toward_us");
+
+    // They write to us once on WhatsApp (matched by email here): served.
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`email:${emailedOnly.email}`}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
+        'message_in', '2026-10-02T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
+    await fd.syncSendFeeds(30_000);
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
+    expect((await serveDue())?.leadId).toBe(emailedOnly.leadId);
+    // The never-contacted one visits the site: served next.
+    await act(never.leadId);
+    expect((await serveDue())?.leadId).toBe(never.leadId);
   });
 });
