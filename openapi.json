@@ -9102,6 +9102,149 @@
           "count"
         ]
       },
+      "LeadProvenanceResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "people": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PersonProvenance"
+            }
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "brandId",
+          "people",
+          "count"
+        ]
+      },
+      "PersonProvenance": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The asked address, trimmed and lowercased."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every source tag of the person, sorted, deduped: the origin slug of each named source (e.g. `sourcing-apollo-cold-filters`), `list:<kind>` for a list kind the catalogue does not name, `list:none` for an audience stating no list, plus lead-service's audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`. Multi: a person found by several sources carries every tag. Empty = nobody recorded where the person came from."
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProvenanceSource"
+            },
+            "description": "Every audience of the brand that found the person (human-service memberships), the serving one first."
+          },
+          "filings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "crm_signup",
+                    "social_engagement",
+                    "stated_by_org"
+                  ]
+                },
+                "firstAt": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "kind",
+                "firstAt"
+              ]
+            },
+            "description": "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated."
+          }
+        },
+        "required": [
+          "email",
+          "tags",
+          "sources",
+          "filings"
+        ]
+      },
+      "ProvenanceSource": {
+        "type": "object",
+        "properties": {
+          "audienceId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string",
+            "nullable": true
+          },
+          "list": {
+            "type": "string",
+            "nullable": true,
+            "description": "human-service's audience list kind (apollo_search, linkedin_engagement, crm...); null when the audience states none."
+          },
+          "origin": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "slug": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "slug",
+              "name"
+            ],
+            "description": "The sourcing origin features-service names for that list kind; null when the catalogue names none (never guessed)."
+          },
+          "servedLead": {
+            "type": "boolean",
+            "description": "True for the source whose serve handed this person out (provenance `served`); false = that source found them while already taken (`found_taken`)."
+          },
+          "foundAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "When that audience found the person, ISO-8601; null when human-service stated none."
+          }
+        },
+        "required": [
+          "audienceId",
+          "offerId",
+          "list",
+          "origin",
+          "servedLead",
+          "foundAt"
+        ]
+      },
+      "LeadProvenanceRequest": {
+        "type": "object",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "emails"
+        ]
+      },
       "ServeRecordsResponse": {
         "type": "object",
         "properties": {
@@ -18938,6 +19081,73 @@
           },
           "503": {
             "description": "The outreach fact copy has not reached the feed's end yet"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/lead-provenance/by-email": {
+      "post": {
+        "summary": "Every lead-source tag of each address at a brand, in bulk (internal, service-auth)",
+        "description": "For the sending side (instantly-service) to join sends, bounces, refusals and blocklist hits to the lead SOURCES that produced the people. One answer per distinct asked address (trimmed, lowercased), in the order asked, every address answered (empty `tags` when nothing is recorded). Sources = human-service's memberships of the brand named by features-service's origin catalogue (same as `sources` on Leads list rows) + lead-service's audience-less filings. Read only. Up to 1000 addresses per call. 502 when human-service or the origin catalogue cannot be read (never `no source`).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadProvenanceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every asked address with its source tags",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadProvenanceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id missing, or body unreadable (emails: 1 to 1000 strings)"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "human-service memberships or the features-service origin catalogue could not be read"
           }
         }
       }
