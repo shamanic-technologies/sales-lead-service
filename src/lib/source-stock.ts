@@ -4,6 +4,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
+import { journalistScopeOf } from "./brand-journalists.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
 
 /**
@@ -141,7 +142,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
          AND NOT EXISTS (
            SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
          )
-         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed)}
+         ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))}
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED

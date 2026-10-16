@@ -8,6 +8,7 @@ import { loadLeadAndCompanyMarks } from "./lead-disqualification.js";
 import { loadRelationships, type RelationshipBlock } from "./relationship-read.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { reachClauses } from "./reach-sql.js";
+import { journalistScopeOf } from "./brand-journalists.js";
 import type { ReachMethod } from "./people-client.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
 
@@ -343,7 +344,7 @@ export async function claimContactedProspect(p: {
           SELECT 1 FROM lead_timeline_facts x
           WHERE x.org_id = t.org_id AND x.brand_id = t.brand_id AND x.lead_id = t.lead_id AND x.withdrawn_at IS NULL
             AND x.label = ANY(${dsql.param([...STOP_LABELS])}::text[]))
-        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails, null, p.recentlyEmailed)}
+        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails, null, p.recentlyEmailed, journalistScopeOf(p.orgId, [p.brandId]))}
       GROUP BY t.lead_id
       ORDER BY max(t.occurred_at) ASC NULLS FIRST, t.lead_id ASC
       LIMIT ${CANDIDATE_BATCH} OFFSET ${offset}

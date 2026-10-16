@@ -1,6 +1,6 @@
 /**
  * Jev reads a person's WHOLE merged thread and says, tag by tag, how likely each relationship is
- * (RELATIONSHIP-TAGS-1014). One call per lead of the brand, nine yes/no questions, frozen in
+ * (RELATIONSHIP-TAGS-1014). One call per lead of the brand, ten yes/no questions, frozen in
  * `relationship_judgments` with the thread position it read (`thread_seq`): a lead is judged again only
  * when its thread MOVED (a new message, a signup, a payment, a merge that brought another thread in).
  *
@@ -42,7 +42,7 @@ export const TAG_QUESTIONS: Record<RelationshipTag, YesNoQuestion> = {
       "Is this person a prospect of the brand: someone who might buy what the brand sells (signed up, asked about the " +
       "offer, was offered it, or was contacted to sell it to them)? A paying customer can also still be a prospect for more.",
     whenTrue: "They are someone the brand sells to or could sell to.",
-    whenFalse: "Nothing ties them to buying from the brand (pure friend, supplier, team, investor...).",
+    whenFalse: "Nothing ties them to buying from the brand (pure friend, supplier, team, investor, a journalist pitched for press...).",
   },
   team: {
     instructions: "Does this person work on the brand: employee, co-founder, contractor, freelancer or intern working for the brand?",
@@ -73,9 +73,17 @@ export const TAG_QUESTIONS: Record<RelationshipTag, YesNoQuestion> = {
   other_professional: {
     instructions:
       "Is this a professional relationship of the brand that is none of customer, prospect, team, investor, advisor, " +
-      "supplier or partner (for example a peer founder, a journalist, a recruiter, an event organizer, an ex-colleague)?",
+      "supplier, partner or journalist (for example a peer founder, a recruiter, an event organizer, an ex-colleague)?",
     whenTrue: "A work relationship of another kind.",
     whenFalse: "No other professional relationship is shown.",
+  },
+  // JOURNALISTS-NOT-LEADS-1016: the brand never sells to a journalist (src/lib/brand-journalists.ts).
+  journalist: {
+    instructions:
+      "Is this person a journalist, editor, reporter, writer or podcast host the brand pitches for press coverage (a " +
+      "story, an article, a quote, a feature), rather than someone the brand sells its offer to?",
+    whenTrue: "The brand reaches them to get covered in the press: pitches, story ideas, interview or quote requests.",
+    whenFalse: "Nothing shows the brand reaches them for press coverage.",
   },
 };
 

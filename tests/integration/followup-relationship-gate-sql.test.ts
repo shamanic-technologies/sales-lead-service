@@ -166,7 +166,8 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     await judged(unsure.human!, { ...LOW, investor: 0.45 });
     await new Promise((r) => setTimeout(r, 5));
     const prospect = await dueLead();
-    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() WHERE id = ${prospect.rowId}::uuid`);
+    // Due last, but strictly in the past on the CLAIM's clock (JS now): a DB `now()` can sit ahead of it and read not due.
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() - interval '1 second' WHERE id = ${prospect.rowId}::uuid`);
 
     const r = await claim("pure_prospect");
     expect(r.claimed?.id).toBe(prospect.rowId);

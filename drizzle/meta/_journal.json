@@ -694,6 +694,13 @@
       "when": 1787898000000,
       "tag": "0098_walks_unknown_policy_retired",
       "breakpoints": true
+    },
+    {
+      "idx": 99,
+      "version": "7",
+      "when": 1787898050000,
+      "tag": "0099_brand_journalists",
+      "breakpoints": true
     }
   ]
 }
