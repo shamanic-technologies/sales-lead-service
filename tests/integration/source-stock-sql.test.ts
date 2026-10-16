@@ -177,4 +177,26 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
       vi.unstubAllGlobals();
     }
   });
+  it("REUSED-ACQUISITION-COST-1017: the reused-acquisition read lists exactly the own-run finds, with Apollo id and email", async () => {
+    const reuser = `itest-src-${randomUUID()}`;
+    const withEmail = await seedFound(reuser, "2026-10-14T10:00:00Z");
+    const pid = `itest-apollo-${randomUUID()}`;
+    await db.update(leads).set({ apolloPersonId: pid }).where(eq(leads.id, withEmail));
+    await seedFound(reuser, "2026-10-14T11:00:00Z", { email: false });
+    await seedFound(reuser, "2026-10-14T12:00:00Z", { reason: "served" }); // a serve, not a find
+    const { loadOwnRunFindsForAcquisition, computeSourceReusedAcquisitions } = await import("../../src/lib/source-reused-acquisitions.js");
+    const mine = (await loadOwnRunFindsForAcquisition()).filter((f) => f.campaignId === reuser);
+    expect(mine).toHaveLength(2);
+    const [emailed] = mine.filter((f) => f.apolloPersonId === pid);
+    expect(emailed).toMatchObject({ orgId, servedAt: "2026-10-14T10:00:00.000Z" });
+    expect(emailed.email).toMatch(/@itest\.example$/);
+    expect(mine.find((f) => f.apolloPersonId !== pid)).toMatchObject({ apolloPersonId: null, email: null });
+    const got = await computeSourceReusedAcquisitions(mine, async (_org, finds) => ({
+      campaigns: [{ campaignId: reuser, servedLeads: finds.length, reusedLeads: 1, earlierAcquisitionCostInUsdCents: "9.0000000000", paidByOtherOrgsCostInUsdCents: "0.0000000000" }],
+      unpricedRunIds: [],
+    }));
+    expect(got.counts).toEqual([
+      { campaignId: reuser, orgId, ownRuns: 2, checkedLeads: 1, uncheckedLeads: 1, reusedLeads: 1, earlierAcquisitionCostInUsdCents: "9.0000000000", paidByOtherOrgsCostInUsdCents: "0.0000000000", unavailableReason: null },
+    ]);
+  });
 });

@@ -40,6 +40,8 @@ const TEST_ENV_VARS: Record<string, string> = {
   CLOUDFLARE_SERVICE_API_KEY: "test-cloudflare-key",
   SOCIAL_SERVICE_URL: "http://social:3020",
   SOCIAL_SERVICE_API_KEY: "test-social-key",
+  APOLLO_SERVICE_URL: "http://apollo:3021",
+  APOLLO_SERVICE_API_KEY: "test-apollo-key",
   NODE_ENV: "test",
 };
 
