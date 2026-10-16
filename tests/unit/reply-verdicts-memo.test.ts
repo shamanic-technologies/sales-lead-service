@@ -77,4 +77,12 @@ describe("one request's reply-verdict reads, shared by its standing resolvers (D
     expect((await memo.fetch(["a@x.com"], { orgId: "o" })).map((r) => r.replyId)).toEqual(["r1"]);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
+  it("a malformed address in a memo read is dropped, the others still answered (LEAD-CHANGES-INVALID-EMAIL-1016)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchSpy.mockResolvedValue(ok([reply("r1", "a@x.com", "2026-10-16T10:00:00Z")]));
+    const memo = createReplyVerdictsMemo();
+    const out = await memo.fetch(["a@x.com", "32.x====@unsubscribe2.customer.io"], { orgId: "org-1" });
+    expect(asked(0)).toEqual(["a@x.com"]);
+    expect(out.map((r) => r.replyId)).toEqual(["r1"]);
+  });
 });

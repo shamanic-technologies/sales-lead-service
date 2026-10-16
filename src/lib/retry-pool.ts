@@ -759,6 +759,7 @@ async function pickChannelCandidate(
       params.campaignId,
       candidates.map((c) => c.email),
       { orgId: params.orgId, userId: params.context.userId ?? null, runId: params.context.runId ?? null },
+      new Map(candidates.map((c) => [c.email.trim().toLowerCase(), c.leadId] as const)),
     );
   } catch (err) {
     console.warn(

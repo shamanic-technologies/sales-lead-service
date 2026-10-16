@@ -51,9 +51,22 @@ describe("channel send client (one batch call)", () => {
     expect(out.get("imenez@gmail.com")?.map((s) => s.sendId)).toEqual(["new", "old"]);
   });
 
-  it("an email crm-service cannot match fails the pull, named, like the per-person 400 did", async () => {
-    fetchWithRetry.mockResolvedValueOnce(json(200, { sends: [], invalidEmails: ["not-an-email"] }));
-    await expect(fetchChannelSendsBatch("b", "c1", ["not-an-email", "a@x.co"], ctx)).rejects.toThrow(/cannot match 1 email.*not-an-email/);
+  it("an address crm-service cannot match is never sent: dropped, logged with its lead, the rest still asked (LEAD-CHANGES-INVALID-EMAIL-1016)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchWithRetry.mockResolvedValueOnce(json(200, { sends: [send({ email: "a@x.co" })], invalidEmails: [] }));
+    const out = await fetchChannelSendsBatch("b", "c1", ["not-an-email", "a@x.co", "x y@z.co"], ctx, new Map([["not-an-email", "lead-bad-1"], ["x y@z.co", "lead-bad-2"]]));
+    expect(JSON.parse(fetchWithRetry.mock.calls[0][1].body).emails).toEqual(["a@x.co"]);
+    expect(out.get("a@x.co")?.map((s) => s.sendId)).toEqual(["s1"]);
+    const logged = errors.mock.calls.map((c) => String(c[0]));
+    expect(logged).toHaveLength(2);
+    expect(logged[0]).toContain("lead-bad-1");
+    expect(logged[1]).toContain("lead-bad-2");
+    errors.mockRestore();
+  });
+
+  it("an email crm-service still names unmatchable (its rule moved) fails the pull, named", async () => {
+    fetchWithRetry.mockResolvedValueOnce(json(200, { sends: [], invalidEmails: ["a@x.co"] }));
+    await expect(fetchChannelSendsBatch("b", "c1", ["a@x.co"], ctx)).rejects.toThrow(/cannot match 1 email.*a@x.co/);
   });
 
   it("fails loud on a non-2xx, an unreachable service, a malformed answer or an unreadable send", async () => {
