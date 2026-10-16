@@ -715,6 +715,13 @@
       "when": 1787898150000,
       "tag": "0101_lead_followup_dates",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1787898200000,
+      "tag": "0102_lead_followup_action",
+      "breakpoints": true
     }
   ]
 }
