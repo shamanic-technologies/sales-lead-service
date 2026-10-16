@@ -638,7 +638,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ acceptedEmails: "valid_and_catch_all", mode: { kind: "find", audienceIds: ["aud-1"] } }), expect.anything());
   });
 
-  it("the deprecated valid_catch_all_and_unknown serves as valid_and_catch_all, no error (CATCHALL-BOUNCE-1016)", async () => {
+  it("valid_catch_all_and_unknown reaches the serve as itself, never narrowed to valid_and_catch_all (UNKNOWN-RESTORE-1016)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
@@ -648,7 +648,7 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     const res = await postAsUnit(undefined, { acceptedEmails: "valid_catch_all_and_unknown" });
 
     expect(res.status).toBe(200);
-    expect(pullNext.mock.calls[0][0].acceptedEmails).toBe("valid_and_catch_all");
+    expect(pullNext.mock.calls[0][0].acceptedEmails).toBe("valid_catch_all_and_unknown");
   });
 
   it("a source unit's own run stating nothing sends no policy, whatever the pipes it feeds accept (valid only)", async () => {

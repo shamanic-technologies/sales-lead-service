@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WIRE_EMAIL_POLICIES } from "./lib/email-policy.js";
+import { EMAIL_POLICIES } from "./lib/email-policy.js";
 import { RELATIONSHIP_POLICIES, RELATIONSHIP_TAGS } from "./lib/relationship-tags.js";
 import { RECENTLY_EMAILED_WINDOWS } from "./lib/recently-emailed-sql.js";
 import {
@@ -985,9 +985,9 @@ export const FullLeadSchema = z
 
 export const BufferNextRequestSchema = z
   .object({
-    acceptedEmails: z.enum(WIRE_EMAIL_POLICIES).optional().openapi({
+    acceptedEmails: z.enum(EMAIL_POLICIES).optional().openapi({
       description:
-        "Which verified emails this workflow accepts. `valid_only` (what a body without this field gets: unchanged behaviour) hands out only addresses the verifier confirmed. `valid_and_catch_all` also hands out addresses on a catch-all domain (the verifier cannot confirm the mailbox; ~7% bounce measured vs <1% for valid), including people of the brand already revealed and dropped as catch-all, without paying for them again. An address the verifier judged unknown, invalid or risky is never handed out, whatever the option (CATCHALL-BOUNCE-1016: an unknown address is never emailed). `valid_catch_all_and_unknown` is DEPRECATED: still accepted, it behaves exactly as `valid_and_catch_all`. Applies to the fresh serve and to every already-paid pool (a person is never handed to a campaign whose option refuses their verdict).",
+        "Which verified emails this workflow accepts. `valid_only` (what a body without this field gets: unchanged behaviour) hands out only addresses the verifier confirmed. `valid_and_catch_all` also hands out addresses on a catch-all domain (the verifier cannot confirm the mailbox; ~7% bounce measured vs <1% for valid), including people of the brand already revealed and dropped as catch-all, without paying for them again. `valid_catch_all_and_unknown` also hands out addresses the verifier could not judge (verdict unknown, ~15% bounce measured), likewise re-reaching people already revealed and dropped as unknown first, at no new spend. The owner reaffirmed this option on 2026-10-16. invalid and risky addresses are never handed out, whatever the option. Applies to the fresh serve and to every already-paid pool (a person is never handed to a campaign whose option refuses their verdict).",
       example: "valid_and_catch_all",
     }),
     reachableBy: z
