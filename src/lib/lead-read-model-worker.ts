@@ -4,9 +4,10 @@
  *
  * Every `READ_MODEL_WORKER_INTERVAL_MS` it walks the live models: one past
  * `READ_MODEL_REFRESH_AFTER_MS` is rebuilt (its delivery evidence asked again, its population
- * re-read), every other one is brought up to date with the change log. The ENFORCED bound lives in
- * lead-read-model.ts (`READ_MODEL_MAX_EVIDENCE_AGE_MS`): if this worker falls behind, a read
- * rebuilds rather than serving a stale model — this worker only makes that rare.
+ * re-read), every other one is brought up to date with the change log. The bound lives in
+ * lead-read-model.ts (`READ_MODEL_MAX_EVIDENCE_AGE_MS`): if this worker falls behind, a read serves
+ * the model it holds at once, stating its age, rather than waiting for a rebuild (a model older than
+ * `READ_MODEL_SERVE_WITHOUT_WAIT_MS` is rebuilt by the read).
  *
  * It also PRE-BUILDS the brand model of every brand that served a lead in the last
  * `ACTIVE_BRAND_WINDOW_DAYS`, so the first time a customer opens their Leads page it answers
