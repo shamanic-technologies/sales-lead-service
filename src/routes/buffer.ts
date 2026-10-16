@@ -24,7 +24,7 @@ import { SOURCE_CAMPAIGN_OFF_REASON } from "../lib/serve-reasons.js";
 import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-requested-events.js";
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 import { loadEmptyAnswers, orderByEmptyAnswers } from "../lib/source-audience-walk.js";
-import type { EmailPolicy } from "../lib/email-policy.js";
+import { normalizeEmailPolicy, type EmailPolicy } from "../lib/email-policy.js";
 
 const router = Router();
 
@@ -127,8 +127,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // channel does not write by email.
   let poolSender: PoolSender = "email";
   // The email policy the serve asks with: the caller's own word, nothing else. A source unit's run states its OWN
-  // strategy (its workflow's serve call), never read off the pipes it feeds (CATCHALL-SOURCE-OWNS-1014).
-  const acceptedEmails: EmailPolicy | null = parsed.data.acceptedEmails ?? null;
+  // strategy (its workflow's serve call), never read off the pipes it feeds (CATCHALL-SOURCE-OWNS-1014). The deprecated
+  // `valid_catch_all_and_unknown` becomes `valid_and_catch_all` HERE, once, so human-service, every pool and the source
+  // walk only ever see the live value (CATCHALL-BOUNCE-1016: an address judged unknown is never emailed).
+  const acceptedEmails: EmailPolicy | null = normalizeEmailPolicy(parsed.data.acceptedEmails);
   // The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve, the
   // campaign's own pools still drain (src/lib/buffer.ts).
   let freshServeRefused: { reason: ServeEmptyReason; detail: string } | null = null;

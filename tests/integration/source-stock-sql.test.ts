@@ -21,11 +21,11 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
   const outreach2 = `itest-out-${randomUUID()}`;
   const leadIds: string[] = [];
 
-  async function seedFound(campaignId: string, servedAt: string, opts: { email?: boolean; reason?: string } = {}): Promise<string> {
+  async function seedFound(campaignId: string, servedAt: string, opts: { email?: boolean; reason?: string; verdict?: string } = {}): Promise<string> {
     const [lead] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
     leadIds.push(lead.id);
     if (opts.email !== false) {
-      await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `${randomUUID()}@itest.example`, source: "apollo" });
+      await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `${randomUUID()}@itest.example`, source: "apollo", ...(opts.verdict ? { verificationVerdict: opts.verdict } : {}) });
     }
     await db.insert(leadsCampaigns).values({
       leadId: lead.id,
@@ -43,8 +43,9 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
   }
 
   const fitsAlways: AskAudienceFit = async () => ({ fits: true });
-  const claimAll = (outreachCampaignId: string, sources = [source], askFit: AskAudienceFit = fitsAlways) =>
+  const claimAll = (outreachCampaignId: string, sources = [source], askFit: AskAudienceFit = fitsAlways, acceptedEmails?: "as_found") =>
     claimStockedLead({
+      ...(acceptedEmails ? { acceptedEmails } : {}),
       orgId,
       sourceCampaignIds: sources,
       outreachCampaignId,
@@ -93,6 +94,15 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
     expect(handed.map((r) => r.sourceHandedToCampaignId).sort()).toEqual([outreach, outreach2].sort());
     // The source keeps its finds: still served, still the source's.
     expect(sourceRows.every((r) => r.status === "served")).toBe(true);
+  });
+
+  it("as_found stock never hands an outreach pipe a person whose address the verifier judged unknown (CATCHALL-BOUNCE-1016)", async () => {
+    const s = `itest-src-${randomUUID()}`;
+    await seedFound(s, "2026-10-12T01:00:00Z", { verdict: "unknown" });
+    const catchAll = await seedFound(s, "2026-10-12T02:00:00Z", { verdict: "catch_all" });
+    const first = await claimAll(`itest-out-${randomUUID()}`, [s], fitsAlways, "as_found");
+    expect(first.lead?.leadId).toBe(catchAll);
+    expect((await claimAll(`itest-out-${randomUUID()}`, [s], fitsAlways, "as_found")).lead).toBeNull();
   });
 
   it("two outreach runs racing never take the same person", async () => {
