@@ -55,8 +55,8 @@ describe.skipIf(!hasRealDatabase)("relationship intent: lead? wants business?", 
     }
     seq += 1n;
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${p.personKey}, ${p.name}, ${sql.param(p.emails ?? [])}::text[], ${sql.param([])}::text[],
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${p.personKey}, ${p.personKey}, ${p.name}, ${sql.param(p.emails ?? [])}::text[], ${sql.param([])}::text[],
         ${p.type}, ${p.at ?? "2026-10-13T10:00:00Z"}::timestamptz, 'event', ${p.source}, ${randomUUID()}, ${JSON.stringify(p.text ? { text: p.text } : {})}::jsonb,
         ${JSON.stringify({ humanId: p.human })}::jsonb)
     `);
@@ -88,6 +88,8 @@ describe.skipIf(!hasRealDatabase)("relationship intent: lead? wants business?", 
     await fact({ personKey: "email:rep@y.io", human: replier, name: "Rep", emails: ["rep@y.io"], type: "message_out", source: "gmail", text: "following up" });
     const [lead] = (await db.execute(sql`INSERT INTO leads (name, human_id) VALUES ('Rep', ${replier}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
     createdLeads.push(lead.id);
+    // Our outreach wrote to the relation's address (PERSON-RELATIONS-1017: a relation's leads are the ones on its addresses).
+    await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'email', 'rep@y.io', 'itest')`);
     await db.execute(sql`
       INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, label, source, source_ref, occurred_at, attribution_basis)
       VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${lead.id}::uuid, 'interested', 'reply', 'r1', '2026-10-14T08:00:00Z', 'reaction_to_our_email')

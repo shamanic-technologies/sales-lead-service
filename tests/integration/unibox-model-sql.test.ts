@@ -44,7 +44,8 @@ vi.mock("../../src/lib/company-client.js", () => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
-const { clearRegistry, connectionTag, organizationLink } = await import("../helpers/crm-registry.js");
+const { clearRegistry, connectionTag, organizationLink, relation } = await import("../helpers/crm-registry.js");
+const { readThread, toSubject } = await import("../../src/lib/relationship-subjects.js");
 const { refreshSubjects } = await import("../../src/lib/relationship-subjects.js");
 const { writeEvidence } = await import("../../src/lib/relationship-judge.js");
 const { refreshUniboxRows, readUniboxPage, readUniboxLead, resetLifecycleCatalogueCache } = await import("../../src/lib/unibox-model.js");
@@ -65,8 +66,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
   async function crmFact(personKey: string, human: string, type: string, at: string, payload: Record<string, unknown> = {}): Promise<void> {
     seq += 1n;
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${personKey}, 'Ben', ARRAY['ben@acme.io']::text[], '{}'::text[], ${type},
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${personKey}, ${personKey}, 'Ben', ARRAY['ben@acme.io']::text[], '{}'::text[], ${type},
         ${at}::timestamptz, 'event', 'stripe', ${randomUUID()}, ${JSON.stringify(payload)}::jsonb, ${JSON.stringify({ humanId: human })}::jsonb)
     `);
   }
@@ -90,6 +91,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
 
     const [lead] = (await db.execute(sql`INSERT INTO leads (name, human_id) VALUES ('Ana', ${ana}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
     createdLeads.push(lead.id);
+    // The relation's leads are the ones on ITS addresses (PERSON-RELATIONS-1017).
+    await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'email', 'ana@x.io', 'itest')`);
     await db.execute(sql`
       INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at)
       VALUES (${lead.id}::uuid, 'camp-cold', ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-10-01T09:00:00Z'),
@@ -181,5 +184,36 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await refreshSubjects(scope);
     const r = await refreshUniboxRows(scope);
     expect(r).toMatchObject({ rows: 1, removed: 1 });
+  });
+
+  it("a friend with a personal chat and a work address = ONE row, the work relation, whose thread holds no personal message (PERSON-RELATIONS-1017)", async () => {
+    const adam = randomUUID();
+    const cifacom = randomUUID();
+    // crm reads Adam's points one by one: his WhatsApp chat with the founder is personal, his work address professional.
+    await relation({ orgId, brandId, human: adam, personKey: "email:adam@cifacom.com", capacity: "personal", tags: ["personal_to_user"], companyId: null, contactPoints: ["matrix:@adam"], name: "Adam" });
+    await relation({ orgId, brandId, human: adam, personKey: "email:adam@cifacom.com", capacity: "professional", tags: ["professional_to_brand"], companyId: cifacom, contactPoints: ["clerk:user_adam"], emails: ["adam@cifacom.com"], name: "Adam Nasri" });
+    seq += 1n;
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, 'email:adam@cifacom.com', 'matrix:@adam', 'Adam', '{}'::text[], '{}'::text[], 'message_in',
+        '2026-10-10T10:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"text":"dinner tonight?"}'::jsonb, ${JSON.stringify({ humanId: adam })}::jsonb)`);
+    seq += 1n;
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, 'email:adam@cifacom.com', 'clerk:user_adam', 'Adam Nasri', ARRAY['adam@cifacom.com']::text[], '{}'::text[], 'signup',
+        '2026-10-09T10:00:00Z', 'created_at', 'clerk', ${randomUUID()}, '{}'::jsonb, ${JSON.stringify({ humanId: adam })}::jsonb)`);
+    await refreshSubjects(scope);
+    await refreshUniboxRows(scope);
+    const rows = (await readUniboxPage(scope, {}, { limit: 50, cursor: null })).rows.filter((r) => r.humanId === adam);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ companyKey: cifacom, relationKey: `rel:${adam}:org:${cifacom}`, emails: ["adam@cifacom.com"], lastTheirsAt: "2026-10-09T10:00:00.000Z" });
+    expect(rows[0].connectionTags).toEqual(["professional_to_brand"]);
+    expect(rows[0].steps.map((x) => x.step)).toEqual(["signup"]);
+    const subject = (await db.execute(sql`SELECT * FROM relationship_subjects WHERE org_id = ${orgId} AND human_id = ${adam}::uuid`)) as unknown as Array<Record<string, unknown>>;
+    expect(subject).toHaveLength(1);
+    const thread = await readThread(toSubject(subject[0]));
+    expect(thread.map((l) => l.kind)).toEqual(["signup"]); // "dinner tonight?" is the personal relation's, never here
+    expect((await readUniboxLead(scope, null, `rel:${adam}:org:${cifacom}`))!.lead.humanId).toBe(adam);
+    expect(await readUniboxLead(scope, null, `rel:${adam}:pro`)).toBeNull();
   });
 });

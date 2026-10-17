@@ -13,7 +13,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { getCompanies } from "./company-client.js";
-import { canonicalHumans } from "./relationship-subjects.js";
+import { canonicalHumans, subjectKey } from "./relationship-subjects.js";
 import { canonicalHumanSql, JOURNALIST_TAG, PRESS_ONLY_EVIDENCE, refreshBrandJournalists } from "./brand-journalists.js";
 import {
   BUSINESS_ONLY_EXCLUDED,
@@ -116,8 +116,36 @@ async function atomicHumansOf(orgId: string, humans: readonly string[]): Promise
   return out;
 }
 
-/** The block for each requested human id (keyed on the id ASKED, merged-away ids answer for their human). */
+/**
+ * The block for each requested human id (keyed on the id ASKED, merged-away ids answer for their human): the PERSON
+ * read every server of people asks (a serve, a claim, crm-service's business-only check). A human with several
+ * relations at the brand answers with the latest-active one, and its policies hold only if EVERY relation allows
+ * (fail-closed: a business pipe never writes to someone one of their relations says it should not). `personal` is
+ * read at the human (crm's `personal_*` tag on any point, any brand of the org).
+ */
 export async function loadRelationships(orgId: string, brandId: string, humanIds: readonly string[]): Promise<Map<string, RelationshipBlock>> {
+  return loadBlocks(orgId, brandId, humanIds, null);
+}
+
+/**
+ * The block of each RELATION (a human at a company, PERSON-RELATIONS-1017), keyed `subjectKey(human asked, company)`:
+ * the Unibox row's read. Only that relation's stored answers, and `personal` / connection tags read off ITS own
+ * points (crm's relation tags), never the human's other relations.
+ */
+export async function loadRelationshipsAt(
+  orgId: string,
+  brandId: string,
+  keys: ReadonlyArray<{ humanId: string; companyKey: string }>,
+): Promise<Map<string, RelationshipBlock>> {
+  return loadBlocks(orgId, brandId, keys.map((k) => k.humanId), keys);
+}
+
+async function loadBlocks(
+  orgId: string,
+  brandId: string,
+  humanIds: readonly string[],
+  relationKeys: ReadonlyArray<{ humanId: string; companyKey: string }> | null,
+): Promise<Map<string, RelationshipBlock>> {
   const asked = Array.from(new Set(humanIds.filter((h) => /^[0-9a-f-]{36}$/i.test(h))));
   const out = new Map<string, RelationshipBlock>();
   if (asked.length === 0) return out;
@@ -129,9 +157,10 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   const atomicAll = Array.from(new Set([...humans, ...[...atomicByCanon.values()].flat()]));
   const [subjects, statements, evidence, judgments, connections, pressOnly, intents] = await Promise.all([
     db.execute(sql`
-      SELECT human_id::text AS human, company_key, wrote_to_us, last_inbound_at, has_direct FROM relationship_subjects
+      SELECT human_id::text AS human, company_key, wrote_to_us, last_inbound_at, has_direct, relation_keys, updated_at FROM relationship_subjects
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
-    `) as unknown as Promise<Array<{ human: string; company_key: string; wrote_to_us: boolean; last_inbound_at: Ts | null; has_direct: boolean }>>,
+      ORDER BY human_id, last_inbound_at DESC NULLS LAST, updated_at DESC, company_key
+    `) as unknown as Promise<Array<{ human: string; company_key: string; wrote_to_us: boolean; last_inbound_at: Ts | null; has_direct: boolean; relation_keys: string[]; updated_at: Ts }>>,
     db.execute(sql`
       SELECT human_id::text AS human, brand_id, company_key, tag, state, stated_at FROM relationship_statements
       WHERE org_id = ${orgId} AND brand_id IN (${brandId}, '') AND human_id = ANY(${sql.param(humans)}::uuid[]) AND withdrawn_at IS NULL
@@ -162,9 +191,9 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       GROUP BY h.human
     `) as unknown as Promise<Array<{ human: string; at: Ts }>>,
     db.execute(sql`
-      SELECT human_id::text AS human, p_wants_business AS p, judged_at FROM relationship_intent_judgments
+      SELECT human_id::text AS human, company_key, p_wants_business AS p, judged_at FROM relationship_intent_judgments
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
-    `) as unknown as Promise<Array<{ human: string; p: number; judged_at: Ts }>>,
+    `) as unknown as Promise<Array<{ human: string; company_key: string; p: number; judged_at: Ts }>>,
   ]);
 
   // Merges that made each human: links stated from here whose two atomic people now name it.
@@ -191,12 +220,26 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     };
     for (const h of new Set([linkedCanon.get(r.a) ?? r.a, linkedCanon.get(r.b) ?? r.b])) mergesOf.set(h, [...(mergesOf.get(h) ?? []), merge]);
   }
-  const companyKeyOf = new Map(subjects.map((s) => [s.human, s.company_key]));
-  const subjectOf = new Map(subjects.map((s) => [s.human, s]));
+  type SubjectRow = (typeof subjects)[number];
+  const subjectsOf = new Map<string, SubjectRow[]>();
+  for (const r of subjects) subjectsOf.set(r.human, [...(subjectsOf.get(r.human) ?? []), r]);
   const canonOfAtomic = new Map<string, string>();
   for (const h of humans) {
     canonOfAtomic.set(h, h);
     for (const a of atomicByCanon.get(h) ?? []) canonOfAtomic.set(a, h);
+  }
+  // A relation's own tags (crm's relation fact): the connection tags of ITS points only (PERSON-RELATIONS-1017).
+  const tagsOfRelation = new Map<string, string[]>();
+  if (relationKeys !== null) {
+    const keys = Array.from(new Set(subjects.flatMap((r) => r.relation_keys ?? [])));
+    if (keys.length > 0) {
+      const rel = (await db.execute(sql`
+        SELECT f.payload->>'relationKey' AS key, f.payload->'tags' AS tags FROM crm_registry_facts f
+        WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId} AND f.type = 'relation' AND f.payload->>'relationKey' = ANY(${sql.param(keys)}::text[])
+          AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+      `)) as unknown as Array<{ key: string; tags: Array<{ tag?: unknown }> | null }>;
+      for (const r of rel) tagsOfRelation.set(r.key, (r.tags ?? []).map((t) => t?.tag).filter((t): t is string => typeof t === "string"));
+    }
   }
   // A company key: a local organization row (a lead's own employer) or a brand-service id (crm-service's link).
   const leadKeys = Array.from(new Set(subjects.map((s) => s.company_key).filter((k) => k)));
@@ -215,29 +258,36 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     if (brandKeys.length > 0) for (const c of await getCompanies(brandKeys)) keyNames.set(c.brandId, { name: c.name, domain: c.domain });
   }
 
-  for (const h of humans) {
-    const key = companyKeyOf.get(h);
+  /** The block of human `h` at `key`; `subj` = that relation's subject row (null = not a subject there). */
+  const blockOf = (h: string, key: string, subj: SubjectRow | null, relationScoped: boolean): RelationshipBlock => {
     const statementsOf = new Map<RelationshipTag, { state: "yes" | "no"; at: string }>();
     let wantsStatement: { state: "yes" | "no"; at: string } | null = null;
     for (const s of statements) {
-      if (s.human === h && s.tag === WANTS_BUSINESS && s.brand_id === brandId && s.company_key === (key ?? "")) {
+      if (s.human === h && s.tag === WANTS_BUSINESS && s.brand_id === brandId && s.company_key === key) {
         wantsStatement = { state: s.state, at: iso(s.stated_at)! };
         continue;
       }
       if (s.human !== h || !isRelationshipTag(s.tag)) continue;
       const humanLevel = levelOf(s.tag) === "human";
-      if (humanLevel ? s.brand_id !== "" : s.brand_id !== brandId || s.company_key !== (key ?? "")) continue;
+      if (humanLevel ? s.brand_id !== "" : s.brand_id !== brandId || s.company_key !== key) continue;
       statementsOf.set(s.tag, { state: s.state, at: iso(s.stated_at)! });
     }
     const evidenceOf = new Map<RelationshipTag, { evidence: string; at: string }>();
-    for (const e of evidence) if (e.human === h && e.company_key === (key ?? "") && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
+    for (const e of evidence) if (e.human === h && e.company_key === key && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
     const pitched = pressOnly.find((x) => x.human === h);
     if (pitched) evidenceOf.set(JOURNALIST_TAG, { evidence: PRESS_ONLY_EVIDENCE, at: iso(pitched.at)! });
-    const mine = connections.filter((c) => canonOfAtomic.get(c.human) === h);
-    const connectionTags = Array.from(new Set(mine.map((c) => c.tag))).sort();
-    const personalTag = mine.filter((c) => c.tag.startsWith("personal")).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
-    if (personalTag) evidenceOf.set("personal", { evidence: `crm:${personalTag.tag}`, at: iso(personalTag.at)! });
-    const j = judgments.find((x) => x.human === h && x.company_key === (key ?? ""));
+    let connectionTags: string[];
+    if (relationScoped) {
+      connectionTags = Array.from(new Set((subj?.relation_keys ?? []).flatMap((k) => tagsOfRelation.get(k) ?? []))).sort();
+      const personal = connectionTags.find((t) => t.startsWith("personal"));
+      if (personal) evidenceOf.set("personal", { evidence: `crm:${personal}`, at: iso(subj?.updated_at ?? null) ?? new Date(0).toISOString() });
+    } else {
+      const mine = connections.filter((c) => canonOfAtomic.get(c.human) === h);
+      connectionTags = Array.from(new Set(mine.map((c) => c.tag))).sort();
+      const personalTag = mine.filter((c) => c.tag.startsWith("personal")).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
+      if (personalTag) evidenceOf.set("personal", { evidence: `crm:${personalTag.tag}`, at: iso(personalTag.at)! });
+    }
+    const j = judgments.find((x) => x.human === h && x.company_key === key);
     let judgment: { probabilities: Partial<Record<RelationshipTag, number>>; at: string } | null = null;
     if (j) {
       const probabilities: Partial<Record<RelationshipTag, number>> = {};
@@ -251,13 +301,12 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     const tags = tagsIn(details, "yes");
     const unsureTags = tagsIn(details, "unsure");
     const judgedAt = j ? iso(j.judged_at) : null;
-    const subj = subjectOf.get(h);
-    const isSubject = companyKeyOf.has(h);
+    const isSubject = subj !== null;
     const hasDirect = subj?.has_direct === true;
     const wroteToUs = subj?.wrote_to_us === true;
     const lead = decideLead(details);
-    const intent = intents.find((x) => x.human === h);
-    const block: RelationshipBlock = {
+    const intent = intents.find((x) => x.human === h && x.company_key === key);
+    return {
       humanId: h,
       company,
       tags,
@@ -280,6 +329,28 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
         statement: wantsStatement,
         judgment: intent ? { p: Number(intent.p), at: iso(intent.judged_at)! } : null,
       }),
+    };
+  };
+
+  if (relationKeys !== null) {
+    for (const k of relationKeys) {
+      const h = canon.get(k.humanId) ?? k.humanId;
+      const subj = (subjectsOf.get(h) ?? []).find((r) => r.company_key === k.companyKey) ?? null;
+      out.set(subjectKey(k.humanId, k.companyKey), blockOf(h, k.companyKey, subj, true));
+    }
+    return out;
+  }
+  for (const h of humans) {
+    const rows = subjectsOf.get(h) ?? [];
+    // Latest-active relation first (the subjects read is ordered); a human who is no subject reads at ''.
+    const blocks = rows.length === 0 ? [blockOf(h, "", null, false)] : rows.map((r) => blockOf(h, r.company_key, r, false));
+    const block: RelationshipBlock = {
+      ...blocks[0],
+      policies: {
+        business_only: blocks.every((b) => b.policies.business_only),
+        pure_prospect: blocks.every((b) => b.policies.pure_prospect),
+      },
+      wroteToUs: blocks.some((b) => b.wroteToUs),
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }
@@ -348,7 +419,7 @@ async function cardsOf(orgId: string, brandId: string, ids: string[]): Promise<M
 export async function readReview(orgId: string, brandId: string): Promise<RelationshipReview> {
   // Only leads something speaks about can carry a tag or a question (a group roster lurker nobody judged has an empty
   // block): read those, count the rest.
-  const subjects = (await db.execute(sql`
+  const subjectRows = (await db.execute(sql`
     SELECT s.human_id::text AS human, s.name FROM relationship_subjects s
     WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId}
       AND (EXISTS (SELECT 1 FROM relationship_judgments j WHERE j.org_id = s.org_id AND j.human_id = s.human_id)
@@ -356,6 +427,9 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
         OR EXISTS (SELECT 1 FROM relationship_statements t WHERE t.org_id = s.org_id AND t.human_id = s.human_id AND t.withdrawn_at IS NULL))
     ORDER BY s.has_messages DESC, s.thread_seq DESC
   `)) as unknown as Array<{ human: string; name: string | null }>;
+  // The review asks about a PERSON (one question per human, whatever their relations).
+  const seenHumans = new Set<string>();
+  const subjects = subjectRows.filter((r) => (seenHumans.has(r.human) ? false : (seenHumans.add(r.human), true)));
   const total = (await db.execute(sql`
     SELECT count(*)::int AS n FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId}
   `)) as unknown as Array<{ n: number }>;
@@ -444,11 +518,20 @@ export async function readReview(orgId: string, brandId: string): Promise<Relati
 export class TagStatementError extends Error {}
 
 /** A person of the org says yes or no about one tag of one human (personal: org-wide; others: this brand's lead). */
-export async function stateTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag | IntentAnswerKey; state: "yes" | "no"; userId: string }): Promise<void> {
+export async function stateTag(input: {
+  orgId: string;
+  brandId: string;
+  humanId: string;
+  tag: RelationshipTag | IntentAnswerKey;
+  state: "yes" | "no";
+  userId: string;
+  /** The relation (Unibox row) it is said about; absent = the human's latest-active relation. */
+  companyKey?: string;
+}): Promise<void> {
   const human = (await canonicalHumans(input.orgId, [input.humanId])).get(input.humanId) ?? input.humanId;
   const humanLevel = levelOf(input.tag) === "human";
   const brand = humanLevel ? "" : input.brandId;
-  const companyKey = humanLevel ? "" : await subjectCompanyKey(input.orgId, input.brandId, human);
+  const companyKey = humanLevel ? "" : (input.companyKey ?? (await subjectCompanyKey(input.orgId, input.brandId, human)));
   await db.transaction(async (tx) => {
     await tx.execute(sql`
       UPDATE relationship_statements SET withdrawn_at = now(), withdrawn_by_user_id = ${input.userId}
@@ -477,13 +560,22 @@ async function refreshJournalistsAfterStatement(orgId: string, brandId: string):
 }
 
 /** Withdraw a person's word on a tag (back to evidence / judgment). Returns whether one was live. */
-export async function withdrawTag(input: { orgId: string; brandId: string; humanId: string; tag: RelationshipTag | IntentAnswerKey; userId: string }): Promise<boolean> {
+export async function withdrawTag(input: {
+  orgId: string;
+  brandId: string;
+  humanId: string;
+  tag: RelationshipTag | IntentAnswerKey;
+  userId: string;
+  /** Only the statement about this relation; absent = every relation of the human. */
+  companyKey?: string;
+}): Promise<boolean> {
   const human = (await canonicalHumans(input.orgId, [input.humanId])).get(input.humanId) ?? input.humanId;
   const humanLevel = levelOf(input.tag) === "human";
+  const onCompany = humanLevel || input.companyKey === undefined ? sql`` : sql`AND company_key = ${input.companyKey}`;
   const rows = (await db.execute(sql`
     UPDATE relationship_statements SET withdrawn_at = now(), withdrawn_by_user_id = ${input.userId}
     WHERE org_id = ${input.orgId} AND brand_id = ${humanLevel ? "" : input.brandId} AND human_id = ${human}::uuid
-      AND tag = ${input.tag} AND withdrawn_at IS NULL
+      AND tag = ${input.tag} AND withdrawn_at IS NULL ${onCompany}
     RETURNING 1
   `)) as unknown as unknown[];
   for (const b of humanLevel ? await brandsOfHuman(input.orgId, human) : [input.brandId]) await recomputePolicy(input.orgId, b, [human]);
@@ -494,6 +586,7 @@ export async function withdrawTag(input: { orgId: string; brandId: string; human
 async function subjectCompanyKey(orgId: string, brandId: string, humanId: string): Promise<string> {
   const rows = (await db.execute(sql`
     SELECT company_key FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ${humanId}::uuid
+    ORDER BY last_inbound_at DESC NULLS LAST, updated_at DESC, company_key LIMIT 1
   `)) as unknown as Array<{ company_key: string }>;
   return rows[0]?.company_key ?? "";
 }
@@ -558,18 +651,19 @@ export interface BrandIntentPerson {
  * writer first. A person the feed names without a human yet is not here (nobody to key on); they appear once resolved.
  */
 export async function readBrandIntent(orgId: string, brandId: string): Promise<BrandIntentPerson[]> {
+  // One entry per RELATION (PERSON-RELATIONS-1017): its own addresses and answers, never the human's other relations.
   const rows = (await db.execute(sql`
-    SELECT human_id::text AS human, name, emails, phones FROM relationship_subjects
+    SELECT human_id::text AS human, company_key, name, emails, phones FROM relationship_subjects
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND wrote_to_us
-    ORDER BY last_inbound_at DESC NULLS LAST, human_id
-  `)) as unknown as Array<{ human: string; name: string | null; emails: string[]; phones: string[] }>;
+    ORDER BY last_inbound_at DESC NULLS LAST, human_id, company_key
+  `)) as unknown as Array<{ human: string; company_key: string; name: string | null; emails: string[]; phones: string[] }>;
   const out: BrandIntentPerson[] = [];
   for (let i = 0; i < rows.length; i += 1000) {
     const part = rows.slice(i, i + 1000);
-    const blocks = await loadRelationships(orgId, brandId, part.map((r) => r.human));
+    const blocks = await loadRelationshipsAt(orgId, brandId, part.map((r) => ({ humanId: r.human, companyKey: r.company_key })));
     for (const r of part) {
-      const b = blocks.get(r.human);
-      if (!b) throw new Error(`[lead-service] relationship block missing for subject ${r.human} of brand ${brandId}`);
+      const b = blocks.get(subjectKey(r.human, r.company_key));
+      if (!b) throw new Error(`[lead-service] relationship block missing for subject ${r.human}@${r.company_key} of brand ${brandId}`);
       out.push({
         humanId: r.human,
         name: r.name,
