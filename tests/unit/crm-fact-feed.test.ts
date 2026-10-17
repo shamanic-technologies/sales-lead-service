@@ -155,4 +155,12 @@ describe("registry facts (CRM-REGISTRY-FACTS-1017)", async () => {
     );
     expect([...ids].sort()).toEqual(["o1", "t1", "w1", "w3"]);
   });
+
+  it("keeps a relation and its withdrawal out of the events (CRM-RELATION-REGISTRY-1017)", () => {
+    const ids = registryFactIds(
+      [f("r1", "relation"), f("w1", "withdrawn", "r1"), f("w2", "withdrawn", "r0"), f("m1", "message_in")],
+      new Set(["r0"]),
+    );
+    expect([...ids].sort()).toEqual(["r1", "w1", "w2"]);
+  });
 });
