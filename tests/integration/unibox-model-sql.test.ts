@@ -38,12 +38,13 @@ vi.mock("../../src/lib/fetch-retry.js", () => ({
   },
 }));
 vi.mock("../../src/lib/company-client.js", () => ({
+  MAX_COMPANIES_PER_REQUEST: 1000,
   getCompanies: async (ids: string[]) => ids.map((brandId) => ({ brandId, name: "Acme", domain: "acme.com" })),
   CompanyServiceError: class extends Error {},
 }));
 
 const { db } = await import("../../src/db/index.js");
-const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
+const { clearRegistry, connectionTag, organizationLink } = await import("../helpers/crm-registry.js");
 const { refreshSubjects } = await import("../../src/lib/relationship-subjects.js");
 const { writeEvidence } = await import("../../src/lib/relationship-judge.js");
 const { refreshUniboxRows, readUniboxPage, readUniboxLead, resetLifecycleCatalogueCache } = await import("../../src/lib/unibox-model.js");
@@ -84,6 +85,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await connectionTag({ orgId, brandId, human: ana, personKey: "email:ana@x.io", name: "Ana", emails: ["ana@x.io"] });
     await connectionTag({ orgId, brandId, human: ben, personKey: "email:ben@acme.io", name: "Ben", emails: ["ben@acme.io"] });
     await connectionTag({ orgId, brandId, human: friend, personKey: "matrix:f", name: "Friend", tag: "personal_to_user" });
+    const anaCompany = randomUUID();
+    await organizationLink({ orgId, brandId, human: ana, personKey: "email:ana@x.io", companyId: anaCompany });
 
     const [lead] = (await db.execute(sql`INSERT INTO leads (name, human_id) VALUES ('Ana', ${ana}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
     createdLeads.push(lead.id);
@@ -129,7 +132,10 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     });
     expect(benRow.steps.map((s) => s.step)).toEqual(["signup"]);
     expect(benRow.personKeys).toEqual(["email:ben@acme.io"]);
+    expect(benRow.company).toBeNull();
     expect(anaRow).toMatchObject({ lifecycle: { key: "engaged", rank: 3 }, fit: "wrong_person", fitNote: "left the company", conversation: "waiting_on_us" }); // replied after our email
+    // "Ana @ Acme": the relation's company, named by brand-service.
+    expect(anaRow.company).toMatchObject({ name: "Acme", domain: "acme.com" });
     expect(anaRow.steps.map((s) => s.step)).toEqual(["lead_found", "email_sent", "conversation", "website_visit"]);
   });
 
