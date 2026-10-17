@@ -9,6 +9,7 @@ import { loadRelationships, type RelationshipBlock } from "./relationship-read.j
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { reachClauses } from "./reach-sql.js";
 import { journalistScopeOf } from "./brand-journalists.js";
+import { isMemberAddress, loadOrgMemberKeys } from "./org-members.js";
 import type { ReachMethod } from "./people-client.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
 
@@ -27,6 +28,8 @@ import type { PoolEmailPolicy } from "./email-policy.js";
  *     (`prospect_followup_handouts`): the reactive pipe carries them after the first follow-up.
  *
  * Facts and where they are read (nothing re-derived here):
+ *   team member      one of their addresses is a member's of the org owning the brand, or a +tag variant of one
+ *                    (client-service, org-members.ts): the brand's own side, never a lead.
  *   contacted        a live `initial_email` / `followup` timeline fact of the brand (`lead_timeline_facts`).
  *   opted out / DNC  the HUMAN's live facts (`human_fact_copies`), a live `opt_out` reply fact.
  *   unsubscribed     a live `unsubscribed` / `tagged_as_spam` fact, or the sender's brand/global status.
@@ -50,6 +53,8 @@ import type { PoolEmailPolicy } from "./email-policy.js";
  */
 
 export const PROSPECT_FOLLOWUP_STOP_REASONS = [
+  // A member of the org owning the brand (its TEAM, org-members.ts, TEAM-OUT-OF-UNIBOX-1017): never a lead of ours.
+  "team_member",
   "opted_out",
   "do_not_contact",
   "unsubscribed",
@@ -143,11 +148,14 @@ export interface ProspectFollowupFacts {
    * a person known only from the Unibox or a signup included. Absent = true.
    */
   contactedRequired?: boolean;
+  /** One of the person's addresses is a member's of the org owning the brand (or a +tag variant). Absent = false. */
+  teamMember?: boolean;
 }
 
 /** Pure: is the person still owed a prospect follow-up, and if not, every reason (strongest first). */
 export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new Date()): ProspectFollowupVerdict {
   const stops = new Set<ProspectFollowupStop>();
+  if (f.teamMember) stops.add("team_member");
   if (f.human?.optedOut) stops.add("opted_out");
   if (f.human?.doNotContact) stops.add("do_not_contact");
   if (f.sender.unsubscribed) stops.add("unsubscribed");
@@ -215,6 +223,7 @@ export async function loadProspectFollowupVerdicts(input: {
     loadHumanFacts(leadIds),
     loadLeadAndCompanyMarks({ orgId, brandIds: [brandId], leadIds }),
   ]);
+  const members = await loadOrgMemberKeys(orgId);
 
   // Is their latest word waiting on an answer newer than our latest answer (outreach `reply_sent`, or a person's
   // "answered outside" statement)? Undated facts cannot be ordered and are left out (awaiting-reply.ts does the same).
@@ -302,6 +311,7 @@ export async function loadProspectFollowupVerdicts(input: {
         relationship: human ? (relationships.get(human) ?? null) : null,
         waitingOnAnswer: waitingOnAnswer.has(leadId),
         contactedRequired: input.contactedRequired,
+        teamMember: emailRows.some((e) => e.lead_id === leadId && isMemberAddress(e.email, members)),
       }),
     );
   }

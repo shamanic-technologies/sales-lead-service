@@ -59,6 +59,10 @@ export const CHAT_SERVICE_API_KEY = required("CHAT_SERVICE_API_KEY");
 export const CRM_SERVICE_URL = required("CRM_SERVICE_URL");
 export const CRM_SERVICE_API_KEY = required("CRM_SERVICE_API_KEY");
 
+// --- Who is a member of an org (client-service): its team is never a lead nor a Unibox row of its brands ---
+export const CLIENT_SERVICE_URL = required("CLIENT_SERVICE_URL");
+export const CLIENT_SERVICE_API_KEY = required("CLIENT_SERVICE_API_KEY");
+
 // --- Sources of a lead's history (GET /orgs/leads/:id/history) ---
 // Every one of these owns a fact about a person that this service does not: the messages
 // exchanged and the reply statements a human recorded (instantly-service), the exchange that
