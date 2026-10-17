@@ -59,7 +59,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     await fact({ personKey: "matrix:room2", human: friend, name: "A friend", type: "message_in", source: "matrix", payload: { text: "dinner?" } });
     await fact({ personKey: "matrix:room1", human: yuliaWa, name: "Yulia (WA)", type: "message_in", source: "matrix", payload: { text: "see you at the retreat!", channel: "whatsapp" } });
     await fact({ personKey: "email:lusenko.julija@gmail.com", human: yuliia, name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"], type: "signup", source: "clerk" });
-    await fact({ personKey: "email:lusenko.julija@gmail.com", human: yuliia, name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"], type: "payment", source: "stripe", payload: { amount: 9900 } });
+    await fact({ personKey: "email:lusenko.julija@gmail.com", human: yuliia, name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"], type: "payment", source: "stripe", payload: { status: "succeeded", amountMinor: 9900, amountRefunded: 0 } });
     const withdrawn = await fact({ personKey: "email:lusenko.julija@gmail.com", human: yuliia, name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"], type: "form_submitted", source: "crm" });
     await fact({ personKey: "email:lusenko.julija@gmail.com", human: null, name: "Yuliia Siletska", type: "withdrawn", source: "crm" });
     await db.execute(sql`UPDATE crm_facts SET withdrawn_of = ${withdrawn} WHERE org_id = ${orgId} AND type = 'withdrawn'`);

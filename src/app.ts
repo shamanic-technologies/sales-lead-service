@@ -15,6 +15,7 @@ import leadFollowupDateRoutes from "./routes/lead-followup-date.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
 import awaitingReplyRoutes from "./routes/awaiting-reply.js";
+import uniboxRoutes from "./routes/unibox.js";
 import disqualificationRoutes from "./routes/disqualifications.js";
 import qualificationRoutes from "./routes/qualification.js";
 import wonLeadsRoutes from "./routes/won-leads.js";
@@ -80,6 +81,8 @@ app.use(qualificationRoutes);
 app.use(awaitingReplyRoutes);
 // Before the leads router too: `/orgs/leads/disqualifications` must not be read as a lead id.
 app.use(disqualificationRoutes);
+// Before the leads router: /orgs/leads/unibox and /unibox-lead are not lead ids (UNIBOX-SIX-TAGS-1017).
+app.use(uniboxRoutes);
 app.use(leadsRoutes);
 app.use(wonLeadsRoutes);
 app.use(neverColdContactRoutes);

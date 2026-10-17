@@ -9274,3 +9274,106 @@ registry.registerPath({
     502: { description: "A source could not be read: no verdict" },
   },
 });
+
+// ── Unibox read model (UNIBOX-SIX-TAGS-1017) ───────────────────────────────────────────────────────────────────
+
+const LifecycleRungSchema = z
+  .object({ key: z.string(), rank: z.number().int(), label: z.string() })
+  .openapi("LifecycleRung", { description: "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)." });
+
+const UniboxRowSchema = z
+  .object({
+    humanId: z.string().openapi({ description: "The person (human-service human, this org's view)." }),
+    companyKey: z.string().openapi({ description: "The company they speak for at the brand ('' = unknown)." }),
+    name: z.string().nullable(),
+    emails: z.array(z.string()),
+    phones: z.array(z.string()),
+    leadIds: z.array(z.string()).openapi({ description: "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)." }),
+    types: z.array(z.enum(["prospect", "customer", "partner", "investor", "supplier", "employee", "advisor", "press", "other"])).openapi({
+      description: "TYPE: who they are to us, several at once (a person's word > a source's evidence > Jev).",
+    }),
+    lifecycle: LifecycleRungSchema.nullable().openapi({ description: "LIFECYCLE: the highest rung ever reached on the absolute ladder; null = none yet." }),
+    steps: z.array(z.object({ step: z.string(), at: z.string().nullable() })).openapi({ description: "Every catalogue step reached at the brand, first time each." }),
+    interest: z.enum(["interested", "not_interested", "unsure", "not_asked"]).openapi({ description: "INTEREST: do they want to buy from us?" }),
+    conversation: z.enum(["waiting_on_us", "waiting_on_them", "no_reply_yet", "closed"]).openapi({ description: "CONVERSATION STATUS: whose turn is it?" }),
+    contactability: z.enum(["contactable", "unsubscribed", "bounced", "do_not_contact"]).openapi({ description: "CONTACTABILITY: may we write?" }),
+    fit: z.enum(["fit", "wrong_person", "not_our_target"]).openapi({ description: "FIT: right person, right company? (disqualification marks)" }),
+    fitNote: z.string().nullable(),
+    lastTheirsAt: z.string().nullable(),
+    lastOursAt: z.string().nullable(),
+    lastActivityAt: z.string(),
+    connectionTags: z.array(z.string()).openapi({ description: "crm-service's connection tags on the human." }),
+  })
+  .openapi("UniboxRow");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/unibox",
+  summary: "The brand's Unibox: its leads (people crm-service tags professional to the brand) with six tag dimensions",
+  description:
+    "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), " +
+    "interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the " +
+    "relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400.",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    ...["type", "lifecycle", "interest", "conversation", "contactability", "fit", "q", "cursor"].map((name) => ({
+      in: "query" as const,
+      name,
+      required: false,
+      schema: { type: "string" as const },
+    })),
+    { in: "query" as const, name: "limit", required: false, schema: { type: "integer" as const, minimum: 1, maximum: 200 } },
+  ],
+  responses: {
+    200: {
+      description: "One page of the Unibox",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string(),
+            lifecycleLadder: z.array(LifecycleRungSchema),
+            rows: z.array(UniboxRowSchema),
+            total: z.number().int(),
+            nextCursor: z.string().nullable(),
+            builtAt: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid query" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/unibox-lead",
+  summary: "One Unibox lead's card: the six tags + every campaign they are part of, with the furthest step in each",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    { in: "query" as const, name: "humanId", required: true, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: {
+      description: "The lead card",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string(),
+            lead: UniboxRowSchema,
+            campaigns: z.array(
+              z.object({
+                campaignId: z.string(),
+                servedAt: z.string().nullable(),
+                furthest: LifecycleRungSchema.nullable(),
+                steps: z.array(z.object({ step: z.string(), at: z.string().nullable() })),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+    404: { description: "Not a lead of this brand (not tagged professional to it by crm-service)" },
+  },
+});
