@@ -104,6 +104,8 @@ export interface UniboxRow {
   name: string | null;
   emails: string[];
   phones: string[];
+  /** crm-service's person keys of the human at the brand: open their thread with one (crm `/orgs/people/timeline?personKey=`). */
+  personKeys: string[];
   leadIds: string[];
   types: UniboxType[];
   lifecycle: { key: string; rank: number; label: string } | null;
@@ -263,6 +265,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       name: s.name,
       emails: s.emails ?? [],
       phones: s.phones ?? [],
+      personKeys: [...(s.person_keys ?? [])].sort(),
       leadIds: myLeads.sort(),
       types: typesOf(block?.tags ?? []),
       lifecycle,
@@ -315,6 +318,7 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
       name: r.name,
       emails: r.emails,
       phones: r.phones,
+      pkeys: r.personKeys,
       leads: r.leadIds,
       types: r.types,
       lkey: r.lifecycle?.key ?? null,
@@ -332,28 +336,29 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
     })),
   );
   await db.execute(sql`
-    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, name, emails, phones, lead_ids, types, lifecycle_key, lifecycle_rank,
+    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, name, emails, phones, person_keys, lead_ids, types, lifecycle_key, lifecycle_rank,
       steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.name,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
-      ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], ARRAY(SELECT jsonb_array_elements_text(v.types)),
+      ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], ARRAY(SELECT jsonb_array_elements_text(v.types)),
       v.lkey, v.lrank, v.steps, v.interest, v.conversation, v.contactability, v.fit, v.note,
       v.theirs::timestamptz, v.ours::timestamptz, v.activity::timestamptz, ARRAY(SELECT jsonb_array_elements_text(v.conn)),
       lower(coalesce(v.name, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, leads jsonb, types jsonb,
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, pkeys jsonb, leads jsonb, types jsonb,
       lkey text, lrank int, steps jsonb, interest text, conversation text, contactability text, fit text, note text, theirs text, ours text,
       activity text, conn jsonb)
     ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
-      company_key = excluded.company_key, name = excluded.name, emails = excluded.emails, phones = excluded.phones, lead_ids = excluded.lead_ids,
+      company_key = excluded.company_key, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
+      person_keys = excluded.person_keys, lead_ids = excluded.lead_ids,
       types = excluded.types, lifecycle_key = excluded.lifecycle_key, lifecycle_rank = excluded.lifecycle_rank, steps = excluded.steps,
       interest = excluded.interest, conversation = excluded.conversation, contactability = excluded.contactability, fit = excluded.fit,
       fit_note = excluded.fit_note, last_theirs_at = excluded.last_theirs_at, last_ours_at = excluded.last_ours_at,
       last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text, updated_at = now()
-    WHERE (unibox_rows.company_key, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.lead_ids, unibox_rows.types,
+    WHERE (unibox_rows.company_key, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.lead_ids, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
-      IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.lead_ids, excluded.types,
+      IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.lead_ids, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
            excluded.connection_tags)
@@ -387,6 +392,7 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     name: (r.name as string | null) ?? null,
     emails: (r.emails as string[]) ?? [],
     phones: (r.phones as string[]) ?? [],
+    personKeys: (r.person_keys as string[]) ?? [],
     leadIds: ((r.lead_ids as string[]) ?? []).map(String),
     types: (r.types as UniboxType[]) ?? [],
     lifecycle: rung,

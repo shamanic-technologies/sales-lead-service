@@ -12600,6 +12600,13 @@
               "type": "string"
             }
           },
+          "personKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "crm-service's person keys of the human at the brand: open their thread with one (crm-service GET /orgs/people/timeline?personKey=)."
+          },
           "leadIds": {
             "type": "array",
             "items": {
@@ -12724,6 +12731,7 @@
           "name",
           "emails",
           "phones",
+          "personKeys",
           "leadIds",
           "types",
           "lifecycle",
