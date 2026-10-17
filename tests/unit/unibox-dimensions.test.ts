@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   contactabilityOf,
+  customerStateFrom,
   conversationOf,
   fitOf,
   interestOf,
@@ -45,6 +46,28 @@ describe("unibox dimensions", () => {
     expect(statusOf({ customer: true, churned: true })).toBe("customer");
     expect(statusOf({ customer: false, churned: true })).toBe("churned");
     expect(statusOf({ customer: false, churned: false })).toBe("prospect");
+  });
+
+  it("Churned only when a source states the end, newer than any sign of being a customer", () => {
+    // GHL: crm states former_client WITH client on the same date = churned; a later client entry = customer again.
+    expect(customerStateFrom([{ kind: "client", at: "2026-09-01T00:00:00Z" }, { kind: "former_client", at: "2026-09-01T00:00:00Z" }])).toEqual({ churned: true, customerSign: false });
+    expect(
+      customerStateFrom([
+        { kind: "client", at: "2026-09-01T00:00:00Z" },
+        { kind: "former_client", at: "2026-09-01T00:00:00Z" },
+        { kind: "client", at: "2026-10-01T00:00:00Z" },
+      ]),
+    ).toEqual({ churned: false, customerSign: true });
+    // A live undated former tag = now; a payment after it cannot be newer than now, a running subscription ties = customer.
+    expect(customerStateFrom([{ kind: "former_client", at: null }, { kind: "paid", at: "2026-10-01T00:00:00Z" }]).churned).toBe(true);
+    // Stripe: a subscription speaks by its LATEST status.
+    const sub = (status: string, at: string) => ({ kind: "subscription" as const, at, subscriptionId: "sub_1", status });
+    expect(customerStateFrom([sub("active", "2026-08-01T00:00:00Z"), sub("canceled", "2026-09-01T00:00:00Z")]).churned).toBe(true);
+    expect(customerStateFrom([sub("canceled", "2026-09-01T00:00:00Z"), { kind: "paid", at: "2026-10-01T00:00:00Z" }])).toEqual({ churned: false, customerSign: true });
+    expect(customerStateFrom([sub("active", "2026-08-01T00:00:00Z")])).toEqual({ churned: false, customerSign: true });
+    // Nothing stated = never a guess.
+    expect(customerStateFrom([])).toEqual({ churned: false, customerSign: false });
+    expect(customerStateFrom([{ kind: "paid", at: "2025-01-01T00:00:00Z" }]).churned).toBe(false);
   });
 
   it("Roles stack beside the status; prospect and customer are never roles", () => {

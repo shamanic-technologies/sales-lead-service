@@ -148,6 +148,16 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(await readUniboxLead(scope, friend)).toBeNull();
   });
 
+  it("a CRM former client reads churned; a later client stage reads customer again (owner 2026-10-17)", async () => {
+    await crmFact("email:ben@acme.io", ben, "client", "2026-10-07T10:00:00Z");
+    await crmFact("email:ben@acme.io", ben, "former_client", "2026-10-07T10:00:00Z");
+    await refreshUniboxRows(scope);
+    expect((await readUniboxPage(scope, { status: ["churned"] }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ben]);
+    await crmFact("email:ben@acme.io", ben, "client", "2026-10-09T10:00:00Z");
+    await refreshUniboxRows(scope);
+    expect((await readUniboxPage(scope, { status: ["customer"] }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ben]);
+  });
+
   it("a person crm stops tagging professional leaves the Unibox", async () => {
     const tagFact = (await db.execute(sql`
       SELECT fact_id FROM crm_registry_facts WHERE org_id = ${orgId} AND raw->>'humanId' = ${ben} AND type = 'connection_tag'`)) as unknown as Array<{ fact_id: string }>;
