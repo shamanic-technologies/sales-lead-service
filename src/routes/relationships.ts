@@ -21,6 +21,11 @@ const isStatable = (tag: string) => isRelationshipTag(tag) || tag === WANTS_BUSI
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const RelationshipsQueryBody = z.object({ humanIds: z.array(z.string().regex(UUID_RE)).min(1).max(1000) });
+/** `?companyKey=` names the relation (Unibox row) a tag is said about (PERSON-RELATIONS-1017); absent = the human's. */
+function companyKeyOf(req: AuthenticatedRequest): string | undefined {
+  return typeof req.query.companyKey === "string" ? req.query.companyKey : undefined;
+}
+
 export const TagStateBody = z.object({ state: z.enum(["yes", "no"]) });
 export const MergeAnswerBody = z.object({ same: z.boolean() });
 export const CompanyBody = z.union([
@@ -155,7 +160,7 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAuth,
     return;
   }
   try {
-    await stateTag({ orgId: req.orgId!, brandId, humanId, tag, state: parsed.data.state, userId });
+    await stateTag({ orgId: req.orgId!, brandId, humanId, tag, state: parsed.data.state, userId, companyKey: companyKeyOf(req) });
     const block = (await loadRelationships(req.orgId!, brandId, [humanId])).get(humanId) ?? { ...EMPTY_RELATIONSHIP, humanId };
     res.json({ relationship: block });
   } catch (err) {
@@ -175,7 +180,7 @@ router.delete("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAu
     return;
   }
   try {
-    const withdrawn = await withdrawTag({ orgId: req.orgId!, brandId, humanId, tag, userId });
+    const withdrawn = await withdrawTag({ orgId: req.orgId!, brandId, humanId, tag, userId, companyKey: companyKeyOf(req) });
     const block = (await loadRelationships(req.orgId!, brandId, [humanId])).get(humanId) ?? { ...EMPTY_RELATIONSHIP, humanId };
     res.json({ withdrawn, relationship: block });
   } catch (err) {

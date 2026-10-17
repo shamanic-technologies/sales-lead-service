@@ -6,8 +6,9 @@
  *   GET /orgs/leads/unibox?brandId=[&status=&role=&type=&lifecycle=&interest=&conversation=&contactability=&fit=&q=&limit=&cursor=]
  *       Most recent activity first. Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
  *       the size of the filtered set; `nextCursor` pages it. Unknown filter value / bad bound = 400.
- *   GET /orgs/leads/unibox-lead?brandId=&humanId=
- *       The lead card: the six tags + every campaign the person is part of, with the furthest step in each. 404 = not
+ *   GET /orgs/leads/unibox-lead?brandId=&(relationKey=|humanId=)
+ *       One row = one RELATION (a human at a company, PERSON-RELATIONS-1017): `relationKey` names it; `humanId` alone =
+ *       that human's most recently active row. The lead card: the six tags + every campaign the person is part of, with the furthest step in each. 404 = not
  *       a lead of the brand.
  *
  * Mounted BEFORE the leads router so neither path is read as a lead id; the gateway reaches both through
@@ -29,6 +30,8 @@ import { loadLifecycleCatalogue, readUniboxLead, readUniboxPage, UniboxCursorErr
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A professional relation key (crm-service): a personal relation has no Unibox row. */
+const RELATION_KEY_RE = /^rel:[0-9a-f-]{36}:(pro|org:[0-9a-f-]{36})$/i;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 
@@ -87,8 +90,11 @@ router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, async (req: Auth
   try {
     const brandId = brandOf(req);
     const humanId = typeof req.query.humanId === "string" ? req.query.humanId.trim() : "";
-    if (!UUID_RE.test(humanId)) throw new BadQuery("humanId (uuid) is required");
-    const card = await readUniboxLead({ orgId: req.orgId!, brandId }, humanId);
+    const relationKey = typeof req.query.relationKey === "string" ? req.query.relationKey.trim() : "";
+    if (humanId && !UUID_RE.test(humanId)) throw new BadQuery("humanId must be a uuid");
+    if (relationKey && !RELATION_KEY_RE.test(relationKey)) throw new BadQuery("relationKey must be a crm relation key (rel:<personId>:pro|org:<companyId>)");
+    if (!humanId && !relationKey) throw new BadQuery("relationKey or humanId is required");
+    const card = await readUniboxLead({ orgId: req.orgId!, brandId }, humanId || null, relationKey || null);
     if (!card) {
       res.status(404).json({ error: "not a lead of this brand", code: "not_a_unibox_lead" });
       return;

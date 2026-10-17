@@ -1122,6 +1122,8 @@ export const crmFacts = pgTable(
     sourceRef: text("source_ref").notNull(),
     payload: jsonb("payload").notNull(),
     withdrawnOf: text("withdrawn_of"),
+    /** The contact point the fact happened on (crm-service's `<source>:<stable id>`, PERSON-RELATIONS-1017); null = none. */
+    contactPoint: text("contact_point"),
     raw: jsonb("raw").notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1158,6 +1160,8 @@ export const crmRegistryFacts = pgTable(
     sourceRef: text("source_ref").notNull(),
     payload: jsonb("payload").notNull(),
     withdrawnOf: text("withdrawn_of"),
+    /** The contact point the fact happened on (crm-service's `<source>:<stable id>`, PERSON-RELATIONS-1017); null = none. */
+    contactPoint: text("contact_point"),
     raw: jsonb("raw").notNull(),
     receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
   },

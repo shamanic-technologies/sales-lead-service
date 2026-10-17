@@ -9283,15 +9283,19 @@ const LifecycleRungSchema = z
 
 const UniboxRowSchema = z
   .object({
-    humanId: z.string().openapi({ description: "The person (human-service human, this org's view)." }),
-    companyKey: z.string().openapi({ description: "The company they speak for at the brand ('' = unknown)." }),
+    humanId: z.string().openapi({ description: "The person (human-service human, this org's view). One row = one RELATION: this human at `companyKey` (PERSON-RELATIONS-1017); a human may have several rows." }),
+    companyKey: z.string().openapi({ description: "The company of the relation ('' = professional, company unknown). (humanId, companyKey) identifies the row." }),
     company: z.object({ id: z.string(), name: z.string().nullable(), domain: z.string().nullable() }).nullable().openapi({
       description: "The relation's company, to print \"Name @ Company\" and its logo (by domain); null = unknown.",
     }),
     name: z.string().nullable(),
     emails: z.array(z.string()),
     phones: z.array(z.string()),
-    personKeys: z.array(z.string()).openapi({ description: "crm-service's person keys of the human at the brand: open their thread with one (crm-service GET /orgs/people/timeline?personKey=)." }),
+    personKeys: z.array(z.string()).openapi({ description: "crm-service's person keys of the relation." }),
+    relationKey: z.string().nullable().openapi({
+      description: "crm-service's relation key of the row: open ITS thread with it (crm-service GET /orgs/people/timeline?relationKey=), only that relation's contact points, never the person's personal conversations.",
+    }),
+    relationKeys: z.array(z.string()).openapi({ description: "Every crm relation folded into the row (`relationKey` first)." }),
     leadIds: z.array(z.string()).openapi({ description: "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)." }),
     status: z.enum(["prospect", "customer", "churned"]).openapi({
       description: "STATUS, one value: customer = paying today (even after an earlier churn); churned = paid, then a source stated the end; prospect = never paid.",
@@ -9312,7 +9316,7 @@ const UniboxRowSchema = z
     lastTheirsAt: z.string().nullable(),
     lastOursAt: z.string().nullable(),
     lastActivityAt: z.string(),
-    connectionTags: z.array(z.string()).openapi({ description: "crm-service's connection tags on the human." }),
+    connectionTags: z.array(z.string()).openapi({ description: "crm-service's connection tags of the relation's own contact points." }),
   })
   .openapi("UniboxRow");
 
@@ -9362,7 +9366,8 @@ registry.registerPath({
   parameters: [
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
-    { in: "query" as const, name: "humanId", required: true, schema: { type: "string" as const } },
+    { in: "query" as const, name: "relationKey", required: false, schema: { type: "string" as const }, description: "The row (a professional relation key). One of relationKey / humanId is required." },
+    { in: "query" as const, name: "humanId", required: false, schema: { type: "string" as const }, description: "Alone: that human's most recently active row." },
   ],
   responses: {
     200: {
