@@ -9290,8 +9290,14 @@ const UniboxRowSchema = z
     phones: z.array(z.string()),
     personKeys: z.array(z.string()).openapi({ description: "crm-service's person keys of the human at the brand: open their thread with one (crm-service GET /orgs/people/timeline?personKey=)." }),
     leadIds: z.array(z.string()).openapi({ description: "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)." }),
+    status: z.enum(["prospect", "customer", "churned"]).openapi({
+      description: "STATUS, one value: customer = paying today (even after an earlier churn); churned = paid, then a source stated the end; prospect = never paid.",
+    }),
+    roles: z.array(z.enum(["partner", "investor", "supplier", "employee", "advisor", "press", "other"])).openapi({
+      description: "ROLES: everything else they are to the brand, several at once (a person's word > a source's evidence > Jev).",
+    }),
     types: z.array(z.enum(["prospect", "customer", "partner", "investor", "supplier", "employee", "advisor", "press", "other"])).openapi({
-      description: "TYPE: who they are to us, several at once (a person's word > a source's evidence > Jev).",
+      description: "Deprecated: status + roles. Kept while readers move.",
     }),
     lifecycle: LifecycleRungSchema.nullable().openapi({ description: "LIFECYCLE: the highest rung ever reached on the absolute ladder; null = none yet." }),
     steps: z.array(z.object({ step: z.string(), at: z.string().nullable() })).openapi({ description: "Every catalogue step reached at the brand, first time each." }),
@@ -9318,7 +9324,7 @@ registry.registerPath({
   parameters: [
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
-    ...["type", "lifecycle", "interest", "conversation", "contactability", "fit", "q", "cursor"].map((name) => ({
+    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "q", "cursor"].map((name) => ({
       in: "query" as const,
       name,
       required: false,

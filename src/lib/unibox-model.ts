@@ -25,6 +25,8 @@ import {
   fitOf,
   interestOf,
   lifecycleOf,
+  rolesOf,
+  statusOf,
   STEP_OF_TIMELINE_LABEL,
   typesOf,
   type LifecycleRung,
@@ -33,6 +35,8 @@ import {
   type UniboxConversation,
   type UniboxFit,
   type UniboxInterest,
+  type UniboxRole,
+  type UniboxStatus,
   type UniboxType,
 } from "./unibox-dimensions.js";
 
@@ -107,6 +111,11 @@ export interface UniboxRow {
   /** crm-service's person keys of the human at the brand: open their thread with one (crm `/orgs/people/timeline?personKey=`). */
   personKeys: string[];
   leadIds: string[];
+  /** STATUS: prospect / customer / churned, one value. */
+  status: UniboxStatus;
+  /** ROLES: partner, investor, supplier, employee, advisor, press, other; several. */
+  roles: UniboxRole[];
+  /** @deprecated status + roles; kept while readers move. */
   types: UniboxType[];
   lifecycle: { key: string; rank: number; label: string } | null;
   steps: Array<{ step: string; at: string | null }>;
@@ -267,6 +276,9 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       phones: s.phones ?? [],
       personKeys: [...(s.person_keys ?? [])].sort(),
       leadIds: myLeads.sort(),
+      // Churned waits on a source stating the end of the relationship (crm-service fact feed): none read yet.
+      status: statusOf({ customer: (block?.tags ?? []).includes("customer"), churned: false }),
+      roles: rolesOf(block?.tags ?? []),
       types: typesOf(block?.tags ?? []),
       lifecycle,
       steps: [...reached.entries()]
@@ -320,6 +332,8 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
       phones: r.phones,
       pkeys: r.personKeys,
       leads: r.leadIds,
+      status: r.status,
+      roles: r.roles,
       types: r.types,
       lkey: r.lifecycle?.key ?? null,
       lrank: r.lifecycle?.rank ?? null,
@@ -336,29 +350,30 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
     })),
   );
   await db.execute(sql`
-    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, name, emails, phones, person_keys, lead_ids, types, lifecycle_key, lifecycle_rank,
+    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, name, emails, phones, person_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
       steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.name,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
-      ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], ARRAY(SELECT jsonb_array_elements_text(v.types)),
+      ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], v.status, ARRAY(SELECT jsonb_array_elements_text(v.roles)),
+      ARRAY(SELECT jsonb_array_elements_text(v.types)),
       v.lkey, v.lrank, v.steps, v.interest, v.conversation, v.contactability, v.fit, v.note,
       v.theirs::timestamptz, v.ours::timestamptz, v.activity::timestamptz, ARRAY(SELECT jsonb_array_elements_text(v.conn)),
       lower(coalesce(v.name, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, pkeys jsonb, leads jsonb, types jsonb,
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, name text, emails jsonb, phones jsonb, pkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
       lkey text, lrank int, steps jsonb, interest text, conversation text, contactability text, fit text, note text, theirs text, ours text,
       activity text, conn jsonb)
     ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
       company_key = excluded.company_key, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
-      person_keys = excluded.person_keys, lead_ids = excluded.lead_ids,
+      person_keys = excluded.person_keys, lead_ids = excluded.lead_ids, status = excluded.status, roles = excluded.roles,
       types = excluded.types, lifecycle_key = excluded.lifecycle_key, lifecycle_rank = excluded.lifecycle_rank, steps = excluded.steps,
       interest = excluded.interest, conversation = excluded.conversation, contactability = excluded.contactability, fit = excluded.fit,
       fit_note = excluded.fit_note, last_theirs_at = excluded.last_theirs_at, last_ours_at = excluded.last_ours_at,
       last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text, updated_at = now()
-    WHERE (unibox_rows.company_key, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.lead_ids, unibox_rows.types,
+    WHERE (unibox_rows.company_key, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
-      IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.lead_ids, excluded.types,
+      IS DISTINCT FROM (excluded.company_key, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
            excluded.connection_tags)
@@ -367,6 +382,8 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
 
 /** The filters of the list: each dimension takes a set (any of), absent = no filter. */
 export interface UniboxFilters {
+  status?: readonly string[];
+  roles?: readonly string[];
   types?: readonly string[];
   lifecycle?: readonly string[];
   interest?: readonly string[];
@@ -394,6 +411,8 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     phones: (r.phones as string[]) ?? [],
     personKeys: (r.person_keys as string[]) ?? [],
     leadIds: ((r.lead_ids as string[]) ?? []).map(String),
+    status: (r.status as UniboxStatus) ?? "prospect",
+    roles: (r.roles as UniboxRole[]) ?? [],
     types: (r.types as UniboxType[]) ?? [],
     lifecycle: rung,
     steps: (r.steps as Array<{ step: string; at: string | null }>) ?? [],
@@ -427,6 +446,8 @@ function decodeCursor(c: string): { at: string; human: string } {
 
 function filterSql(scope: Scope, f: UniboxFilters) {
   const parts = [sql`u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId}`];
+  if (f.status?.length) parts.push(sql`u.status = ANY(${sql.param([...f.status])}::text[])`);
+  if (f.roles?.length) parts.push(sql`u.roles && ${sql.param([...f.roles])}::text[]`);
   if (f.types?.length) parts.push(sql`u.types && ${sql.param([...f.types])}::text[]`);
   if (f.lifecycle?.length) {
     // `none` = no rung reached yet.
