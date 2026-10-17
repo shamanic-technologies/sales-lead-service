@@ -58,6 +58,53 @@ export function statusOf(f: { customer: boolean; churned: boolean }): UniboxStat
   return "prospect";
 }
 
+/** One fact about being (or no longer being) a customer, as crm-service states it. `at` null = undated (a live tag: now). */
+export type CustomerFact =
+  | { kind: "client"; at: string | null }
+  | { kind: "former_client"; at: string | null }
+  | { kind: "subscription"; at: string | null; subscriptionId: string; status: string }
+  | { kind: "paid"; at: string | null };
+
+/** Stripe subscription statuses that END the relationship (crm-service, CRM-FORMER-CLIENT). */
+const SUBSCRIPTION_ENDED = new Set(["canceled", "incomplete_expired"]);
+
+const instant = (at: string | null): number => (at === null ? Number.POSITIVE_INFINITY : Date.parse(at));
+
+/**
+ * Has the person CHURNED, as a source states it (owner 2026-10-17: paid, then stopped; never a time guess)? The
+ * latest END must be newer than the latest sign of being a customer:
+ *   - END: a `former_client` fact (a CRM stage or tag; undated = a live tag = now), or a Stripe subscription whose
+ *     latest status ended it (canceled / incomplete_expired);
+ *   - CUSTOMER: a `client` fact NOT stated with a `former_client` at the same date (crm states both together for a
+ *     former client), a Stripe subscription whose latest status is any other, or a payment / sale that stands.
+ * A tie goes to the customer (paying today = customer, even after an earlier churn).
+ */
+export function customerStateFrom(facts: readonly CustomerFact[]): { churned: boolean; customerSign: boolean } {
+  const formerAt = new Set(facts.filter((f) => f.kind === "former_client").map((f) => f.at ?? "undated"));
+  let lastEnd = Number.NEGATIVE_INFINITY;
+  let lastActive = Number.NEGATIVE_INFINITY;
+  for (const f of facts) {
+    if (f.kind === "former_client") lastEnd = Math.max(lastEnd, instant(f.at));
+    else if (f.kind === "client" && !formerAt.has(f.at ?? "undated")) lastActive = Math.max(lastActive, instant(f.at));
+    else if (f.kind === "paid") lastActive = Math.max(lastActive, instant(f.at));
+  }
+  // A subscription speaks by its LATEST status only.
+  const latest = new Map<string, { at: number; status: string }>();
+  for (const f of facts) {
+    if (f.kind !== "subscription") continue;
+    const at = instant(f.at);
+    const cur = latest.get(f.subscriptionId);
+    if (!cur || at >= cur.at) latest.set(f.subscriptionId, { at, status: f.status });
+  }
+  for (const s of latest.values()) {
+    if (SUBSCRIPTION_ENDED.has(s.status)) lastEnd = Math.max(lastEnd, s.at);
+    // A subscription still running is a customer NOW, whenever it last changed.
+    else lastActive = Number.POSITIVE_INFINITY;
+  }
+  const churned = lastEnd > Number.NEGATIVE_INFINITY && lastEnd > lastActive;
+  return { churned, customerSign: !churned && lastActive > Number.NEGATIVE_INFINITY };
+}
+
 /** ROLES (owner 2026-10-17): everything else a person is to the brand, stacking beside the status. */
 export const UNIBOX_ROLES = ["partner", "investor", "supplier", "employee", "advisor", "press", "other"] as const;
 export type UniboxRole = (typeof UNIBOX_ROLES)[number];

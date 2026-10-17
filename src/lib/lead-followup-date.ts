@@ -285,6 +285,8 @@ export const CRM_NOT_THEIR_ACT = [
   "added_to_crm",
   "group_member",
   "deal_status_changed",
+  // A CRM stage / tag saying they are no longer a client (crm-service v0.73.0): bookkeeping, not an act of theirs.
+  "former_client",
   "disqualified",
   "meeting_not_held",
 ] as const;
