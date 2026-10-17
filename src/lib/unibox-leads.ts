@@ -43,13 +43,15 @@ export interface UniboxIntakeResult {
   filed: number;
   notProspect: number;
   ambiguous: number;
+  /** Members of the org (its team, org-members.ts): never filed. */
+  teamMembers: number;
   /** Pure prospects not filed because none of their addresses is one email-gateway accepts. */
   malformed: number;
 }
 
 /** File every Unibox pure prospect that is not a lead of its brand yet (of one brand when scoped). */
 export async function fileUniboxLeads(scope: { orgId: string; brandId: string } | null = null): Promise<UniboxIntakeResult> {
-  const result: UniboxIntakeResult = { candidates: 0, filed: 0, notProspect: 0, ambiguous: 0, malformed: 0 };
+  const result: UniboxIntakeResult = { candidates: 0, filed: 0, notProspect: 0, ambiguous: 0, teamMembers: 0, malformed: 0 };
   // Keyset walk: a subject refused today (not a pure prospect) stays a candidate and must not hide the ones after it.
   let after: { at: string; human: string } | null = null;
   for (;;) {
@@ -150,6 +152,10 @@ async function fileCandidates(candidates: Candidate[], result: UniboxIntakeResul
       if (filing.status === "ambiguous_lead") {
         result.ambiguous++;
         console.warn(`[lead-service] unibox intake: ${email} (brand ${brandId}) is held by several leads (${filing.leadIds.join(", ")}); not filed`);
+        continue;
+      }
+      if (filing.status === "team_member") {
+        result.teamMembers++;
         continue;
       }
       if (filing.status === "filed") result.filed++;

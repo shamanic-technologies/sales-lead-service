@@ -35,6 +35,7 @@ import { db } from "../db/index.js";
 import { leads } from "../db/schema.js";
 import { registerServedEmail } from "./leads-registry.js";
 import { normalizeEmail, splitFullName } from "./named-person.js";
+import { isMemberAddress, loadOrgMemberKeys } from "./org-members.js";
 
 export const BRAND_SIGNUPS_SOURCE = "crm_signup";
 export const BRAND_SIGNUPS_INTERVAL_MS = 2 * 60_000;
@@ -97,7 +98,8 @@ async function leadsOwningEmail(email: string): Promise<string[]> {
 
 export type SignupFiling =
   | { status: "filed" | "already_filed"; leadId: string; leadCampaignId: string }
-  | { status: "ambiguous_lead"; leadIds: string[] };
+  | { status: "ambiguous_lead"; leadIds: string[] }
+  | { status: "team_member" };
 
 /** File ONE signup as a lead of the brand. */
 export async function fileSignup(p: {
@@ -121,6 +123,8 @@ export async function fileSignup(p: {
 /**
  * File ONE person the brand itself knows (a signup, a Unibox conversation) as a lead of the brand under one of its own
  * intakes (`campaignId`, never a campaign-service campaign): email-first lead, ONE `served` row dated `at`.
+ * A member of the org owning the brand (or a +tag variant of a member's address) is its TEAM, never a lead: nothing
+ * is written, `team_member` (TEAM-OUT-OF-UNIBOX-1017, org-members.ts). Members unreadable = thrown, nothing filed.
  */
 export async function fileBrandIntakePerson(p: {
   orgId: string;
@@ -132,6 +136,7 @@ export async function fileBrandIntakePerson(p: {
   source: string;
 }): Promise<SignupFiling> {
   const email = normalizeEmail(p.email);
+  if (isMemberAddress(email, await loadOrgMemberKeys(p.orgId))) return { status: "team_member" };
   const owners = await leadsOwningEmail(email);
   if (owners.length > 1) return { status: "ambiguous_lead", leadIds: owners };
 
@@ -170,6 +175,8 @@ export interface SignupSweepResult {
   pending: number;
   filed: number;
   ambiguous: number;
+  /** Signups of the org's own team: never filed. */
+  teamMembers: number;
   /** The brands a lead was filed for: their CRM evidence pass is asked next. */
   brands: Array<{ orgId: string; brandId: string }>;
 }
@@ -179,6 +186,7 @@ export async function fileBrandSignups(scope: BrandScope | null = null): Promise
   const pending = await pendingSignups(scope);
   let filed = 0;
   let ambiguous = 0;
+  let teamMembers = 0;
   const brands = new Map<string, { orgId: string; brandId: string }>();
   for (const s of pending) {
     const result = await fileSignup({
@@ -196,10 +204,14 @@ export async function fileBrandSignups(scope: BrandScope | null = null): Promise
       );
       continue;
     }
+    if (result.status === "team_member") {
+      teamMembers++;
+      continue;
+    }
     if (result.status === "filed") filed++;
     brands.set(`${s.org_id}|${s.brand_id}`, { orgId: s.org_id, brandId: s.brand_id });
   }
-  return { pending: pending.length, filed, ambiguous, brands: [...brands.values()] };
+  return { pending: pending.length, filed, ambiguous, teamMembers, brands: [...brands.values()] };
 }
 
 let sweeping = false;

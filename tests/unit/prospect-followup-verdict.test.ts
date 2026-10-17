@@ -33,6 +33,13 @@ function facts(over: Partial<ProspectFollowupFacts> = {}): ProspectFollowupFacts
 }
 
 describe("prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014)", () => {
+  it("a member of the org owning the brand is its team: never owed, for good (TEAM-OUT-OF-UNIBOX-1017)", () => {
+    const v = decideProspectFollowup(facts({ teamMember: true }));
+    expect(v).toMatchObject({ owed: false, kind: "stop", reason: "team_member", reasons: ["team_member"] });
+    // "team" wins over every other tag: a member who also paid is still a stop for being the team.
+    expect(decideProspectFollowup(facts({ teamMember: true, outcomes: new Set(["sale"]) })).reasons).toEqual(["team_member", "customer"]);
+  });
+
   it("a contacted person no source of the org knows is a pure prospect: owed", () => {
     expect(decideProspectFollowup(facts())).toEqual({ owed: true, kind: "owed", retryAfter: null, reason: null, reasons: [], relationshipTags: [] });
   });
