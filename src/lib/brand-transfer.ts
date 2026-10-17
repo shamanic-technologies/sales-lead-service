@@ -209,6 +209,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "relationship_intent_judgments", touchesUpdatedAt: false },
       { table: "relationship_statements", touchesUpdatedAt: false },
       { table: "relationship_merge_questions", touchesUpdatedAt: false },
+      // The Unibox read model (UNIBOX-SIX-TAGS-1017): moves with the subjects it is built from.
+      { table: "unibox_rows", touchesUpdatedAt: true },
       // Who was handed to the contacted-pure-prospects population (NEVER-NO-FOLLOWUP-1014): once per brand, ever.
       { table: "prospect_followup_handouts", touchesUpdatedAt: false },
       // What each person's outcome triggers did (EVERY-OUTCOME-FIRES-1015): once per person, so it moves with them.

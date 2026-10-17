@@ -31,6 +31,7 @@ const BRAND_SCALAR_TABLES = [
   "candidate_screenings",
   "crm_facts",
   "crm_registry_facts",
+  "unibox_rows",
   "lead_delivery_evidence",
   "lead_timeline_facts",
   "answered_outside_statements",
@@ -153,6 +154,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
       type: "added_to_crm", occurredAt: null, dateBasis: "created_at", source: "gohighlevel",
       sourceRef: `ref-${randomUUID()}`, payload: { origin: "itest" }, raw: { itest: true },
     });
+    await db.execute(sql`
+      INSERT INTO unibox_rows (org_id, brand_id, human_id, interest, conversation, contactability, fit, last_activity_at)
+      VALUES (${org}, ${brand}, ${randomUUID()}::uuid, 'not_asked', 'no_reply_yet', 'contactable', 'fit', now())`);
     await db.insert(schema.crmRegistryFacts).values({
       factId: randomUUID(), seq: BigInt(Math.floor(Math.random() * 1e15)), orgId: org, brandId: brand,
       personKey: `p-${randomUUID()}`, sourceContactId: null, fullName: null, emails: [], phones: [],
