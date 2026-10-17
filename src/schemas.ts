@@ -9355,7 +9355,7 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/unibox-lead",
-  summary: "One Unibox lead's card: the six tags + every campaign they are part of, with the furthest step in each",
+  summary: "One Unibox lead's card: the six tags + every campaign they are part of (at the sales funnel grain, named), with the furthest step in each; a filing that is no campaign (signup, Unibox conversation) is not listed",
   parameters: [
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
@@ -9371,7 +9371,10 @@ registry.registerPath({
             lead: UniboxRowSchema,
             campaigns: z.array(
               z.object({
-                campaignId: z.string(),
+                campaignId: z.string().openapi({ description: "The sales funnel campaign the customer launched (a pipe folds into it), else the campaign." }),
+                salesFunnelCampaignId: z.string().nullable(),
+                name: z.string().openapi({ description: "What the customer calls it: the funnel's name, else the campaign's." }),
+                partCampaignIds: z.array(z.string()).openapi({ description: "Our pipe campaigns folded into it." }),
                 servedAt: z.string().nullable(),
                 furthest: LifecycleRungSchema.nullable(),
                 steps: z.array(z.object({ step: z.string(), at: z.string().nullable() })),

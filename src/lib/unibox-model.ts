@@ -19,6 +19,7 @@ import { STEP_REACHED_EVIDENCE } from "./step-reached.js";
 import { loadRelationships } from "./relationship-read.js";
 import { loadLeadAndCompanyMarks, effectiveLeadOrCompanyMark } from "./lead-disqualification.js";
 import { NON_EVENT_FACT_TYPES, type Scope } from "./relationship-subjects.js";
+import { loadCampaignDisplays, type CampaignDisplay } from "./campaign-names-client.js";
 import {
   contactabilityOf,
   conversationOf,
@@ -497,9 +498,14 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
 }
 
 export interface UniboxCampaign {
+  /** The SALES FUNNEL campaign the customer launched when the person's campaign is one of its pipes, else the campaign. */
   campaignId: string;
+  salesFunnelCampaignId: string | null;
+  /** What the customer calls it (the funnel's name, else the campaign's). */
+  name: string;
+  /** The pipe campaigns of ours folded into it. */
+  partCampaignIds: string[];
   servedAt: string | null;
-  /** The furthest rung reached in this campaign. */
   furthest: LifecycleRung | null;
   steps: Array<{ step: string; at: string | null }>;
 }
@@ -527,23 +533,36 @@ export async function readUniboxLead(scope: Scope, humanId: string): Promise<{ l
       AND lead_id = ANY(${sql.param(lead.leadIds)}::uuid[])
     GROUP BY 1, 2
   `)) as unknown as Array<{ campaign_id: string; label: string; at: Ts | null }>;
-  const byCampaign = new Map<string, { servedAt: string | null; steps: StepsReached }>();
+  // Shown at the grain the customer knows: a pipe folds into its sales funnel campaign. A filing that is no campaign
+  // (a signup, a Unibox conversation: `signups:<brand>`, `unibox:<brand>`) is not listed; its steps still count in the
+  // lead's Lifecycle.
+  const displays = await loadCampaignDisplays(scope.orgId, scope.brandId);
+  const byCampaign = new Map<string, { display: CampaignDisplay; parts: Set<string>; servedAt: string | null; steps: StepsReached }>();
   const of = (c: string) => {
-    let v = byCampaign.get(c);
-    if (!v) byCampaign.set(c, (v = { servedAt: null, steps: new Map() }));
+    const display = displays.get(c);
+    if (!display) return null;
+    let v = byCampaign.get(display.id);
+    if (!v) byCampaign.set(display.id, (v = { display, parts: new Set(), servedAt: null, steps: new Map() }));
+    v.parts.add(c);
     return v;
   };
   for (const s of served) {
     const v = of(s.campaign_id);
-    v.servedAt = iso(s.served_at);
-    reach(v.steps, "lead_found", v.servedAt);
+    if (!v) continue;
+    const at = iso(s.served_at);
+    if (at !== null && (v.servedAt === null || Date.parse(at) < Date.parse(v.servedAt))) v.servedAt = at;
+    reach(v.steps, "lead_found", at);
   }
   for (const f of facts) {
     const step = STEP_OF_TIMELINE_LABEL[f.label];
-    if (step) reach(of(f.campaign_id).steps, step, iso(f.at));
+    const v = step ? of(f.campaign_id) : null;
+    if (v && step) reach(v.steps, step, iso(f.at));
   }
-  const campaigns: UniboxCampaign[] = [...byCampaign.entries()].map(([campaignId, v]) => ({
-    campaignId,
+  const campaigns: UniboxCampaign[] = [...byCampaign.values()].map((v) => ({
+    campaignId: v.display.id,
+    salesFunnelCampaignId: v.display.salesFunnelCampaignId,
+    name: v.display.name,
+    partCampaignIds: [...v.parts].sort(),
     servedAt: v.servedAt,
     furthest: lifecycleOf(v.steps.keys(), catalogue.ranks, catalogue.ladder),
     steps: [...v.steps.entries()]

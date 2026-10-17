@@ -22277,7 +22277,7 @@
     },
     "/orgs/leads/unibox-lead": {
       "get": {
-        "summary": "One Unibox lead's card: the six tags + every campaign they are part of, with the furthest step in each",
+        "summary": "One Unibox lead's card: the six tags + every campaign they are part of (at the sales funnel grain, named), with the furthest step in each; a filing that is no campaign (signup, Unibox conversation) is not listed",
         "parameters": [
           {
             "in": "header",
@@ -22424,7 +22424,23 @@
                         "type": "object",
                         "properties": {
                           "campaignId": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "The sales funnel campaign the customer launched (a pipe folds into it), else the campaign."
+                          },
+                          "salesFunnelCampaignId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "What the customer calls it: the funnel's name, else the campaign's."
+                          },
+                          "partCampaignIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "Our pipe campaigns folded into it."
                           },
                           "servedAt": {
                             "type": "string",
@@ -22462,6 +22478,9 @@
                         },
                         "required": [
                           "campaignId",
+                          "salesFunnelCampaignId",
+                          "name",
+                          "partCampaignIds",
                           "servedAt",
                           "furthest",
                           "steps"
