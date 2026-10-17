@@ -9288,6 +9288,7 @@ const UniboxRowSchema = z
     name: z.string().nullable(),
     emails: z.array(z.string()),
     phones: z.array(z.string()),
+    personKeys: z.array(z.string()).openapi({ description: "crm-service's person keys of the human at the brand: open their thread with one (crm-service GET /orgs/people/timeline?personKey=)." }),
     leadIds: z.array(z.string()).openapi({ description: "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)." }),
     types: z.array(z.enum(["prospect", "customer", "partner", "investor", "supplier", "employee", "advisor", "press", "other"])).openapi({
       description: "TYPE: who they are to us, several at once (a person's word > a source's evidence > Jev).",
