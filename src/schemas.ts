@@ -9285,6 +9285,9 @@ const UniboxRowSchema = z
   .object({
     humanId: z.string().openapi({ description: "The person (human-service human, this org's view)." }),
     companyKey: z.string().openapi({ description: "The company they speak for at the brand ('' = unknown)." }),
+    company: z.object({ id: z.string(), name: z.string().nullable(), domain: z.string().nullable() }).nullable().openapi({
+      description: "The relation's company, to print \"Name @ Company\" and its logo (by domain); null = unknown.",
+    }),
     name: z.string().nullable(),
     emails: z.array(z.string()),
     phones: z.array(z.string()),
