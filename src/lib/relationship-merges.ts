@@ -1,45 +1,12 @@
 /**
- * "Are these two the same person?" for people nothing ties together (RELATIONSHIP-TAGS-1014, owner
- * 2026-10-14): a WhatsApp "Yulia (WA)" with no email and no shared phone, and "Yuliia Siletska" who
- * signed up. human-service decides "same human" and holds every link; this module only ASKS Jev and
- * STATES the answer there, in the org's own view (a judgment never merges the fleet):
- *   - candidates: each subject of the brand with NO email and a real name, against the brand's
- *     subjects WITH an email, picked by name blocking (`relationship-names.ts`), never a rule on words;
- *   - Jev reads both people (names, keys, channels, both threads) and gives P(same);
- *   - >= LINK_AT (more likely than not, owner 2026-10-14 RELATIONSHIP-TAGS-1014b): an org link judged by "jev",
- *     undoable from the review page or the person's own block (`merges`); >= ASK_AT: the true doubt, a question
- *     for the owner; below: recorded as rejected, never asked again. A question left open under an older, higher
- *     LINK_AT is settled by the same rule on the next tick (`settleOpenMerges`); one a person answered never is.
- * Every pair is judged ONCE (`relationship_merge_questions`, unique per org and pair).
+ * "Same person?" answers this org stated (RELATIONSHIP-TAGS-1014). Since PROFESSIONAL-LEADS-1017 (owner 2026-10-17)
+ * lead-service no longer ASKS it: crm-service and human-service own merges. What stays: the org view of each human
+ * (`refreshOrgAliases`, followed by human-events.ts) and a person's answer / undo on a question or link stated here
+ * before, until the review page drops them.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { getHumanInOrg, stateHumanLink, withdrawHumanLink } from "./human-identity-client.js";
-import { judgeYesNo } from "./qualification-judge.js";
-import { fitThread } from "./relationship-judge.js";
-import { hasComparableName, nameTokens, unlinkedCandidatesFor } from "./relationship-names.js";
-import { readThread, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
-
-export const LINK_AT = 0.5;
-export const ASK_AT = 0.4;
-const PAIRS_PER_TICK = 40;
-const PAIR_CONCURRENCY = 4;
-const MAX_CANDIDATES = 3;
-const MAX_FAILURES_PER_TICK = 3;
-
-const SAME_PERSON = {
-  instructions:
-    "Are `a` and `b` the SAME real person? They come from different channels of one brand (for example a WhatsApp " +
-    "contact or group member, and someone who signed up or emailed). Compare names across spellings, alphabets and " +
-    "nicknames (Yulia / Yuliia / Julia / Юля; Dima / Dmytro), the company, emails or phone numbers either side " +
-    "mentions, places, and what each thread says. A shared first name alone is weak evidence.",
-  whenTrue: "Everything shown fits one person and something specific ties them (full name, email or phone mentioned, same company, same story).",
-  whenFalse: "They are different people, or nothing beyond a common first name ties them.",
-};
-
-async function card(s: Subject): Promise<Record<string, unknown>> {
-  return { name: s.name, emails: s.emails, phones: s.phones, channels: s.channels, thread: fitThread(await readThread(s), 6_000) };
-}
 
 export function orderPair(a: string, b: string): [string, string] {
   return a < b ? [a, b] : [b, a];
@@ -71,131 +38,6 @@ export async function refreshOrgAliases(orgId: string, humanIds: readonly string
       `);
     }
   }
-}
-
-interface Pair {
-  unlinked: Subject;
-  known: Subject;
-}
-
-async function pendingPairs(scope: Scope): Promise<Pair[]> {
-  const rows = (await db.execute(sql`
-    SELECT * FROM relationship_subjects WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
-  `)) as unknown as Array<Record<string, unknown>>;
-  const subjects = rows.map(toSubject);
-  const known = subjects.filter((s) => s.emails.length > 0);
-  const unlinked = subjects.filter((s) => s.emails.length === 0 && hasComparableName(s.name));
-  if (known.length === 0 || unlinked.length === 0) return [];
-  const asked = (await db.execute(sql`
-    SELECT human_a::text AS a, human_b::text AS b FROM relationship_merge_questions WHERE org_id = ${scope.orgId}
-  `)) as unknown as Array<{ a: string; b: string }>;
-  const askedSet = new Set(asked.map((r) => `${r.a}|${r.b}`));
-  const byId = new Map(subjects.map((s) => [s.humanId, s]));
-  // People a source states as prospect or customer of the brand (signed up, paid...): the ones campaigns write to.
-  const evidenced = new Set(
-    ((await db.execute(sql`
-      SELECT DISTINCT human_id::text AS h FROM relationship_evidence WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
-    `)) as unknown as Array<{ h: string }>).map((r) => r.h),
-  );
-  const isSignedUp = (s: Subject) => evidenced.has(s.humanId);
-  // From each KNOWN person (people with evidence first), the best
-  // unlinked candidates; strongest name evidence first across the brand.
-  const unlinkedIndex = unlinked.map((u) => ({ person: { humanId: u.humanId, name: u.name, emails: [] as string[] }, tokens: nameTokens(u.name) }));
-  const knownFirst = [...known].sort((x, y) => Number(isSignedUp(y)) - Number(isSignedUp(x)) || x.humanId.localeCompare(y.humanId));
-  const all: Array<Pair & { score: number; signedUp: boolean }> = [];
-  for (const k of knownFirst) {
-    for (const c of unlinkedCandidatesFor({ humanId: k.humanId, name: k.name, emails: k.emails }, unlinkedIndex, MAX_CANDIDATES)) {
-      const [a, b] = orderPair(c.person.humanId, k.humanId);
-      if (askedSet.has(`${a}|${b}`)) continue;
-      all.push({ unlinked: byId.get(c.person.humanId)!, known: k, score: c.score, signedUp: isSignedUp(k) });
-    }
-  }
-  return all
-    .sort((x, y) => Number(y.signedUp) - Number(x.signedUp) || y.score - x.score || x.known.humanId.localeCompare(y.known.humanId))
-    .slice(0, PAIRS_PER_TICK);
-}
-
-export interface MergeTick {
-  settled: number;
-  asked: number;
-  linked: number;
-  open: number;
-  rejected: number;
-}
-
-/** State an org link judged by Jev at human-service and re-read the org view of both people. */
-async function linkByJudge(orgId: string, a: string, b: string, evidence: string): Promise<string | null> {
-  const r = await stateHumanLink({ orgId, relation: "same", humanIds: [a, b], judgedBy: "jev", evidence });
-  await refreshOrgAliases(orgId, [a, b]);
-  return r.link?.linkId ?? null;
-}
-
-/** Open questions the judge already put at or above LINK_AT (asked under an older edge): linked as its judgment. */
-export async function settleOpenMerges(scope: Scope): Promise<number> {
-  const rows = (await db.execute(sql`
-    SELECT id::text, human_a::text AS a, human_b::text AS b, probability, model FROM relationship_merge_questions
-    WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND state = 'open' AND answered_by IS NULL AND probability >= ${LINK_AT}
-    ORDER BY probability DESC LIMIT ${PAIRS_PER_TICK}
-  `)) as unknown as Array<{ id: string; a: string; b: string; probability: number; model: string | null }>;
-  let settled = 0;
-  for (const q of rows) {
-    const linkId = await linkByJudge(
-      scope.orgId,
-      q.a,
-      q.b,
-      `lead-service relationship sweep: Jev P(same)=${Number(q.probability).toFixed(3)} (${q.model ?? "unknown model"}), settled at the >= ${LINK_AT} edge (question ${q.id})`,
-    );
-    const done = (await db.execute(sql`
-      UPDATE relationship_merge_questions SET state = 'linked', link_id = ${linkId}, answered_by = 'jev', answered_at = now()
-      WHERE id = ${q.id}::uuid AND state = 'open' AND answered_by IS NULL
-      RETURNING 1
-    `)) as unknown as unknown[];
-    settled += done.length;
-  }
-  return settled;
-}
-
-export async function suggestMerges(scope: Scope, runId: string): Promise<MergeTick> {
-  const tick: MergeTick = { settled: await settleOpenMerges(scope), asked: 0, linked: 0, open: 0, rejected: 0 };
-  const pairs = await pendingPairs(scope);
-  let next = 0;
-  let failures = 0;
-  const worker = async () => {
-    while (next < pairs.length) {
-      await askPair(pairs[next++]);
-    }
-  };
-  const askPair = async (p: Pair) => {
-    const state = { a: await card(p.unlinked), b: await card(p.known) };
-    let judged: { probabilities: { same: number }; model: string };
-    try {
-      judged = await judgeYesNo(state, { same: SAME_PERSON }, "platform");
-    } catch (err) {
-      console.error(`[lead-service] merge judgment failed for ${p.unlinked.humanId} / ${p.known.humanId}; asked again next tick:`, err);
-      if (++failures >= MAX_FAILURES_PER_TICK) next = pairs.length; // the judge is down: stop asking this tick
-      return;
-    }
-    const { probabilities, model } = judged;
-    const prob = probabilities.same;
-    const [a, b] = orderPair(p.unlinked.humanId, p.known.humanId);
-    const st: "linked" | "open" | "rejected" = prob >= LINK_AT ? "linked" : prob >= ASK_AT ? "open" : "rejected";
-    let linkId: string | null = null;
-    if (st === "linked") {
-      linkId = await linkByJudge(scope.orgId, a, b, `lead-service relationship sweep: Jev P(same)=${prob.toFixed(3)} (${model}) for "${p.unlinked.name}" and "${p.known.name}"`);
-    }
-    await db.execute(sql`
-      INSERT INTO relationship_merge_questions (org_id, brand_id, human_a, human_b, probability, model, run_id, state, link_id, answered_by, answered_at)
-      VALUES (${scope.orgId}, ${scope.brandId}, ${a}::uuid, ${b}::uuid, ${prob}, ${model}, ${runId}, ${st}, ${linkId},
-        ${st === "linked" ? "jev" : null}, ${st === "linked" ? new Date().toISOString() : null}::timestamptz)
-      ON CONFLICT (org_id, human_a, human_b) DO NOTHING
-    `);
-    tick.asked++;
-    if (st === "linked") tick.linked++;
-    else if (st === "open") tick.open++;
-    else tick.rejected++;
-  };
-  await Promise.all(Array.from({ length: PAIR_CONCURRENCY }, worker));
-  return tick;
 }
 
 export class MergeQuestionNotFoundError extends Error {}
