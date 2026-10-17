@@ -11663,7 +11663,14 @@
           },
           "subject": {
             "type": "boolean",
-            "description": "Does some source of the org (CRM, mailbox, WhatsApp/LinkedIn, signups, payments) know this person at the brand? false = known only through our own outreach."
+            "description": "Is the person a lead of the brand in the Unibox sense: crm-service tags them professional_to_brand? (PROFESSIONAL-LEADS-1017)"
+          },
+          "connectionTags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "crm-service's live connection tags on the human: this brand's (professional_to_brand / professional_not_to_brand) and the org-wide personal_* ones."
           },
           "merges": {
             "type": "array",
@@ -11697,6 +11704,7 @@
           "details",
           "policies",
           "subject",
+          "connectionTags",
           "merges",
           "wroteToUs",
           "lastInboundAt",
