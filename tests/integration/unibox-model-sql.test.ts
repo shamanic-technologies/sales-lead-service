@@ -26,8 +26,15 @@ const catalogue = {
 };
 vi.mock("../../src/lib/fetch-retry.js", () => ({
   fetchWithRetry: async (url: string) => {
-    if (!String(url).endsWith("/public/catalogue/steps")) throw new Error(`unexpected fetch ${url}`);
-    return new Response(JSON.stringify(catalogue), { status: 200, headers: { "content-type": "application/json" } });
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const u = String(url);
+    if (u.endsWith("/public/catalogue/steps")) return json(catalogue);
+    // campaign-service: the cold pipe is a unit of a sales funnel campaign the customer named; the webinar is not.
+    if (u.includes("/sales-funnel-campaigns?")) {
+      return json({ salesFunnelCampaigns: [{ id: "sfc-1", salesFunnelName: "Cold email to meeting", units: [{ campaignId: "camp-cold" }] }] });
+    }
+    if (u.includes("/campaigns?")) return json({ campaigns: [{ id: "camp-cold", name: "pipe: cold email" }, { id: "camp-webinar", name: "Webinar" }] });
+    throw new Error(`unexpected fetch ${u}`);
   },
 }));
 vi.mock("../../src/lib/company-client.js", () => ({
@@ -83,7 +90,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await db.execute(sql`
       INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at)
       VALUES (${lead.id}::uuid, 'camp-cold', ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-10-01T09:00:00Z'),
-             (${lead.id}::uuid, 'camp-webinar', ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-10-05T09:00:00Z')`);
+             (${lead.id}::uuid, 'camp-webinar', ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-10-05T09:00:00Z'),
+             (${lead.id}::uuid, ${`signups:${brandId}`}, ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-10-06T09:00:00Z')`);
     for (const [label, at, campaign] of [
       ["initial_email", "2026-10-01T10:00:00Z", "camp-cold"],
       ["website_visit", "2026-10-02T10:00:00Z", "camp-cold"],
@@ -141,9 +149,10 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
 
   it("the lead card names every campaign with its furthest step; a non-lead has no card", async () => {
     const card = await readUniboxLead(scope, ana);
-    expect(card!.campaigns.map((c) => [c.campaignId, c.furthest?.key])).toEqual([
-      ["camp-cold", "engaged"],
-      ["camp-webinar", "lead_found"],
+    // At the grain the customer knows (the funnel campaign, named); a signup filing is no campaign.
+    expect(card!.campaigns.map((c) => [c.campaignId, c.name, c.pipeCampaignIds, c.furthest?.key])).toEqual([
+      ["sfc-1", "Cold email to meeting", ["camp-cold"], "engaged"],
+      ["camp-webinar", "Webinar", ["camp-webinar"], "lead_found"],
     ]);
     expect(await readUniboxLead(scope, friend)).toBeNull();
   });

@@ -22277,7 +22277,7 @@
     },
     "/orgs/leads/unibox-lead": {
       "get": {
-        "summary": "One Unibox lead's card: the six tags + every campaign they are part of, with the furthest step in each",
+        "summary": "One Unibox lead's card: the six tags + every campaign they are part of (as the customer launched it, named), with the furthest step in each; a filing that is no campaign (signup, Unibox conversation) is not listed",
         "parameters": [
           {
             "in": "header",
@@ -22424,7 +22424,19 @@
                         "type": "object",
                         "properties": {
                           "campaignId": {
-                            "type": "string"
+                            "type": "string",
+                            "description": "The campaign the customer launched (each of its pipes folds into it), else the campaign itself."
+                          },
+                          "name": {
+                            "type": "string",
+                            "description": "What the customer calls it."
+                          },
+                          "pipeCampaignIds": {
+                            "type": "array",
+                            "items": {
+                              "type": "string"
+                            },
+                            "description": "The pipe campaigns folded into it."
                           },
                           "servedAt": {
                             "type": "string",
@@ -22462,6 +22474,8 @@
                         },
                         "required": [
                           "campaignId",
+                          "name",
+                          "pipeCampaignIds",
                           "servedAt",
                           "furthest",
                           "steps"
