@@ -28,7 +28,8 @@ export const ENRICH_MAX_MICRO = 3_000;
 const LOOKUPS_PER_TICK = 60;
 const RECHECK_AFTER = "30 days";
 
-export type CompanySource = "lead" | "email_domain" | "signup" | "treg_enrich" | "treg_identity" | "person";
+/** `crm`: the company crm-service links the person to (PROFESSIONAL-LEADS-1017); the others are older bases kept readable. */
+export type CompanySource = "crm" | "lead" | "email_domain" | "signup" | "treg_enrich" | "treg_identity" | "person";
 
 export interface CompanyCandidate {
   name: string | null;

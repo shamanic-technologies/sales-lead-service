@@ -18,7 +18,8 @@
  *             a later `scheduled` (they write again) re-enters it and the claim decides again.
  *  - pending: we cannot say yet, so nobody is answered AND nothing is settled; the row stays due and the next
  *             claim asks again. Never "treat as a lead": no human id yet (`human_unknown`), a CRM fact names the
- *             address but the relationship sweep has not built the person yet (`relationship_not_built`), a
+ *             address but crm-service has not tagged the person yet (`relationship_not_built`; tagged and not
+ *             professional to the brand = refused), a
  *             subject never judged that this claim could not judge (`relationship_not_judged`), an open
  *             "same person?" question (`same_person_question_open`, answered on the review page or settled by
  *             the sweep).
@@ -93,9 +94,13 @@ export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean): 
   // A tag stated, evidenced or judged (sure or not) that is not prospect: whatever else is unknown, not a lead.
   if (tags.length > 0 || unsureTags.length > 0) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
   if (block.policies.pure_prospect) {
-    // A non-subject is a pure prospect by definition, unless a source of the org knows them and the sweep has
-    // not built them yet: that is "we do not know", never "a stranger".
-    if (!block.subject && knownToCrm) return pending("relationship_not_built");
+    // A non-subject is a pure prospect by definition, unless a source of the org knows them: then crm-service's
+    // connection tags decide (PROFESSIONAL-LEADS-1017). Not tagged yet = "we do not know", never "a stranger";
+    // tagged, but not professional to the brand (personal, professional to someone else) = not a lead.
+    if (!block.subject && knownToCrm) {
+      if (block.connectionTags.length === 0) return pending("relationship_not_built");
+      return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
+    }
     return { kind: "admit" };
   }
   if (block.subject && block.judgedAt === null) return { kind: "judge" };

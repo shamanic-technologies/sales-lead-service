@@ -3,7 +3,7 @@ import { decideProspectFollowup, type ProspectFollowupFacts } from "../../src/li
 import { pureProspectAllows } from "../../src/lib/relationship-tags.js";
 import { EMPTY_RELATIONSHIP, type RelationshipBlock } from "../../src/lib/relationship-read.js";
 
-function rel(p: Partial<RelationshipBlock> & { openMerge?: boolean } = {}): RelationshipBlock {
+function rel(p: Partial<RelationshipBlock> & { hasDirect?: boolean } = {}): RelationshipBlock {
   const tags = p.tags ?? [];
   const unsureTags = p.unsureTags ?? [];
   const judgedAt = p.judgedAt === undefined ? null : p.judgedAt;
@@ -15,7 +15,7 @@ function rel(p: Partial<RelationshipBlock> & { openMerge?: boolean } = {}): Rela
     unsureTags,
     judgedAt,
     subject,
-    policies: { business_only: false, pure_prospect: pureProspectAllows({ subject, tags, unsureTags, judgedAt, openMerge: p.openMerge ?? false }) },
+    policies: { business_only: false, pure_prospect: pureProspectAllows({ subject, hasDirect: p.hasDirect ?? true, tags, unsureTags, judgedAt }) },
   };
 }
 
@@ -58,7 +58,6 @@ describe("prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014)", () => {
     ["sequence still sending", facts({ sender: { queued: true, unsubscribed: false, bounced: false } }), "sequence_running"],
     ["no human yet", facts({ relationship: null }), "identity_unresolved"],
     ["known subject never judged", facts({ relationship: rel({ subject: true }) }), "relationship_not_judged"],
-    ["open same-person question", facts({ relationship: rel({ openMerge: true }) }), "same_person_question_open"],
   ])("%s: not owed", (_name, f, reason) => {
     const v = decideProspectFollowup(f);
     expect(v.owed).toBe(false);

@@ -1,22 +1,18 @@
 /**
  * The relationship sweep (RELATIONSHIP-TAGS-1014), on the BACKGROUND thread every
- * `RELATIONSHIP_SWEEP_INTERVAL_MS`, per (org, brand) of the CRM fact feed:
- *   1. subjects: the brand's leads (human x company) rebuilt from the feed (relationship-subjects.ts);
+ * `RELATIONSHIP_SWEEP_INTERVAL_MS`, per (org, brand) crm-service names professional people for:
+ *   1. subjects: the brand's leads (human x company) = crm's `professional_to_brand` people (relationship-subjects.ts);
  *   2. evidence: signup -> prospect, payment / sale -> customer, rewritten whole;
  *   3. judgment: Jev reads each lead whose thread moved (messages first), JUDGE_PER_TICK at most;
  *   3b. intent: Jev says whether each lead who WROTE to us wants to do business with the brand (relationship-intent.ts),
- *       INTENT_PER_TICK at most, after the tags (a lead is decided by them);
- *   4. merges: unlinked people (no email) vs known people, asked of Jev, stated in human-service;
- *   5. companies: unknown employers, free first then treg (owner-approved price ceilings).
- * Jev is platform-billed (no org request starts the sweep); treg lookups are metered to the org on ONE run per
- * brand per tick of this service. A brand that
+ *       INTENT_PER_TICK at most, after the tags (a lead is decided by them).
+ * "Same person?" and "which company?" are crm-service's and human-service's answers, read on the subjects; this
+ * sweep asks neither (PROFESSIONAL-LEADS-1017). Jev is platform-billed (no org request starts the sweep). A brand that
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
  */
-import { closePlatformRun, createPlatformRun, createRun, updateRun } from "./runs-client.js";
-import { lookUpCompanies } from "./relationship-company.js";
+import { createRun, updateRun } from "./runs-client.js";
 import { judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
 import { intentSubjectsToJudge, judgeIntent } from "./relationship-intent-judge.js";
-import { suggestMerges, type MergeTick } from "./relationship-merges.js";
 import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects.js";
 import { recomputePolicy } from "./relationship-read.js";
 import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
@@ -38,14 +34,12 @@ export interface ScopeTick {
   judged: number;
   judgeFailed: number;
   intentJudged: number;
-  merges: MergeTick | null;
-  companies: { looked: number; free: number; treg: number; none: number; tregMicro: number } | null;
   policyChanged: number;
   error: string | null;
 }
 
-export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: number; merges?: boolean; companies?: boolean } = {}): Promise<ScopeTick> {
-  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, merges: null, companies: null, policyChanged: 0, error: null };
+export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: number } = {}): Promise<ScopeTick> {
+  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, policyChanged: 0, error: null };
   const refresh = await refreshSubjects(scope);
   tick.subjects = refresh.subjects;
   tick.withoutHuman = refresh.withoutHuman;
@@ -56,7 +50,6 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
     if (!run) run = await createRun({ orgId: scope.orgId, brandId: scope.brandId, serviceName: "lead-service", taskName: "relationship-sweep" });
     return { orgId: scope.orgId, userId: null, runId: run.id, brandId: scope.brandId };
   };
-  let platformRun: { id: string } | null = null;
   let failed = false;
   try {
     const todo = await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK);
@@ -93,13 +86,6 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
         }
       }
     }
-    if (opts.merges !== false && tick.judgeFailed < MAX_JUDGE_FAILURES) tick.merges = await suggestMerges(scope, (await identity()).runId);
-    if (opts.companies !== false) {
-      tick.companies = await lookUpCompanies(scope, async () => {
-        if (!platformRun) platformRun = await createPlatformRun("relationship-company-lookup");
-        return platformRun.id;
-      });
-    }
     tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
   } catch (err) {
     failed = true;
@@ -109,8 +95,6 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
   } finally {
     const r = run as { id: string } | null;
     if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
-    const pr = platformRun as { id: string } | null;
-    if (pr) await closePlatformRun(pr.id, failed ? "failed" : "completed").catch((e) => console.error("[lead-service] relationship platform run close failed:", e));
   }
   return tick;
 }
@@ -136,10 +120,9 @@ export function startRelationshipSweepWorker(): void {
     try {
       const results = await sweepAllOnce();
       for (const r of results) {
-        if (r.judged || r.intentJudged || r.merges?.asked || r.merges?.settled || r.companies?.looked) {
+        if (r.judged || r.intentJudged) {
           console.log(
-            `[lead-service] relationship sweep ${r.scope.brandId}: ${r.subjects} leads, judged ${r.judged}, intent ${r.intentJudged} (${r.judgeFailed} failed), ` +
-              `merges ${JSON.stringify(r.merges)}, companies ${JSON.stringify(r.companies)}`,
+            `[lead-service] relationship sweep ${r.scope.brandId}: ${r.subjects} leads, judged ${r.judged}, intent ${r.intentJudged} (${r.judgeFailed} failed)`,
           );
         }
       }

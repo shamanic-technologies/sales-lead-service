@@ -2,29 +2,27 @@
  * The leads of a brand the relationship sweep looks at (RELATIONSHIP-TAGS-1014), and each one's WHOLE
  * merged thread.
  *
- * WHO: every person of the brand's CRM fact feed (bronze `crm_facts`: their mailbox, their WhatsApp /
- * LinkedIn bridge, signups, payments, CRM contacts), grouped by the HUMAN the org sees
- * (human-service: the fleet human, then the org's own judgment links; `org_human_aliases`). A person
- * the feed names without a human yet is resolved with the keys it carries (never created here: a person
- * with no key waits for crm-service to resolve them). One subject = one lead of the brand = one Unibox
- * row: the human at its company (`company_key`, '' while unknown).
+ * WHO (PROFESSIONAL-LEADS-1017, owner 2026-10-17: "lead-service digs ONLY into the people crm-service tags
+ * professional to the brand"): every human crm-service's registry tags `professional_to_brand` for the brand
+ * (`crm_registry_facts`, live `connection_tag`), keyed on the human crm states (followed through this org's
+ * links and fleet merges). Nobody else is a subject: personal contacts, people professional to someone else, a
+ * person crm has not tagged yet. Who a person is (human-service) and which company they speak for (crm's
+ * `organization_link`, else their lead's employer) are READ, never resolved or looked up here. One subject = one
+ * lead of the brand = one Unibox row: the human at its company (`company_key`, '' while unknown).
  *
- * THREAD: every live fact of every person key of the subject at the brand (messages both ways, group
- * memberships, signups, payments, forms, meetings...), plus what our outreach did and heard (the
- * labelled timeline of the human's leads at the brand). Read whole; the judge sees the newest part when
- * it does not fit.
+ * THREAD: every live fact of the subject at the brand (messages both ways, group memberships, signups, payments,
+ * forms, meetings...), plus what our outreach did and heard (the labelled timeline of the human's leads at the
+ * brand). Read whole; the judge sees the newest part when it does not fit.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
-import { HumanIdentityError, resolveHuman } from "./human-identity-client.js";
 import { INBOUND_FACT_TYPES } from "./relationship-intent.js";
 import { WORD_LABELS } from "./timeline-labels.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const E164_RE = /^\+[1-9]\d{6,14}$/;
-const RESOLVE_PER_TICK = 300;
-const RESOLVE_RETRY_AFTER = "1 day";
+/** The connection tag that makes a person a subject (crm-service's registry). */
+export const PROFESSIONAL_TO_BRAND = "professional_to_brand";
 /** Fact types that are bookkeeping of the feed, never something that happened with the person. */
 export const NON_EVENT_FACT_TYPES = ["withdrawn", "person_merged", "person_split"];
 /** Facts that only say the person sits in / wrote in a group chat shared with the brand's own people. */
@@ -35,12 +33,50 @@ export interface Scope {
   brandId: string;
 }
 
-/** Every (org, brand) the CRM fact feed names. */
+/** Every (org, brand) crm-service names a professional person for. */
 export async function listScopes(): Promise<Scope[]> {
   const rows = (await db.execute(sql`
-    SELECT DISTINCT org_id, brand_id FROM crm_facts ORDER BY org_id, brand_id
+    SELECT DISTINCT org_id, brand_id FROM crm_registry_facts
+    WHERE type = 'connection_tag' AND payload->>'tag' = ${PROFESSIONAL_TO_BRAND}
+    ORDER BY org_id, brand_id
   `)) as unknown as Array<{ org_id: string; brand_id: string }>;
   return rows.filter((r) => UUID_RE.test(r.org_id) && UUID_RE.test(r.brand_id)).map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
+}
+
+interface ProPerson {
+  human: string | null;
+  person_key: string;
+  name: string | null;
+  emails: string[];
+  phones: string[];
+  seq: string;
+}
+
+/** The brand's live `professional_to_brand` tags (a withdrawn tag is gone). */
+async function professionalPeople(scope: Scope): Promise<ProPerson[]> {
+  return (await db.execute(sql`
+    SELECT CASE WHEN f.raw->>'humanId' ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human,
+      f.person_key, f.full_name AS name, f.emails, f.phones, f.seq::text AS seq
+    FROM crm_registry_facts f
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
+      AND f.type = 'connection_tag' AND f.payload->>'tag' = ${PROFESSIONAL_TO_BRAND}
+      AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+  `)) as unknown as ProPerson[];
+}
+
+/** The company crm-service says each human speaks for at the brand (its latest live professional link). */
+async function professionalCompanies(scope: Scope): Promise<Map<string, string>> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT ON (f.raw->>'humanId') f.raw->>'humanId' AS human, f.payload->>'companyId' AS company
+    FROM crm_registry_facts f
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
+      AND f.type = 'organization_link' AND coalesce(f.payload->>'companyId', '') <> ''
+      AND coalesce(f.payload->'tags', '[]'::jsonb) ? ${PROFESSIONAL_TO_BRAND}
+      AND f.raw->>'humanId' ~* '^[0-9a-f-]{36}$'
+      AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+    ORDER BY f.raw->>'humanId', f.seq DESC
+  `)) as unknown as Array<{ human: string; company: string }>;
+  return new Map(rows.map((r) => [r.human, r.company]));
 }
 
 interface PersonRow {
@@ -55,7 +91,7 @@ interface PersonRow {
   last_in: Date | string | null;
 }
 
-async function personRows(scope: Scope): Promise<PersonRow[]> {
+async function personRows(scope: Scope, keys: readonly string[], humans: readonly string[]): Promise<PersonRow[]> {
   return (await db.execute(sql`
     SELECT f.person_key,
       (array_agg(f.raw->>'humanId' ORDER BY f.seq DESC) FILTER (WHERE f.raw->>'humanId' ~* '^[0-9a-f-]{36}$'))[1] AS fact_human,
@@ -69,77 +105,29 @@ async function personRows(scope: Scope): Promise<PersonRow[]> {
     FROM crm_facts f
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
+      AND (f.person_key = ANY(${sql.param([...keys])}::text[]) OR f.raw->>'humanId' = ANY(${sql.param([...humans])}::text[]))
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
     GROUP BY f.person_key
   `)) as unknown as PersonRow[];
 }
 
-async function personKeysOf(scope: Scope): Promise<Map<string, { emails: string[]; phones: string[] }>> {
+async function personKeysOf(scope: Scope, personKeys: readonly string[]): Promise<Map<string, { emails: string[]; phones: string[] }>> {
   const emails = (await db.execute(sql`
     SELECT f.person_key, array_agg(DISTINCT lower(e)) AS v
     FROM crm_facts f, unnest(f.emails) e
-    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.person_key = ANY(${sql.param([...personKeys])}::text[])
     GROUP BY f.person_key
   `)) as unknown as Array<{ person_key: string; v: string[] }>;
   const phones = (await db.execute(sql`
     SELECT f.person_key, array_agg(DISTINCT p) AS v
     FROM crm_facts f, unnest(f.phones) p
-    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.person_key = ANY(${sql.param([...personKeys])}::text[])
     GROUP BY f.person_key
   `)) as unknown as Array<{ person_key: string; v: string[] }>;
   const out = new Map<string, { emails: string[]; phones: string[] }>();
   for (const r of emails) out.set(r.person_key, { emails: r.v ?? [], phones: [] });
   for (const r of phones) out.set(r.person_key, { emails: out.get(r.person_key)?.emails ?? [], phones: r.v ?? [] });
   return out;
-}
-
-/**
- * Person keys with no human on their facts and none recorded: resolved by their keys (read-only), at
- * most RESOLVE_PER_TICK per scope; an unknown or keyless person is asked again a day later.
- */
-async function resolvePersonHumans(scope: Scope, persons: PersonRow[], keys: Map<string, { emails: string[]; phones: string[] }>): Promise<void> {
-  const known = (await db.execute(sql`
-    SELECT person_key, atomic_human_id::text AS human, resolved_at > now() - ${RESOLVE_RETRY_AFTER}::interval AS fresh
-    FROM relationship_person_humans WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
-  `)) as unknown as Array<{ person_key: string; human: string | null; fresh: boolean }>;
-  const knownOf = new Map(known.map((k) => [k.person_key, k]));
-  const toWrite: Array<{ key: string; human: string | null }> = [];
-  let asked = 0;
-  for (const p of persons) {
-    const k = knownOf.get(p.person_key);
-    if (p.fact_human) {
-      if (k?.human !== p.fact_human) toWrite.push({ key: p.person_key, human: p.fact_human });
-      continue;
-    }
-    if (k && (k.human || k.fresh)) continue;
-    if (asked >= RESOLVE_PER_TICK) continue;
-    const kk = keys.get(p.person_key) ?? { emails: [], phones: [] };
-    const emails = kk.emails.filter((e) => e.includes("@")).slice(0, 50);
-    const phones = kk.phones.filter((ph) => E164_RE.test(ph)).slice(0, 50);
-    if (emails.length === 0 && phones.length === 0) {
-      toWrite.push({ key: p.person_key, human: null });
-      continue;
-    }
-    asked++;
-    try {
-      const r = await resolveHuman({ emails, phones, create: false, orgId: scope.orgId });
-      toWrite.push({ key: p.person_key, human: r.atomicHumanId ?? r.humanId });
-    } catch (err) {
-      if (err instanceof HumanIdentityError && err.status === 400) {
-        toWrite.push({ key: p.person_key, human: null });
-        continue;
-      }
-      throw err;
-    }
-  }
-  if (toWrite.length === 0) return;
-  await db.execute(sql`
-    INSERT INTO relationship_person_humans (org_id, brand_id, person_key, atomic_human_id, resolved_at)
-    SELECT ${scope.orgId}, ${scope.brandId}, k, NULLIF(h, '')::uuid, now()
-    FROM unnest(${sql.param(toWrite.map((w) => w.key))}::text[], ${sql.param(toWrite.map((w) => w.human ?? ""))}::text[]) AS v(k, h)
-    ON CONFLICT (org_id, brand_id, person_key) DO UPDATE
-      SET atomic_human_id = excluded.atomic_human_id, resolved_at = excluded.resolved_at
-  `);
 }
 
 /** The id this org sees for each atomic human: its own judgment links, then fleet merges. */
@@ -156,7 +144,7 @@ export async function canonicalHumans(orgId: string, atomicIds: readonly string[
   return new Map(rows.map((r) => [r.atomic, r.human]));
 }
 
-/** The company each human is at for this brand: its lead's employer first, then what this org learned. */
+/** The employer of each human's lead at the brand (when crm-service names no company for them). */
 async function companyKeys(scope: Scope, humans: readonly string[]): Promise<Map<string, string>> {
   if (humans.length === 0) return new Map();
   const rows = (await db.execute(sql`
@@ -167,7 +155,6 @@ async function companyKeys(scope: Scope, humans: readonly string[]): Promise<Map
           WHERE l.human_id = h.id AND lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids)
             AND (l.company_id IS NOT NULL OR l.organization_id IS NOT NULL)
           ORDER BY lc.created_at DESC LIMIT 1),
-        (SELECT rc.company_id FROM relationship_companies rc WHERE rc.org_id = ${scope.orgId} AND rc.human_id = h.id AND rc.company_id IS NOT NULL),
         ''
       ) AS company_key
     FROM unnest(${sql.param(humans as string[])}::uuid[]) AS h(id)
@@ -181,34 +168,50 @@ export interface SubjectRefresh {
   withoutHuman: number;
 }
 
-/** Rebuild the brand's subjects from its feed (one row per human; company moves carry tags). */
+/** Rebuild the brand's subjects: crm-service's professional people of the brand (company moves carry tags). */
 export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
-  const persons = await personRows(scope);
-  const keys = await personKeysOf(scope);
-  await resolvePersonHumans(scope, persons, keys);
-  const mapped = (await db.execute(sql`
-    SELECT person_key, atomic_human_id::text AS human FROM relationship_person_humans
-    WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND atomic_human_id IS NOT NULL
-  `)) as unknown as Array<{ person_key: string; human: string }>;
-  const atomicOf = new Map(mapped.map((m) => [m.person_key, m.human]));
+  const pro = await professionalPeople(scope);
+  const proHumans = Array.from(new Set(pro.map((p) => p.human).filter((h): h is string => h !== null)));
+  const proKeys = Array.from(new Set(pro.map((p) => p.person_key)));
+  const persons = await personRows(scope, proKeys, proHumans);
+  const keys = await personKeysOf(scope, Array.from(new Set([...proKeys, ...persons.map((p) => p.person_key)])));
+  // A person key's human: the one its own facts state, else the one crm's tag names for that key.
+  const atomicOf = new Map<string, string>();
+  for (const p of pro) if (p.human) atomicOf.set(p.person_key, p.human);
+  for (const p of persons) if (p.fact_human && proHumans.includes(p.fact_human)) atomicOf.set(p.person_key, p.fact_human);
   const canon = await canonicalHumans(scope.orgId, [...atomicOf.values()]);
+  const crmCompany = await professionalCompanies(scope);
 
   interface Acc { names: string[]; emails: Set<string>; phones: Set<string>; channels: Set<string>; keys: string[]; seq: bigint; messages: boolean; direct: boolean; lastIn: number | null; wrote: boolean }
   const byHuman = new Map<string, Acc>();
+  const empty = (): Acc => ({ names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false, direct: false, lastIn: null, wrote: false });
+  const companyOfCanon = new Map<string, string>();
   let withoutHuman = 0;
-  for (const p of persons) {
-    const atomic = atomicOf.get(p.person_key);
-    if (!atomic) {
+  for (const p of pro) {
+    if (!p.human) {
       withoutHuman++;
       continue;
     }
+    const h = canon.get(p.human) ?? p.human;
+    const acc = byHuman.get(h) ?? empty();
+    if (p.name) acc.names.push(p.name);
+    for (const e of p.emails ?? []) acc.emails.add(e.toLowerCase());
+    for (const ph of p.phones ?? []) acc.phones.add(ph);
+    if (!acc.keys.includes(p.person_key)) acc.keys.push(p.person_key);
+    byHuman.set(h, acc);
+    const company = crmCompany.get(p.human);
+    if (company && !companyOfCanon.has(h)) companyOfCanon.set(h, company);
+  }
+  for (const p of persons) {
+    const atomic = atomicOf.get(p.person_key);
+    if (!atomic) continue;
     const h = canon.get(atomic) ?? atomic;
-    const acc = byHuman.get(h) ?? { names: [], emails: new Set(), phones: new Set(), channels: new Set(), keys: [], seq: 0n, messages: false, direct: false, lastIn: null, wrote: false };
+    const acc = byHuman.get(h) ?? empty();
     if (p.name) acc.names.push(p.name);
     for (const e of keys.get(p.person_key)?.emails ?? []) acc.emails.add(e);
     for (const ph of keys.get(p.person_key)?.phones ?? []) acc.phones.add(ph);
     for (const s of p.sources ?? []) acc.channels.add(s);
-    acc.keys.push(p.person_key);
+    if (!acc.keys.includes(p.person_key)) acc.keys.push(p.person_key);
     const seq = BigInt(p.max_seq);
     if (seq > acc.seq) acc.seq = seq;
     acc.messages = acc.messages || p.has_messages;
@@ -225,12 +228,12 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     a.wrote = true;
     a.lastIn = laterOf(a.lastIn, r.at);
   }
-  const company = await companyKeys(scope, humans);
+  const leadCompany = await companyKeys(scope, humans.filter((h) => !companyOfCanon.has(h)));
   const rows = humans.map((h) => {
     const a = byHuman.get(h)!;
     return {
       human: h,
-      company: company.get(h) ?? "",
+      company: companyOfCanon.get(h) ?? leadCompany.get(h) ?? "",
       name: bestName(a.names),
       emails: [...a.emails].sort(),
       phones: [...a.phones].sort(),
@@ -244,12 +247,12 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     };
   });
   for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500));
-  // A human merged into another (the org's links, fleet merges) is no row of its own any more.
+  // A human merged into another (the org's links, fleet merges), or no longer professional to the brand, is no row.
   await db.execute(sql`
     DELETE FROM relationship_subjects
     WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND human_id <> ALL(${sql.param(humans)}::uuid[])
   `);
-  return { persons: persons.length, subjects: rows.length, withoutHuman };
+  return { persons: pro.length, subjects: rows.length, withoutHuman };
 }
 
 function laterOf(current: number | null, v: Date | string | null): number | null {

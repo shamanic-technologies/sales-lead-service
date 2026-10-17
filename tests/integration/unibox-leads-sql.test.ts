@@ -8,6 +8,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
+const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const { fileUniboxLeads, uniboxIntakeCampaignId } = await import("../../src/lib/unibox-leads.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -17,8 +18,10 @@ describe.skipIf(!hasRealDatabase)("unibox intake (LEAD-FOLLOWUP-DATE-1016)", () 
   const orgId = randomUUID();
   const brandId = randomUUID();
 
-  async function subject(name: string, probabilities: Record<string, number>, email: string) {
+  async function subject(name: string, probabilities: Record<string, number>, email: string, crmPersonal = false) {
     const humanId = randomUUID();
+    // Personal is crm-service's connection tag (PROFESSIONAL-LEADS-1017), never judged.
+    if (crmPersonal) await connectionTag({ orgId, brandId, human: humanId, personKey: `email:${email}`, tag: "personal_to_user" });
     await db.execute(sql`
       INSERT INTO relationship_subjects (org_id, brand_id, human_id, name, emails, has_messages, has_direct)
       VALUES (${orgId}, ${brandId}, ${humanId}::uuid, ${name}, ARRAY[${email}]::text[], true, true)`);
@@ -29,6 +32,7 @@ describe.skipIf(!hasRealDatabase)("unibox intake (LEAD-FOLLOWUP-DATE-1016)", () 
   }
 
   afterAll(async () => {
+    await clearRegistry(orgId);
     const rows = (await db.execute(sql`SELECT lead_id::text AS id FROM leads_campaigns WHERE org_id = ${orgId}`)) as unknown as Array<{ id: string }>;
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM relationship_subjects WHERE org_id = ${orgId}`);
@@ -41,7 +45,7 @@ describe.skipIf(!hasRealDatabase)("unibox intake (LEAD-FOLLOWUP-DATE-1016)", () 
     const prospect = `kevin+ubx-prospect-${tag}@distribute.you`;
     const friend = `kevin+ubx-friend-${tag}@distribute.you`;
     await subject("Prospect Person", { prospect: 0.9 }, prospect);
-    await subject("Friend Person", { personal: 0.95 }, friend);
+    await subject("Friend Person", {}, friend, true);
 
     const first = await fileUniboxLeads({ orgId, brandId });
     expect(first).toMatchObject({ filed: 1, notProspect: 1 });

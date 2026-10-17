@@ -23,15 +23,10 @@ const CONTEXT =
   "can be true at once (a friend who is also a customer). Judge from what the thread shows; a thread that shows " +
   "nothing about a relationship means it is unlikely, not impossible.";
 
-export const TAG_QUESTIONS: Record<RelationshipTag, YesNoQuestion> = {
-  personal: {
-    instructions:
-      "Does someone on the brand's side know this person PERSONALLY, outside of selling to them: a friend, family, " +
-      "partner, flatmate, someone they socialize or travel with, or a fellow member of a private, social or community " +
-      "group chat (a workshop, retreat, club or friends' group)?",
-    whenTrue: "They know each other as people: private talk, social plans, shared private or community groups, family or friendship.",
-    whenFalse: "The only contact is commercial or cold: outreach, a signup, support, purchases, with no personal tie shown.",
-  },
+/** Tags Jev judges. `personal` is crm-service's connection tag, read as evidence, never judged here (PROFESSIONAL-LEADS-1017). */
+export type JudgedTag = Exclude<RelationshipTag, "personal">;
+
+export const TAG_QUESTIONS: Record<JudgedTag, YesNoQuestion> = {
   customer: {
     instructions: "Is this person, or the company they act for, a paying customer of the brand, now or in the past?",
     whenTrue: "They paid the brand, hold a subscription, or the thread says they bought.",
@@ -117,6 +112,15 @@ export async function brandCard(brandId: string): Promise<{ name: string | null;
   return card;
 }
 
+async function companyCard(key: string): Promise<Array<{ name: string | null; domain: string | null }>> {
+  if (/^[0-9a-f-]{36}$/i.test(key)) {
+    const local = (await db.execute(sql`SELECT name, primary_domain AS domain FROM organizations WHERE id = ${key}::uuid`)) as unknown as Array<{ name: string | null; domain: string | null }>;
+    if (local.length > 0) return local;
+  }
+  const [c] = await getCompanies([key]);
+  return c ? [{ name: c.name ?? null, domain: c.domain ?? null }] : [];
+}
+
 export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subject[]> {
   const rows = (await db.execute(sql`
     SELECT s.* FROM relationship_subjects s
@@ -133,11 +137,10 @@ export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subj
 }
 
 /** Judge one lead and freeze the answer. Throws on any failure (nothing written). */
-export async function judgeSubject(s: Subject, runId: string): Promise<Record<RelationshipTag, number>> {
+export async function judgeSubject(s: Subject, runId: string): Promise<Record<JudgedTag, number>> {
   const brand = await brandCard(s.brandId);
-  const company = s.companyKey
-    ? (await db.execute(sql`SELECT name, domain FROM relationship_companies WHERE org_id = ${s.orgId} AND human_id = ${s.humanId}::uuid`)) as unknown as Array<{ name: string | null; domain: string | null }>
-    : [];
+  // The company crm-service (or the lead's employer) names: a brand-service id or a local organization row.
+  const company = s.companyKey ? await companyCard(s.companyKey) : [];
   const thread = fitThread(await readThread(s));
   const state = {
     context: CONTEXT,

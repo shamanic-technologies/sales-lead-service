@@ -22,6 +22,7 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
+const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const { claimContactedProspect, loadProspectFollowupVerdicts, handoutOfSourceRow } = await import("../../src/lib/prospect-followup.js");
 const { claimStockedLead } = await import("../../src/lib/source-stock.js");
 
@@ -79,6 +80,7 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
   afterAll(async () => {
     await db.execute(sql`DELETE FROM prospect_followup_handouts WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
+    await clearRegistry(orgId);
     for (const t of ["lead_timeline_facts", "conversion_events", "answered_outside_statements", "lead_disqualification_marks", "relationship_subjects", "relationship_judgments"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
@@ -101,14 +103,17 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
     const tagged: Record<string, string> = {};
     for (const tag of ["personal", "customer", "investor"]) {
       const p = await person(`tag-${tag}`);
-      await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id) VALUES (${orgId}, ${brandId}, ${p.humanId}::uuid)`);
+      await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, has_direct) VALUES (${orgId}, ${brandId}, ${p.humanId}::uuid, true)`);
+      // Personal is crm-service's connection tag (PROFESSIONAL-LEADS-1017); the others are judged.
+      if (tag === "personal") await connectionTag({ orgId, brandId, human: p.humanId, personKey: `itest:${p.humanId}`, tag: "personal_to_user" });
       await db.execute(sql`
         INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
         VALUES (${orgId}, ${brandId}, ${p.humanId}::uuid, ${JSON.stringify({ [tag]: 0.9, prospect: 0.9 })}::jsonb, 1, 'jev', 'run')`);
       tagged[tag] = p.leadId;
     }
     const unjudged = await person("unjudged");
-    await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id) VALUES (${orgId}, ${brandId}, ${unjudged.humanId}::uuid)`);
+    // A direct conversation never judged (a subject only our outreach knows needs no judgment).
+    await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, has_direct) VALUES (${orgId}, ${brandId}, ${unjudged.humanId}::uuid, true)`);
     const neverSent = await person("neversent", { sentAt: null });
 
     const v = await loadProspectFollowupVerdicts({

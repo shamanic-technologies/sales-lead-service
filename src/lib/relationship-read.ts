@@ -4,8 +4,10 @@
  *
  * The block of a human at a brand is decided by `decideTags` from the three bases stored for that LEAD
  * (the human at its current company, `relationship_subjects.company_key`), with `personal` read at the
- * org x human level: a person's word on it (brand ''), else the strongest judgment over the org's brands.
- * A human the sweep never saw at this brand answers with nothing judged (`judgedAt: null`), never a guess.
+ * org x human level: a person's word on it (brand ''), else crm-service's `personal_*` connection tag on the human
+ * at any brand of the org (PROFESSIONAL-LEADS-1017: never judged here any more). The company is the one crm-service
+ * links the person to (else their lead's employer). A human the sweep never saw at this brand answers with nothing
+ * judged (`judgedAt: null`), never a guess.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -50,8 +52,10 @@ export interface RelationshipBlock {
   unsureTags: RelationshipTag[];
   judgedAt: string | null;
   details: TagDetail[];
-  /** Is the person a relationship subject of the brand (some source of the org knows them outside our outreach)? */
+  /** Is the person a relationship subject of the brand: crm-service tags them `professional_to_brand`? */
   subject: boolean;
+  /** crm-service's live connection tags on the human: this brand's, and the org-wide `personal_*` ones. */
+  connectionTags: string[];
   /**
    * May a pipe stating each policy hand this person out? The one answer every server of people reads.
    * `pure_prospect`: no tag but prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts).
@@ -85,6 +89,7 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   judgedAt: null,
   details: [],
   subject: false,
+  connectionTags: [],
   policies: { business_only: false, pure_prospect: false },
   merges: [],
   wroteToUs: false,
@@ -96,6 +101,21 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
 type Ts = Date | string;
 const iso = (v: Ts | null | undefined): string | null => (v === null || v === undefined ? null : toIsoTimestamp(v));
 
+/** Every atomic human this org folds into each of `humans` (its own links, fleet merges), the human itself excluded. */
+async function atomicHumansOf(orgId: string, humans: readonly string[]): Promise<Map<string, string[]>> {
+  if (humans.length === 0) return new Map();
+  const rows = (await db.execute(sql`
+    SELECT o.human_id::text AS human, o.atomic_human_id::text AS atomic FROM org_human_aliases o
+    WHERE o.org_id = ${orgId} AND o.human_id = ANY(${sql.param([...humans])}::uuid[]) AND o.atomic_human_id <> o.human_id
+    UNION
+    SELECT ha.human_id::text, ha.atomic_human_id::text FROM human_aliases ha
+    WHERE ha.human_id = ANY(${sql.param([...humans])}::uuid[]) AND ha.atomic_human_id <> ha.human_id
+  `)) as unknown as Array<{ human: string; atomic: string }>;
+  const out = new Map<string, string[]>();
+  for (const r of rows) out.set(r.human, [...(out.get(r.human) ?? []), r.atomic]);
+  return out;
+}
+
 /** The block for each requested human id (keyed on the id ASKED, merged-away ids answer for their human). */
 export async function loadRelationships(orgId: string, brandId: string, humanIds: readonly string[]): Promise<Map<string, RelationshipBlock>> {
   const asked = Array.from(new Set(humanIds.filter((h) => /^[0-9a-f-]{36}$/i.test(h))));
@@ -104,11 +124,14 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   const canon = await canonicalHumans(orgId, asked);
   const humans = Array.from(new Set(asked.map((h) => canon.get(h) ?? h)));
 
-  const [subjects, statements, evidence, judgments, personal, companies, pressOnly, intents] = await Promise.all([
+  // crm-service's connection tags name crm's human; read them for every atomic human that folds into ours.
+  const atomicByCanon = await atomicHumansOf(orgId, humans);
+  const atomicAll = Array.from(new Set([...humans, ...[...atomicByCanon.values()].flat()]));
+  const [subjects, statements, evidence, judgments, connections, pressOnly, intents] = await Promise.all([
     db.execute(sql`
-      SELECT human_id::text AS human, company_key, wrote_to_us, last_inbound_at FROM relationship_subjects
+      SELECT human_id::text AS human, company_key, wrote_to_us, last_inbound_at, has_direct FROM relationship_subjects
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
-    `) as unknown as Promise<Array<{ human: string; company_key: string; wrote_to_us: boolean; last_inbound_at: Ts | null }>>,
+    `) as unknown as Promise<Array<{ human: string; company_key: string; wrote_to_us: boolean; last_inbound_at: Ts | null; has_direct: boolean }>>,
     db.execute(sql`
       SELECT human_id::text AS human, brand_id, company_key, tag, state, stated_at FROM relationship_statements
       WHERE org_id = ${orgId} AND brand_id IN (${brandId}, '') AND human_id = ANY(${sql.param(humans)}::uuid[]) AND withdrawn_at IS NULL
@@ -122,14 +145,13 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
     `) as unknown as Promise<Array<{ human: string; company_key: string; probabilities: Record<string, number>; judged_at: Ts }>>,
     db.execute(sql`
-      SELECT human_id::text AS human, max((probabilities->>'personal')::float8) AS p, max(judged_at) AS at FROM relationship_judgments
-      WHERE org_id = ${orgId} AND human_id = ANY(${sql.param(humans)}::uuid[])
-      GROUP BY human_id
-    `) as unknown as Promise<Array<{ human: string; p: number | null; at: Ts }>>,
-    db.execute(sql`
-      SELECT human_id::text AS human, company_id, name, domain, source FROM relationship_companies
-      WHERE org_id = ${orgId} AND human_id = ANY(${sql.param(humans)}::uuid[]) AND (company_id IS NOT NULL OR (name IS NOT NULL AND NOT conflict))
-    `) as unknown as Promise<Array<{ human: string; company_id: string | null; name: string | null; domain: string | null; source: CompanySource }>>,
+      SELECT f.raw->>'humanId' AS human, f.brand_id, f.payload->>'tag' AS tag, min(f.received_at) AS at
+      FROM crm_registry_facts f
+      WHERE f.org_id = ${orgId} AND f.type = 'connection_tag' AND f.raw->>'humanId' = ANY(${sql.param(atomicAll)}::text[])
+        AND (f.brand_id = ${brandId} OR f.payload->>'tag' LIKE 'personal%')
+        AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+      GROUP BY 1, 2, 3
+    `) as unknown as Promise<Array<{ human: string; brand_id: string; tag: string; at: Ts }>>,
     // Journalist evidence (brand-journalists.ts): a lead of the human the brand reached ONLY through a press pitch.
     db.execute(sql`
       SELECT h.human::text AS human, COALESCE(min(bj.first_pitched_at), min(bj.updated_at)) AS at
@@ -145,13 +167,6 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     `) as unknown as Promise<Array<{ human: string; p: number; judged_at: Ts }>>,
   ]);
 
-  // A person with an unanswered "same person?" question may be someone we already know: held back from business-only.
-  const openMerges = new Set(
-    ((await db.execute(sql`
-      SELECT human_a::text AS a, human_b::text AS b FROM relationship_merge_questions
-      WHERE org_id = ${orgId} AND state = 'open' AND (human_a = ANY(${sql.param(humans)}::uuid[]) OR human_b = ANY(${sql.param(humans)}::uuid[]))
-    `)) as unknown as Array<{ a: string; b: string }>).flatMap((r) => [r.a, r.b]),
-  );
   // Merges that made each human: links stated from here whose two atomic people now name it.
   const linkedRows = (await db.execute(sql`
     SELECT q.human_a::text AS a, q.human_b::text AS b, q.link_id, q.probability, q.answered_by, q.answered_at
@@ -178,15 +193,24 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
   }
   const companyKeyOf = new Map(subjects.map((s) => [s.human, s.company_key]));
   const subjectOf = new Map(subjects.map((s) => [s.human, s]));
-  const learned = new Map(companies.map((c) => [c.human, c]));
-  // A lead's own employer key (not learned here): name it from brand-service or the local organization row.
-  const leadKeys = Array.from(new Set(subjects.map((s) => s.company_key).filter((k) => k && ![...learned.values()].some((c) => c.company_id === k))));
+  const canonOfAtomic = new Map<string, string>();
+  for (const h of humans) {
+    canonOfAtomic.set(h, h);
+    for (const a of atomicByCanon.get(h) ?? []) canonOfAtomic.set(a, h);
+  }
+  // A company key: a local organization row (a lead's own employer) or a brand-service id (crm-service's link).
+  const leadKeys = Array.from(new Set(subjects.map((s) => s.company_key).filter((k) => k)));
   const keyNames = new Map<string, { name: string | null; domain: string | null }>();
+  const localNamed = new Set<string>();
   if (leadKeys.length > 0) {
+    const localKeys = leadKeys.filter((k) => /^[0-9a-f-]{36}$/i.test(k));
     const orgRows = (await db.execute(sql`
-      SELECT id::text AS id, name, primary_domain AS domain FROM organizations WHERE id = ANY(${sql.param(leadKeys)}::uuid[])
+      SELECT id::text AS id, name, primary_domain AS domain FROM organizations WHERE id = ANY(${sql.param(localKeys)}::uuid[])
     `)) as unknown as Array<{ id: string; name: string | null; domain: string | null }>;
-    for (const r of orgRows) keyNames.set(r.id, { name: r.name, domain: r.domain });
+    for (const r of orgRows) {
+      keyNames.set(r.id, { name: r.name, domain: r.domain });
+      localNamed.add(r.id);
+    }
     const brandKeys = leadKeys.filter((k) => !keyNames.has(k));
     if (brandKeys.length > 0) for (const c of await getCompanies(brandKeys)) keyNames.set(c.brandId, { name: c.name, domain: c.domain });
   }
@@ -209,24 +233,27 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
     for (const e of evidence) if (e.human === h && e.company_key === (key ?? "") && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
     const pitched = pressOnly.find((x) => x.human === h);
     if (pitched) evidenceOf.set(JOURNALIST_TAG, { evidence: PRESS_ONLY_EVIDENCE, at: iso(pitched.at)! });
+    const mine = connections.filter((c) => canonOfAtomic.get(c.human) === h);
+    const connectionTags = Array.from(new Set(mine.map((c) => c.tag))).sort();
+    const personalTag = mine.filter((c) => c.tag.startsWith("personal")).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
+    if (personalTag) evidenceOf.set("personal", { evidence: `crm:${personalTag.tag}`, at: iso(personalTag.at)! });
     const j = judgments.find((x) => x.human === h && x.company_key === (key ?? ""));
-    const p = personal.find((x) => x.human === h);
     let judgment: { probabilities: Partial<Record<RelationshipTag, number>>; at: string } | null = null;
-    if (j || (p && p.p !== null)) {
+    if (j) {
       const probabilities: Partial<Record<RelationshipTag, number>> = {};
-      for (const [k, v] of Object.entries(j?.probabilities ?? {})) if (isRelationshipTag(k) && typeof v === "number") probabilities[k] = v;
-      if (p && p.p !== null) probabilities.personal = Number(p.p);
-      judgment = { probabilities, at: iso(j?.judged_at ?? p!.at)! };
+      // `personal` is crm-service's now: an older judgment of it is not read (PROFESSIONAL-LEADS-1017).
+      for (const [k, v] of Object.entries(j.probabilities ?? {})) if (isRelationshipTag(k) && k !== "personal" && typeof v === "number") probabilities[k] = v;
+      judgment = { probabilities, at: iso(j.judged_at)! };
     }
     const details = decideTags({ statements: statementsOf, evidence: evidenceOf, judgment });
-    const c = learned.get(h);
     let company: RelationshipCompany | null = null;
-    if (c) company = { id: c.company_id, name: c.name, domain: c.domain, source: c.source };
-    else if (key) company = { id: key, name: keyNames.get(key)?.name ?? null, domain: keyNames.get(key)?.domain ?? null, source: "lead" };
+    if (key) company = { id: key, name: keyNames.get(key)?.name ?? null, domain: keyNames.get(key)?.domain ?? null, source: /^[0-9a-f-]{36}$/i.test(key) && localNamed.has(key) ? "lead" : "crm" };
     const tags = tagsIn(details, "yes");
     const unsureTags = tagsIn(details, "unsure");
     const judgedAt = j ? iso(j.judged_at) : null;
     const subj = subjectOf.get(h);
+    const isSubject = companyKeyOf.has(h);
+    const hasDirect = subj?.has_direct === true;
     const wroteToUs = subj?.wrote_to_us === true;
     const lead = decideLead(details);
     const intent = intents.find((x) => x.human === h);
@@ -237,10 +264,11 @@ export async function loadRelationships(orgId: string, brandId: string, humanIds
       unsureTags,
       judgedAt,
       details,
-      subject: companyKeyOf.has(h),
+      subject: isSubject,
+      connectionTags,
       policies: {
-        business_only: policyAllows("business_only", { tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }),
-        pure_prospect: pureProspectAllows({ subject: companyKeyOf.has(h), tags, unsureTags, judgedAt, openMerge: openMerges.has(h) }),
+        business_only: policyAllows("business_only", { subject: isSubject, hasDirect, tags, unsureTags, judgedAt }),
+        pure_prospect: pureProspectAllows({ subject: isSubject, hasDirect, tags, unsureTags, judgedAt }),
       },
       merges: mergesOf.get(h) ?? [],
       wroteToUs,
