@@ -93,4 +93,25 @@ describe.skipIf(!hasRealDatabase)("crm fact feed bronze against a real database"
     expect(registry.map((r) => r.fact_id)).toEqual([tag.factId, withdrawal.factId]);
     expect(registry[0].raw.payload).toEqual({ tag: "professional_to_brand" });
   });
+
+  it("copies a relation and its withdrawal into the registry, never into crm_facts (CRM-RELATION-REGISTRY-1017)", async () => {
+    const relation = fact(20, {
+      type: "relation", source: "crm", occurredAt: null, dateBasis: "none",
+      payload: {
+        relationKey: "rel:p1:org:c1", capacity: "professional", companyId: "c1", domain: "acme.com",
+        tags: ["professional_to_brand"], contactPoints: [{ id: "x", source: "gmail" }], emails: ["a@example.com"], phones: [], keys: [],
+      },
+    });
+    expect(await ingestFactsPage({ facts: [relation], nextCursor: "c20", hasMore: false }, feed)).toBe(1);
+    const withdrawal = fact(21, { type: "withdrawn", source: "crm", withdrawnOf: relation.factId });
+    expect(await ingestFactsPage({ facts: [withdrawal], nextCursor: "c21", hasMore: false }, feed)).toBe(1);
+
+    const events = (await db.execute(sql`
+      SELECT fact_id FROM crm_facts WHERE org_id = ${org} AND seq >= ${String(base + 20)}::bigint`)) as unknown as Array<{ fact_id: string }>;
+    expect(events).toEqual([]);
+    const registry = (await db.execute(sql`
+      SELECT fact_id, raw FROM crm_registry_facts WHERE org_id = ${org} AND seq >= ${String(base + 20)}::bigint ORDER BY seq`)) as unknown as Array<{ fact_id: string; raw: Record<string, unknown> }>;
+    expect(registry.map((r) => r.fact_id)).toEqual([relation.factId, withdrawal.factId]);
+    expect((registry[0].raw.payload as Record<string, unknown>).relationKey).toBe("rel:p1:org:c1");
+  });
 });
