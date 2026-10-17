@@ -118,6 +118,7 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
       fit: "fit",
     });
     expect(benRow.steps.map((s) => s.step)).toEqual(["signup"]);
+    expect(benRow.personKeys).toEqual(["email:ben@acme.io"]);
     expect(anaRow).toMatchObject({ lifecycle: { key: "engaged", rank: 3 }, fit: "wrong_person", fitNote: "left the company", conversation: "waiting_on_us" }); // replied after our email
     expect(anaRow.steps.map((s) => s.step)).toEqual(["lead_found", "email_sent", "conversation", "website_visit"]);
   });
