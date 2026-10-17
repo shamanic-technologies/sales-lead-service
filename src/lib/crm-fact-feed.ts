@@ -17,7 +17,8 @@
  *
  * REGISTRY facts are copied BESIDE the events, into `crm_registry_facts` (CRM-REGISTRY-FACTS-1017): crm-service
  * v0.72.0 states on the same feed who a person IS (`connection_tag`: personal or professional to the brand;
- * `organization_link`: the company they speak for), not something they DID. Every reader of `crm_facts` reads a
+ * `organization_link`: the company they speak for; `relation`: in which capacity they deal with the brand), not
+ * something they DID. Every reader of `crm_facts` reads a
  * row as an event about the person (an act toward us, a direct conversation, "known to the CRM"), so a registry
  * fact there would have made ~19k group-only people "direct" and everyone "acted toward us". A withdrawal of a
  * registry fact follows it. Same verbatim copy, same transaction, same cursor; only the table differs.
@@ -142,7 +143,8 @@ export function parseCrmFact(raw: unknown): CrmFact {
 }
 
 /** Fact types that say who a person IS (crm-service's registry), never something that happened. */
-export const CRM_REGISTRY_FACT_TYPES: ReadonlySet<string> = new Set(["connection_tag", "organization_link"]);
+/** `relation` (CRM-RELATION-REGISTRY-1017): one person's capacity toward the brand (personal / professional at a company). */
+export const CRM_REGISTRY_FACT_TYPES: ReadonlySet<string> = new Set(["connection_tag", "organization_link", "relation"]);
 
 /**
  * Which facts of a page are registry facts: a registry type, or a `withdrawn` of a registry fact (one in this
