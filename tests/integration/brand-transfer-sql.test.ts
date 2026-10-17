@@ -27,6 +27,7 @@ const BRAND_SCALAR_TABLES = [
   "crm_pairing_rulings",
   "qualification_criteria",
   "qualification_checks",
+  "qualification_previews",
   "candidate_screenings",
   "crm_facts",
   "lead_delivery_evidence",
@@ -137,6 +138,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     }).returning();
     await db.insert(schema.qualificationChecks).values({
       criterionId: criterion.id, orgId: org, brandId: brand, offerId: criterion.offerId as string, subject: `lead:${leadId}`, reason: "no_company_domain",
+    });
+    await db.insert(schema.qualificationPreviews).values({
+      orgId: org, brandId: brand, offerId: criterion.offerId as string, companies: [{ domain: "acme.com", name: "Acme" }], criterionIds: [criterion.id], status: "completed",
     });
     await db.insert(schema.candidateScreenings).values({
       orgId: org, brandId: brand, audienceId: randomUUID(), providerPersonId: randomUUID(), candidateId: randomUUID(),

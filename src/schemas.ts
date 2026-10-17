@@ -12,7 +12,7 @@ import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
 import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
 import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
-import { BUILTIN_PROBE_KEYS, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
+import { BUILTIN_PROBE_KEYS, MAX_PREVIEW_COMPANIES, MAX_SAMPLE, QUALIFICATION_MODES } from "./lib/qualification-probes.js";
 import {
   CONVERSATION_LAST_WORDS,
   CONVERSATION_STEPS,
@@ -7893,6 +7893,111 @@ registry.registerPath({
     },
     400: { description: "Missing brandId or a non-uuid lead id" },
     404: { description: "Lead not on this brand" },
+  },
+});
+
+// --- Checks on sample companies that are not leads yet (PREVIEW-CHECKS-1017) ---------------------
+
+const QualificationPreviewCheckSchema = LeadQualificationCheckSchema.extend({
+  title: z.string().nullable().openapi({ description: "The criterion's card title (null on a hand-made one)." }),
+}).openapi("QualificationPreviewCheck");
+
+const QualificationPreviewSchema = z
+  .object({
+    id: z.string(),
+    brandId: z.string(),
+    offerId: z.string(),
+    status: z.enum(["running", "completed", "failed"]).openapi({
+      description: "running = still checking (poll GET .../previews/{previewId}); completed = every check ran; failed = stopped (see error; what was checked before stays readable, asking again reuses it).",
+    }),
+    error: z
+      .object({ code: z.string().openapi({ description: "insufficient_credit | interrupted | failed" }), message: z.string() })
+      .nullable(),
+    createdAt: z.string(),
+    finishedAt: z.string().nullable(),
+    run: z
+      .object({
+        id: z.string().openapi({ description: "The spend run (child of the caller's x-run-id), billed to the calling org." }),
+        totalCostUsd: z.number().nullable().openapi({ description: "Everything the run spent (probes, AI, storage), read from runs-service once the preview stopped; null while running." }),
+      })
+      .nullable()
+      .openapi({ description: "null when the offer had no enabled check (nothing ran, nothing spent)." }),
+    checks: z
+      .array(
+        z.object({
+          criterionId: z.string(),
+          title: z.string().nullable(),
+          question: z.string(),
+          mode: z.enum(QUALIFICATION_MODES),
+          source: z.string(),
+        }),
+      )
+      .openapi({ description: "The ENABLED checks of the offer when the preview started (frozen), in creation order." }),
+    companies: z.array(
+      z.object({
+        domain: z.string().openapi({ description: "Normalized (lowercase, no scheme, no www)." }),
+        name: z.string(),
+        mustPass: z.object({
+          state: z.enum(["passes", "fails", "pending", "unknown"]).openapi({
+            description:
+              "passes = no Must have (must_pass) answered no; an unavailable check never fails a company, as on a live serve. fails = at least one answered no (see failed): " +
+              "its Nice to have (mention) checks are not run (not_checked, reason failed_must_pass), as a live campaign would never email it. pending = running and a Must have is not answered yet. " +
+              "unknown = the preview failed before answering one.",
+          }),
+          failed: z.array(z.object({ criterionId: z.string(), title: z.string().nullable(), question: z.string() })),
+        }),
+        qualification: z
+          .object({ domain: z.string(), checks: z.array(QualificationPreviewCheckSchema) })
+          .openapi({ description: "Same shape as a served lead's `qualification` (POST /orgs/buffer/next), each check also titled: what the email writer gets." }),
+      }),
+    ),
+  })
+  .openapi("QualificationPreview");
+
+const PreviewNotes =
+  "Companies are a domain + a name, NOT leads (nothing is written to the lead store). Every check is keyed on the company DOMAIN like every check: " +
+  "a company already checked (by a preview or as a lead's employer) is not paid again, and a company that later becomes a lead reads the same answers. " +
+  "Firmographic checks (in_our_data) read the organization we hold for the domain when we hold one, else only its name and domain (a check that cannot be answered from that reads unavailable). " +
+  "Must haves run first; a company failing one is not paid its Nice to haves. Each check applied counts in the criterion's pass rate (subject company:<domain>).";
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/offers/{offerId}/qualification/previews",
+  summary: "Run the offer's enabled checks on sample companies that are not leads yet (spends), answered when done or polled",
+  description:
+    `Body {companies: [{domain, name}]}, 1 to ${MAX_PREVIEW_COMPANIES} (duplicates by domain are folded). Opens a spend run under x-run-id (billed to the calling org), ` +
+    "starts the checks and waits up to 25 s: 200 = every check answered, 202 = still running (poll GET .../previews/{previewId}). " +
+    PreviewNotes,
+  request: {
+    params: OfferParams,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ companies: z.array(z.object({ domain: z.string(), name: z.string() })).min(1).max(MAX_PREVIEW_COMPANIES) }),
+        },
+      },
+    },
+  },
+  parameters: QualificationSpendHeaders,
+  responses: {
+    200: { description: "Finished (or the offer has no enabled check: nothing ran)", content: { "application/json": { schema: z.object({ preview: QualificationPreviewSchema }) } } },
+    202: { description: "Still running: poll GET .../previews/{previewId}", content: { "application/json": { schema: z.object({ preview: QualificationPreviewSchema }) } } },
+    400: { description: "Invalid body (`code: invalid_domain` names unusable domains), missing x-user-id or x-run-id" },
+    402: { description: "Insufficient credit (`code: insufficient_credit`), with `preview` (what was answered before the refusal)" },
+    502: { description: "A sibling could not answer" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/offers/{offerId}/qualification/previews/{previewId}",
+  summary: "Where a preview of the offer's checks on sample companies stands (no spend)",
+  description: PreviewNotes,
+  request: { params: OfferParams.extend({ previewId: z.string() }) },
+  parameters: QualificationReadHeaders,
+  responses: {
+    200: { description: "The preview, read from the stored verdicts", content: { "application/json": { schema: z.object({ preview: QualificationPreviewSchema }) } } },
+    404: { description: "`code: preview_not_found` (unknown id, or another org/brand/offer's)" },
   },
 });
 

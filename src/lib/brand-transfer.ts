@@ -190,6 +190,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "crm_pairing_rulings", touchesUpdatedAt: true },
       { table: "qualification_criteria", touchesUpdatedAt: false },
       { table: "qualification_checks", touchesUpdatedAt: false },
+      // Sample companies an offer's checks ran on before anyone was a lead (PREVIEW-CHECKS-1017).
+      { table: "qualification_previews", touchesUpdatedAt: false },
       { table: "candidate_screenings", touchesUpdatedAt: false },
       { table: "crm_facts", touchesUpdatedAt: false },
       { table: "answered_outside_statements", touchesUpdatedAt: false },

@@ -11,7 +11,7 @@ import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { db } from "../db/index.js";
-import { qualificationCriteria } from "../db/schema.js";
+import { qualificationCriteria, qualificationPreviews, type QualificationPreviewRow } from "../db/schema.js";
 import { and, eq, isNull } from "drizzle-orm";
 import type { PassRate } from "../lib/qualification.js";
 import { buildFullLeadsBatch } from "../lib/lead-shape.js";
@@ -40,6 +40,15 @@ import {
   runCriterionOnLeads,
 } from "../lib/qualification-run.js";
 import { TregEndpointUnknownError } from "../lib/treg-catalog-client.js";
+import {
+  MAX_PREVIEW_COMPANIES,
+  PREVIEW_WAIT_MS,
+  getPreview,
+  normalizePreviewCompanies,
+  previewCriteria,
+  readPreview,
+  runPreview,
+} from "../lib/qualification-preview.js";
 import { fundingCapLabel, type SpendIdentity } from "../lib/treg-client.js";
 import type { QualificationCriterionRow } from "../db/schema.js";
 
@@ -382,6 +391,105 @@ router.post(
     } catch (error) {
       if (identity) await closeRun(identity, false).catch((e) => console.error("[lead-service] closing run failed:", e));
       fail(res, error, "qualification sample");
+    }
+  }),
+);
+
+// --- Checks on sample companies that are not leads yet (PREVIEW-CHECKS-1017) -------------------
+
+const PreviewBody = z
+  .object({
+    companies: z
+      .array(z.object({ domain: z.string().trim().min(1).max(253), name: z.string().trim().min(1).max(300) }).strict())
+      .min(1)
+      .max(MAX_PREVIEW_COMPANIES),
+  })
+  .strict();
+
+async function previewAnswer(row: QualificationPreviewRow) {
+  const criteria = await previewCriteria(row);
+  const preview = await readPreview(row, criteria);
+  let run: { id: string; totalCostUsd: number | null } | null = null;
+  if (row.runId) {
+    const total = preview.status === "running" ? null : await getRunTotalCents(row.runId, row.orgId);
+    run = { id: row.runId, totalCostUsd: total ? Math.round(total.totalCents * 10_000) / 1_000_000 : null };
+  }
+  return { ...preview, run };
+}
+
+router.post(
+  "/orgs/brands/:brandId/offers/:offerId/qualification/previews",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    const parsed = PreviewBody.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: `Invalid request: send {companies: [{domain, name}]}, 1 to ${MAX_PREVIEW_COMPANIES}`, details: parsed.error.flatten() });
+      return;
+    }
+    const normalized = normalizePreviewCompanies(parsed.data.companies);
+    if (!normalized.ok) {
+      res.status(400).json({ error: "Some domains are not usable company domains", code: "invalid_domain", domains: normalized.invalidDomains });
+      return;
+    }
+    const scope = offerScope(req);
+    let identity: SpendIdentity | null = null;
+    try {
+      const criteria = (await listCriteria(scope)).filter((c) => c.enabled);
+      if (criteria.length) {
+        identity = await openRun(req, res, scope.brandId, "qualification-preview");
+        if (!identity) return;
+      }
+      const [row] = await db
+        .insert(qualificationPreviews)
+        .values({
+          ...scope,
+          companies: normalized.companies,
+          criterionIds: criteria.map((c) => c.id),
+          runId: identity?.runId ?? null,
+          status: criteria.length ? "running" : "completed",
+          finishedAt: criteria.length ? null : new Date(),
+          createdByUserId: req.userId ?? null,
+        })
+        .returning();
+      if (identity) {
+        const spend = identity;
+        const job = runPreview(row, criteria, spend, (ok) => closeRun(spend, ok));
+        identity = null; // the job owns the run from here
+        await Promise.race([job, new Promise((r) => setTimeout(r, PREVIEW_WAIT_MS).unref())]);
+      }
+      const current = (await getPreview(scope, row.id))!;
+      const preview = await previewAnswer(current);
+      if (preview.status === "failed" && preview.error?.code === "insufficient_credit") {
+        res.status(402).json({ error: "Insufficient credit", code: "insufficient_credit", detail: preview.error.message, preview });
+        return;
+      }
+      res.status(preview.status === "running" ? 202 : 200).json({ preview });
+    } catch (error) {
+      if (identity) await closeRun(identity, false).catch((e) => console.error("[lead-service] closing run failed:", e));
+      fail(res, error, "qualification preview");
+    }
+  }),
+);
+
+router.get(
+  "/orgs/brands/:brandId/offers/:offerId/qualification/previews/:previewId",
+  apiKeyAuth,
+  requireOrgId,
+  wrap<AuthenticatedRequest>(async (req, res) => {
+    if (!z.string().uuid().safeParse(req.params.previewId).success) {
+      res.status(404).json({ error: "No preview with that id on this offer", code: "preview_not_found" });
+      return;
+    }
+    try {
+      const row = await getPreview(offerScope(req), req.params.previewId);
+      if (!row) {
+        res.status(404).json({ error: "No preview with that id on this offer", code: "preview_not_found" });
+        return;
+      }
+      res.json({ preview: await previewAnswer(row) });
+    } catch (error) {
+      fail(res, error, "qualification preview read");
     }
   }),
 );

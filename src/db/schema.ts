@@ -1039,6 +1039,31 @@ export const qualificationChecks = pgTable(
   (table) => [uniqueIndex("idx_qck_criterion_subject").on(table.criterionId, table.subject)],
 );
 
+// --- An offer's checks run on sample companies that are not leads yet (migration 0104, PREVIEW-CHECKS-1017) ---
+// Semantics in src/lib/qualification-preview.ts. Verdicts stay in qualification_verdicts (domain-keyed).
+export const qualificationPreviews = pgTable(
+  "qualification_previews",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    offerId: text("offer_id").notNull(),
+    /** `[{domain, name}]` as asked, domains normalized, in the caller's order. */
+    companies: jsonb("companies").notNull(),
+    /** The ENABLED criteria of the offer when the preview started (frozen: a toggle mid-run changes nothing). */
+    criterionIds: text("criterion_ids").array().notNull(),
+    runId: text("run_id"),
+    /** running | completed | failed */
+    status: text("status").notNull(),
+    error: text("error"),
+    createdByUserId: text("created_by_user_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (table) => [index("idx_qp_org_brand_offer").on(table.orgId, table.brandId, table.offerId, table.createdAt)],
+);
+
+export type QualificationPreviewRow = typeof qualificationPreviews.$inferSelect;
 export type QualificationCriterionRow = typeof qualificationCriteria.$inferSelect;
 export type QualificationObservationRow = typeof qualificationObservations.$inferSelect;
 export type QualificationVerdictRow = typeof qualificationVerdicts.$inferSelect;

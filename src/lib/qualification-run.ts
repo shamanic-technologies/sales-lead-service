@@ -23,7 +23,7 @@ import {
   type QualificationMode,
 } from "./qualification.js";
 import { judgeChoice, judgeYesNo } from "./qualification-judge.js";
-import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, catalogEntryToCall, probeKey, type ProbeSpec } from "./qualification-probes.js";
+import { BUILTIN_PROBES, BUILTIN_PROBE_KEYS, catalogEntryToCall, probeKey, type CompanySubject, type ProbeSpec } from "./qualification-probes.js";
 import { searchCatalog } from "./treg-catalog-client.js";
 import { TREG_COST_NAME, TregMeter, type SpendIdentity } from "./treg-client.js";
 import type { QualificationCriterionRow } from "../db/schema.js";
@@ -170,7 +170,11 @@ export interface LeadQualification {
  * `not_checked`.
  */
 export async function readLeadQualification(lead: FullLead, criteria: QualificationCriterionRow[]): Promise<{ domain: string | null; checks: LeadQualification[] }> {
-  const subject = subjectFromOrganization(lead.organization);
+  return readCompanyQualification(subjectFromOrganization(lead.organization), criteria);
+}
+
+/** The same read for a company named by its domain (a lead's employer, or a preview company that is no lead). */
+export async function readCompanyQualification(subject: CompanySubject | null, criteria: QualificationCriterionRow[]): Promise<{ domain: string | null; checks: LeadQualification[] }> {
   const checks: LeadQualification[] = [];
   for (const c of criteria) {
     const spec = probeOf(c);

@@ -225,19 +225,23 @@ export interface QualificationDeps {
 export async function observe(spec: ProbeSpec, subject: CompanySubject, org: OrganizationView, deps: QualificationDeps): Promise<ObserveResult> {
   const key = probeKey(spec);
   const prior = await freshObservation(key, subject.domain);
-  if (prior) return { observation: prior, reused: true, chargedMicro: 0 };
-
   if (spec.kind === "company_data") {
+    // Free data we hold: the prior reading serves only while it says the same thing. A company first seen with a name
+    // and a domain alone (a preview company, PREVIEW-CHECKS-1017) must not answer for 30 days once its lead carries
+    // full firmographics; an unchanged reading is reused exactly as before.
+    const content = companyDataContent(org);
+    if (prior && prior.status === "ok" && prior.content === content) return { observation: prior, reused: true, chargedMicro: 0 };
     const observation = await recordObservation({
       probeKey: key,
       domain: subject.domain,
       status: "ok",
-      content: companyDataContent(org),
+      content,
       vendorCostMicro: 0,
       runId: deps.identity.runId,
     });
     return { observation, reused: false, chargedMicro: 0 };
   }
+  if (prior) return { observation: prior, reused: true, chargedMicro: 0 };
 
   let charged = 0;
   const reasons: string[] = [];
