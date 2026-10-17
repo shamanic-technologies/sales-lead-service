@@ -59,6 +59,19 @@ export interface CrmFact {
   sourceRef: string;
   payload: Record<string, unknown>;
   withdrawnOf: string | null;
+  /** The contact point it happened on (`contactPointOf`). */
+  contactPoint: string | null;
+}
+
+/**
+ * The contact point a fact happened on (PERSON-RELATIONS-1017): crm-service's `contactPoint` (its `presenceStableKey`,
+ * byte-equal to a relation's `contactPoints[].id`). A fact crm served before it named one: `<source>:<sourceContactId>`,
+ * the same key for every source whose contact id IS its stable id; none = null (the fact belongs to no relation).
+ */
+export function contactPointOf(raw: Record<string, unknown>, source: string, sourceContactId: string | null): string | null {
+  const stated = raw.contactPoint;
+  if (typeof stated === "string" && stated.length > 0) return stated;
+  return sourceContactId ? `${source}:${sourceContactId}` : null;
 }
 
 export class CrmFactParseError extends Error {
@@ -139,6 +152,7 @@ export function parseCrmFact(raw: unknown): CrmFact {
     sourceRef: str(r, "sourceRef", where),
     payload: payload as Record<string, unknown>,
     withdrawnOf,
+    contactPoint: contactPointOf(r, str(r, "source", where), nullableStr(r, "sourceContactId", where)),
   };
 }
 
@@ -211,6 +225,7 @@ export async function ingestFactsPage(
       sourceRef: f.sourceRef,
       payload: f.payload,
       withdrawnOf: f.withdrawnOf,
+      contactPoint: f.contactPoint,
       raw: page.facts[i] as Record<string, unknown>,
     });
     const indexed = facts.map((f, i) => ({ f, i }));
@@ -282,6 +297,54 @@ export async function pullCrmFacts(
   }
 }
 
+/**
+ * One walk of the whole feed from the start that fills `contact_point` on facts copied before crm-service served it
+ * (PERSON-RELATIONS-1017, crm-service v0.75.1): crm reads it from its own record, so old facts carry it. Its own
+ * cursor; finished once it reached the end (`caught_up_at`), never run again. Writes only `contact_point`.
+ */
+export const CONTACT_POINT_REWALK_FEED = "people_facts_contact_points" as const;
+
+export async function rewalkContactPoints(maxPages: number = CRM_FACTS_MAX_PAGES_PER_TICK): Promise<{ pages: number; updated: number; done: boolean }> {
+  const state = await db
+    .select({ cursor: crmFeedCursors.cursor, caughtUpAt: crmFeedCursors.caughtUpAt })
+    .from(crmFeedCursors)
+    .where(sql`${crmFeedCursors.feed} = ${CONTACT_POINT_REWALK_FEED}`);
+  if (state[0]?.caughtUpAt) return { pages: 0, updated: 0, done: true };
+  let cursor = state[0]?.cursor ?? null;
+  let pages = 0;
+  let updated = 0;
+  while (pages < maxPages) {
+    const page = await fetchCrmFactsPage(cursor, CRM_FACTS_PAGE_SIZE);
+    pages++;
+    const points = page.facts
+      .map((f) => f as Record<string, unknown>)
+      .filter((f) => typeof f.factId === "string" && typeof f.contactPoint === "string" && f.contactPoint.length > 0)
+      .map((f) => ({ id: f.factId as string, cp: f.contactPoint as string }));
+    await db.transaction(async (tx) => {
+      if (points.length > 0) {
+        const rows = (await tx.execute(sql`
+          UPDATE crm_facts f SET contact_point = v.cp
+          FROM jsonb_to_recordset(${JSON.stringify(points)}::jsonb) AS v(id text, cp text)
+          WHERE f.fact_id = v.id AND f.contact_point IS DISTINCT FROM v.cp
+          RETURNING 1
+        `)) as unknown as unknown[];
+        updated += rows.length;
+      }
+      if (page.nextCursor !== null) {
+        const caughtUp = page.hasMore ? {} : { caughtUpAt: new Date() };
+        await tx
+          .insert(crmFeedCursors)
+          .values({ feed: CONTACT_POINT_REWALK_FEED, cursor: page.nextCursor, ...caughtUp })
+          .onConflictDoUpdate({ target: crmFeedCursors.feed, set: { cursor: page.nextCursor, updatedAt: new Date(), ...caughtUp } });
+      }
+    });
+    if (!page.hasMore) return { pages, updated, done: true };
+    if (page.nextCursor === null || page.nextCursor === cursor) throw new Error("[lead-service] contact point re-walk: the feed did not move its cursor");
+    cursor = page.nextCursor;
+  }
+  return { pages, updated, done: false };
+}
+
 let pulling = false;
 
 export async function tickCrmFactFeed(): Promise<void> {
@@ -295,6 +358,8 @@ export async function tickCrmFactFeed(): Promise<void> {
           (r.budgetReached ? " (page budget reached, continuing next tick)" : ""),
       );
     }
+    const w = await rewalkContactPoints();
+    if (w.pages > 0) console.log(`[lead-service] crm fact contact points re-walk: pages=${w.pages} updated=${w.updated} done=${w.done}`);
   } finally {
     pulling = false;
   }

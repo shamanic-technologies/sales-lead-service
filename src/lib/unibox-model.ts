@@ -1,7 +1,8 @@
 /**
  * The Unibox read model (UNIBOX-SIX-TAGS-1017, owner 2026-10-17: "the Unibox list is read from lead-service; crm
- * keeps the thread and the sending"): one row per lead of the brand (a relationship SUBJECT = a person crm-service
- * tags professional to the brand, at their company) carrying the six tag dimensions (`unibox-dimensions.ts`), the
+ * keeps the thread and the sending"): one row per RELATION of the brand (PERSON-RELATIONS-1017: a relationship
+ * SUBJECT = a human at one company, from a professional relation crm-service tags professional to the brand; a
+ * personal relation has no row) carrying ONLY that relation's addresses, events and thread, with the six tag dimensions (`unibox-dimensions.ts`), the
  * steps reached and the last word of each side. Built by the relationship sweep after the tags (every 5 min), read
  * by `GET /orgs/leads/unibox` (the list, filtered on the dimensions) and `GET /orgs/leads/unibox-lead` (the lead
  * card: the six tags + every campaign the person is part of, with the furthest step reached in each).
@@ -16,9 +17,9 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { paymentStands } from "./crm-evidence.js";
 import { STEP_REACHED_EVIDENCE } from "./step-reached.js";
-import { loadRelationships } from "./relationship-read.js";
+import { loadRelationshipsAt } from "./relationship-read.js";
 import { loadLeadAndCompanyMarks, effectiveLeadOrCompanyMark } from "./lead-disqualification.js";
-import { NON_EVENT_FACT_TYPES, type Scope } from "./relationship-subjects.js";
+import { NON_EVENT_FACT_TYPES, subjectKey, type Scope } from "./relationship-subjects.js";
 import { loadCampaignDisplays, type CampaignDisplay } from "./campaign-names-client.js";
 import { getCompanies, MAX_COMPANIES_PER_REQUEST } from "./company-client.js";
 import {
@@ -116,8 +117,12 @@ export interface UniboxRow {
   name: string | null;
   emails: string[];
   phones: string[];
-  /** crm-service's person keys of the human at the brand: open their thread with one (crm `/orgs/people/timeline?personKey=`). */
+  /** crm-service's person keys of the relation. */
   personKeys: string[];
+  /** The relation: open its thread with it (crm `/orgs/people/timeline?relationKey=`), only its own contact points. */
+  relationKey: string | null;
+  /** Every crm relation folded into this row (two crm persons of one human at one company), `relationKey` first. */
+  relationKeys: string[];
   leadIds: string[];
   /** STATUS: prospect / customer / churned, one value. */
   status: UniboxStatus;
@@ -141,6 +146,8 @@ export interface UniboxRow {
 interface SubjectRow {
   human: string;
   company_key: string;
+  relation_keys: string[];
+  contact_points: string[];
   name: string | null;
   emails: string[];
   phones: string[];
@@ -152,27 +159,42 @@ interface SubjectRow {
 /** Derive the rows of these subjects (pure orchestration of reads; nothing written). */
 export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectRow[], catalogue: LifecycleCatalogue): Promise<UniboxRow[]> {
   if (subjects.length === 0) return [];
-  const humans = subjects.map((s) => s.human);
-  const blocks = await loadRelationships(scope.orgId, scope.brandId, humans);
+  const keyOf = (s: SubjectRow) => subjectKey(s.human, s.company_key);
+  const humans = Array.from(new Set(subjects.map((s) => s.human)));
+  const blocks = await loadRelationshipsAt(scope.orgId, scope.brandId, subjects.map((s) => ({ humanId: s.human, companyKey: s.company_key })));
 
-  // The person's leads at the brand: every atomic human this org folds into theirs (its own links, fleet merges), then
-  // their lead rows (index on leads.human_id), and when each was first served at the brand.
-  const atoms = (await db.execute(sql`
-    SELECT h.id::text AS human, h.id::text AS atomic FROM unnest(${sql.param(humans)}::uuid[]) AS h(id)
-    UNION SELECT o.human_id::text, o.atomic_human_id::text FROM org_human_aliases o
-      WHERE o.org_id = ${scope.orgId} AND o.human_id = ANY(${sql.param(humans)}::uuid[])
-    UNION SELECT ha.human_id::text, ha.atomic_human_id::text FROM human_aliases ha WHERE ha.human_id = ANY(${sql.param(humans)}::uuid[])
-  `)) as unknown as Array<{ human: string; atomic: string }>;
-  const humanOfAtom = new Map(atoms.map((a) => [a.atomic, a.human]));
-  const leadRows = (await db.execute(sql`
-    SELECT l.human_id::text AS atomic, l.id::text AS lead_id, min(lc.served_at) AS served_at
-    FROM leads l JOIN leads_campaigns lc ON lc.lead_id = l.id
-    WHERE l.human_id = ANY(${sql.param([...humanOfAtom.keys()])}::uuid[]) AND lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids)
-    GROUP BY 1, 2
-  `)) as unknown as Array<{ atomic: string; lead_id: string; served_at: Ts | null }>;
-  const leads = leadRows.map((r) => ({ human: humanOfAtom.get(r.atomic)!, lead_id: r.lead_id, served_at: r.served_at }));
-  const leadIds = leads.map((l) => l.lead_id);
-  const humanOfLead = new Map(leads.map((l) => [l.lead_id, l.human]));
+  // The relation's leads at the brand: the leads registered on ITS addresses (our outreach wrote to that address),
+  // never a lead of the human on another relation's address, and when each was first served at the brand.
+  const emails = Array.from(new Set(subjects.flatMap((s) => (s.emails ?? []).map((e) => e.toLowerCase()))));
+  const leadRows =
+    emails.length === 0
+      ? []
+      : ((await db.execute(sql`
+          SELECT lower(m.value) AS email, m.lead_id::text AS lead_id, min(lc.served_at) AS served_at
+          FROM lead_contact_methods m JOIN leads_campaigns lc ON lc.lead_id = m.lead_id
+          WHERE m.channel = 'email' AND lower(m.value) = ANY(${sql.param(emails)}::text[])
+            AND lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids)
+          GROUP BY 1, 2
+        `)) as unknown as Array<{ email: string; lead_id: string; served_at: Ts | null }>);
+  const leadsOfEmail = new Map<string, Array<{ lead_id: string; served_at: Ts | null }>>();
+  for (const r of leadRows) leadsOfEmail.set(r.email, [...(leadsOfEmail.get(r.email) ?? []), r]);
+  const leads: Array<{ subject: string; lead_id: string; served_at: Ts | null }> = [];
+  for (const s of subjects) {
+    const seen = new Set<string>();
+    for (const e of s.emails ?? []) {
+      for (const l of leadsOfEmail.get(e.toLowerCase()) ?? []) {
+        if (seen.has(l.lead_id)) continue;
+        seen.add(l.lead_id);
+        leads.push({ subject: keyOf(s), lead_id: l.lead_id, served_at: l.served_at });
+      }
+    }
+  }
+  const leadIds = Array.from(new Set(leads.map((l) => l.lead_id)));
+  const subjectsOfLead = new Map<string, string[]>();
+  for (const l of leads) subjectsOfLead.set(l.lead_id, [...(subjectsOfLead.get(l.lead_id) ?? []), l.subject]);
+  const subjectsOfPoint = new Map<string, string[]>();
+  for (const s of subjects) for (const c of s.contact_points ?? []) subjectsOfPoint.set(c, [...(subjectsOfPoint.get(c) ?? []), keyOf(s)]);
+  const points = [...subjectsOfPoint.keys()];
 
   const [timeline, crm, humanFacts, marks] = await Promise.all([
     leadIds.length === 0
@@ -183,15 +205,16 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
           WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND withdrawn_at IS NULL AND lead_id = ANY(${sql.param(leadIds)}::uuid[])
           GROUP BY 1, 2
         `) as unknown as Promise<Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>>),
-    db.execute(sql`
-      SELECT s.human_id::text AS human, f.type, f.payload, f.occurred_at, f.source_ref
-      FROM relationship_subjects s
-      JOIN crm_facts f ON f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.person_key = ANY(s.person_keys)
-      WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND s.human_id = ANY(${sql.param(humans)}::uuid[])
-        AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
-        AND (f.type = ANY(${sql.param([...CRM_STEP_OF_TYPE.keys(), "message_out", ...CUSTOMER_FACT_TYPES])}::text[]))
-        AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
-    `) as unknown as Promise<Array<{ human: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null; source_ref: string }>>,
+    points.length === 0
+      ? Promise.resolve([] as Array<{ contact_point: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null; source_ref: string }>)
+      : (db.execute(sql`
+          SELECT f.contact_point, f.type, f.payload, f.occurred_at, f.source_ref
+          FROM crm_facts f
+          WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.contact_point = ANY(${sql.param(points)}::text[])
+            AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
+            AND (f.type = ANY(${sql.param([...CRM_STEP_OF_TYPE.keys(), "message_out", ...CUSTOMER_FACT_TYPES])}::text[]))
+            AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
+        `) as unknown as Promise<Array<{ contact_point: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null; source_ref: string }>>),
     db.execute(sql`
       SELECT COALESCE(o.human_id, a.human_id, f.human_id)::text AS human,
         bool_or(f.kind = 'opt_out') AS opted_out, bool_or(f.kind = 'do_not_contact') AS do_not_contact
@@ -205,95 +228,100 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
     loadLeadAndCompanyMarks({ orgId: scope.orgId, brandIds: [scope.brandId], leadIds }),
   ]);
 
+  // Everything below is keyed on the SUBJECT (the relation), never the human.
   const steps = new Map<string, StepsReached>();
-  const theirsAt = new Map<string, string | null>();
   const oursAt = new Map<string, string | null>();
   const activity = new Map<string, string | null>();
   const unsubscribed = new Set<string>();
   const bounced = new Set<string>();
-  const stepsOf = (h: string) => {
-    let s = steps.get(h);
-    if (!s) steps.set(h, (s = new Map()));
-    return s;
+  const stepsOf = (k: string) => {
+    let st = steps.get(k);
+    if (!st) steps.set(k, (st = new Map()));
+    return st;
   };
-  const touch = (h: string, at: string | null) => activity.set(h, later(activity.get(h) ?? null, at));
+  const touch = (k: string, at: string | null) => activity.set(k, later(activity.get(k) ?? null, at));
 
   for (const l of leads) {
-    reach(stepsOf(l.human), "lead_found", iso(l.served_at));
-    touch(l.human, iso(l.served_at));
+    reach(stepsOf(l.subject), "lead_found", iso(l.served_at));
+    touch(l.subject, iso(l.served_at));
   }
   for (const t of timeline) {
-    const h = humanOfLead.get(t.lead_id);
-    if (!h) continue;
-    const step = STEP_OF_TIMELINE_LABEL[t.label];
-    if (step) reach(stepsOf(h), step, iso(t.first_at));
-    if (SEND_LABELS.includes(t.label)) oursAt.set(h, later(oursAt.get(h) ?? null, iso(t.last_at)));
-    if (UNSUBSCRIBED_LABELS.includes(t.label)) unsubscribed.add(h);
-    if (t.label === "bounced") bounced.add(h);
-    touch(h, iso(t.last_at));
+    for (const k of subjectsOfLead.get(t.lead_id) ?? []) {
+      const step = STEP_OF_TIMELINE_LABEL[t.label];
+      if (step) reach(stepsOf(k), step, iso(t.first_at));
+      if (SEND_LABELS.includes(t.label)) oursAt.set(k, later(oursAt.get(k) ?? null, iso(t.last_at)));
+      if (UNSUBSCRIBED_LABELS.includes(t.label)) unsubscribed.add(k);
+      if (t.label === "bounced") bounced.add(k);
+      touch(k, iso(t.last_at));
+    }
   }
   const customerFacts = new Map<string, CustomerFact[]>();
-  const addCustomerFact = (h: string, f: CustomerFact) => customerFacts.set(h, [...(customerFacts.get(h) ?? []), f]);
+  const addCustomerFact = (k: string, f: CustomerFact) => customerFacts.set(k, [...(customerFacts.get(k) ?? []), f]);
   for (const f of crm) {
-    const at = iso(f.occurred_at);
-    if (f.type === "client" || f.type === "former_client") addCustomerFact(f.human, { kind: f.type, at });
-    else if (f.type === "subscription_changed" && typeof f.payload?.status === "string") {
-      addCustomerFact(f.human, { kind: "subscription", at, subscriptionId: f.source_ref, status: f.payload.status });
-    } else if ((f.type === "payment" && paymentStands(f.payload)) || f.type === "sale") addCustomerFact(f.human, { kind: "paid", at });
-    if (CUSTOMER_FACT_TYPES.includes(f.type)) continue;
-    touch(f.human, at);
-    if (f.type === "message_out") {
-      oursAt.set(f.human, later(oursAt.get(f.human) ?? null, at));
-      continue;
+    for (const k of subjectsOfPoint.get(f.contact_point) ?? []) {
+      const at = iso(f.occurred_at);
+      if (f.type === "client" || f.type === "former_client") addCustomerFact(k, { kind: f.type, at });
+      else if (f.type === "subscription_changed" && typeof f.payload?.status === "string") {
+        addCustomerFact(k, { kind: "subscription", at, subscriptionId: f.source_ref, status: f.payload.status });
+      } else if ((f.type === "payment" && paymentStands(f.payload)) || f.type === "sale") addCustomerFact(k, { kind: "paid", at });
+      if (CUSTOMER_FACT_TYPES.includes(f.type)) continue;
+      touch(k, at);
+      if (f.type === "message_out") {
+        oursAt.set(k, later(oursAt.get(k) ?? null, at));
+        continue;
+      }
+      if (f.type === "payment" && !paymentStands(f.payload)) continue;
+      const step = CRM_STEP_OF_TYPE.get(f.type);
+      if (step) reach(stepsOf(k), step, at);
     }
-    if (f.type === "payment" && !paymentStands(f.payload)) continue;
-    const step = CRM_STEP_OF_TYPE.get(f.type);
-    if (step) reach(stepsOf(f.human), step, at);
   }
   const optOut = new Map(humanFacts.map((r) => [r.human, r]));
 
   const out: UniboxRow[] = [];
   for (const s of subjects) {
-    const h = s.human;
-    const block = blocks.get(h);
-    const reached = stepsOf(h);
+    const k = keyOf(s);
+    const block = blocks.get(k);
+    const reached = stepsOf(k);
     const lastIn = iso(s.last_inbound_at);
-    theirsAt.set(h, lastIn);
-    touch(h, lastIn);
-    const myLeads = leads.filter((l) => l.human === h).map((l) => l.lead_id);
+    touch(k, lastIn);
+    const myLeads = Array.from(new Set(leads.filter((l) => l.subject === k).map((l) => l.lead_id)));
     let fit: UniboxFit = "fit";
     let fitNote: string | null = null;
     for (const leadId of myLeads) {
       const mark = effectiveLeadOrCompanyMark(marks, leadId, scope.brandId, null);
       if (!mark) continue;
       const f = fitOf({ lead: mark.level !== "company", company: mark.level === "company" });
-      // A wrong-person mark on any of the person's leads answers before a company one.
+      // A wrong-person mark on any of the relation's leads answers before a company one.
       if (fit === "fit" || f === "wrong_person") {
         fit = f;
         fitNote = mark.note;
       }
     }
-    const hf = optOut.get(h);
+    // Opt-out / do-not-contact is the HUMAN's word: it holds on every relation.
+    const hf = optOut.get(s.human);
     const contactability = contactabilityOf({
       doNotContact: hf?.do_not_contact === true,
       optedOut: hf?.opted_out === true,
-      unsubscribed: unsubscribed.has(h),
-      bounced: bounced.has(h),
+      unsubscribed: unsubscribed.has(k),
+      bounced: bounced.has(k),
     });
     const interest = interestOf(block?.wantsBusiness.state ?? null);
-    const lastOurs = oursAt.get(h) ?? null;
+    const lastOurs = oursAt.get(k) ?? null;
     const lifecycle = lifecycleOf(reached.keys(), catalogue.ranks, catalogue.ladder);
+    const relationKeys = [...(s.relation_keys ?? [])].sort();
     out.push({
-      humanId: h,
+      humanId: s.human,
       companyKey: s.company_key,
       company: null,
       name: s.name,
       emails: s.emails ?? [],
       phones: s.phones ?? [],
       personKeys: [...(s.person_keys ?? [])].sort(),
+      relationKey: relationKeys[0] ?? null,
+      relationKeys,
       leadIds: myLeads.sort(),
       status: (() => {
-        const st = customerStateFrom(customerFacts.get(h) ?? []);
+        const st = customerStateFrom(customerFacts.get(k) ?? []);
         return statusOf({ customer: !st.churned && ((block?.tags ?? []).includes("customer") || st.customerSign), churned: st.churned });
       })(),
       roles: rolesOf(block?.tags ?? []),
@@ -309,7 +337,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       fitNote,
       lastTheirsAt: lastIn,
       lastOursAt: lastOurs,
-      lastActivityAt: activity.get(h) ?? iso(s.updated_at)!,
+      lastActivityAt: activity.get(k) ?? iso(s.updated_at)!,
       connectionTags: block?.connectionTags ?? [],
     });
   }
@@ -320,9 +348,9 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
 export async function refreshUniboxRows(scope: Scope): Promise<{ rows: number; removed: number }> {
   const catalogue = await loadLifecycleCatalogue();
   const subjects = (await db.execute(sql`
-    SELECT human_id::text AS human, company_key, name, emails, phones, person_keys, last_inbound_at, updated_at
+    SELECT human_id::text AS human, company_key, relation_keys, contact_points, name, emails, phones, person_keys, last_inbound_at, updated_at
     FROM relationship_subjects WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
-    ORDER BY human_id
+    ORDER BY human_id, company_key
   `)) as unknown as SubjectRow[];
   let written = 0;
   for (let i = 0; i < subjects.length; i += CHUNK) {
@@ -334,7 +362,8 @@ export async function refreshUniboxRows(scope: Scope): Promise<{ rows: number; r
   const removed = (await db.execute(sql`
     DELETE FROM unibox_rows u
     WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId}
-      AND NOT EXISTS (SELECT 1 FROM relationship_subjects s WHERE s.org_id = u.org_id AND s.brand_id = u.brand_id AND s.human_id = u.human_id)
+      AND NOT EXISTS (SELECT 1 FROM relationship_subjects s WHERE s.org_id = u.org_id AND s.brand_id = u.brand_id AND s.human_id = u.human_id
+        AND s.company_key = u.company_key)
     RETURNING 1
   `)) as unknown as unknown[];
   return { rows: written, removed: removed.length };
@@ -378,6 +407,7 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
       emails: r.emails,
       phones: r.phones,
       pkeys: r.personKeys,
+      rkeys: r.relationKeys,
       leads: r.leadIds,
       status: r.status,
       roles: r.roles,
@@ -397,30 +427,30 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
     })),
   );
   await db.execute(sql`
-    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, company_name, company_domain, name, emails, phones, person_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
+    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, company_name, company_domain, name, emails, phones, person_keys, relation_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
       steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.cname, v.cdomain, v.name,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
-      ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], v.status, ARRAY(SELECT jsonb_array_elements_text(v.roles)),
+      ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.rkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], v.status, ARRAY(SELECT jsonb_array_elements_text(v.roles)),
       ARRAY(SELECT jsonb_array_elements_text(v.types)),
       v.lkey, v.lrank, v.steps, v.interest, v.conversation, v.contactability, v.fit, v.note,
       v.theirs::timestamptz, v.ours::timestamptz, v.activity::timestamptz, ARRAY(SELECT jsonb_array_elements_text(v.conn)),
       lower(coalesce(v.name, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, cname text, cdomain text, name text, emails jsonb, phones jsonb, pkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, cname text, cdomain text, name text, emails jsonb, phones jsonb, pkeys jsonb, rkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
       lkey text, lrank int, steps jsonb, interest text, conversation text, contactability text, fit text, note text, theirs text, ours text,
       activity text, conn jsonb)
-    ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
-      company_key = excluded.company_key, company_name = excluded.company_name, company_domain = excluded.company_domain, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
-      person_keys = excluded.person_keys, lead_ids = excluded.lead_ids, status = excluded.status, roles = excluded.roles,
+    ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
+      company_name = excluded.company_name, company_domain = excluded.company_domain, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
+      person_keys = excluded.person_keys, relation_keys = excluded.relation_keys, lead_ids = excluded.lead_ids, status = excluded.status, roles = excluded.roles,
       types = excluded.types, lifecycle_key = excluded.lifecycle_key, lifecycle_rank = excluded.lifecycle_rank, steps = excluded.steps,
       interest = excluded.interest, conversation = excluded.conversation, contactability = excluded.contactability, fit = excluded.fit,
       fit_note = excluded.fit_note, last_theirs_at = excluded.last_theirs_at, last_ours_at = excluded.last_ours_at,
       last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text, updated_at = now()
-    WHERE (unibox_rows.company_key, unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
+    WHERE (unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
-      IS DISTINCT FROM (excluded.company_key, excluded.company_name, excluded.company_domain, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
+      IS DISTINCT FROM (excluded.company_name, excluded.company_domain, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
            excluded.connection_tags)
@@ -458,6 +488,8 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     emails: (r.emails as string[]) ?? [],
     phones: (r.phones as string[]) ?? [],
     personKeys: (r.person_keys as string[]) ?? [],
+    relationKey: ((r.relation_keys as string[]) ?? [])[0] ?? null,
+    relationKeys: (r.relation_keys as string[]) ?? [],
     leadIds: ((r.lead_ids as string[]) ?? []).map(String),
     status: (r.status as UniboxStatus) ?? "prospect",
     roles: (r.roles as UniboxRole[]) ?? [],
@@ -476,17 +508,18 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
   };
 }
 
-function encodeCursor(at: string, human: string): string {
-  return Buffer.from(JSON.stringify([at, human])).toString("base64url");
+function encodeCursor(at: string, human: string, company: string): string {
+  return Buffer.from(JSON.stringify([at, human, company])).toString("base64url");
 }
 
 export class UniboxCursorError extends Error {}
 
-function decodeCursor(c: string): { at: string; human: string } {
+function decodeCursor(c: string): { at: string; human: string; company: string } {
   try {
-    const [at, human] = JSON.parse(Buffer.from(c, "base64url").toString("utf8")) as [string, string];
+    const [at, human, company] = JSON.parse(Buffer.from(c, "base64url").toString("utf8")) as [string, string, string];
     if (typeof at !== "string" || typeof human !== "string" || Number.isNaN(Date.parse(at)) || !/^[0-9a-f-]{36}$/i.test(human)) throw new Error("shape");
-    return { at, human };
+    if (typeof company !== "string") throw new Error("shape");
+    return { at, human, company };
   } catch {
     throw new UniboxCursorError("cursor is not one this endpoint issued");
   }
@@ -516,11 +549,12 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
   const catalogue = await loadLifecycleCatalogue();
   const where = filterSql(scope, f);
   const after = page.cursor === null ? null : decodeCursor(page.cursor);
-  const keyset = after === null ? sql`` : sql`AND (u.last_activity_at, u.human_id) < (${after.at}::timestamptz, ${after.human}::uuid)`;
+  const keyset =
+    after === null ? sql`` : sql`AND (u.last_activity_at, u.human_id, u.company_key) < (${after.at}::timestamptz, ${after.human}::uuid, ${after.company})`;
   const [rows, totals, built] = await Promise.all([
     db.execute(sql`
       SELECT u.* FROM unibox_rows u WHERE ${where} ${keyset}
-      ORDER BY u.last_activity_at DESC, u.human_id DESC LIMIT ${page.limit + 1}
+      ORDER BY u.last_activity_at DESC, u.human_id DESC, u.company_key DESC LIMIT ${page.limit + 1}
     `) as unknown as Promise<Array<Record<string, unknown>>>,
     db.execute(sql`SELECT count(*)::int AS n FROM unibox_rows u WHERE ${where}`) as unknown as Promise<Array<{ n: number }>>,
     db.execute(sql`SELECT max(updated_at) AS at FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}`) as unknown as Promise<Array<{ at: Ts | null }>>,
@@ -528,7 +562,7 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
   const more = rows.length > page.limit;
   const items = rows.slice(0, page.limit).map((r) => toRow(r, catalogue.ladder));
   const last = items[items.length - 1];
-  return { rows: items, total: totals[0]?.n ?? 0, nextCursor: more && last ? encodeCursor(last.lastActivityAt, last.humanId) : null, builtAt: iso(built[0]?.at ?? null) };
+  return { rows: items, total: totals[0]?.n ?? 0, nextCursor: more && last ? encodeCursor(last.lastActivityAt, last.humanId, last.companyKey) : null, builtAt: iso(built[0]?.at ?? null) };
 }
 
 export interface UniboxCampaign {
@@ -544,13 +578,21 @@ export interface UniboxCampaign {
 }
 
 /**
- * The lead card: the row's six tags plus EVERY campaign the person is part of at the brand, with the steps reached
+ * The lead card: the row's six tags plus EVERY campaign the relation is part of at the brand, with the steps reached
  * in it (facts the timeline attributes to that campaign, and being found by it) and the furthest one on the ladder.
+ * `relationKey` names the row (PERSON-RELATIONS-1017); absent = the human's most recently active row.
  */
-export async function readUniboxLead(scope: Scope, humanId: string): Promise<{ lead: UniboxRow; campaigns: UniboxCampaign[] } | null> {
+export async function readUniboxLead(
+  scope: Scope,
+  humanId: string | null,
+  relationKey: string | null = null,
+): Promise<{ lead: UniboxRow; campaigns: UniboxCampaign[] } | null> {
   const catalogue = await loadLifecycleCatalogue();
+  const byHuman = humanId === null ? sql`` : sql`AND u.human_id = ${humanId}::uuid`;
+  const byRelation = relationKey === null ? sql`` : sql`AND ${relationKey} = ANY(u.relation_keys)`;
   const rows = (await db.execute(sql`
-    SELECT u.* FROM unibox_rows u WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} AND u.human_id = ${humanId}::uuid
+    SELECT u.* FROM unibox_rows u WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} ${byHuman} ${byRelation}
+    ORDER BY u.last_activity_at DESC, u.company_key LIMIT 1
   `)) as unknown as Array<Record<string, unknown>>;
   if (rows.length === 0) return null;
   const lead = toRow(rows[0], catalogue.ladder);

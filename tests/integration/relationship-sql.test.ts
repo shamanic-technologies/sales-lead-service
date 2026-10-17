@@ -14,9 +14,9 @@ import { clearRegistry, connectionTag, organizationLink } from "../helpers/crm-r
 vi.mock("../../src/lib/company-client.js", () => ({
   getCompanies: async (ids: string[]) => ids.map((brandId) => ({ brandId, name: "Acme", domain: "acme.com" })),
 }));
-import { refreshSubjects, readThread, toSubject } from "../../src/lib/relationship-subjects.js";
+import { refreshSubjects, readThread, subjectKey, toSubject } from "../../src/lib/relationship-subjects.js";
 import { writeEvidence } from "../../src/lib/relationship-judge.js";
-import { loadRelationships, readReview, recomputePolicy, stateTag, withdrawTag } from "../../src/lib/relationship-read.js";
+import { loadRelationships, loadRelationshipsAt, readReview, recomputePolicy, stateTag, withdrawTag } from "../../src/lib/relationship-read.js";
 import { relationshipClause } from "../../src/lib/reach-sql.js";
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -28,6 +28,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
   const yuliaWa = randomUUID();
   const yuliia = randomUUID();
   const scope = { orgId, brandId };
+  const companyId = randomUUID();
   let seq = BigInt(Date.now()) * 1000n;
   const createdLeads: string[] = [];
 
@@ -35,8 +36,8 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     const id = randomUUID();
     seq += 1n;
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${id}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${p.personKey}, ${p.name}, ${sql.param(p.emails ?? [])}::text[], ${sql.param(p.phones ?? [])}::text[],
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${id}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${p.personKey}, ${p.personKey}, ${p.name}, ${sql.param(p.emails ?? [])}::text[], ${sql.param(p.phones ?? [])}::text[],
         ${p.type}, ${p.at ?? "2026-10-01T10:00:00Z"}::timestamptz, 'event', ${p.source}, ${randomUUID()}, ${JSON.stringify(p.payload ?? {})}::jsonb,
         ${JSON.stringify(p.human ? { humanId: p.human } : {})}::jsonb)
     `);
@@ -51,7 +52,7 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     }
   });
 
-  it("builds one lead per PROFESSIONAL human with its whole thread and the sources' evidence; nobody else", async () => {
+  it("builds one lead per PROFESSIONAL relation with its own thread and the sources' evidence; nobody else", async () => {
     await connectionTag({ orgId, brandId, human: yuliaWa, personKey: "matrix:room1", name: "Yulia (WA)" });
     await connectionTag({ orgId, brandId, human: yuliia, personKey: "email:lusenko.julija@gmail.com", name: "Yuliia Siletska", emails: ["lusenko.julija@gmail.com"] });
     const friend = randomUUID();
@@ -109,26 +110,35 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     expect(review.counts.byTag).toMatchObject({ personal: 1, customer: 1, prospect: 1 });
   });
 
-  it("an org merge folds both into ONE lead carrying every tag; the company crm-service links carries them", async () => {
+  it("an org merge folds both into ONE lead carrying every tag; a company crm-service links later splits the relations", async () => {
     await db.execute(sql`
       INSERT INTO org_human_aliases (org_id, atomic_human_id, human_id) VALUES (${orgId}, ${yuliaWa}::uuid, ${yuliia}::uuid), (${orgId}, ${yuliia}::uuid, ${yuliia}::uuid)
     `);
     await db.execute(sql`UPDATE relationship_judgments SET human_id = ${yuliia}::uuid WHERE org_id = ${orgId}`);
     const r = await refreshSubjects(scope);
-    expect(r.subjects).toBe(1);
+    expect(r.subjects).toBe(1); // both relations professional, company unknown: one row
     await writeEvidence(scope);
     const viaOldId = (await loadRelationships(orgId, brandId, [yuliaWa])).get(yuliaWa)!;
     expect(viaOldId.humanId).toBe(yuliia);
     expect(viaOldId.tags.sort()).toEqual(["customer", "personal", "prospect"]);
 
-    const companyId = randomUUID();
+    // PERSON-RELATIONS-1017: crm reads the email relation at a company; the WhatsApp chat stays "company unknown".
     await organizationLink({ orgId, brandId, human: yuliia, personKey: "email:lusenko.julija@gmail.com", companyId });
-    await refreshSubjects(scope);
-    const moved = (await db.execute(sql`SELECT DISTINCT company_key FROM relationship_evidence WHERE org_id = ${orgId}`)) as unknown as Array<{ company_key: string }>;
-    expect(moved.map((m) => m.company_key)).toEqual([companyId]);
-    const b = (await loadRelationships(orgId, brandId, [yuliia])).get(yuliia)!;
-    expect(b.company).toMatchObject({ id: companyId, name: "Acme", source: "crm" });
-    expect(b.tags.sort()).toEqual(["customer", "personal", "prospect"]);
+    expect((await refreshSubjects(scope)).subjects).toBe(2);
+    await writeEvidence(scope);
+    const evidence = (await db.execute(sql`SELECT DISTINCT company_key, tag FROM relationship_evidence WHERE org_id = ${orgId} ORDER BY tag`)) as unknown as Array<{ company_key: string; tag: string }>;
+    expect(evidence).toEqual([{ company_key: companyId, tag: "customer" }, { company_key: companyId, tag: "prospect" }]);
+    const at = await loadRelationshipsAt(orgId, brandId, [{ humanId: yuliia, companyKey: companyId }, { humanId: yuliia, companyKey: "" }]);
+    const work = at.get(subjectKey(yuliia, companyId))!;
+    expect(work.company).toMatchObject({ id: companyId, name: "Acme", source: "crm" });
+    expect(work.tags.sort()).toEqual(["customer", "prospect"]); // the relation's own points: no personal tag there
+    const chat = at.get(subjectKey(yuliia, ""))!;
+    expect(chat.tags).toEqual([]);
+    // Each relation reads only its own thread.
+    const rows = (await db.execute(sql`SELECT * FROM relationship_subjects WHERE org_id = ${orgId} ORDER BY company_key`)) as unknown as Array<Record<string, unknown>>;
+    expect((await readThread(toSubject(rows[0]))).map((l) => l.text)).toEqual(["see you at the retreat!"]);
+    expect((await readThread(toSubject(rows[1]))).map((l) => l.kind).sort()).toEqual(["payment", "signup"]);
+    expect(rows.every((x) => x.shares_human === true)).toBe(true);
   });
 
   it("business_only: fail-closed until decided, a personal tag holds the person back, the pool clause reads it", async () => {
@@ -139,9 +149,13 @@ describe.skipIf(!hasRealDatabase)("relationship tags", () => {
     // The lead's fleet human (Yulia's WhatsApp id) is folded into Yuliia by the org's own link.
     expect(await allowed()).toBe(false);
     await recomputePolicy(orgId, brandId);
-    expect(await allowed()).toBe(false); // personal (crm-service) + investor unsure
+    expect(await allowed()).toBe(false); // personal (crm-service) + investor unsure + the work relation never judged
+    await db.execute(sql`
+      INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, thread_scope, model, run_id)
+      VALUES (${orgId}, ${brandId}, ${yuliia}::uuid, ${companyId}, '{"customer":0.9}'::jsonb, 9e15, 'relation', 'jev-test', 'run')
+    `);
     await stateTag({ orgId, brandId, humanId: yuliia, tag: "personal", state: "no", userId: "user-1" });
-    await stateTag({ orgId, brandId, humanId: yuliia, tag: "investor", state: "no", userId: "user-1" });
+    await stateTag({ orgId, brandId, humanId: yuliia, tag: "investor", state: "no", userId: "user-1", companyKey: "" });
     expect(await allowed()).toBe(true);
     const block = (await loadRelationships(orgId, brandId, [yuliia])).get(yuliia)!;
     expect(block.policies.business_only).toBe(true);

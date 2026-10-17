@@ -90,8 +90,8 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
   async function crmFact(email: string): Promise<void> {
     seq += 1n;
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${"email:" + email}, 'itest', ${sql.param([email])}::text[], '{}'::text[],
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${"email:" + email}, ${"email:" + email}, 'itest', ${sql.param([email])}::text[], '{}'::text[],
         'message_in', now(), 'event', 'matrix', ${randomUUID()}, '{}'::jsonb, '{}'::jsonb)
     `);
   }
@@ -287,8 +287,8 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
       const p = await duePhoneLead();
       seq += 1n;
       await db.execute(sql`
-        INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-        VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${"phone:" + p.phone}, 'itest', '{}'::text[],
+        INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+        VALUES (${randomUUID()}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${"phone:" + p.phone}, ${"phone:" + p.phone}, 'itest', '{}'::text[],
           ${sql.param([p.phone.slice(0, 3) + " " + p.phone.slice(3)])}::text[], 'message_in', now(), 'event', 'whatsapp', ${randomUUID()}, '{}'::jsonb, '{}'::jsonb)
       `);
       const r = await claim("pure_prospect");

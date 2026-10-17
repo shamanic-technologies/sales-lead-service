@@ -12578,11 +12578,11 @@
         "properties": {
           "humanId": {
             "type": "string",
-            "description": "The person (human-service human, this org's view)."
+            "description": "The person (human-service human, this org's view). One row = one RELATION: this human at `companyKey` (PERSON-RELATIONS-1017); a human may have several rows."
           },
           "companyKey": {
             "type": "string",
-            "description": "The company they speak for at the brand ('' = unknown)."
+            "description": "The company of the relation ('' = professional, company unknown). (humanId, companyKey) identifies the row."
           },
           "company": {
             "type": "object",
@@ -12628,7 +12628,19 @@
             "items": {
               "type": "string"
             },
-            "description": "crm-service's person keys of the human at the brand: open their thread with one (crm-service GET /orgs/people/timeline?personKey=)."
+            "description": "crm-service's person keys of the relation."
+          },
+          "relationKey": {
+            "type": "string",
+            "nullable": true,
+            "description": "crm-service's relation key of the row: open ITS thread with it (crm-service GET /orgs/people/timeline?relationKey=), only that relation's contact points, never the person's personal conversations."
+          },
+          "relationKeys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every crm relation folded into the row (`relationKey` first)."
           },
           "leadIds": {
             "type": "array",
@@ -12770,7 +12782,7 @@
             "items": {
               "type": "string"
             },
-            "description": "crm-service's connection tags on the human."
+            "description": "crm-service's connection tags of the relation's own contact points."
           }
         },
         "required": [
@@ -12781,6 +12793,8 @@
           "emails",
           "phones",
           "personKeys",
+          "relationKey",
+          "relationKeys",
           "leadIds",
           "status",
           "roles",
@@ -22421,11 +22435,21 @@
           },
           {
             "in": "query",
-            "name": "humanId",
-            "required": true,
+            "name": "relationKey",
+            "required": false,
             "schema": {
               "type": "string"
-            }
+            },
+            "description": "The row (a professional relation key). One of relationKey / humanId is required."
+          },
+          {
+            "in": "query",
+            "name": "humanId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Alone: that human's most recently active row."
           }
         ],
         "responses": {

@@ -125,7 +125,9 @@ export async function subjectsToJudge(scope: Scope, limit: number): Promise<Subj
   const rows = (await db.execute(sql`
     SELECT s.* FROM relationship_subjects s
     LEFT JOIN relationship_judgments j ON j.org_id = s.org_id AND j.brand_id = s.brand_id AND j.human_id = s.human_id AND j.company_key = s.company_key
-    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND (j.human_id IS NULL OR j.thread_seq < s.thread_seq)
+    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
+      -- A judgment that read the whole human's thread is not this relation's when the human holds another (PERSON-RELATIONS-1017).
+      AND (j.human_id IS NULL OR j.thread_seq < s.thread_seq OR (s.shares_human AND j.thread_scope <> 'relation'))
       AND s.has_direct
     -- People a source states as prospect / customer (the ones campaigns write to) and people we talk with, first.
     ORDER BY (s.has_messages OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
@@ -151,11 +153,11 @@ export async function judgeSubject(s: Subject, runId: string): Promise<Record<Ju
   // A background sweep: no org request started it, so the platform pays (chat-service platform judgments).
   const { probabilities, model } = await judgeYesNo(state, TAG_QUESTIONS, "platform");
   await db.execute(sql`
-    INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id, judged_at)
+    INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, thread_scope, model, run_id, judged_at)
     VALUES (${s.orgId}, ${s.brandId}, ${s.humanId}::uuid, ${s.companyKey}, ${JSON.stringify(probabilities)}::jsonb,
-      ${s.threadSeq}::bigint, ${model}, ${runId}, now())
+      ${s.threadSeq}::bigint, 'relation', ${model}, ${runId}, now())
     ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
-      probabilities = excluded.probabilities, thread_seq = excluded.thread_seq, model = excluded.model,
+      probabilities = excluded.probabilities, thread_seq = excluded.thread_seq, thread_scope = excluded.thread_scope, model = excluded.model,
       run_id = excluded.run_id, judged_at = excluded.judged_at
   `);
   return probabilities;
@@ -167,7 +169,7 @@ export async function writeEvidence(scope: Scope): Promise<number> {
     WITH facts AS (
       SELECT s.human_id, s.company_key, f.type, min(f.occurred_at) AS at
       FROM relationship_subjects s
-      JOIN crm_facts f ON f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.person_key = ANY(s.person_keys)
+      JOIN crm_facts f ON f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.contact_point = ANY(s.contact_points)
       WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
         AND f.type IN ('signup', 'payment', 'sale', 'form_submitted', 'meeting_booked')
         -- A payment makes a customer only when it STANDS (succeeded, not wholly refunded: crm-evidence paymentStands);
@@ -186,8 +188,8 @@ export async function writeEvidence(scope: Scope): Promise<number> {
       UNION ALL
       SELECT s.human_id, s.company_key, 'customer', 'won_sale', min(c.received_at)
       FROM relationship_subjects s
-      JOIN leads l ON l.human_id = s.human_id
-      JOIN conversion_events c ON c.matched_lead_id = l.id AND c.org_id = s.org_id AND c.brand_id = s.brand_id
+      JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = ANY(s.emails)
+      JOIN conversion_events c ON c.matched_lead_id = m.lead_id AND c.org_id = s.org_id AND c.brand_id = s.brand_id
       WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
         AND c.event IN ('sale', 'purchase') AND c.withdrawn_at IS NULL AND c.attribution_status = 'attributed'
       GROUP BY s.human_id, s.company_key

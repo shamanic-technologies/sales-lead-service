@@ -13,8 +13,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { judgeYesNo, type YesNoQuestion } from "./qualification-judge.js";
 import { brandCard, fitThread } from "./relationship-judge.js";
-import { loadRelationships } from "./relationship-read.js";
-import { readThread, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
+import { loadRelationshipsAt } from "./relationship-read.js";
+import { readThread, subjectKey, toSubject, type Scope, type Subject } from "./relationship-subjects.js";
 import { JUDGED_NO } from "./relationship-tags.js";
 
 export const INTENT_THREAD_BUDGET_CHARS = 12_000;
@@ -46,25 +46,26 @@ export async function intentSubjectsToJudge(scope: Scope, limit: number): Promis
   const rows = (await db.execute(sql`
     SELECT s.* FROM relationship_subjects s
     LEFT JOIN relationship_intent_judgments i ON i.org_id = s.org_id AND i.brand_id = s.brand_id AND i.human_id = s.human_id
+      AND i.company_key = s.company_key
     WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND s.wrote_to_us AND s.has_direct
-      AND (i.human_id IS NULL OR i.thread_seq < s.thread_seq
+      AND (i.human_id IS NULL OR i.thread_seq < s.thread_seq OR (s.shares_human AND i.thread_scope <> 'relation')
         OR (s.last_inbound_at IS NOT NULL AND (i.inbound_at IS NULL OR s.last_inbound_at > i.inbound_at)))
       AND (
         EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id AND e.human_id = s.human_id
-          AND e.tag IN ('prospect', 'customer'))
+          AND e.company_key = s.company_key AND e.tag IN ('prospect', 'customer'))
         OR EXISTS (SELECT 1 FROM relationship_statements t WHERE t.org_id = s.org_id AND t.brand_id = s.brand_id AND t.human_id = s.human_id
-          AND t.tag IN ('prospect', 'customer') AND t.state = 'yes' AND t.withdrawn_at IS NULL)
+          AND t.company_key = s.company_key AND t.tag IN ('prospect', 'customer') AND t.state = 'yes' AND t.withdrawn_at IS NULL)
         OR EXISTS (SELECT 1 FROM relationship_judgments j WHERE j.org_id = s.org_id AND j.brand_id = s.brand_id AND j.human_id = s.human_id
-          AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO}))
+          AND j.company_key = s.company_key AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO}))
       )
     ORDER BY (i.human_id IS NULL) DESC, s.last_inbound_at DESC NULLS LAST
     LIMIT ${limit * 3}
   `)) as unknown as Array<Record<string, unknown>>;
   const candidates = rows.map(toSubject);
   if (candidates.length === 0) return [];
-  const blocks = await loadRelationships(scope.orgId, scope.brandId, candidates.map((c) => c.humanId));
+  const blocks = await loadRelationshipsAt(scope.orgId, scope.brandId, candidates.map((c) => ({ humanId: c.humanId, companyKey: c.companyKey })));
   return candidates.filter((c) => {
-    const lead = blocks.get(c.humanId)?.lead.state ?? null;
+    const lead = blocks.get(subjectKey(c.humanId, c.companyKey))?.lead.state ?? null;
     return lead === "yes" || lead === "unsure";
   }).slice(0, limit);
 }
@@ -77,10 +78,10 @@ export async function judgeIntent(s: Subject, runId: string): Promise<number> {
   const { probabilities, model } = await judgeYesNo(state, { wants_business: WANTS_BUSINESS_QUESTION }, "platform");
   const p = probabilities.wants_business;
   await db.execute(sql`
-    INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, p_wants_business, thread_seq, inbound_at, model, run_id, judged_at)
-    VALUES (${s.orgId}, ${s.brandId}, ${s.humanId}::uuid, ${p}, ${s.threadSeq}::bigint, ${s.lastInboundAt}::timestamptz, ${model}, ${runId}, now())
-    ON CONFLICT (org_id, brand_id, human_id) DO UPDATE SET
-      p_wants_business = excluded.p_wants_business, thread_seq = excluded.thread_seq, inbound_at = excluded.inbound_at,
+    INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, company_key, p_wants_business, thread_seq, thread_scope, inbound_at, model, run_id, judged_at)
+    VALUES (${s.orgId}, ${s.brandId}, ${s.humanId}::uuid, ${s.companyKey}, ${p}, ${s.threadSeq}::bigint, 'relation', ${s.lastInboundAt}::timestamptz, ${model}, ${runId}, now())
+    ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
+      p_wants_business = excluded.p_wants_business, thread_scope = excluded.thread_scope, thread_seq = excluded.thread_seq, inbound_at = excluded.inbound_at,
       model = excluded.model, run_id = excluded.run_id, judged_at = excluded.judged_at
   `);
   return p;

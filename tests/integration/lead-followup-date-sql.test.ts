@@ -145,8 +145,8 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, brand_ids, raw)
       VALUES (${nextSeq()}::bigint, ${`s:${randomUUID()}`}, 'email_sent', '2026-10-10T10:00:00Z', ${emailed.email!.toUpperCase()}, ${orgId}, ARRAY[${brandId}]::text[], '{}'::jsonb)`);
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, 'Wa Two', '{}', ARRAY['+33699887766']::text[],
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, ${`phone:${randomUUID()}`}, 'Wa Two', '{}', ARRAY['+33699887766']::text[],
         'message_out', '2026-10-11T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
     await fd.syncSendFeeds(30_000);
 
@@ -206,8 +206,8 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     for (const p of [older, client, friend]) await act(p.leadId);
     // The phone-only person wrote to us on WhatsApp: an act of theirs read off the Unibox facts.
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, ${`phone:${randomUUID()}`}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
         'message_in', '2026-10-01T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
     await fd.syncSendFeeds(30_000);
     await db.execute(sql`
@@ -296,8 +296,8 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
 
     // They write to us once on WhatsApp (matched by email here): served.
     await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`email:${emailedOnly.email}`}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`email:${emailedOnly.email}`}, ${`email:${emailedOnly.email}`}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
         'message_in', '2026-10-02T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
     await fd.syncSendFeeds(30_000);
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
