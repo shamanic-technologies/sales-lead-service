@@ -8902,6 +8902,223 @@
           "probeCostUsd"
         ]
       },
+      "QualificationPreview": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "offerId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "completed",
+              "failed"
+            ],
+            "description": "running = still checking (poll GET .../previews/{previewId}); completed = every check ran; failed = stopped (see error; what was checked before stays readable, asking again reuses it)."
+          },
+          "error": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "insufficient_credit | interrupted | failed"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "run": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The spend run (child of the caller's x-run-id), billed to the calling org."
+              },
+              "totalCostUsd": {
+                "type": "number",
+                "nullable": true,
+                "description": "Everything the run spent (probes, AI, storage), read from runs-service once the preview stopped; null while running."
+              }
+            },
+            "required": [
+              "id",
+              "totalCostUsd"
+            ],
+            "description": "null when the offer had no enabled check (nothing ran, nothing spent)."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "criterionId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "question": {
+                  "type": "string"
+                },
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "mention",
+                    "must_pass"
+                  ]
+                },
+                "source": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "criterionId",
+                "title",
+                "question",
+                "mode",
+                "source"
+              ]
+            },
+            "description": "The ENABLED checks of the offer when the preview started (frozen), in creation order."
+          },
+          "companies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "domain": {
+                  "type": "string",
+                  "description": "Normalized (lowercase, no scheme, no www)."
+                },
+                "name": {
+                  "type": "string"
+                },
+                "mustPass": {
+                  "type": "object",
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "passes",
+                        "fails",
+                        "pending",
+                        "unknown"
+                      ],
+                      "description": "passes = no Must have (must_pass) answered no; an unavailable check never fails a company, as on a live serve. fails = at least one answered no (see failed): its Nice to have (mention) checks are not run (not_checked, reason failed_must_pass), as a live campaign would never email it. pending = running and a Must have is not answered yet. unknown = the preview failed before answering one."
+                    },
+                    "failed": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterionId": {
+                            "type": "string"
+                          },
+                          "title": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "question": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "criterionId",
+                          "title",
+                          "question"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "state",
+                    "failed"
+                  ]
+                },
+                "qualification": {
+                  "type": "object",
+                  "properties": {
+                    "domain": {
+                      "type": "string"
+                    },
+                    "checks": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/QualificationPreviewCheck"
+                      }
+                    }
+                  },
+                  "required": [
+                    "domain",
+                    "checks"
+                  ],
+                  "description": "Same shape as a served lead's `qualification` (POST /orgs/buffer/next), each check also titled: what the email writer gets."
+                }
+              },
+              "required": [
+                "domain",
+                "name",
+                "mustPass",
+                "qualification"
+              ]
+            }
+          }
+        },
+        "required": [
+          "id",
+          "brandId",
+          "offerId",
+          "status",
+          "error",
+          "createdAt",
+          "finishedAt",
+          "run",
+          "checks",
+          "companies"
+        ]
+      },
+      "QualificationPreviewCheck": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/LeadQualificationCheck"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "nullable": true,
+                "description": "The criterion's card title (null on a hand-made one)."
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        ]
+      },
       "BrandJourneysResponse": {
         "type": "object",
         "properties": {
@@ -19629,6 +19846,220 @@
           },
           "404": {
             "description": "Lead not on this brand"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/previews": {
+      "post": {
+        "summary": "Run the offer's enabled checks on sample companies that are not leads yet (spends), answered when done or polled",
+        "description": "Body {companies: [{domain, name}]}, 1 to 10 (duplicates by domain are folded). Opens a spend run under x-run-id (billed to the calling org), starts the checks and waits up to 25 s: 200 = every check answered, 202 = still running (poll GET .../previews/{previewId}). Companies are a domain + a name, NOT leads (nothing is written to the lead store). Every check is keyed on the company DOMAIN like every check: a company already checked (by a preview or as a lead's employer) is not paid again, and a company that later becomes a lead reads the same answers. Firmographic checks (in_our_data) read the organization we hold for the domain when we hold one, else only its name and domain (a check that cannot be answered from that reads unavailable). Must haves run first; a company failing one is not paid its Nice to haves. Each check applied counts in the criterion's pass rate (subject company:<domain>).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The user the spend is attributed to."
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Parent run: the spend hangs on a child run of it."
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "companies": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "domain": {
+                          "type": "string"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "domain",
+                        "name"
+                      ]
+                    },
+                    "minItems": 1,
+                    "maxItems": 10
+                  }
+                },
+                "required": [
+                  "companies"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Finished (or the offer has no enabled check: nothing ran)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preview": {
+                      "$ref": "#/components/schemas/QualificationPreview"
+                    }
+                  },
+                  "required": [
+                    "preview"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Still running: poll GET .../previews/{previewId}",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preview": {
+                      "$ref": "#/components/schemas/QualificationPreview"
+                    }
+                  },
+                  "required": [
+                    "preview"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body (`code: invalid_domain` names unusable domains), missing x-user-id or x-run-id"
+          },
+          "402": {
+            "description": "Insufficient credit (`code: insufficient_credit`), with `preview` (what was answered before the refusal)"
+          },
+          "502": {
+            "description": "A sibling could not answer"
+          }
+        }
+      }
+    },
+    "/orgs/brands/{brandId}/offers/{offerId}/qualification/previews/{previewId}": {
+      "get": {
+        "summary": "Where a preview of the offer's checks on sample companies stands (no spend)",
+        "description": "Companies are a domain + a name, NOT leads (nothing is written to the lead store). Every check is keyed on the company DOMAIN like every check: a company already checked (by a preview or as a lead's employer) is not paid again, and a company that later becomes a lead reads the same answers. Firmographic checks (in_our_data) read the organization we hold for the domain when we hold one, else only its name and domain (a check that cannot be answered from that reads unavailable). Must haves run first; a company failing one is not paid its Nice to haves. Each check applied counts in the criterion's pass rate (subject company:<domain>).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "offerId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "previewId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The preview, read from the stored verdicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "preview": {
+                      "$ref": "#/components/schemas/QualificationPreview"
+                    }
+                  },
+                  "required": [
+                    "preview"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "`code: preview_not_found` (unknown id, or another org/brand/offer's)"
           }
         }
       }

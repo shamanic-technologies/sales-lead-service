@@ -26,6 +26,8 @@ export const QUALIFICATION_VERDICTS = ["yes", "no", "unavailable"] as const;
 export type QualificationVerdict = (typeof QUALIFICATION_VERDICTS)[number];
 /** Most leads one sample run checks (a synchronous request). */
 export const MAX_SAMPLE = 25;
+/** Sample companies one preview runs the offer's checks on (PREVIEW-CHECKS-1017). */
+export const MAX_PREVIEW_COMPANIES = 10;
 
 export const COMPANY_FACTS = ["domain", "websiteUrl", "companyName", "companyLinkedinUrl"] as const;
 export type CompanyFact = (typeof COMPANY_FACTS)[number];
