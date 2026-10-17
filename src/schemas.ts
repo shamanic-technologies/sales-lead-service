@@ -8811,7 +8811,7 @@ export const RelationshipBlockSchema = z
         id: z.string().nullable(),
         name: z.string().nullable(),
         domain: z.string().nullable(),
-        source: z.enum(["lead", "email_domain", "signup", "treg_enrich", "treg_identity", "person"]),
+        source: z.enum(["crm", "lead", "email_domain", "signup", "treg_enrich", "treg_identity", "person"]),
       })
       .nullable()
       .openapi({ description: "The company of this lead; null while unknown." }),
@@ -8838,7 +8838,10 @@ export const RelationshipBlockSchema = z
       }),
     }),
     subject: z.boolean().openapi({
-      description: "Does some source of the org (CRM, mailbox, WhatsApp/LinkedIn, signups, payments) know this person at the brand? false = known only through our own outreach.",
+      description: "Is the person a lead of the brand in the Unibox sense: crm-service tags them professional_to_brand? (PROFESSIONAL-LEADS-1017)",
+    }),
+    connectionTags: z.array(z.string()).openapi({
+      description: "crm-service's live connection tags on the human: this brand's (professional_to_brand / professional_not_to_brand) and the org-wide personal_* ones.",
     }),
     merges: z.array(SettledMergeSchema).openapi({
       description: "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId.",

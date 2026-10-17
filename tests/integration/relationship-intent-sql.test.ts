@@ -25,6 +25,7 @@ vi.mock("../../src/lib/company-client.js", () => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
+const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const { refreshSubjects } = await import("../../src/lib/relationship-subjects.js");
 const { writeEvidence } = await import("../../src/lib/relationship-judge.js");
 const { intentSubjectsToJudge, judgeIntent } = await import("../../src/lib/relationship-intent-judge.js");
@@ -45,7 +46,13 @@ describe.skipIf(!hasRealDatabase)("relationship intent: lead? wants business?", 
   let seq = BigInt(Date.now()) * 1000n;
   const createdLeads: string[] = [];
 
+  const tagged = new Set<string>();
   async function fact(p: { personKey: string; human: string; name: string; emails?: string[]; type: string; source: string; text?: string; at?: string }): Promise<void> {
+    // Every person here is professional to the brand per crm-service (PROFESSIONAL-LEADS-1017).
+    if (!tagged.has(p.human)) {
+      tagged.add(p.human);
+      await connectionTag({ orgId, brandId, human: p.human, personKey: p.personKey, name: p.name, emails: p.emails?.map((e) => e.toLowerCase()) });
+    }
     seq += 1n;
     await db.execute(sql`
       INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
@@ -64,6 +71,7 @@ describe.skipIf(!hasRealDatabase)("relationship intent: lead? wants business?", 
   }
 
   afterAll(async () => {
+    await clearRegistry(orgId);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
     for (const t of ["crm_facts", "relationship_person_humans", "relationship_subjects", "relationship_evidence", "relationship_judgments", "relationship_intent_judgments", "relationship_statements", "lead_timeline_facts"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);

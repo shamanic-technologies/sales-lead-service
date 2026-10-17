@@ -24,6 +24,7 @@ vi.mock("../../src/lib/qualification-judge.js", async (orig) => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
+const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const { pickFollowupCandidate, readFollowupState } = await import("../../src/lib/followup-queue.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -115,6 +116,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM followup_responders WHERE first_responder_campaign_id = ${acting}`);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
+    await clearRegistry(orgId);
     for (const t of ["crm_facts", "relationship_subjects", "relationship_judgments", "relationship_evidence", "relationship_statements"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
@@ -135,10 +137,11 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(r.claimed?.id).toBe(p.rowId);
   });
 
-  it("refuses a personal contact by name, stops the row, and never offers it again", async () => {
+  it("refuses a personal contact by name (crm-service's tag), stops the row, and never offers it again", async () => {
     const p = await dueLead();
     await subject(p.human!, [p.email]);
-    await judged(p.human!, { ...LOW, personal: 0.92 });
+    await judged(p.human!, LOW);
+    await connectionTag({ orgId, brandId, human: p.human!, personKey: `email:${p.email}`, tag: "personal_to_user" });
 
     const r = await claim("pure_prospect");
     expect(r.claimed).toBeNull();
@@ -191,12 +194,13 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(j).toHaveLength(1);
   });
 
-  it("an on-demand judgment saying personal refuses", async () => {
+  it("an on-demand judgment saying team refuses; personal is never asked of the judge (crm-service's)", async () => {
     const lead = await dueLead();
     await subject(lead.human!, [lead.email]);
-    judgeYesNo.mockResolvedValueOnce({ probabilities: { ...LOW, personal: 0.9 }, model: "jev-test" });
+    judgeYesNo.mockResolvedValueOnce({ probabilities: { ...LOW, team: 0.9 }, model: "jev-test" });
     const r = await claim("pure_prospect");
     expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+    expect(Object.keys(judgeYesNo.mock.calls[0][1] as Record<string, unknown>)).not.toContain("personal");
   });
 
   it("a judgment that fails leaves the person due and pending, never treated as a lead", async () => {
@@ -213,12 +217,21 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(state?.claimedAt).toBeNull();
   });
 
-  it("a person the CRM knows but the sweep has not built yet is pending, not a stranger", async () => {
+  it("a person the CRM knows but crm-service has not tagged yet is pending, not a stranger", async () => {
     const lead = await dueLead();
     await crmFact(lead.email);
     const r = await claim("pure_prospect");
     expect(r).toMatchObject({ claimed: null, reason: "relationship_pending" });
     expect(r.relationships!.pending[0]).toMatchObject({ reason: "relationship_not_built" });
+  });
+
+  it("a person the CRM knows and crm-service tags professional to SOMEONE ELSE is not a lead: refused (PROFESSIONAL-LEADS-1017)", async () => {
+    const lead = await dueLead();
+    await crmFact(lead.email);
+    await connectionTag({ orgId, brandId, human: lead.human!, personKey: `email:${lead.email}`, tag: "professional_not_to_brand" });
+    const r = await claim("pure_prospect");
+    expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+    expect(r.relationships!.refused[0]).toMatchObject({ leadId: lead.leadId, reason: "not_a_lead", tags: [], unsureTags: [] });
   });
 
   it("a lead with no human yet is pending", async () => {
@@ -227,7 +240,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(r.relationships!.pending[0]).toMatchObject({ reason: "human_unknown" });
   });
 
-  it("an open same-person question is pending", async () => {
+  it("an open same-person question no longer holds anyone: crm-service and human-service answer it (PROFESSIONAL-LEADS-1017)", async () => {
     const lead = await dueLead();
     await subject(lead.human!, [lead.email]);
     await judged(lead.human!, LOW);
@@ -237,14 +250,15 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
       VALUES (${orgId}, ${brandId}, ${a}::uuid, ${b}::uuid, 0.45, 'jev-test', 'run', 'open')
     `);
     const r = await claim("pure_prospect");
-    expect(r.relationships!.pending[0]).toMatchObject({ reason: "same_person_question_open" });
+    expect(r.claimed?.id).toBe(lead.rowId);
     await db.execute(sql`DELETE FROM relationship_merge_questions WHERE org_id = ${orgId}`);
   });
 
   it("a claim stating no policy is today's claim: the personal contact is handed out, no relationships key", async () => {
     const p = await dueLead();
     await subject(p.human!, [p.email]);
-    await judged(p.human!, { ...LOW, personal: 0.92 });
+    await judged(p.human!, LOW);
+    await connectionTag({ orgId, brandId, human: p.human!, personKey: `email:${p.email}`, tag: "personal_to_user" });
     const r = await claim();
     expect(r.claimed?.id).toBe(p.rowId);
     expect("relationships" in r).toBe(false);
