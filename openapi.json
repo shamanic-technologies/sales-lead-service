@@ -12584,6 +12584,29 @@
             "type": "string",
             "description": "The company they speak for at the brand ('' = unknown)."
           },
+          "company": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "nullable": true
+              },
+              "domain": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "domain"
+            ],
+            "description": "The relation's company, to print \"Name @ Company\" and its logo (by domain); null = unknown."
+          },
           "name": {
             "type": "string",
             "nullable": true
@@ -12753,6 +12776,7 @@
         "required": [
           "humanId",
           "companyKey",
+          "company",
           "name",
           "emails",
           "phones",
