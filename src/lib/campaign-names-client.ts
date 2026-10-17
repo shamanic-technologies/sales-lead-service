@@ -7,10 +7,9 @@ import { CAMPAIGN_SERVICE_API_KEY, CAMPAIGN_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 export interface CampaignDisplay {
-  /** The funnel campaign id when the campaign is a unit of one, else the campaign's own id. */
+  /** The customer's campaign id when the campaign is one of its pipes, else the campaign's own id. */
   id: string;
   name: string;
-  salesFunnelCampaignId: string | null;
 }
 
 async function getJson<T>(path: string, orgId: string): Promise<T> {
@@ -28,15 +27,15 @@ export async function loadCampaignDisplays(orgId: string, brandId: string): Prom
   const q = `brandId=${encodeURIComponent(brandId)}`;
   const [funnels, campaigns] = await Promise.all([
     getJson<{ salesFunnelCampaigns?: Array<{ id: string; salesFunnelName: string; units?: Array<{ campaignId: string }> }> }>(`/sales-funnel-campaigns?${q}`, orgId),
-    getJson<{ campaigns?: Array<{ id: string; name: string; salesFunnelCampaignId?: string | null }> }>(`/campaigns?${q}`, orgId),
+    getJson<{ campaigns?: Array<{ id: string; name: string }> }>(`/campaigns?${q}`, orgId),
   ]);
   if (!Array.isArray(funnels.salesFunnelCampaigns) || !Array.isArray(campaigns.campaigns)) {
     throw new Error("[campaign-names-client] campaign-service answered without salesFunnelCampaigns / campaigns");
   }
   const out = new Map<string, CampaignDisplay>();
-  for (const c of campaigns.campaigns) out.set(c.id, { id: c.id, name: c.name, salesFunnelCampaignId: null });
+  for (const c of campaigns.campaigns) out.set(c.id, { id: c.id, name: c.name });
   for (const f of funnels.salesFunnelCampaigns) {
-    const display = { id: f.id, name: f.salesFunnelName, salesFunnelCampaignId: f.id };
+    const display = { id: f.id, name: f.salesFunnelName };
     out.set(f.id, display);
     for (const u of f.units ?? []) out.set(u.campaignId, display);
   }

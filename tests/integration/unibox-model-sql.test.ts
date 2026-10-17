@@ -150,7 +150,7 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
   it("the lead card names every campaign with its furthest step; a non-lead has no card", async () => {
     const card = await readUniboxLead(scope, ana);
     // At the grain the customer knows (the funnel campaign, named); a signup filing is no campaign.
-    expect(card!.campaigns.map((c) => [c.campaignId, c.name, c.partCampaignIds, c.furthest?.key])).toEqual([
+    expect(card!.campaigns.map((c) => [c.campaignId, c.name, c.pipeCampaignIds, c.furthest?.key])).toEqual([
       ["sfc-1", "Cold email to meeting", ["camp-cold"], "engaged"],
       ["camp-webinar", "Webinar", ["camp-webinar"], "lead_found"],
     ]);

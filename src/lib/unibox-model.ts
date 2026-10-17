@@ -498,13 +498,12 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
 }
 
 export interface UniboxCampaign {
-  /** The SALES FUNNEL campaign the customer launched when the person's campaign is one of its pipes, else the campaign. */
+  /** The campaign the customer launched (a pipe folds into it), else the campaign itself. */
   campaignId: string;
-  salesFunnelCampaignId: string | null;
-  /** What the customer calls it (the funnel's name, else the campaign's). */
+  /** What the customer calls it. */
   name: string;
-  /** The pipe campaigns of ours folded into it. */
-  partCampaignIds: string[];
+  /** The pipe campaigns folded into it. */
+  pipeCampaignIds: string[];
   servedAt: string | null;
   furthest: LifecycleRung | null;
   steps: Array<{ step: string; at: string | null }>;
@@ -533,7 +532,7 @@ export async function readUniboxLead(scope: Scope, humanId: string): Promise<{ l
       AND lead_id = ANY(${sql.param(lead.leadIds)}::uuid[])
     GROUP BY 1, 2
   `)) as unknown as Array<{ campaign_id: string; label: string; at: Ts | null }>;
-  // Shown at the grain the customer knows: a pipe folds into its sales funnel campaign. A filing that is no campaign
+  // Shown at the grain the customer knows: a pipe folds into the campaign it belongs to. A filing that is no campaign
   // (a signup, a Unibox conversation: `signups:<brand>`, `unibox:<brand>`) is not listed; its steps still count in the
   // lead's Lifecycle.
   const displays = await loadCampaignDisplays(scope.orgId, scope.brandId);
@@ -560,9 +559,8 @@ export async function readUniboxLead(scope: Scope, humanId: string): Promise<{ l
   }
   const campaigns: UniboxCampaign[] = [...byCampaign.values()].map((v) => ({
     campaignId: v.display.id,
-    salesFunnelCampaignId: v.display.salesFunnelCampaignId,
     name: v.display.name,
-    partCampaignIds: [...v.parts].sort(),
+    pipeCampaignIds: [...v.parts].sort(),
     servedAt: v.servedAt,
     furthest: lifecycleOf(v.steps.keys(), catalogue.ranks, catalogue.ladder),
     steps: [...v.steps.entries()]
