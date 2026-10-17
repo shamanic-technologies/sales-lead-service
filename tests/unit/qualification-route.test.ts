@@ -56,6 +56,21 @@ vi.mock("../../src/lib/qualification-run.js", async (orig) => {
   };
 });
 
+const runPreview = vi.fn();
+const getPreview = vi.fn();
+const readPreview = vi.fn();
+vi.mock("../../src/lib/qualification-preview.js", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    PREVIEW_WAIT_MS: 50,
+    runPreview: (...a: unknown[]) => runPreview(...a),
+    getPreview: (...a: unknown[]) => getPreview(...a),
+    previewCriteria: async () => [],
+    readPreview: (...a: unknown[]) => readPreview(...a),
+  };
+});
+
 vi.mock("../../src/lib/runs-client.js", async (orig) => {
   const actual = (await orig()) as Record<string, unknown>;
   return {
@@ -328,5 +343,83 @@ describe("GET lead qualification", () => {
 
   it("refuses an empty offerId", async () => {
     expect((await request(app).get(`/orgs/leads/${LEAD_A}/qualification?brandId=b1&offerId=`).set(H)).status).toBe(400);
+  });
+});
+
+describe("POST/GET previews (companies that are not leads, PREVIEW-CHECKS-1017)", () => {
+  const path = "/orgs/brands/b1/offers/offer-a/qualification/previews";
+  const PREVIEW_ID = "22222222-2222-4222-8222-222222222222";
+  const row = (status: string, error: string | null = null) => ({ id: PREVIEW_ID, orgId: "org-1", brandId: "b1", offerId: "offer-a", runId: "run-child", status, error, companies: [], criterionIds: ["c1"], createdAt: new Date(), finishedAt: null });
+  const answer = (status: string, error: { code: string; message: string } | null = null) => ({ id: PREVIEW_ID, brandId: "b1", offerId: "offer-a", status, error, createdAt: "t", finishedAt: null, checks: [], companies: [] });
+
+  it("refuses an unusable domain, an empty list and more than 10 companies, before anything is spent", async () => {
+    for (const body of [{ companies: [{ domain: "nope", name: "x" }] }, { companies: [] }, { companies: Array.from({ length: 11 }, (_, i) => ({ domain: `c${i}.com`, name: "x" })) }]) {
+      const res = await request(app).post(path).set(H).send(body);
+      expect(res.status).toBe(400);
+    }
+    const res = await request(app).post(path).set(H).send({ companies: [{ domain: "nope", name: "x" }] });
+    expect(res.body).toMatchObject({ code: "invalid_domain", domains: ["nope"] });
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it("refuses to spend without a user and a run when the offer has enabled checks", async () => {
+    listCriteria.mockResolvedValue([criterion]);
+    const res = await request(app).post(path).set({ "x-api-key": "test-api-key", "x-org-id": "org-1" }).send({ companies: [{ domain: "acme.com", name: "Acme" }] });
+    expect(res.status).toBe(400);
+    expect(runPreview).not.toHaveBeenCalled();
+  });
+
+  it("opens a child run, starts the checks with only the ENABLED criteria, and answers 202 while running", async () => {
+    listCriteria.mockResolvedValue([criterion, { ...criterion, id: "c-off", enabled: false }]);
+    insertReturning.mockResolvedValue([row("running")]);
+    runPreview.mockReturnValue(new Promise(() => {}));
+    getPreview.mockResolvedValue(row("running"));
+    readPreview.mockResolvedValue(answer("running"));
+    const res = await request(app).post(path).set(H).send({ companies: [{ domain: "https://www.Acme.com", name: "Acme" }, { domain: "acme.com", name: "dup" }] });
+    expect(res.status).toBe(202);
+    expect(res.body.preview).toMatchObject({ id: PREVIEW_ID, status: "running", run: { id: "run-child", totalCostUsd: null } });
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-1", userId: "user-1", parentRunId: "run-parent", taskName: "qualification-preview" }));
+    expect(insertedValues[0]).toMatchObject({ companies: [{ domain: "acme.com", name: "Acme" }], criterionIds: ["c1"], runId: "run-child", status: "running" });
+    expect((runPreview.mock.calls[0][1] as Array<{ id: string }>).map((c) => c.id)).toEqual(["c1"]);
+  });
+
+  it("answers 200 with the run total once done, and 402 when the org could not pay", async () => {
+    listCriteria.mockResolvedValue([criterion]);
+    insertReturning.mockResolvedValue([row("running")]);
+    runPreview.mockResolvedValue(undefined);
+    getPreview.mockResolvedValue(row("completed"));
+    readPreview.mockResolvedValue(answer("completed"));
+    const ok = await request(app).post(path).set(H).send({ companies: [{ domain: "acme.com", name: "Acme" }] });
+    expect(ok.status).toBe(200);
+    expect(ok.body.preview.run).toEqual({ id: "run-child", totalCostUsd: 0.03 });
+
+    getPreview.mockResolvedValue(row("failed", "insufficient_credit: balance 0c"));
+    readPreview.mockResolvedValue(answer("failed", { code: "insufficient_credit", message: "balance 0c" }));
+    const broke = await request(app).post(path).set(H).send({ companies: [{ domain: "acme.com", name: "Acme" }] });
+    expect(broke.status).toBe(402);
+    expect(broke.body).toMatchObject({ code: "insufficient_credit", preview: { status: "failed" } });
+  });
+
+  it("an offer with no enabled check runs nothing and spends nothing", async () => {
+    listCriteria.mockResolvedValue([{ ...criterion, enabled: false }]);
+    insertReturning.mockResolvedValue([{ ...row("completed"), runId: null, criterionIds: [] }]);
+    getPreview.mockResolvedValue({ ...row("completed"), runId: null, criterionIds: [] });
+    readPreview.mockResolvedValue(answer("completed"));
+    const res = await request(app).post(path).set({ "x-api-key": "test-api-key", "x-org-id": "org-1" }).send({ companies: [{ domain: "acme.com", name: "Acme" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.preview.run).toBeNull();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(runPreview).not.toHaveBeenCalled();
+  });
+
+  it("GET reads the preview back; an unknown or malformed id is 404 preview_not_found", async () => {
+    getPreview.mockResolvedValue(row("completed"));
+    readPreview.mockResolvedValue(answer("completed"));
+    const res = await request(app).get(`${path}/${PREVIEW_ID}`).set(H);
+    expect(res.status).toBe(200);
+    expect(res.body.preview.id).toBe(PREVIEW_ID);
+    getPreview.mockResolvedValue(null);
+    expect((await request(app).get(`${path}/${PREVIEW_ID}`).set(H)).body.code).toBe("preview_not_found");
+    expect((await request(app).get(`${path}/not-a-uuid`).set(H)).status).toBe(404);
   });
 });

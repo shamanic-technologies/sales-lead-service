@@ -132,7 +132,7 @@ function mapFundingEvents(raw: unknown): FundingEventView[] {
   });
 }
 
-function mapOrganizationView(row: typeof organizations.$inferSelect): OrganizationView {
+export function mapOrganizationView(row: typeof organizations.$inferSelect): OrganizationView {
   return {
     id: row.id,
     apolloOrganizationId: row.apolloOrganizationId ?? null,
