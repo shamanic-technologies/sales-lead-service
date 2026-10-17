@@ -24,11 +24,13 @@ import {
   conversationOf,
   fitOf,
   interestOf,
+  customerStateFrom,
   lifecycleOf,
   rolesOf,
   statusOf,
   STEP_OF_TIMELINE_LABEL,
   typesOf,
+  type CustomerFact,
   type LifecycleRung,
   type StepRanks,
   type UniboxContactability,
@@ -100,6 +102,8 @@ for (const [step, ev] of Object.entries(STEP_REACHED_EVIDENCE)) {
 }
 
 const SEND_LABELS = ["initial_email", "followup"];
+/** crm-service facts that say whether the person is (still) a customer (CRM-FORMER-CLIENT, crm-service v0.73.0). */
+const CUSTOMER_FACT_TYPES = ["client", "former_client", "subscription_changed"];
 const UNSUBSCRIBED_LABELS = ["unsubscribed", "opt_out"];
 
 export interface UniboxRow {
@@ -176,14 +180,14 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
           GROUP BY 1, 2
         `) as unknown as Promise<Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>>),
     db.execute(sql`
-      SELECT s.human_id::text AS human, f.type, f.payload, f.occurred_at
+      SELECT s.human_id::text AS human, f.type, f.payload, f.occurred_at, f.source_ref
       FROM relationship_subjects s
       JOIN crm_facts f ON f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.person_key = ANY(s.person_keys)
       WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND s.human_id = ANY(${sql.param(humans)}::uuid[])
         AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
-        AND (f.type = ANY(${sql.param([...CRM_STEP_OF_TYPE.keys(), "message_out"])}::text[]))
+        AND (f.type = ANY(${sql.param([...CRM_STEP_OF_TYPE.keys(), "message_out", ...CUSTOMER_FACT_TYPES])}::text[]))
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
-    `) as unknown as Promise<Array<{ human: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null }>>,
+    `) as unknown as Promise<Array<{ human: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null; source_ref: string }>>,
     db.execute(sql`
       SELECT COALESCE(o.human_id, a.human_id, f.human_id)::text AS human,
         bool_or(f.kind = 'opt_out') AS opted_out, bool_or(f.kind = 'do_not_contact') AS do_not_contact
@@ -224,8 +228,15 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
     if (t.label === "bounced") bounced.add(h);
     touch(h, iso(t.last_at));
   }
+  const customerFacts = new Map<string, CustomerFact[]>();
+  const addCustomerFact = (h: string, f: CustomerFact) => customerFacts.set(h, [...(customerFacts.get(h) ?? []), f]);
   for (const f of crm) {
     const at = iso(f.occurred_at);
+    if (f.type === "client" || f.type === "former_client") addCustomerFact(f.human, { kind: f.type, at });
+    else if (f.type === "subscription_changed" && typeof f.payload?.status === "string") {
+      addCustomerFact(f.human, { kind: "subscription", at, subscriptionId: f.source_ref, status: f.payload.status });
+    } else if ((f.type === "payment" && paymentStands(f.payload)) || f.type === "sale") addCustomerFact(f.human, { kind: "paid", at });
+    if (CUSTOMER_FACT_TYPES.includes(f.type)) continue;
     touch(f.human, at);
     if (f.type === "message_out") {
       oursAt.set(f.human, later(oursAt.get(f.human) ?? null, at));
@@ -276,8 +287,10 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       phones: s.phones ?? [],
       personKeys: [...(s.person_keys ?? [])].sort(),
       leadIds: myLeads.sort(),
-      // Churned waits on a source stating the end of the relationship (crm-service fact feed): none read yet.
-      status: statusOf({ customer: (block?.tags ?? []).includes("customer"), churned: false }),
+      status: (() => {
+        const st = customerStateFrom(customerFacts.get(h) ?? []);
+        return statusOf({ customer: !st.churned && ((block?.tags ?? []).includes("customer") || st.customerSign), churned: st.churned });
+      })(),
       roles: rolesOf(block?.tags ?? []),
       types: typesOf(block?.tags ?? []),
       lifecycle,
