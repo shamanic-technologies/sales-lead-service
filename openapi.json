@@ -12552,6 +12552,192 @@
           "reasons",
           "relationshipTags"
         ]
+      },
+      "LifecycleRung": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "rank": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "rank",
+          "label"
+        ],
+        "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
+      },
+      "UniboxRow": {
+        "type": "object",
+        "properties": {
+          "humanId": {
+            "type": "string",
+            "description": "The person (human-service human, this org's view)."
+          },
+          "companyKey": {
+            "type": "string",
+            "description": "The company they speak for at the brand ('' = unknown)."
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "phones": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "leadIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)."
+          },
+          "types": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "prospect",
+                "customer",
+                "partner",
+                "investor",
+                "supplier",
+                "employee",
+                "advisor",
+                "press",
+                "other"
+              ]
+            },
+            "description": "TYPE: who they are to us, several at once (a person's word > a source's evidence > Jev)."
+          },
+          "lifecycle": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LifecycleRung"
+              },
+              {
+                "nullable": true,
+                "description": "LIFECYCLE: the highest rung ever reached on the absolute ladder; null = none yet."
+              }
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "step": {
+                  "type": "string"
+                },
+                "at": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "step",
+                "at"
+              ]
+            },
+            "description": "Every catalogue step reached at the brand, first time each."
+          },
+          "interest": {
+            "type": "string",
+            "enum": [
+              "interested",
+              "not_interested",
+              "unsure",
+              "not_asked"
+            ],
+            "description": "INTEREST: do they want to buy from us?"
+          },
+          "conversation": {
+            "type": "string",
+            "enum": [
+              "waiting_on_us",
+              "waiting_on_them",
+              "no_reply_yet",
+              "closed"
+            ],
+            "description": "CONVERSATION STATUS: whose turn is it?"
+          },
+          "contactability": {
+            "type": "string",
+            "enum": [
+              "contactable",
+              "unsubscribed",
+              "bounced",
+              "do_not_contact"
+            ],
+            "description": "CONTACTABILITY: may we write?"
+          },
+          "fit": {
+            "type": "string",
+            "enum": [
+              "fit",
+              "wrong_person",
+              "not_our_target"
+            ],
+            "description": "FIT: right person, right company? (disqualification marks)"
+          },
+          "fitNote": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastTheirsAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastOursAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastActivityAt": {
+            "type": "string"
+          },
+          "connectionTags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "crm-service's connection tags on the human."
+          }
+        },
+        "required": [
+          "humanId",
+          "companyKey",
+          "name",
+          "emails",
+          "phones",
+          "leadIds",
+          "types",
+          "lifecycle",
+          "steps",
+          "interest",
+          "conversation",
+          "contactability",
+          "fit",
+          "fitNote",
+          "lastTheirsAt",
+          "lastOursAt",
+          "lastActivityAt",
+          "connectionTags"
+        ]
       }
     },
     "parameters": {},
@@ -21785,6 +21971,464 @@
           },
           "502": {
             "description": "A source could not be read: no verdict"
+          }
+        }
+      }
+    },
+    "/orgs/leads/unibox": {
+      "get": {
+        "summary": "The brand's Unibox: its leads (people crm-service tags professional to the brand) with six tag dimensions",
+        "description": "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lifecycle",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "interest",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "conversation",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "contactability",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the Unibox",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "brandId": {
+                      "type": "string"
+                    },
+                    "lifecycleLadder": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LifecycleRung"
+                      }
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/UniboxRow"
+                      }
+                    },
+                    "total": {
+                      "type": "integer"
+                    },
+                    "nextCursor": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "builtAt": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "brandId",
+                    "lifecycleLadder",
+                    "rows",
+                    "total",
+                    "nextCursor",
+                    "builtAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query"
+          }
+        }
+      }
+    },
+    "/orgs/leads/unibox-lead": {
+      "get": {
+        "summary": "One Unibox lead's card: the six tags + every campaign they are part of, with the furthest step in each",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "humanId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lead card",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "brandId": {
+                      "type": "string"
+                    },
+                    "lead": {
+                      "$ref": "#/components/schemas/UniboxRow"
+                    },
+                    "campaigns": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "campaignId": {
+                            "type": "string"
+                          },
+                          "servedAt": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "furthest": {
+                            "allOf": [
+                              {
+                                "$ref": "#/components/schemas/LifecycleRung"
+                              },
+                              {
+                                "nullable": true
+                              }
+                            ]
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "step": {
+                                  "type": "string"
+                                },
+                                "at": {
+                                  "type": "string",
+                                  "nullable": true
+                                }
+                              },
+                              "required": [
+                                "step",
+                                "at"
+                              ]
+                            }
+                          }
+                        },
+                        "required": [
+                          "campaignId",
+                          "servedAt",
+                          "furthest",
+                          "steps"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "brandId",
+                    "lead",
+                    "campaigns"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not a lead of this brand (not tagged professional to it by crm-service)"
           }
         }
       }

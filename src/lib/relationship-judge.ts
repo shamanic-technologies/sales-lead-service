@@ -170,6 +170,12 @@ export async function writeEvidence(scope: Scope): Promise<number> {
       JOIN crm_facts f ON f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.person_key = ANY(s.person_keys)
       WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
         AND f.type IN ('signup', 'payment', 'sale', 'form_submitted', 'meeting_booked')
+        -- A payment makes a customer only when it STANDS (succeeded, not wholly refunded: crm-evidence paymentStands);
+        -- a failed or refunded charge is no customer (4 people were tagged customer off one, 2026-10-17).
+        AND (f.type <> 'payment' OR (f.payload->>'status' = 'succeeded' AND CASE
+              WHEN f.payload->>'amountMinor' ~ '^-?[0-9]+$'
+                THEN (f.payload->>'amountMinor')::bigint - COALESCE(NULLIF(f.payload->>'amountRefunded', '')::bigint, 0) > 0
+              ELSE COALESCE(f.payload->>'refunded', 'false') <> 'true' END))
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
       GROUP BY s.human_id, s.company_key, f.type
     ), stated AS (
