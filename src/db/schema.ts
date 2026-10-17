@@ -1133,6 +1133,41 @@ export const crmFacts = pgTable(
   ],
 );
 
+/**
+ * Bronze copy of crm-service's REGISTRY facts (CRM-REGISTRY-FACTS-1017): who a person IS to the brand
+ * (`connection_tag`, `organization_link`) and their withdrawals, off the same feed and cursor as `crm_facts`, kept
+ * apart so no reader of `crm_facts` ever reads one as something the person did. Same columns, verbatim.
+ */
+export const crmRegistryFacts = pgTable(
+  "crm_registry_facts",
+  {
+    factId: text("fact_id").primaryKey(),
+    seq: bigint("seq", { mode: "bigint" }).notNull(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    personKey: text("person_key").notNull(),
+    sourceContactId: text("source_contact_id"),
+    crmContactId: text("crm_contact_id"),
+    fullName: text("full_name"),
+    emails: text("emails").array().notNull(),
+    phones: text("phones").array().notNull(),
+    type: text("type").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    dateBasis: text("date_basis").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    payload: jsonb("payload").notNull(),
+    withdrawnOf: text("withdrawn_of"),
+    raw: jsonb("raw").notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("idx_crm_registry_facts_seq").on(table.seq),
+    index("idx_crm_registry_facts_brand_type").on(table.orgId, table.brandId, table.type),
+    index("idx_crm_registry_facts_withdrawn_of").on(table.withdrawnOf),
+  ],
+);
+
 /** Where each feed pull stopped (crm-service's opaque cursor), moved with the page it read. */
 export const crmFeedCursors = pgTable("crm_feed_cursors", {
   feed: text("feed").primaryKey(),

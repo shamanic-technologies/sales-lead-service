@@ -194,6 +194,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "qualification_previews", touchesUpdatedAt: false },
       { table: "candidate_screenings", touchesUpdatedAt: false },
       { table: "crm_facts", touchesUpdatedAt: false },
+      // Who each person IS to the brand per crm-service (CRM-REGISTRY-FACTS-1017).
+      { table: "crm_registry_facts", touchesUpdatedAt: false },
       { table: "answered_outside_statements", touchesUpdatedAt: false },
       { table: "outside_answer_judgments", touchesUpdatedAt: false },
       { table: "lead_disqualification_marks", touchesUpdatedAt: true },

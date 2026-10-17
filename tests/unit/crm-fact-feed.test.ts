@@ -135,3 +135,24 @@ describe("walking the feed", () => {
     expect(r).toMatchObject({ pages: 3, budgetReached: true });
   });
 });
+
+describe("registry facts (CRM-REGISTRY-FACTS-1017)", async () => {
+  const { registryFactIds } = await import("../../src/lib/crm-fact-feed.js");
+  const f = (factId: string, type: string, withdrawnOf: string | null = null) =>
+    ({ factId, type, withdrawnOf }) as Parameters<typeof registryFactIds>[0][number];
+
+  it("keeps who-a-person-is facts apart from events, with their withdrawals", () => {
+    const ids = registryFactIds(
+      [
+        f("t1", "connection_tag"),
+        f("o1", "organization_link"),
+        f("m1", "message_in"),
+        f("w1", "withdrawn", "t1"),
+        f("w2", "withdrawn", "m0"),
+        f("w3", "withdrawn", "t0"),
+      ],
+      new Set(["t0"]),
+    );
+    expect([...ids].sort()).toEqual(["o1", "t1", "w1", "w3"]);
+  });
+});
