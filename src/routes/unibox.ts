@@ -3,7 +3,7 @@
  * people crm-service tags professional to the brand) with their six tag dimensions, and one lead's card. crm-service
  * keeps the thread and the sending.
  *
- *   GET /orgs/leads/unibox?brandId=[&type=&lifecycle=&interest=&conversation=&contactability=&fit=&q=&limit=&cursor=]
+ *   GET /orgs/leads/unibox?brandId=[&status=&role=&type=&lifecycle=&interest=&conversation=&contactability=&fit=&q=&limit=&cursor=]
  *       Most recent activity first. Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
  *       the size of the filtered set; `nextCursor` pages it. Unknown filter value / bad bound = 400.
  *   GET /orgs/leads/unibox-lead?brandId=&humanId=
@@ -20,6 +20,8 @@ import {
   UNIBOX_CONVERSATION,
   UNIBOX_FIT,
   UNIBOX_INTEREST,
+  UNIBOX_ROLES,
+  UNIBOX_STATUS,
   UNIBOX_TYPES,
 } from "../lib/unibox-dimensions.js";
 import { loadLifecycleCatalogue, readUniboxLead, readUniboxPage, UniboxCursorError, type UniboxFilters } from "../lib/unibox-model.js";
@@ -53,6 +55,8 @@ router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: Authentic
     const brandId = brandOf(req);
     const catalogue = await loadLifecycleCatalogue();
     const filters: UniboxFilters = {
+      status: list(req.query.status, UNIBOX_STATUS, "status"),
+      roles: list(req.query.role, UNIBOX_ROLES, "role"),
       types: list(req.query.type, UNIBOX_TYPES, "type"),
       lifecycle: list(req.query.lifecycle, [...catalogue.ladder.map((r) => r.key), "none"], "lifecycle"),
       interest: list(req.query.interest, UNIBOX_INTEREST, "interest"),

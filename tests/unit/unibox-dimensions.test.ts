@@ -5,6 +5,8 @@ import {
   fitOf,
   interestOf,
   lifecycleOf,
+  rolesOf,
+  statusOf,
   typesOf,
 } from "../../src/lib/unibox-dimensions.js";
 
@@ -37,6 +39,16 @@ describe("unibox dimensions", () => {
       "press",
       "other",
     ]);
+  });
+
+  it("Status is ONE value: paying today = customer (even after an earlier churn), stated end = churned, else prospect", () => {
+    expect(statusOf({ customer: true, churned: true })).toBe("customer");
+    expect(statusOf({ customer: false, churned: true })).toBe("churned");
+    expect(statusOf({ customer: false, churned: false })).toBe("prospect");
+  });
+
+  it("Roles stack beside the status; prospect and customer are never roles", () => {
+    expect(rolesOf(["customer", "investor", "prospect", "team", "journalist"])).toEqual(["investor", "employee", "press"]);
   });
 
   it("Lifecycle: the highest rung over every step reached, whatever the funnel; unknown or unranked steps do not count", () => {
