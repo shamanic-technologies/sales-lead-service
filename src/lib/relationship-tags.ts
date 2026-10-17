@@ -8,7 +8,8 @@
  * Bases, read with precedence person > evidence > judgment:
  *   - a person of the org said yes or no (review page, MCP): that is the answer, withdrawable;
  *   - a source stated a fact (signup -> prospect, payment / sale -> customer, reached ONLY through a press pitch ->
- *     journalist, src/lib/brand-journalists.ts): yes;
+ *     journalist, src/lib/brand-journalists.ts; crm-service's `personal_*` connection tag -> personal, the ONLY
+ *     basis of `personal` besides a person's word, PROFESSIONAL-LEADS-1017): yes;
  *   - Jev judged the person's whole merged thread: more likely than not (>= JUDGED_YES, 50%) is a yes,
  *     below JUDGED_NO (40%) a no, the true doubt between is a question for the owner (owner 2026-10-14,
  *     RELATIONSHIP-TAGS-1014b: the same edges as a merge, `relationship-merges.ts`).
@@ -116,36 +117,36 @@ export function tagsIn(details: readonly TagDetail[], state: TagState): Relation
 }
 
 /**
- * May a pipe stating `policy` hand this person out? Never judged = no (we never assume a stranger);
- * any excluded tag that is yes = no. An excluded tag still UNSURE also holds them back: the owner
- * has not said they are only business.
+ * May a pipe stating `policy` hand this person out? Not a subject (crm-service has not tagged them professional to
+ * the brand) = no (we never assume a stranger); a subject we talk with directly and never judged = no; any excluded
+ * tag that is yes = no. An excluded tag still UNSURE also holds them back: the owner has not said they are only
+ * business. A subject with no direct conversation (a person only our outreach and the brand's own tools know) needs
+ * no judgment: crm's tags and the sources' evidence decide (PROFESSIONAL-LEADS-1017).
  */
 export function policyAllows(
   policy: RelationshipPolicy,
-  block: { tags: readonly RelationshipTag[]; unsureTags: readonly RelationshipTag[]; judgedAt: string | null; openMerge?: boolean },
+  block: { subject: boolean; hasDirect: boolean; tags: readonly RelationshipTag[]; unsureTags: readonly RelationshipTag[]; judgedAt: string | null },
 ): boolean {
   if (policy !== "business_only") return true;
-  if (block.judgedAt === null) return false;
-  // "Are they the same person as someone we talk with?" still unanswered: they may be known (never assume a stranger).
-  if (block.openMerge) return false;
+  if (!block.subject) return false;
+  if (block.hasDirect && block.judgedAt === null) return false;
   return !BUSINESS_ONLY_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
 }
 
 /**
- * Is this person a PURE PROSPECT of the brand (NEVER-NO-FOLLOWUP-1014)? A relationship SUBJECT of the brand (some
- * source of the org knows them: CRM, mailbox, WhatsApp...) only once judged, with no open "same person?" question and
- * no tag but prospect, yes or unsure. A person NO source of the org knows outside our own outreach (not a subject) is
- * one by definition, no judgment asked (owner's definition, relayed 2026-10-14): only a tag stated or judged elsewhere
- * (`personal`, org-wide) or an open question holds them back.
+ * Is this person a PURE PROSPECT of the brand (NEVER-NO-FOLLOWUP-1014)? No tag but prospect, yes or unsure. A subject
+ * we talk with directly (a conversation crm-service mirrors) only once judged. A subject known only through our
+ * outreach and the brand's own tools, or a person who is no subject, needs no judgment: only a tag stated, evidenced
+ * (`personal` from crm-service, org-wide) or judged holds them back (owner's definition, relayed 2026-10-14). "Same
+ * person?" is crm-service's and human-service's answer, never a hold here (PROFESSIONAL-LEADS-1017).
  */
 export function pureProspectAllows(block: {
   subject: boolean;
+  hasDirect: boolean;
   tags: readonly RelationshipTag[];
   unsureTags: readonly RelationshipTag[];
   judgedAt: string | null;
-  openMerge?: boolean;
 }): boolean {
-  if (block.subject && block.judgedAt === null) return false;
-  if (block.openMerge) return false;
+  if (block.subject && block.hasDirect && block.judgedAt === null) return false;
   return !PURE_PROSPECT_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
 }

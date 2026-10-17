@@ -11517,6 +11517,7 @@
               "source": {
                 "type": "string",
                 "enum": [
+                  "crm",
                   "lead",
                   "email_domain",
                   "signup",
@@ -11970,6 +11971,7 @@
                         "source": {
                           "type": "string",
                           "enum": [
+                            "crm",
                             "lead",
                             "email_domain",
                             "signup",

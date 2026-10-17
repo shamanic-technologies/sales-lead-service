@@ -35,18 +35,20 @@ describe("decideTags", () => {
 });
 
 describe("policyAllows business_only", () => {
-  const base = { tags: [] as RelationshipTag[], unsureTags: [] as RelationshipTag[], judgedAt: at };
-  it("never judged = held back (never assume a stranger)", () => {
+  const base = { subject: true, hasDirect: true, tags: [] as RelationshipTag[], unsureTags: [] as RelationshipTag[], judgedAt: at };
+  it("not a subject, or a direct conversation never judged = held back (never assume a stranger)", () => {
+    expect(policyAllows("business_only", { ...base, subject: false })).toBe(false);
     expect(policyAllows("business_only", { ...base, judgedAt: null })).toBe(false);
+  });
+  it("a subject known only by our outreach and the brand's tools needs no judgment (PROFESSIONAL-LEADS-1017)", () => {
+    expect(policyAllows("business_only", { ...base, hasDirect: false, judgedAt: null })).toBe(true);
+    expect(policyAllows("business_only", { ...base, hasDirect: false, judgedAt: null, tags: ["personal"] })).toBe(false);
   });
   it("personal yes or unsure = held back; customer + prospect pass", () => {
     expect(policyAllows("business_only", { ...base, tags: ["personal", "customer"] })).toBe(false);
     expect(policyAllows("business_only", { ...base, unsureTags: ["advisor"] })).toBe(false);
     expect(policyAllows("business_only", { ...base, tags: ["customer", "prospect"] })).toBe(true);
     expect(policyAllows("business_only", { ...base, tags: ["other_professional"] })).toBe(true);
-  });
-  it("an unanswered same-person question holds them back", () => {
-    expect(policyAllows("business_only", { ...base, tags: ["customer"], openMerge: true })).toBe(false);
   });
 });
 

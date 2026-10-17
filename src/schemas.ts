@@ -8811,7 +8811,7 @@ export const RelationshipBlockSchema = z
         id: z.string().nullable(),
         name: z.string().nullable(),
         domain: z.string().nullable(),
-        source: z.enum(["lead", "email_domain", "signup", "treg_enrich", "treg_identity", "person"]),
+        source: z.enum(["crm", "lead", "email_domain", "signup", "treg_enrich", "treg_identity", "person"]),
       })
       .nullable()
       .openapi({ description: "The company of this lead; null while unknown." }),

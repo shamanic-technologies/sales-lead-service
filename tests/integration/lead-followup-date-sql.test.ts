@@ -19,6 +19,7 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 }));
 
 const { db } = await import("../../src/db/index.js");
+const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const fd = await import("../../src/lib/lead-followup-date.js");
 const { claimStockedLead } = await import("../../src/lib/source-stock.js");
 
@@ -110,6 +111,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await db.execute(sql`DELETE FROM lead_followup_due_serves WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM lead_followup_dates WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
+    await clearRegistry(orgId);
     for (const t of ["conversion_events", "relationship_subjects", "relationship_judgments", "crm_facts"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
@@ -211,10 +213,12 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await db.execute(sql`
       INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
       VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
-    await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id) VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid)`);
+    await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, has_direct) VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid, true)`);
     await db.execute(sql`
       INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
-      VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid, ${JSON.stringify({ personal: 0.95 })}::jsonb, 1, 'jev', 'run')`);
+      VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid, ${JSON.stringify({ prospect: 0.2 })}::jsonb, 1, 'jev', 'run')`);
+    // Personal is crm-service's connection tag (PROFESSIONAL-LEADS-1017), never judged.
+    await connectionTag({ orgId, brandId, human: friend.humanId, personKey: `itest:${friend.humanId}`, tag: "personal_to_user" });
 
     const first = await serveDue();
     expect(first?.leadId).toBe(older.leadId);
