@@ -736,6 +736,13 @@
       "when": 1787898300000,
       "tag": "0104_qualification_previews",
       "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1787899000000,
+      "tag": "0105_crm_registry_facts",
+      "breakpoints": true
     }
   ]
 }

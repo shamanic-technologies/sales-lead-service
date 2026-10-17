@@ -41,6 +41,7 @@ describe.skipIf(!hasRealDatabase)("crm fact feed bronze against a real database"
 
   afterAll(async () => {
     await db.execute(sql`DELETE FROM crm_facts WHERE org_id = ${org}`);
+    await db.execute(sql`DELETE FROM crm_registry_facts WHERE org_id = ${org}`);
     await db.execute(sql`DELETE FROM crm_feed_cursors WHERE feed = ${feed}`);
   });
 
@@ -72,5 +73,24 @@ describe.skipIf(!hasRealDatabase)("crm fact feed bronze against a real database"
     expect(await loadFeedCursor(feed)).toBe(before);
     const n = (await db.execute(sql`SELECT count(*)::int AS n FROM crm_facts WHERE org_id = ${org}`)) as unknown as Array<{ n: number }>;
     expect(n[0].n).toBe(2);
+  });
+
+  it("copies registry facts and their withdrawals beside the events, never into crm_facts", async () => {
+    const tag = fact(10, { type: "connection_tag", source: "crm", occurredAt: null, payload: { tag: "professional_to_brand" } });
+    const event = fact(11, { type: "message_in" });
+    expect(await ingestFactsPage({ facts: [tag, event], nextCursor: "c10", hasMore: false }, feed)).toBe(2);
+    // The withdrawal arrives in a LATER page: it follows its target into the registry copy.
+    const withdrawal = fact(12, { type: "withdrawn", source: "crm", withdrawnOf: tag.factId });
+    const eventWithdrawal = fact(13, { type: "withdrawn", withdrawnOf: event.factId });
+    expect(await ingestFactsPage({ facts: [withdrawal, eventWithdrawal], nextCursor: "c12", hasMore: false }, feed)).toBe(2);
+    expect(await loadFeedCursor(feed)).toBe("c12");
+
+    const events = (await db.execute(sql`
+      SELECT fact_id FROM crm_facts WHERE org_id = ${org} AND seq >= ${String(base + 10)}::bigint ORDER BY seq`)) as unknown as Array<{ fact_id: string }>;
+    expect(events.map((r) => r.fact_id)).toEqual([event.factId, eventWithdrawal.factId]);
+    const registry = (await db.execute(sql`
+      SELECT fact_id, type, raw FROM crm_registry_facts WHERE org_id = ${org} ORDER BY seq`)) as unknown as Array<{ fact_id: string; type: string; raw: Record<string, unknown> }>;
+    expect(registry.map((r) => r.fact_id)).toEqual([tag.factId, withdrawal.factId]);
+    expect(registry[0].raw.payload).toEqual({ tag: "professional_to_brand" });
   });
 });
