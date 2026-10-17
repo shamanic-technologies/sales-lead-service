@@ -2,7 +2,9 @@
  * The SIX tag dimensions of a Unibox lead (UNIBOX-SIX-TAGS-1017, owner 2026-10-17): a lead = a person crm-service
  * tags professional to the brand, at their company. Each dimension answers one question; they stack. Pure.
  *
- *   Type                 who are they to us?        several at once (a customer can also be a partner)
+ *   Status               prospect / customer / churned: ONE value (owner 2026-10-17)
+ *   Roles                partner, investor, supplier, employee, advisor, press, other: several at once
+ *                        (Status + Roles replace the single "Type"; `types` is still served while readers move)
  *   Lifecycle            how far did they ever go?  ONE value: the highest rung reached on the absolute ladder
  *   Interest             do they want to buy?       one value
  *   Conversation status  whose turn is it?          one value
@@ -40,6 +42,29 @@ export function typesOf(tags: readonly RelationshipTag[]): UniboxType[] {
     if (v) out.add(v);
   }
   return UNIBOX_TYPES.filter((t) => out.has(t));
+}
+
+/**
+ * STATUS (owner 2026-10-17): ONE commercial value per person, never stacked, moving over time. Paying today =
+ * customer (even after an earlier churn); paid then stopped = churned (only when a source STATES the end, never a
+ * time guess); never paid = prospect. A prospect who became a customer is a customer.
+ */
+export const UNIBOX_STATUS = ["prospect", "customer", "churned"] as const;
+export type UniboxStatus = (typeof UNIBOX_STATUS)[number];
+
+export function statusOf(f: { customer: boolean; churned: boolean }): UniboxStatus {
+  if (f.customer) return "customer";
+  if (f.churned) return "churned";
+  return "prospect";
+}
+
+/** ROLES (owner 2026-10-17): everything else a person is to the brand, stacking beside the status. */
+export const UNIBOX_ROLES = ["partner", "investor", "supplier", "employee", "advisor", "press", "other"] as const;
+export type UniboxRole = (typeof UNIBOX_ROLES)[number];
+
+export function rolesOf(tags: readonly RelationshipTag[]): UniboxRole[] {
+  const types = typesOf(tags);
+  return UNIBOX_ROLES.filter((r) => (types as readonly string[]).includes(r));
 }
 
 export const UNIBOX_INTEREST = ["interested", "not_interested", "unsure", "not_asked"] as const;

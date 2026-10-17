@@ -12614,6 +12614,31 @@
             },
             "description": "Their lead rows at the brand (GET /orgs/leads/{id} keys on the list row id, not these)."
           },
+          "status": {
+            "type": "string",
+            "enum": [
+              "prospect",
+              "customer",
+              "churned"
+            ],
+            "description": "STATUS, one value: customer = paying today (even after an earlier churn); churned = paid, then a source stated the end; prospect = never paid."
+          },
+          "roles": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "partner",
+                "investor",
+                "supplier",
+                "employee",
+                "advisor",
+                "press",
+                "other"
+              ]
+            },
+            "description": "ROLES: everything else they are to the brand, several at once (a person's word > a source's evidence > Jev)."
+          },
           "types": {
             "type": "array",
             "items": {
@@ -12630,7 +12655,7 @@
                 "other"
               ]
             },
-            "description": "TYPE: who they are to us, several at once (a person's word > a source's evidence > Jev)."
+            "description": "Deprecated: status + roles. Kept while readers move."
           },
           "lifecycle": {
             "allOf": [
@@ -12733,6 +12758,8 @@
           "phones",
           "personKeys",
           "leadIds",
+          "status",
+          "roles",
           "types",
           "lifecycle",
           "steps",
@@ -22100,6 +22127,22 @@
             "in": "query",
             "name": "brandId",
             "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
             "schema": {
               "type": "string"
             }

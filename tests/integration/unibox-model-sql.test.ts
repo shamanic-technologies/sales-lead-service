@@ -111,6 +111,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(page.rows.map((r) => r.humanId)).toEqual([ben, ana]); // most recent activity first
     const [benRow, anaRow] = page.rows;
     expect(benRow).toMatchObject({
+      status: "prospect",
+      roles: [],
       types: ["prospect"], // a signup is prospect evidence; the failed charge makes no customer
       lifecycle: { key: "signup_or_form", rank: 4 },
       conversation: "waiting_on_us",
@@ -125,6 +127,8 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
 
   it("filters on any dimension, pages with a cursor, and refuses nothing it served", async () => {
     expect((await readUniboxPage(scope, { lifecycle: ["engaged"] }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ana]);
+    expect((await readUniboxPage(scope, { status: ["prospect", "churned"] }, { limit: 10, cursor: null })).total).toBe(2);
+    expect((await readUniboxPage(scope, { status: ["customer"] }, { limit: 10, cursor: null })).total).toBe(0);
     expect((await readUniboxPage(scope, { fit: ["fit"], conversation: ["waiting_on_us"] }, { limit: 10, cursor: null })).total).toBe(1);
     expect((await readUniboxPage(scope, { lifecycle: ["none", "paid_client"] }, { limit: 10, cursor: null })).total).toBe(0);
     expect((await readUniboxPage(scope, { q: "BEN@acme" }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ben]);
