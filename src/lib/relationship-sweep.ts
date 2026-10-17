@@ -37,7 +37,7 @@ export interface ScopeTick {
   judgeFailed: number;
   intentJudged: number;
   policyChanged: number;
-  unibox: { rows: number; removed: number } | null;
+  unibox: { rows: number; removed: number; teamMembers: number } | null;
   error: string | null;
 }
 
