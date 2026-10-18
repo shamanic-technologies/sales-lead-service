@@ -254,10 +254,13 @@ export async function fetchEmailGatewayStats(
     workflowSlugs?: string;
     featureSlugs?: string;
     groupBy?: string;
+    /** One channel only (email-gateway `type`): the other provider is not asked. */
+    type?: "transactional" | "broadcast";
   },
   context?: ServiceContext,
 ): Promise<EmailGatewayStatsResponse | EmailGatewayGroupedStatsResponse> {
   const queryParams = new URLSearchParams();
+  if (params.type) queryParams.set("type", params.type);
   if (params.brandId) queryParams.set("brandId", params.brandId);
   if (params.campaignId) queryParams.set("campaignId", params.campaignId);
   if (params.workflowSlugs) queryParams.set("workflowSlugs", params.workflowSlugs);
