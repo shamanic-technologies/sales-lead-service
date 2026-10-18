@@ -8570,6 +8570,63 @@ registry.registerPath({
   },
 });
 
+const ScreeningSplit = z.object({
+  screened: z.number().int().openapi({ description: "People screened (one verdict per audience x person x target text x prompt version)." }),
+  passed: z.number().int().openapi({ description: "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)." }),
+  declined: z.number().int().openapi({ description: "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened." }),
+});
+
+const ScreeningCounts = ScreeningSplit.extend({
+  byProbability: z
+    .object({
+      below_0_2: ScreeningSplit.openapi({ description: "P(yes) < 0.2." }),
+      from_0_2_to_0_5: ScreeningSplit.openapi({ description: "0.2 <= P(yes) <= 0.5 (0.5 itself does not pass)." }),
+      above_0_5_below_0_8: ScreeningSplit.openapi({ description: "0.5 < P(yes) < 0.8." }),
+      from_0_8: ScreeningSplit.openapi({ description: "P(yes) >= 0.8." }),
+      unscored: ScreeningSplit.openapi({ description: "Verdict stored without a P(yes) (expected 0)." }),
+    })
+    .openapi({ description: "The same people split by the screen's P(yes); the five buckets sum to `screened`." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/candidate-screenings/stats",
+  summary: "How the audience screen before the paid reveal decided, fleet-wide, by month (internal, service-auth)",
+  description:
+    "Every org, since inception of lead-service's screen (it took the screen over from human-service on 2026-10-07; earlier screens are " +
+    "human-service's to state). Before paying a reveal, each Apollo candidate is judged by Jev against the audience's own target text; " +
+    "verdict pass iff P(yes) > `passThreshold`. Per UTC calendar month and in total: people screened, passed, declined, and the same people " +
+    "by P(yes) bucket. `distinct` = orgs, brands and audiences screened over the whole period. Ids only, nothing names a person. One " +
+    "aggregate statement over the screenings table, no paging. Declined share = `totals.declined / totals.screened`.",
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "Screen outcomes by month",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              recordedSince: z.string().openapi({ description: "lead-service screens are recorded from this instant (2026-10-07)." }),
+              passThreshold: z.number().openapi({ description: "The pass bar: pass iff P(yes) > passThreshold (0.5 today)." }),
+              firstScreenedAt: z.string().nullable().openapi({ description: "First verdict stored; null when none." }),
+              lastScreenedAt: z.string().nullable().openapi({ description: "Latest verdict stored; null when none." }),
+              distinct: z
+                .object({
+                  orgs: z.number().int().openapi({ description: "Distinct client orgs the screen worked for, whole period." }),
+                  brands: z.number().int().openapi({ description: "Distinct brands screened for, whole period." }),
+                  audiences: z.number().int().openapi({ description: "Distinct audiences screened, whole period." }),
+                }),
+              totals: ScreeningCounts,
+              months: z.array(ScreeningCounts.extend({ month: z.string().openapi({ description: "UTC month, YYYY-MM." }) })).openapi({ description: "Months with at least one screen, oldest first; they sum to `totals`." }),
+            })
+            .openapi("CandidateScreeningStatsResponse"),
+        },
+      },
+    },
+    401: { description: "Unauthorized" },
+  },
+});
+
 const MeetingArmCounts = z.object({
   handled: z.number().int().openapi({ description: "People who replied positively whose handler is on this side (the rate's population)." }),
   booked: z.number().int().openapi({ description: "Of them, people whose first meeting after the positive reply this side booked." }),

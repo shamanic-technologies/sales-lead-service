@@ -10329,6 +10329,371 @@
           "unpricedRunIds"
         ]
       },
+      "CandidateScreeningStatsResponse": {
+        "type": "object",
+        "properties": {
+          "recordedSince": {
+            "type": "string",
+            "description": "lead-service screens are recorded from this instant (2026-10-07)."
+          },
+          "passThreshold": {
+            "type": "number",
+            "description": "The pass bar: pass iff P(yes) > passThreshold (0.5 today)."
+          },
+          "firstScreenedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First verdict stored; null when none."
+          },
+          "lastScreenedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Latest verdict stored; null when none."
+          },
+          "distinct": {
+            "type": "object",
+            "properties": {
+              "orgs": {
+                "type": "integer",
+                "description": "Distinct client orgs the screen worked for, whole period."
+              },
+              "brands": {
+                "type": "integer",
+                "description": "Distinct brands screened for, whole period."
+              },
+              "audiences": {
+                "type": "integer",
+                "description": "Distinct audiences screened, whole period."
+              }
+            },
+            "required": [
+              "orgs",
+              "brands",
+              "audiences"
+            ]
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "screened": {
+                "type": "integer",
+                "description": "People screened (one verdict per audience x person x target text x prompt version)."
+              },
+              "passed": {
+                "type": "integer",
+                "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+              },
+              "declined": {
+                "type": "integer",
+                "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+              },
+              "byProbability": {
+                "type": "object",
+                "properties": {
+                  "below_0_2": {
+                    "type": "object",
+                    "properties": {
+                      "screened": {
+                        "type": "integer",
+                        "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                      },
+                      "passed": {
+                        "type": "integer",
+                        "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                      },
+                      "declined": {
+                        "type": "integer",
+                        "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                      }
+                    },
+                    "required": [
+                      "screened",
+                      "passed",
+                      "declined"
+                    ],
+                    "description": "P(yes) < 0.2."
+                  },
+                  "from_0_2_to_0_5": {
+                    "type": "object",
+                    "properties": {
+                      "screened": {
+                        "type": "integer",
+                        "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                      },
+                      "passed": {
+                        "type": "integer",
+                        "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                      },
+                      "declined": {
+                        "type": "integer",
+                        "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                      }
+                    },
+                    "required": [
+                      "screened",
+                      "passed",
+                      "declined"
+                    ],
+                    "description": "0.2 <= P(yes) <= 0.5 (0.5 itself does not pass)."
+                  },
+                  "above_0_5_below_0_8": {
+                    "type": "object",
+                    "properties": {
+                      "screened": {
+                        "type": "integer",
+                        "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                      },
+                      "passed": {
+                        "type": "integer",
+                        "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                      },
+                      "declined": {
+                        "type": "integer",
+                        "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                      }
+                    },
+                    "required": [
+                      "screened",
+                      "passed",
+                      "declined"
+                    ],
+                    "description": "0.5 < P(yes) < 0.8."
+                  },
+                  "from_0_8": {
+                    "type": "object",
+                    "properties": {
+                      "screened": {
+                        "type": "integer",
+                        "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                      },
+                      "passed": {
+                        "type": "integer",
+                        "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                      },
+                      "declined": {
+                        "type": "integer",
+                        "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                      }
+                    },
+                    "required": [
+                      "screened",
+                      "passed",
+                      "declined"
+                    ],
+                    "description": "P(yes) >= 0.8."
+                  },
+                  "unscored": {
+                    "type": "object",
+                    "properties": {
+                      "screened": {
+                        "type": "integer",
+                        "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                      },
+                      "passed": {
+                        "type": "integer",
+                        "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                      },
+                      "declined": {
+                        "type": "integer",
+                        "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                      }
+                    },
+                    "required": [
+                      "screened",
+                      "passed",
+                      "declined"
+                    ],
+                    "description": "Verdict stored without a P(yes) (expected 0)."
+                  }
+                },
+                "required": [
+                  "below_0_2",
+                  "from_0_2_to_0_5",
+                  "above_0_5_below_0_8",
+                  "from_0_8",
+                  "unscored"
+                ],
+                "description": "The same people split by the screen's P(yes); the five buckets sum to `screened`."
+              }
+            },
+            "required": [
+              "screened",
+              "passed",
+              "declined",
+              "byProbability"
+            ]
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "screened": {
+                  "type": "integer",
+                  "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                },
+                "passed": {
+                  "type": "integer",
+                  "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                },
+                "declined": {
+                  "type": "integer",
+                  "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                },
+                "byProbability": {
+                  "type": "object",
+                  "properties": {
+                    "below_0_2": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "P(yes) < 0.2."
+                    },
+                    "from_0_2_to_0_5": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "0.2 <= P(yes) <= 0.5 (0.5 itself does not pass)."
+                    },
+                    "above_0_5_below_0_8": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "0.5 < P(yes) < 0.8."
+                    },
+                    "from_0_8": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "P(yes) >= 0.8."
+                    },
+                    "unscored": {
+                      "type": "object",
+                      "properties": {
+                        "screened": {
+                          "type": "integer",
+                          "description": "People screened (one verdict per audience x person x target text x prompt version)."
+                        },
+                        "passed": {
+                          "type": "integer",
+                          "description": "Of them, verdict pass: P(yes) above the pass bar, sent on to the paid reveal (or to the offer's must-pass checks)."
+                        },
+                        "declined": {
+                          "type": "integer",
+                          "description": "Of them, verdict decline: turned away before the paid reveal. passed + declined = screened."
+                        }
+                      },
+                      "required": [
+                        "screened",
+                        "passed",
+                        "declined"
+                      ],
+                      "description": "Verdict stored without a P(yes) (expected 0)."
+                    }
+                  },
+                  "required": [
+                    "below_0_2",
+                    "from_0_2_to_0_5",
+                    "above_0_5_below_0_8",
+                    "from_0_8",
+                    "unscored"
+                  ],
+                  "description": "The same people split by the screen's P(yes); the five buckets sum to `screened`."
+                },
+                "month": {
+                  "type": "string",
+                  "description": "UTC month, YYYY-MM."
+                }
+              },
+              "required": [
+                "screened",
+                "passed",
+                "declined",
+                "byProbability",
+                "month"
+              ]
+            },
+            "description": "Months with at least one screen, oldest first; they sum to `totals`."
+          }
+        },
+        "required": [
+          "recordedSince",
+          "passThreshold",
+          "firstScreenedAt",
+          "lastScreenedAt",
+          "distinct",
+          "totals",
+          "months"
+        ]
+      },
       "MeetingAttributionResponse": {
         "type": "object",
         "properties": {
@@ -20869,6 +21234,38 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/SourceReusedAcquisitionsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/candidate-screenings/stats": {
+      "get": {
+        "summary": "How the audience screen before the paid reveal decided, fleet-wide, by month (internal, service-auth)",
+        "description": "Every org, since inception of lead-service's screen (it took the screen over from human-service on 2026-10-07; earlier screens are human-service's to state). Before paying a reveal, each Apollo candidate is judged by Jev against the audience's own target text; verdict pass iff P(yes) > `passThreshold`. Per UTC calendar month and in total: people screened, passed, declined, and the same people by P(yes) bucket. `distinct` = orgs, brands and audiences screened over the whole period. Ids only, nothing names a person. One aggregate statement over the screenings table, no paging. Declined share = `totals.declined / totals.screened`.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Screen outcomes by month",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidateScreeningStatsResponse"
                 }
               }
             }
