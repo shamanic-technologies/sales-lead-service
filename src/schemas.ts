@@ -9294,6 +9294,39 @@ registry.registerPath({
   },
 });
 
+export const ScheduledFollowupsSchema = z
+  .object({
+    campaignIds: z.array(z.string()),
+    asOf: z.string().openapi({ description: "When this was read (ISO)." }),
+    leads: z.number().int().openapi({ description: "People with a follow-up scheduled by these campaigns, on any channel (due + upcoming), each counted once." }),
+    due: z.number().int().openapi({ description: "Their time passed: they go out on the follow-up pipe's next pass." }),
+    upcoming: z.number().int().openapi({ description: "Their time is still ahead." }),
+    nextAt: z.string().nullable().openapi({ description: "The earliest time still ahead (ISO); null when nothing is ahead. Each time is the writer's pick in the person's own working hours." }),
+    oldestDueAt: z.string().nullable().openapi({ description: "The longest-waiting due time (ISO); null when nothing is due." }),
+    byDay: z
+      .array(z.object({ date: z.string().openapi({ description: "UTC date YYYY-MM-DD" }), leads: z.number().int(), firstAt: z.string() }))
+      .openapi({ description: "Upcoming people per UTC day over the next 31 days, earliest first." }),
+    laterThanHorizon: z.number().int().openapi({ description: "Upcoming people scheduled beyond those 31 days." }),
+  })
+  .openapi("ScheduledFollowups");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/followup-dates/scheduled",
+  summary: "What these campaigns have scheduled on every channel: how many people, and when the next follow-ups go out",
+  description:
+    "A follow-up writer (email reply in the person's last thread, WhatsApp, LinkedIn...) states each person's next follow-up date here instead of queueing in a sender. Counts the people whose next follow-up date one of these campaigns last stated (a stop or a 30-day recheck is not a scheduled follow-up) plus the campaigns' reactive follow-up queue, once per person at the earliest time. A sender's own queue (e.g. an email sequence) is not in here: ask the sender.",
+  request: { query: z.object({ campaignIds: z.string().openapi({ description: "Comma-separated campaign ids of the org (at most 500)" }) }) },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal org UUID" },
+  ],
+  responses: {
+    200: { description: "The schedule", content: { "application/json": { schema: ScheduledFollowupsSchema } } },
+    400: { description: "`campaign_ids_required` or `too_many_campaign_ids`" },
+  },
+});
+
 // --- Prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014) ---
 
 export const ProspectFollowupVerdictSchema = z
