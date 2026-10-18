@@ -27,6 +27,14 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
  *     to another run, maybe another workflow, which is the one that sends), else the row's own serve
  *     (`workflow_slug`). `workflowSource` says which; both null when the person holds no row under that
  *     campaign (nothing local names the sender's workflow; never guessed from another row).
+ *   - TRANSPORT (SCOUT-VISIT-SCREEN-1018): every outreach fact names the path it went through, verbatim off
+ *     the current outreach fact of its subject (`outreach_facts.raw->>'transport'`: `smtp` = sent by US, our
+ *     tracker; `instantly` = the provider). A fact states it as `transport`; a CLICK also states `screened`:
+ *     true iff our tracker recorded it (`smtp`: only a hit instantly-service judged human is promoted, a
+ *     scanner's is withdrawn), false when the provider reported it (no verdict, mostly link scanners), null on
+ *     every fact that is not a click. Each `emailSends` entry splits its sends by transport (`transports`), so
+ *     a consumer keeps only people emailed through our own path in a visit denominator. A fact no outreach
+ *     fact names (CRM, by hand) = null, never guessed.
  *
  * Aggregated in Postgres (~0.4 s on the largest brand, 63k facts / 17.5k journeys) and streamed
  * through a server-side cursor: the response never holds the population.
@@ -42,6 +50,10 @@ export interface JourneyFact {
   /** The stated amount on an outcome (a sale), cents; null when none was stated or not an outcome. */
   valueCents: number | null;
   url: string | null;
+  /** The outreach path the fact went through, verbatim (`smtp` ours, `instantly` the provider); null = not an outreach fact. */
+  transport: string | null;
+  /** Clicks only: true = our tracker recorded it (judged human), false = the provider reported it (unscreened); null otherwise. */
+  screened: boolean | null;
 }
 
 export interface JourneyAct {
@@ -55,6 +67,14 @@ export interface JourneyAct {
 /** Which record named the sending workflow: the row's serve, or a re-point of the row to the sending run. */
 export type EmailSendWorkflowSource = "serve" | "retry_claim" | "named_serve";
 
+export interface JourneyEmailSendTransport {
+  /** Verbatim outreach transport (`smtp` ours, `instantly` the provider); null = no outreach fact names it. */
+  transport: string | null;
+  firstSentAt: string | null;
+  lastSentAt: string | null;
+  count: number;
+}
+
 export interface JourneyEmailSend {
   campaignId: string | null;
   /** The workflow of the run that sent; null = no record names it (see `workflowSource`). */
@@ -64,6 +84,8 @@ export interface JourneyEmailSend {
   firstSentAt: string | null;
   lastSentAt: string | null;
   count: number;
+  /** The same sends split by transport (counts sum to `count`), earliest first. */
+  transports: JourneyEmailSendTransport[];
 }
 
 export interface BrandJourney {
@@ -119,6 +141,8 @@ export function toBrandJourney(r: RawJourney): BrandJourney {
       attributionBasis: (f.attributionBasis as string | null) ?? null,
       valueCents: num(f.valueCents),
       url: (f.url as string | null) ?? null,
+      transport: (f.transport as string | null) ?? null,
+      screened: (f.screened as boolean | null) ?? null,
     })),
     acts: (r.acts ?? []).map((a) => ({
       campaignId: (a.campaignId as string | null) ?? null,
@@ -134,6 +158,12 @@ export function toBrandJourney(r: RawJourney): BrandJourney {
       firstSentAt: iso(e.firstAt),
       lastSentAt: iso(e.lastAt),
       count: Number(e.count),
+      transports: ((e.transports as Array<Record<string, unknown>> | null) ?? []).map((t) => ({
+        transport: (t.transport as string | null) ?? null,
+        firstSentAt: iso(t.firstAt),
+        lastSentAt: iso(t.lastAt),
+        count: Number(t.count),
+      })),
     })),
   };
 }
@@ -150,16 +180,25 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
     WITH offers AS (
       SELECT key AS campaign_id, value #>> '{}' AS offer_id FROM jsonb_each(${offersJson(offers)}::jsonb)
     ),
+    -- Each fact's outreach transport, off the current outreach fact of its subject (the timeline row's id).
     f AS (
-      SELECT * FROM lead_timeline_facts
-      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND withdrawn_at IS NULL
+      SELECT t.*, o.type AS outreach_type, o.raw->>'transport' AS transport
+      FROM lead_timeline_facts t
+      LEFT JOIN LATERAL (
+        SELECT x.type, x.raw FROM outreach_facts x
+        WHERE t.source IN ('outreach', 'reply') AND x.subject_key = t.id AND x.org_id = t.org_id AND x.type <> 'withdrawn'
+        ORDER BY x.seq DESC
+        LIMIT 1
+      ) o ON true
+      WHERE t.org_id = ${orgId} AND t.brand_id = ${brandId} AND t.withdrawn_at IS NULL
     ),
     facts AS (
       SELECT lead_id, offer_id,
         jsonb_agg(jsonb_build_object(
           'id', id, 'label', label, 'source', source, 'occurredAt', occurred_at,
           'campaignId', campaign_id, 'attributable', attributable, 'attributionBasis', attribution_basis,
-          'valueCents', detail->'valueCents', 'url', url
+          'valueCents', detail->'valueCents', 'url', url, 'transport', transport,
+          'screened', CASE WHEN outreach_type = 'link_clicked' THEN transport IS NOT DISTINCT FROM 'smtp' END
         ) ORDER BY occurred_at ASC NULLS LAST, id ASC) AS facts
       FROM f WHERE attribution_basis IS DISTINCT FROM 'our_email'
       GROUP BY lead_id, offer_id
@@ -188,7 +227,7 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
     ),
     -- Each send credited to the run holding the person's row of its campaign when it went out.
     sends AS (
-      SELECT f.lead_id, f.offer_id, f.campaign_id, f.occurred_at,
+      SELECT f.lead_id, f.offer_id, f.campaign_id, f.occurred_at, f.transport,
         CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.workflow_slug ELSE lc.workflow_slug END AS workflow_slug,
         CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.cause ELSE 'serve' END AS workflow_source
       FROM f
@@ -206,12 +245,19 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
       SELECT lead_id, offer_id,
         jsonb_agg(jsonb_build_object(
           'campaignId', campaign_id, 'workflowSlug', workflow_slug, 'workflowSource', workflow_source,
-          'firstAt', first_at, 'lastAt', last_at, 'count', n
+          'firstAt', first_at, 'lastAt', last_at, 'count', n, 'transports', transports
         ) ORDER BY first_at ASC NULLS LAST, campaign_id ASC NULLS LAST, workflow_slug ASC NULLS LAST) AS email_sends
       FROM (
-        SELECT lead_id, offer_id, campaign_id, workflow_slug, workflow_source, min(occurred_at) AS first_at,
-          max(occurred_at) AS last_at, count(*)::int AS n
-        FROM sends GROUP BY lead_id, offer_id, campaign_id, workflow_slug, workflow_source
+        SELECT lead_id, offer_id, campaign_id, workflow_slug, workflow_source, min(first_at) AS first_at,
+          max(last_at) AS last_at, sum(n)::int AS n,
+          jsonb_agg(jsonb_build_object('transport', transport, 'firstAt', first_at, 'lastAt', last_at, 'count', n)
+            ORDER BY first_at ASC NULLS LAST, transport ASC NULLS LAST) AS transports
+        FROM (
+          SELECT lead_id, offer_id, campaign_id, workflow_slug, workflow_source, transport, min(occurred_at) AS first_at,
+            max(occurred_at) AS last_at, count(*)::int AS n
+          FROM sends GROUP BY lead_id, offer_id, campaign_id, workflow_slug, workflow_source, transport
+        ) gt
+        GROUP BY lead_id, offer_id, campaign_id, workflow_slug, workflow_source
       ) g
       GROUP BY lead_id, offer_id
     )
