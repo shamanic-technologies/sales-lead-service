@@ -8012,6 +8012,16 @@ const JourneyFactSchema = z
     attributionBasis: z.string().nullable(),
     valueCents: z.number().nullable().openapi({ description: "The stated amount on an outcome (a sale), cents; null otherwise." }),
     url: z.string().nullable(),
+    transport: z.string().nullable().openapi({
+      description:
+        "The outreach path the fact went through, verbatim off the outreach fact (`smtp` = sent by us, our tracker; `instantly` = " +
+        "the provider). null = not an outreach fact (CRM, by hand, social).",
+    }),
+    screened: z.boolean().nullable().openapi({
+      description:
+        "Clicks only: true = our tracker recorded the click (`smtp`: only a hit judged human is kept, a scanner's is withdrawn); " +
+        "false = the provider reported it (no human/scanner verdict, mostly link scanners). null on every fact that is not a click.",
+    }),
   })
   .openapi("JourneyFact");
 
@@ -8039,6 +8049,18 @@ const JourneyEmailSendSchema = z
     firstSentAt: z.string().nullable().openapi({ description: "ISO-8601, first send under this campaign x workflow." }),
     lastSentAt: z.string().nullable(),
     count: z.number().int().openapi({ description: "Sends (initial + follow-ups; never a bounce)." }),
+    transports: z
+      .array(
+        z
+          .object({
+            transport: z.string().nullable().openapi({ description: "`smtp` = sent by us (clicks screened by our tracker), `instantly` = the provider; null = no outreach fact names it." }),
+            firstSentAt: z.string().nullable(),
+            lastSentAt: z.string().nullable(),
+            count: z.number().int(),
+          })
+          .openapi("JourneyEmailSendTransport"),
+      )
+      .openapi({ description: "The same sends split by outreach transport, earliest first; counts sum to `count`." }),
   })
   .openapi("JourneyEmailSend");
 

@@ -78,8 +78,11 @@ describe.skipIf(!hasRealDatabase)("brand journeys read against a real database",
     expect(j1a.firstActedAt).toBe("2026-09-01T00:00:00.000Z");
     // Emailed under a campaign the person holds no row of: nothing local names the sending workflow.
     expect(j1a.emailSends).toEqual([
-      { campaignId: cA, workflowSlug: null, workflowSource: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 2 },
+      { campaignId: cA, workflowSlug: null, workflowSource: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 2,
+        transports: [{ transport: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 2 }] },
     ]);
+    // No outreach fact names these facts: no transport, never guessed; only a click states `screened`.
+    expect(j1a.facts.map((f) => [f.transport, f.screened])).toEqual([[null, null], [null, null], [null, null]]);
 
     const j1b = journeys.find((j) => j.leadId === p1 && j.offerId === offerB)!;
     expect(j1b.facts.map((f) => f.label)).toEqual(["interested"]);
@@ -133,11 +136,77 @@ describe.skipIf(!hasRealDatabase)("brand journeys read against a real database",
     for await (const chunk of streamBrandJourneys(orgId, brand, new Map(), 50)) journeys.push(...chunk);
     expect(journeys).toHaveLength(1);
     expect(journeys[0].emailSends).toEqual([
-      { campaignId: cS1, workflowSlug: "wf-alpha", workflowSource: "serve", firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-04T00:00:00.000Z", count: 2 },
-      { campaignId: cS2, workflowSlug: "wf-claimant", workflowSource: "retry_claim", firstSentAt: "2026-10-12T00:00:00.000Z", lastSentAt: "2026-10-12T00:00:00.000Z", count: 1 },
-      { campaignId: cS2, workflowSlug: "wf-named", workflowSource: "named_serve", firstSentAt: "2026-10-20T00:00:00.000Z", lastSentAt: "2026-10-20T00:00:00.000Z", count: 1 },
+      { campaignId: cS1, workflowSlug: "wf-alpha", workflowSource: "serve", firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-04T00:00:00.000Z", count: 2,
+        transports: [{ transport: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-04T00:00:00.000Z", count: 2 }] },
+      { campaignId: cS2, workflowSlug: "wf-claimant", workflowSource: "retry_claim", firstSentAt: "2026-10-12T00:00:00.000Z", lastSentAt: "2026-10-12T00:00:00.000Z", count: 1,
+        transports: [{ transport: null, firstSentAt: "2026-10-12T00:00:00.000Z", lastSentAt: "2026-10-12T00:00:00.000Z", count: 1 }] },
+      { campaignId: cS2, workflowSlug: "wf-named", workflowSource: "named_serve", firstSentAt: "2026-10-20T00:00:00.000Z", lastSentAt: "2026-10-20T00:00:00.000Z", count: 1,
+        transports: [{ transport: null, firstSentAt: "2026-10-20T00:00:00.000Z", lastSentAt: "2026-10-20T00:00:00.000Z", count: 1 }] },
     ]);
     // `acts` is unchanged: one entry per (campaign, kind), bounces included.
     expect(journeys[0].acts.map((a) => [a.campaignId, a.count])).toEqual([[cS1, 3], [cS2, 2]]);
+  });
+
+  it("states each fact's and each send's outreach transport, and whether a click was screened by our tracker", async () => {
+    // SCOUT-VISIT-SCREEN-1018: a click on an email WE sent (smtp) was judged human by our tracker; one the provider
+    // reports (instantly) carries no verdict. Sends split by the transport they went through.
+    const brand = randomUUID();
+    const cT = `cT-${tag}`;
+    const p = await lead("p4");
+    const ids = { s1: `t-s1-${tag}`, s2: `t-s2-${tag}`, s3: `t-s3-${tag}`, ch: `t-ch-${tag}`, ci: `t-ci-${tag}`, r: `t-r-${tag}` };
+    const row = (id: string, label: string, at: string, basis: string, over: Record<string, unknown> = {}) => ({
+      id, org_id: orgId, brand_id: brand, offer_id: offerA, lead_id: p, campaign_id: cT, occurred_at: at, label,
+      source: "outreach", source_ref: id, attributable: true, attribution_basis: basis, url: null, detail: {}, withdrawn_at: null, ...over,
+    }) as never;
+    await upsertTimelineFacts([
+      row(ids.s1, "initial_email", "2026-09-01T00:00:00.000Z", "our_email"),
+      row(ids.s2, "followup", "2026-09-03T00:00:00.000Z", "our_email"),
+      row(ids.s3, "followup", "2026-09-05T00:00:00.000Z", "our_email"),
+      row(ids.ch, "website_visit", "2026-09-02T00:00:00.000Z", "reaction_to_our_email", { url: "https://brand.test/" }),
+      row(ids.ci, "link_click", "2026-09-04T00:00:00.000Z", "reaction_to_our_email", { url: "https://other.test/" }),
+      row(ids.r, "interested", "2026-09-06T00:00:00.000Z", "reaction_to_our_email", { source: "reply", source_ref: `reply-${tag}` }),
+    ]);
+    const base = Math.floor(Math.random() * 1e12) + 1e12;
+    const facts: Array<[string, string, string, string]> = [
+      [ids.s1, "email_sent", "smtp", "2026-09-01T00:00:00Z"],
+      [ids.s2, "email_sent", "smtp", "2026-09-03T00:00:00Z"],
+      [ids.s3, "email_sent", "instantly", "2026-09-05T00:00:00Z"],
+      [ids.ch, "link_clicked", "smtp", "2026-09-02T00:00:00Z"],
+      [ids.ci, "link_clicked", "instantly", "2026-09-04T00:00:00Z"],
+      [ids.r, "reply", "smtp", "2026-09-06T00:00:00Z"],
+    ];
+    let seq = base;
+    for (const [subject, type, transport, at] of facts) {
+      await sql`
+        INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, campaign_id, brand_ids, raw)
+        VALUES (${String(seq++)}::bigint, ${subject}, ${type}, ${at}::timestamptz, ${`p4-${tag}@x.test`}, ${orgId}, ${cT},
+          ARRAY[${brand}]::text[], ${JSON.stringify({ transport })}::jsonb)
+      `;
+    }
+    // A later withdrawn fact on the provider click never names a transport of its own.
+    await sql`
+      INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, campaign_id, brand_ids, raw)
+      VALUES (${String(seq++)}::bigint, ${ids.ci}, 'withdrawn', now(), ${`p4-${tag}@x.test`}, ${orgId}, ${cT},
+        ARRAY[${brand}]::text[], ${JSON.stringify({ transport: "manual" })}::jsonb)
+    `;
+
+    const journeys = [];
+    for await (const chunk of streamBrandJourneys(orgId, brand, new Map(), 50)) journeys.push(...chunk);
+    expect(journeys).toHaveLength(1);
+    const j = journeys[0];
+    expect(j.facts.map((f) => [f.label, f.transport, f.screened])).toEqual([
+      ["website_visit", "smtp", true],
+      ["link_click", "instantly", false],
+      ["interested", "smtp", null],
+    ]);
+    expect(j.emailSends).toEqual([
+      { campaignId: cT, workflowSlug: null, workflowSource: null, firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 3,
+        transports: [
+          { transport: "smtp", firstSentAt: "2026-09-01T00:00:00.000Z", lastSentAt: "2026-09-03T00:00:00.000Z", count: 2 },
+          { transport: "instantly", firstSentAt: "2026-09-05T00:00:00.000Z", lastSentAt: "2026-09-05T00:00:00.000Z", count: 1 },
+        ] },
+    ]);
+    // Existing fields unchanged: one email act per campaign, every send counted.
+    expect(j.acts.map((a) => [a.campaignId, a.kind, a.count])).toEqual([[cT, "email", 3]]);
   });
 });

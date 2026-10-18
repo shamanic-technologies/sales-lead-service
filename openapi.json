@@ -9234,6 +9234,16 @@
           "url": {
             "type": "string",
             "nullable": true
+          },
+          "transport": {
+            "type": "string",
+            "nullable": true,
+            "description": "The outreach path the fact went through, verbatim off the outreach fact (`smtp` = sent by us, our tracker; `instantly` = the provider). null = not an outreach fact (CRM, by hand, social)."
+          },
+          "screened": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Clicks only: true = our tracker recorded the click (`smtp`: only a hit judged human is kept, a scanner's is withdrawn); false = the provider reported it (no human/scanner verdict, mostly link scanners). null on every fact that is not a click."
           }
         },
         "required": [
@@ -9245,7 +9255,9 @@
           "attributable",
           "attributionBasis",
           "valueCents",
-          "url"
+          "url",
+          "transport",
+          "screened"
         ]
       },
       "JourneyAct": {
@@ -9319,12 +9331,47 @@
           "count": {
             "type": "integer",
             "description": "Sends (initial + follow-ups; never a bounce)."
+          },
+          "transports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JourneyEmailSendTransport"
+            },
+            "description": "The same sends split by outreach transport, earliest first; counts sum to `count`."
           }
         },
         "required": [
           "campaignId",
           "workflowSlug",
           "workflowSource",
+          "firstSentAt",
+          "lastSentAt",
+          "count",
+          "transports"
+        ]
+      },
+      "JourneyEmailSendTransport": {
+        "type": "object",
+        "properties": {
+          "transport": {
+            "type": "string",
+            "nullable": true,
+            "description": "`smtp` = sent by us (clicks screened by our tracker), `instantly` = the provider; null = no outreach fact names it."
+          },
+          "firstSentAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "lastSentAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "transport",
           "firstSentAt",
           "lastSentAt",
           "count"
