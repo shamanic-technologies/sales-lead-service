@@ -3686,6 +3686,7 @@ registry.registerPath({
   summary: "Get lead stats by status",
   description:
     "Returns lead stats with outreach status from email-gateway. totalLeads = served leads count, byOutreachStatus = full recipientStats (contacted, sent, delivered, opened, clicked, bounced, unsubscribed, replies*), repliesDetail = granular reply breakdown, buffered/skipped = buffer counts. " +
+    "Outreach figures count PROSPECTS only: a transactional message counts when its recipient is a lead of the scope, never a notification to the client's own team. " +
     "When filtering or grouping by goal/profile/persona attribution fields, lead-service joins explicit leads_campaigns tags to recipient-level email-gateway evidence. Untagged rows stay unattributed and do not produce persona/profile groups.",
   parameters: [
     ...AuthHeaders,
