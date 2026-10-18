@@ -125,7 +125,7 @@ describe("GET /orgs/stats counts prospects only", () => {
     expect(res.body.byOutreachStatus.delivered).toBe(0);
     expect(res.body.byOutreachStatus.opened).toBe(0);
     const perRecipient = fetchEmailGatewayStatsMock.mock.calls.find((c) => c[0].groupBy === "recipientEmail");
-    expect(perRecipient?.[0]).toEqual(expect.objectContaining({ campaignId: LIVE, brandId: BRAND }));
+    expect(perRecipient?.[0]).toEqual(expect.objectContaining({ campaignId: LIVE, brandId: BRAND, type: "transactional" }));
   });
 
   it("a transactional message to a lead of the campaign still counts", async () => {
