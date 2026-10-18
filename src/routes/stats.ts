@@ -312,6 +312,94 @@ async function fetchStatsForCampaignScope(
   };
 }
 
+function hasOutreach(s: RecipientStats | undefined): s is RecipientStats {
+  if (!s) return false;
+  return (Object.keys(s) as (keyof RecipientStats)[]).some((k) => k !== "repliesDetail" && (s[k] as number) > 0);
+}
+
+/** Every email address of a lead in the scope (any status), lower-cased: who a prospect message can reach. */
+async function fetchScopeLeadEmails(conds: SQL[]): Promise<Set<string>> {
+  const rows = await db.execute<{ email: string }>(sql`
+    SELECT DISTINCT lower(lead_contact_methods.value) AS "email"
+    FROM leads_campaigns
+    JOIN lead_contact_methods
+      ON lead_contact_methods.lead_id = leads_campaigns.lead_id
+     AND lead_contact_methods.channel = 'email'
+    WHERE ${and(...conds)}
+  `);
+  return new Set((rows as unknown as Array<{ email: string }>).map((r) => r.email));
+}
+
+/**
+ * The scope's TRANSACTIONAL outreach, counted only for recipients who are LEADS of the scope
+ * (CAMPAIGN-STATS-SENT-ZERO-1018). email-gateway's transactional bucket carries every postmark
+ * message stamped with the campaign id, and today those are notifications to the client's OWN
+ * team ("<prospect> wants to book a call", "campaign created"...): the team is never a lead
+ * (TEAM-OUT-OF-UNIBOX-1017), so a message to it is never a contacted prospect. The fact read is
+ * positive: the recipient address is one of a lead's in the same scope, nothing keyed on a tag or
+ * an address. A transactional message to a real lead still counts.
+ *
+ * No transactional activity in the scope = no extra call (the common case).
+ */
+async function prospectTransactional(
+  tx: RecipientStats | undefined,
+  scope: { campaignScope: string[] | null; params: Parameters<typeof fetchEmailGatewayStats>[0]; conds: SQL[] },
+  context: ReturnType<typeof getServiceContext>,
+): Promise<RecipientStats | undefined> {
+  if (!hasOutreach(tx)) return tx;
+  const [perRecipient, leadEmails] = await Promise.all([
+    fetchStatsForCampaignScope(scope.campaignScope, { ...scope.params, groupBy: "recipientEmail" }, context, (k) => k),
+    fetchScopeLeadEmails(scope.conds),
+  ]);
+  let out: RecipientStats = { ...ZERO_RECIPIENT_STATS, repliesDetail: { ...ZERO_RECIPIENT_STATS.repliesDetail } };
+  if ("groups" in perRecipient) {
+    for (const g of (perRecipient as EmailGatewayGroupedStatsResponse).groups) {
+      if (g.transactional && leadEmails.has(g.key.toLowerCase())) out = addStats(out, g.transactional.recipientStats);
+    }
+  }
+  return out;
+}
+
+/** The scope one email-gateway group answers for: the request's scope narrowed to the group key. */
+function groupScope(
+  field: "campaignId" | "brandId" | "workflowSlug" | "featureSlug",
+  key: string,
+  base: { campaignScope: string[] | null; params: Parameters<typeof fetchEmailGatewayStats>[0]; conds: SQL[] },
+  familyFor: (key: string) => string[] | null,
+): { campaignScope: string[] | null; params: Parameters<typeof fetchEmailGatewayStats>[0]; conds: SQL[] } {
+  const params = { ...base.params };
+  delete params.groupBy;
+  if (field === "campaignId") {
+    const members = familyFor(key) ?? [key];
+    return { campaignScope: members, params, conds: [...base.conds, inArray(leadsCampaigns.campaignId, members)] };
+  }
+  if (field === "brandId") {
+    return { campaignScope: base.campaignScope, params: { ...params, brandId: key }, conds: [...base.conds, sql`${key} = ANY(${leadsCampaigns.brandIds})`] };
+  }
+  if (field === "workflowSlug") {
+    return { campaignScope: base.campaignScope, params: { ...params, workflowSlugs: key }, conds: [...base.conds, eq(leadsCampaigns.workflowSlug, key)] };
+  }
+  return { campaignScope: base.campaignScope, params: { ...params, featureSlugs: key }, conds: [...base.conds, eq(leadsCampaigns.featureSlug, key)] };
+}
+
+/** Rewrite each group's transactional bucket to its prospect-addressed part (see `prospectTransactional`). */
+async function prospectTransactionalGroups(
+  egStats: AnyStatsResponse,
+  field: "campaignId" | "brandId" | "workflowSlug" | "featureSlug",
+  base: { campaignScope: string[] | null; params: Parameters<typeof fetchEmailGatewayStats>[0]; conds: SQL[] },
+  familyFor: (key: string) => string[] | null,
+  context: ReturnType<typeof getServiceContext>,
+): Promise<void> {
+  if (!("groups" in egStats)) return;
+  await Promise.all(
+    (egStats as EmailGatewayGroupedStatsResponse).groups.map(async (g) => {
+      if (!hasOutreach(g.transactional?.recipientStats)) return;
+      const tx = await prospectTransactional(g.transactional!.recipientStats, groupScope(field, g.key, base, familyFor), context);
+      g.transactional = { recipientStats: tx! };
+    }),
+  );
+}
+
 function applyStatusCounts(group: GroupStats, status: string, n: number) {
   if (status === "served") group.totalLeads += n;
   else if (status === "buffered") group.buffered += n;
@@ -595,6 +683,11 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     if (conds.brandIdStr) egParams.brandId = conds.brandIdStr;
     if (dynastyResolved.workflowSlugs) egParams.workflowSlugs = dynastyResolved.workflowSlugs.join(",");
     if (dynastyResolved.featureSlugs) egParams.featureSlugs = dynastyResolved.featureSlugs.join(",");
+    // Outreach figures count prospects only: a transactional message counts when its recipient is a
+    // lead of the (group's) scope, never a notification to the client's own team.
+    const scopeBase = { campaignScope: conds.campaignScope, params: { ...egParams }, conds: conds.conds };
+    const familyFor = (key: string): string[] | null =>
+      familyMembers && key === requestedCampaignId ? conds.campaignScope : null;
 
     if (conds.hasAttributionFilter || isAttributionGroupBy(groupByParam)) {
       const dynastyContext = { orgId: req.orgId, userId: req.userId, runId: req.runId };
@@ -638,6 +731,7 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           .groupBy(col, leadsCampaigns.status),
         fetchStatsForCampaignScope(conds.campaignScope, egParams, egContext, collapseKey),
       ]);
+      await prospectTransactionalGroups(egStats, dbField, scopeBase, familyFor, egContext);
 
       const groups = new Map<string, GroupStats>();
       const toDynasty = (slug: string | null): string => dynastyMap.get(slug ?? "") ?? slug ?? "unknown";
@@ -680,6 +774,7 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
         `),
         fetchStatsForCampaignScope(conds.campaignScope, egParams, egContext, collapseKey),
       ]);
+      await prospectTransactionalGroups(egStats, "brandId", scopeBase, familyFor, egContext);
 
       const groups = new Map<string, GroupStats>();
       const getGroup = (key: string | null) => {
@@ -715,6 +810,9 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
           .groupBy(col, leadsCampaigns.status),
         fetchStatsForCampaignScope(conds.campaignScope, egParams, egContext, collapseKey),
       ]);
+      if (field === "campaignId" || field === "workflowSlug" || field === "featureSlug") {
+        await prospectTransactionalGroups(egStats, field, scopeBase, familyFor, egContext);
+      }
 
       const groups = new Map<string, GroupStats>();
       // `groupBy=campaignId` over an identity: every member's rows fold onto the campaign the
@@ -752,7 +850,8 @@ router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedReq
     const flat = newGroupStats();
     for (const row of statusRows) applyStatusCounts(flat, row.status, row.count);
     const egFlat = egStats as EmailGatewayStatsResponse;
-    const merged = mergeRecipientStats(egFlat.broadcast, egFlat.transactional);
+    const prospectTx = await prospectTransactional(egFlat.transactional?.recipientStats, scopeBase, egContext);
+    const merged = mergeRecipientStats(egFlat.broadcast, prospectTx ? { recipientStats: prospectTx } : undefined);
     flat.byOutreachStatus = merged.byOutreachStatus;
     flat.repliesDetail = merged.repliesDetail;
 
