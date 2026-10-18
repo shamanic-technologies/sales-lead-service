@@ -11,6 +11,7 @@ import {
   dueVerdict,
   type FollowupStatement,
 } from "../lib/lead-followup-date.js";
+import { loadScheduledFollowups } from "../lib/scheduled-followups.js";
 
 const router = Router();
 
@@ -124,6 +125,30 @@ router.put("/orgs/leads/:id/followup-date", apiKeyAuth, requireOrgId, async (req
       return;
     }
     console.error(`[lead-service] PUT followup-date failed id=${req.params.id}:`, err);
+    if (!res.headersSent) res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * What these campaigns have SCHEDULED, on every channel (NEXT-STEPS-ALL-CHANNELS-1019, src/lib/scheduled-followups.ts):
+ * the people whose next follow-up date one of them last stated, plus their reactive follow-up queue, once per person
+ * at the earliest time. `campaignIds` = comma-separated campaign ids of the org (a sales funnel campaign's units).
+ */
+router.get("/orgs/followup-dates/scheduled", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+  const raw = typeof req.query.campaignIds === "string" ? req.query.campaignIds : "";
+  const campaignIds = [...new Set(raw.split(",").map((s) => s.trim()).filter((s) => s !== ""))];
+  if (campaignIds.length === 0) {
+    res.status(400).json({ error: "campaign_ids_required", detail: "campaignIds: comma-separated campaign ids" });
+    return;
+  }
+  if (campaignIds.length > 500) {
+    res.status(400).json({ error: "too_many_campaign_ids", detail: `${campaignIds.length} campaign ids, at most 500` });
+    return;
+  }
+  try {
+    res.json({ campaignIds, ...(await loadScheduledFollowups(req.orgId!, campaignIds)) });
+  } catch (err) {
+    console.error(`[lead-service] GET followup-dates/scheduled failed org=${req.orgId} campaigns=${campaignIds.join(",")}:`, err);
     if (!res.headersSent) res.status(500).json({ error: "internal_error" });
   }
 });

@@ -12903,6 +12903,82 @@
         },
         "additionalProperties": false
       },
+      "ScheduledFollowups": {
+        "type": "object",
+        "properties": {
+          "campaignIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "asOf": {
+            "type": "string",
+            "description": "When this was read (ISO)."
+          },
+          "leads": {
+            "type": "integer",
+            "description": "People with a follow-up scheduled by these campaigns, on any channel (due + upcoming), each counted once."
+          },
+          "due": {
+            "type": "integer",
+            "description": "Their time passed: they go out on the follow-up pipe's next pass."
+          },
+          "upcoming": {
+            "type": "integer",
+            "description": "Their time is still ahead."
+          },
+          "nextAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "The earliest time still ahead (ISO); null when nothing is ahead. Each time is the writer's pick in the person's own working hours."
+          },
+          "oldestDueAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "The longest-waiting due time (ISO); null when nothing is due."
+          },
+          "byDay": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string",
+                  "description": "UTC date YYYY-MM-DD"
+                },
+                "leads": {
+                  "type": "integer"
+                },
+                "firstAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "leads",
+                "firstAt"
+              ]
+            },
+            "description": "Upcoming people per UTC day over the next 31 days, earliest first."
+          },
+          "laterThanHorizon": {
+            "type": "integer",
+            "description": "Upcoming people scheduled beyond those 31 days."
+          }
+        },
+        "required": [
+          "campaignIds",
+          "asOf",
+          "leads",
+          "due",
+          "upcoming",
+          "nextAt",
+          "oldestDueAt",
+          "byDay",
+          "laterThanHorizon"
+        ]
+      },
       "ProspectFollowupVerdict": {
         "type": "object",
         "properties": {
@@ -22359,6 +22435,56 @@
           },
           "502": {
             "description": "The verdict could not be read (the statement was stored)"
+          }
+        }
+      }
+    },
+    "/orgs/followup-dates/scheduled": {
+      "get": {
+        "summary": "What these campaigns have scheduled on every channel: how many people, and when the next follow-ups go out",
+        "description": "A follow-up writer (email reply in the person's last thread, WhatsApp, LinkedIn...) states each person's next follow-up date here instead of queueing in a sender. Counts the people whose next follow-up date one of these campaigns last stated (a stop or a 30-day recheck is not a scheduled follow-up) plus the campaigns' reactive follow-up queue, once per person at the earliest time. A sender's own queue (e.g. an email sequence) is not in here: ask the sender.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Comma-separated campaign ids of the org (at most 500)"
+            },
+            "required": true,
+            "description": "Comma-separated campaign ids of the org (at most 500)",
+            "name": "campaignIds",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The schedule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduledFollowups"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "`campaign_ids_required` or `too_many_campaign_ids`"
           }
         }
       }
