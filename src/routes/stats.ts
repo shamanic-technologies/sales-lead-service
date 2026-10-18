@@ -347,8 +347,10 @@ async function prospectTransactional(
   context: ReturnType<typeof getServiceContext>,
 ): Promise<RecipientStats | undefined> {
   if (!hasOutreach(tx)) return tx;
+  // Transactional only: instantly-service refuses `groupBy=recipientEmail` (it names it `leadEmail`), so asking both
+  // providers 502s the whole read (prod 2026-10-18, v0.83.150).
   const [perRecipient, leadEmails] = await Promise.all([
-    fetchStatsForCampaignScope(scope.campaignScope, { ...scope.params, groupBy: "recipientEmail" }, context, (k) => k),
+    fetchStatsForCampaignScope(scope.campaignScope, { ...scope.params, groupBy: "recipientEmail", type: "transactional" }, context, (k) => k),
     fetchScopeLeadEmails(scope.conds),
   ]);
   let out: RecipientStats = { ...ZERO_RECIPIENT_STATS, repliesDetail: { ...ZERO_RECIPIENT_STATS.repliesDetail } };
