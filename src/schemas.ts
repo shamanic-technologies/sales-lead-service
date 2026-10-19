@@ -9327,6 +9327,72 @@ registry.registerPath({
   },
 });
 
+// --- First message -> first positive reply, every channel (REPLY-LATENCY-ALL-CHANNELS-1019) ---
+
+export const ReplyLatencyRequestSchema = z
+  .object({
+    groups: z
+      .record(
+        z.string().min(1),
+        z.object({
+          campaignIds: z
+            .array(z.string().min(1))
+            .min(1)
+            .max(500)
+            .openapi({ description: "Campaign ids of the group, any org (1..500; duplicates ignored)." }),
+        }),
+      )
+      .openapi({ description: "1..100 groups keyed by the caller's own group key, echoed on the answer." }),
+  })
+  .openapi("ReplyLatencyRequest");
+
+export const ReplyLatencyMetricSchema = z
+  .object({
+    sampleSize: z
+      .number()
+      .int()
+      .openapi({ description: "People (one lead at one org x brand) whose first positive reply came after our first message under the group. A person with no positive reply is not in the sample." }),
+    medianMs: z.number().int().nullable().openapi({ description: "Median first message -> first positive reply, in milliseconds; null when sampleSize is 0." }),
+    averageMs: z.number().int().nullable().openapi({ description: "Average of the same, in milliseconds; null when sampleSize is 0." }),
+  })
+  .openapi("ReplyLatencyMetric");
+
+export const ReplyLatencyResponseSchema = z
+  .object({
+    basis: z.literal("first_message_sent_to_first_positive_reply_since_inception"),
+    groups: z.array(
+      z.object({
+        key: z.string(),
+        campaignIds: z.array(z.string()).openapi({ description: "The group's campaign ids, deduplicated." }),
+        timeToFirstPositiveReply: ReplyLatencyMetricSchema,
+      }),
+    ),
+  })
+  .openapi("ReplyLatencyResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/reply-latency/grouped",
+  summary: "Per group of campaign ids: time from our first message (any channel) to the person's first positive reply, since inception (internal, service-auth, fleet-wide)",
+  description:
+    "For each group: every person (one lead at one org x brand) we sent a message to under one of the group's campaigns, on any channel: " +
+    "an email of ours on the lead timeline (`initial_email` / `followup`, any transport: the provider's sequences and our own sending, the AI follow-up writer included), " +
+    "a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). " +
+    "Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: " +
+    "a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). " +
+    "A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs null. " +
+    "Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. " +
+    "No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
+  request: { body: { content: { "application/json": { schema: ReplyLatencyRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } }],
+  responses: {
+    200: { description: "One answer per group, in request order", content: { "application/json": { schema: ReplyLatencyResponseSchema } } },
+    400: { description: "`invalid_body`: no group, more than 100 groups, an empty group or more than 500 ids in one" },
+    401: { description: "Invalid API key" },
+    500: { description: "The read failed (never an empty answer)" },
+  },
+});
+
 // --- Prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014) ---
 
 export const ProspectFollowupVerdictSchema = z

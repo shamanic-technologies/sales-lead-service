@@ -39,6 +39,7 @@ import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
 import candidateScreeningsRoutes from "./routes/candidate-screenings.js";
 import meetingAttributionRoutes from "./routes/meeting-attribution.js";
+import replyLatencyRoutes, { REPLY_LATENCY_PATH, replyLatencyBodyParser } from "./routes/reply-latency.js";
 import sourceStockRoutes from "./routes/source-stock.js";
 import socialEngagementsRoutes from "./routes/social-engagements.js";
 import leadIdentityRoutes from "./routes/lead-identity.js";
@@ -53,6 +54,7 @@ const openapiPath = join(__dirname, "..", "openapi.json");
 const app = express();
 
 app.use(cors());
+app.use(REPLY_LATENCY_PATH, replyLatencyBodyParser);
 app.use(express.json());
 app.use(withRequestContext);
 
@@ -105,6 +107,7 @@ app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
 app.use(candidateScreeningsRoutes);
 app.use(meetingAttributionRoutes);
+app.use(replyLatencyRoutes);
 app.use(sourceStockRoutes);
 app.use(socialEngagementsRoutes);
 app.use(leadIdentityRoutes);
