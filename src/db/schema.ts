@@ -480,6 +480,8 @@ export const followupActions = pgTable(
     heldByCampaignId: text("held_by_campaign_id").notNull(),
     actingCampaignId: text("acting_campaign_id"),
     runId: text("run_id"),
+    /** The workflow VERSION of the run that wrote the row (x-workflow-slug); NULL = before 0114 or none stated. */
+    workflowSlug: text("workflow_slug"),
     action: text("action").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     source: text("source").notNull().default("live"),
@@ -489,6 +491,7 @@ export const followupActions = pgTable(
   (table) => [
     index("idx_fa_acting_campaign").on(table.actingCampaignId, table.action),
     index("idx_fa_brand_ids").using("gin", table.brandIds),
+    index("idx_fa_lead_org").on(table.leadId, table.orgId),
     uniqueIndex("idx_fa_source_ref")
       .on(table.sourceRef)
       .where(sql`source_ref IS NOT NULL`),
