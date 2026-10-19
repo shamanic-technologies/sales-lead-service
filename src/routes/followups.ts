@@ -473,6 +473,7 @@ router.post(
       leadCampaignId: lookup.id,
       actingCampaignId: req.campaignId,
       runId: req.runId,
+      workflowSlug: req.workflowSlug ?? null,
       nowIso: new Date().toISOString(),
     });
     if (outcome === "row_gone") {
@@ -586,6 +587,7 @@ router.post(
       nowMs,
       actingCampaignId: req.campaignId ?? null,
       runId: req.runId ?? null,
+      workflowSlug: req.workflowSlug ?? null,
     });
 
     if (!state) {

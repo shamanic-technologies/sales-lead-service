@@ -434,6 +434,8 @@ export async function claimFollowup(params: {
   runId: string | null;
   /** The campaign the claiming worker was dispatched for (x-campaign-id). Recorded, never guessed. */
   actingCampaignId: string;
+  /** The claiming run's workflow version (x-workflow-slug); recorded on the ledger row, null = none stated. */
+  workflowSlug?: string | null;
 }): Promise<boolean> {
   const now = new Date(params.nowMs).toISOString();
   const leaseCutoff = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
@@ -458,7 +460,7 @@ export async function claimFollowup(params: {
          AND ${notJournalistSql("")}
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
-      ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now)}
+      ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now, sql`claimed`, params.workflowSlug ?? null)}
     )
     SELECT id FROM claimed
   `)) as unknown as Array<{ id: string }>;
@@ -840,6 +842,7 @@ export async function pickFollowupCandidate(params: {
         nowMs,
         runId: params.runId,
         actingCampaignId: params.actingCampaignId,
+        workflowSlug: params.context.workflowSlug ?? null,
       });
       if (claimed) {
         console.log(
@@ -1040,6 +1043,8 @@ export async function writeFollowupStatement(params: {
    */
   actingCampaignId?: string | null;
   runId?: string | null;
+  /** The writing run's workflow version (x-workflow-slug): recorded on an 'acted' ledger row, null = none stated. */
+  workflowSlug?: string | null;
   /** The occurrence through which the brand named this person (scheduled only; ignored otherwise). */
   statedBy?: FollowupOccurrenceStatement | null;
 }): Promise<FollowupState | null> {
@@ -1094,7 +1099,7 @@ export async function writeFollowupStatement(params: {
     )${
       acted
         ? sql`, logged AS (
-      ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`)}
+      ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`, params.workflowSlug ?? null)}
     )`
         : sql``
     }

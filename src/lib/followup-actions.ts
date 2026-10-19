@@ -41,13 +41,15 @@ export function followupActionInsert(
   runId: string | null,
   nowIso: string,
   from: SQL = sql`claimed`,
+  /** The writing run's workflow version (x-workflow-slug); null = none stated. */
+  workflowSlug: string | null = null,
 ): SQL {
   return sql`
     INSERT INTO followup_actions
       (org_id, brand_ids, lead_campaign_id, lead_id, held_by_campaign_id,
-       acting_campaign_id, run_id, action, occurred_at, source)
+       acting_campaign_id, run_id, workflow_slug, action, occurred_at, source)
     SELECT org_id, brand_ids, id, lead_id, campaign_id,
-           ${actingCampaignId}, ${runId}, ${action}, ${nowIso}, 'live'
+           ${actingCampaignId}, ${runId}, ${workflowSlug}, ${action}, ${nowIso}, 'live'
     FROM ${from}
     RETURNING id
   `;
@@ -74,6 +76,8 @@ export async function recordActedByEmail(params: {
   leadCampaignId: string;
   actingCampaignId: string;
   runId: string;
+  /** The acting run's workflow version (x-workflow-slug); null = none stated. */
+  workflowSlug?: string | null;
   nowIso: string;
 }): Promise<"recorded" | "already_recorded" | "row_gone"> {
   const sourceRef = `run:${params.runId}`;
@@ -86,9 +90,9 @@ export async function recordActedByEmail(params: {
     ins AS (
       INSERT INTO followup_actions
         (org_id, brand_ids, lead_campaign_id, lead_id, held_by_campaign_id,
-         acting_campaign_id, run_id, action, occurred_at, source, source_ref)
+         acting_campaign_id, run_id, workflow_slug, action, occurred_at, source, source_ref)
       SELECT org_id, brand_ids, id, lead_id, campaign_id,
-             ${params.actingCampaignId}, ${params.runId}, 'acted', ${params.nowIso}::timestamptz,
+             ${params.actingCampaignId}, ${params.runId}, ${params.workflowSlug ?? null}, 'acted', ${params.nowIso}::timestamptz,
              ${ACTED_BY_EMAIL_SOURCE}, ${sourceRef}
       FROM target
       ON CONFLICT (source_ref) WHERE source_ref IS NOT NULL DO NOTHING
