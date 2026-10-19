@@ -9,6 +9,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { EMAIL_SEND_WORKFLOW_SOURCES } from "./lib/repoint-causes.js";
 import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
 import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
 import { BUYING_SIGNAL_TYPES, ENGAGEMENT_KINDS } from "./lib/buying-signal.js";
@@ -8042,9 +8043,9 @@ const JourneyEmailSendSchema = z
     workflowSlug: z.string().nullable().openapi({
       description:
         "The workflow of the run that SENT: the run holding the person's `leads_campaigns` row of this campaign at the send " +
-        "(latest retry-pool claim or named serve at or before it, else the row's serve). null = no record names it.",
+        "(latest retry-pool claim, named serve or follow-up due serve at or before it, else the row's serve). null = no record names it.",
     }),
-    workflowSource: z.enum(["serve", "retry_claim", "named_serve"]).nullable().openapi({
+    workflowSource: z.enum(EMAIL_SEND_WORKFLOW_SOURCES).nullable().openapi({
       description: "Which record named `workflowSlug`. null = the person holds no serve row under this campaign (workflowSlug null too).",
     }),
     firstSentAt: z.string().nullable().openapi({ description: "ISO-8601, first send under this campaign x workflow." }),
