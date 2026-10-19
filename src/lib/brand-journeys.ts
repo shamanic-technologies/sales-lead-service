@@ -1,4 +1,5 @@
 import { sql } from "../db/index.js";
+import { EMAIL_SEND_WORKFLOW_SOURCES, type EmailSendWorkflowSource } from "./repoint-causes.js";
 import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
 
 /**
@@ -23,8 +24,8 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
  *     bounce), compacted per (campaign, WORKFLOW that sent): every campaign x workflow under which the
  *     person was actually emailed, first/last send and count. A send's workflow = the run holding the
  *     person's `leads_campaigns` row of that campaign WHEN it was sent: the latest re-point at or before
- *     the send (`lead_campaign_run_repoints`: a retry-pool claim or a named serve hands the paid person
- *     to another run, maybe another workflow, which is the one that sends), else the row's own serve
+ *     the send (`lead_campaign_run_repoints`: a retry-pool claim, a named serve or a follow-up due serve
+ *     hands the person to another run, maybe another workflow, which is the one that sends), else the row's own serve
  *     (`workflow_slug`). `workflowSource` says which; both null when the person holds no row under that
  *     campaign (nothing local names the sender's workflow; never guessed from another row).
  *   - TRANSPORT (SCOUT-VISIT-SCREEN-1018): every outreach fact names the path it went through, verbatim off
@@ -63,9 +64,6 @@ export interface JourneyAct {
   lastAt: string | null;
   count: number;
 }
-
-/** Which record named the sending workflow: the row's serve, or a re-point of the row to the sending run. */
-export type EmailSendWorkflowSource = "serve" | "retry_claim" | "named_serve";
 
 export interface JourneyEmailSendTransport {
   /** Verbatim outreach transport (`smtp` ours, `instantly` the provider); null = no outreach fact names it. */
@@ -111,7 +109,7 @@ interface RawJourney {
 
 function workflowSource(v: unknown): EmailSendWorkflowSource | null {
   if (v === null || v === undefined) return null;
-  if (v === "serve" || v === "retry_claim" || v === "named_serve") return v;
+  if ((EMAIL_SEND_WORKFLOW_SOURCES as readonly unknown[]).includes(v)) return v as EmailSendWorkflowSource;
   throw new Error(`[lead-service] timeline-journeys: unknown email send workflow source ${JSON.stringify(v)}`);
 }
 
