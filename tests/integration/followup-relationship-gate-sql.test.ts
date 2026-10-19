@@ -117,7 +117,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     await db.execute(sql`DELETE FROM followup_responders WHERE first_responder_campaign_id = ${acting}`);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
     await clearRegistry(orgId);
-    for (const t of ["crm_facts", "relationship_subjects", "relationship_judgments", "relationship_evidence", "relationship_statements"]) {
+    for (const t of ["conversion_events", "crm_facts", "relationship_subjects", "relationship_judgments", "relationship_evidence", "relationship_statements"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
   });
@@ -305,6 +305,54 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
       expect(r.claimed).toBeNull();
       expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "opted_out" });
       await db.execute(sql`DELETE FROM human_fact_copies WHERE human_id = ${p.human}::uuid`);
+    });
+  });
+  describe("a person a trigger occurrence named (OCCURRENCE-POLICY-ADMITS-1019)", () => {
+    async function named(rowId: string): Promise<void> {
+      await db.execute(sql`
+        UPDATE leads_campaigns SET followup_stated_event_id = ${randomUUID()}, followup_stated_at = now(), followup_stated_closed_at = NULL
+        WHERE id = ${rowId}::uuid`);
+    }
+    async function outcome(leadId: string, event: string): Promise<void> {
+      await db.execute(sql`
+        INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
+        VALUES (${orgId}, ${brandId}, ${event}, 'exact', 'attributed', ${leadId}::uuid, 'manual')`);
+    }
+
+    it("a pure prospect who booked a meeting and never paid is claimed under the policy", async () => {
+      const p = await dueLead();
+      await named(p.rowId);
+      await outcome(p.leadId, "meeting_booked");
+      const r = await claim("pure_prospect");
+      expect(r.claimed?.id).toBe(p.rowId);
+      expect(r.relationships).toEqual({ policy: "pure_prospect", refused: [], pending: [] });
+    });
+
+    it("a person with a sale on the ledger is refused by the policy as a customer and listed in refused", async () => {
+      const p = await dueLead();
+      await named(p.rowId);
+      await outcome(p.leadId, "meeting_booked");
+      await outcome(p.leadId, "sale");
+      const r = await claim("pure_prospect");
+      expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+      expect(r.relationships!.refused).toEqual([
+        { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, phone: null, reason: "not_a_lead", tags: ["customer"], unsureTags: [] },
+      ]);
+      expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_not_a_lead" });
+    });
+
+    it("the follow-up loop is unchanged: a booked person no occurrence named is never claimed, policy or not", async () => {
+      const p = await dueLead();
+      await outcome(p.leadId, "meeting_booked");
+      expect(await claim("pure_prospect")).toMatchObject({ claimed: null, reason: "nothing_due", relationships: { refused: [], pending: [] } });
+      expect(await claim()).toMatchObject({ claimed: null, reason: "nothing_due" });
+    });
+
+    it("without a stated policy an occurrence-named booked person keeps the booked stop", async () => {
+      const p = await dueLead();
+      await named(p.rowId);
+      await outcome(p.leadId, "meeting_booked");
+      expect(await claim()).toMatchObject({ claimed: null, reason: "nothing_due" });
     });
   });
 });
