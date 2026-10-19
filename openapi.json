@@ -9306,7 +9306,7 @@
           "workflowSlug": {
             "type": "string",
             "nullable": true,
-            "description": "The workflow of the run that SENT: the run holding the person's `leads_campaigns` row of this campaign at the send (latest retry-pool claim or named serve at or before it, else the row's serve). null = no record names it."
+            "description": "The workflow of the run that SENT: the run holding the person's `leads_campaigns` row of this campaign at the send (latest retry-pool claim, named serve or follow-up due serve at or before it, else the row's serve). null = no record names it."
           },
           "workflowSource": {
             "type": "string",
@@ -9315,6 +9315,7 @@
               "serve",
               "retry_claim",
               "named_serve",
+              "followup_due",
               null
             ],
             "description": "Which record named `workflowSlug`. null = the person holds no serve row under this campaign (workflowSlug null too)."
