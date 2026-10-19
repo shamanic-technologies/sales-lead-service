@@ -223,6 +223,10 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       // Every lead's next follow-up date and each "Lead follow-up due" hand-out (LEAD-FOLLOWUP-DATE-1016).
       { table: "lead_followup_dates", touchesUpdatedAt: true },
       { table: "lead_followup_due_serves", touchesUpdatedAt: false },
+      // Who is hot and what each new hot fact did (HOT-LEAD-PROPOSAL-1019): moved so a person who stays hot never re-fires.
+      { table: "hot_lead_brands", touchesUpdatedAt: false },
+      { table: "hot_lead_states", touchesUpdatedAt: true },
+      { table: "hot_lead_fires", touchesUpdatedAt: false },
     ];
     // A date the target already holds for the same lead is the target's own: drop the source copy.
     await tx.execute(sql`
