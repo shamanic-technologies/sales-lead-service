@@ -6,7 +6,9 @@
  *   3. judgment: Jev reads each lead whose thread moved (messages first), JUDGE_PER_TICK at most;
  *   3b. intent: Jev says whether each lead who WROTE to us wants to do business with the brand (relationship-intent.ts),
  *       INTENT_PER_TICK at most, after the tags (a lead is decided by them);
- *   4. the Unibox read model: each lead's six tag dimensions (unibox-model.ts, UNIBOX-SIX-TAGS-1017).
+ *   4. the Unibox read model: each lead's six tag dimensions (unibox-model.ts, UNIBOX-SIX-TAGS-1017);
+ *   5. the "hot lead" trigger: a relation that NEWLY became lead yes + wants business yes is reported once to
+ *      campaign-service (hot-lead-triggers.ts, HOT-LEAD-PROPOSAL-1019).
  * "Same person?" and "which company?" are crm-service's and human-service's answers, read on the subjects; this
  * sweep asks neither (PROFESSIONAL-LEADS-1017). Jev is platform-billed (no org request starts the sweep). A brand that
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
@@ -17,6 +19,7 @@ import { intentSubjectsToJudge, judgeIntent } from "./relationship-intent-judge.
 import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects.js";
 import { recomputePolicy } from "./relationship-read.js";
 import { refreshUniboxRows } from "./unibox-model.js";
+import { detectHotLeads, type HotLeadPass } from "./hot-lead-triggers.js";
 import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
@@ -38,11 +41,12 @@ export interface ScopeTick {
   intentJudged: number;
   policyChanged: number;
   unibox: { rows: number; removed: number; teamMembers: number } | null;
+  hotLeads: HotLeadPass | null;
   error: string | null;
 }
 
 export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: number } = {}): Promise<ScopeTick> {
-  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, policyChanged: 0, unibox: null, error: null };
+  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, policyChanged: 0, unibox: null, hotLeads: null, error: null };
   const refresh = await refreshSubjects(scope);
   tick.subjects = refresh.subjects;
   tick.withoutHuman = refresh.withoutHuman;
@@ -91,6 +95,12 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
     }
     tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
     tick.unibox = await refreshUniboxRows(scope);
+    // A failed hot-lead pass writes nothing and is retried next tick; it never fails the answers already refreshed.
+    try {
+      tick.hotLeads = await detectHotLeads(scope);
+    } catch (err) {
+      console.error(`[lead-service] hot lead pass failed for org ${scope.orgId} brand ${scope.brandId} (retried next tick):`, err);
+    }
   } catch (err) {
     failed = true;
     tick.error = err instanceof Error ? err.message : String(err);

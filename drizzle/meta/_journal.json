@@ -792,6 +792,13 @@
       "when": 1787902200000,
       "tag": "0112_timeline_sends_by_lead",
       "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1787902300000,
+      "tag": "0113_hot_lead_triggers",
+      "breakpoints": true
     }
   ]
 }

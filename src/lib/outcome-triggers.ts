@@ -164,7 +164,7 @@ function createLookups(): Lookups {
 }
 
 /** brand-service's ACTIVE offers of the brand. THROWS when it cannot answer. */
-async function fetchActiveBrandOffers(orgId: string, brandId: string): Promise<string[]> {
+export async function fetchActiveBrandOffers(orgId: string, brandId: string): Promise<string[]> {
   const response = await fetchWithRetry(`${BRAND_SERVICE_URL}/internal/brands/${encodeURIComponent(brandId)}/offers`, {
     headers: { "x-api-key": BRAND_SERVICE_API_KEY, "x-org-id": orgId },
     signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
@@ -180,7 +180,7 @@ async function fetchActiveBrandOffers(orgId: string, brandId: string): Promise<s
 }
 
 /** The lead of (org, brand) owning one of the addresses, the record's own first; null = not a lead. */
-async function leadOwningEmails(orgId: string, brandId: string, emails: string[]): Promise<string | null> {
+export async function leadOwningEmails(orgId: string, brandId: string, emails: string[]): Promise<string | null> {
   if (emails.length === 0) return null;
   const rows = (await db.execute(sql`
     SELECT cm.lead_id::text AS lead_id, lower(cm.value) AS email
