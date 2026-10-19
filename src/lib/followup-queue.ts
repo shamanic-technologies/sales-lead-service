@@ -162,6 +162,22 @@ export const FOLLOWUP_DUE_MAX_HORIZON_MS = 365 * 24 * 60 * 60 * 1000;
  */
 export const FOLLOWUP_BOOKED_OUTCOMES = ["meeting_booked", "meeting_attended", "sale"] as const;
 
+/**
+ * Outcomes that make the person a CUSTOMER of the brand. Read on a claim stating a relationship policy, where an
+ * occurrence-named row skips the booked stop (OCCURRENCE-POLICY-ADMITS-1019): the ledger's sale is customer
+ * evidence the policy refuses on, even before the relationship sweep has tagged the person.
+ */
+export const FOLLOWUP_WON_OUTCOMES = ["sale", "purchase"] as const;
+
+/**
+ * A row a trigger occurrence named and no claim has consumed yet (the open grant `statedBy` on schedule-by-email
+ * writes): the claim exists because the brand named THIS person, so under a stated relationship policy it is the
+ * policy, never the follow-up loop's booked stop, that decides whether they are answered.
+ */
+export function openOccurrenceSql() {
+  return sql`(lc.followup_stated_event_id IS NOT NULL AND lc.followup_stated_closed_at IS NULL)`;
+}
+
 /** Why a claim came back with nobody. Named, never a silent empty. */
 export type FollowupEmptyReason =
   /** No row of this campaign is due right now. */
@@ -224,6 +240,8 @@ export interface FollowupCandidate {
   followupCount: number;
   lastActionAt: Date | string | null;
   audienceId: string | null;
+  /** A live sale (legacy `purchase` included) is on the ledger for this row or lead: a customer. */
+  wonOnLedger: boolean;
 }
 
 /** What a caller states about a row's follow-up debt. */
@@ -296,6 +314,7 @@ interface RawCandidateRow {
   followup_count: number | string | null;
   followup_last_action_at: Date | string | null;
   audience_id: string | null;
+  won_on_ledger: boolean | null;
 }
 
 /**
@@ -320,6 +339,11 @@ export async function loadFollowupCandidates(params: {
   responderStartedAtIso: string;
   /** The campaign that claims (x-campaign-id): only debts that are its to take are read. */
   actingCampaignId: string;
+  /**
+   * The claim states a relationship policy: a row a trigger occurrence named (open grant) is then read
+   * whatever the booked-outcome stop says, and the policy decides (OCCURRENCE-POLICY-ADMITS-1019).
+   */
+  occurrenceAdmittedByPolicy?: boolean;
   limit?: number;
 }): Promise<FollowupCandidate[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -331,6 +355,13 @@ export async function loadFollowupCandidates(params: {
       lc.id, lc.lead_id, lc.campaign_id, lc.brand_ids, lc.audience_id,
       lc.followup_due_at, lc.followup_last_action_at,
       COALESCE(lc.followup_count, 0) AS followup_count,
+      EXISTS (
+        SELECT 1
+        FROM conversion_events cw
+        WHERE cw.withdrawn_at IS NULL
+          AND cw.event = ANY(${sql.param(FOLLOWUP_WON_OUTCOMES as unknown as string[])}::text[])
+          AND (cw.lead_campaign_id = lc.id OR cw.matched_lead_id = lc.lead_id)
+      ) AS won_on_ledger,
       lower(em.value) AS email,
       ph.value AS phone
     FROM leads_campaigns lc
@@ -357,12 +388,14 @@ export async function loadFollowupCandidates(params: {
       AND ${ownedByActingSql(params.actingCampaignId)}
       AND ${notJournalistSql()}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
-      AND NOT EXISTS (
-        SELECT 1
-        FROM conversion_events ce
-        WHERE ce.withdrawn_at IS NULL
-          AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
-          AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
+      AND (
+        ${params.occurrenceAdmittedByPolicy ? sql`${openOccurrenceSql()} OR ` : sql``}NOT EXISTS (
+          SELECT 1
+          FROM conversion_events ce
+          WHERE ce.withdrawn_at IS NULL
+            AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
+            AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
+        )
       )
     ORDER BY lc.followup_due_at ASC, lc.id ASC
     LIMIT ${limit}
@@ -382,6 +415,7 @@ export async function loadFollowupCandidates(params: {
       followupCount: Number(r.followup_count ?? 0),
       lastActionAt: r.followup_last_action_at,
       audienceId: r.audience_id,
+      wonOnLedger: Boolean(r.won_on_ledger),
     }))
     .filter((c) => c.brandId.length > 0);
 }
@@ -702,6 +736,7 @@ export async function pickFollowupCandidate(params: {
     nowMs,
     responderStartedAtIso,
     actingCampaignId: params.actingCampaignId,
+    occurrenceAdmittedByPolicy: Boolean(params.relationships),
   });
   const report: RelationshipGateReport | undefined = params.relationships
     ? { policy: params.relationships, refused: [], pending: [] }
@@ -765,7 +800,10 @@ export async function pickFollowupCandidate(params: {
       if (report && budget) {
         let verdict: Awaited<ReturnType<typeof gateFollowupCandidate>>;
         try {
-          verdict = await gateFollowupCandidate({
+          // A sale on the ledger is a customer, whatever the relationship sweep has tagged yet: refused by the policy.
+          verdict = candidate.wonOnLedger
+            ? { kind: "refuse", reason: NOT_A_LEAD_REASON, tags: ["customer"], unsureTags: [] }
+            : await gateFollowupCandidate({
             orgId: params.orgId,
             brandId: candidate.brandId,
             leadId: candidate.leadId,
