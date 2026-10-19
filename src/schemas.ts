@@ -8123,6 +8123,68 @@ registry.registerPath({
   },
 });
 
+const WrittenBySchema = z
+  .object({
+    by: z.enum(["workflow", "person", "unknown"]),
+    basis: z.enum(["person", "recorded_act", "holding_run"]).nullable().openapi({
+      description:
+        "person = the copy says a person sent it; recorded_act = the follow-up ledger act a run recorded on this person within 10 min " +
+        "(of the message's own campaign when it names one); holding_run = the run holding the person's row of the campaign when the email went out.",
+    }),
+    runId: z.string().nullable().openapi({ description: "The writing run (resolvable at runs-service); null when unknown." }),
+    workflowSlug: z.string().nullable().openapi({ description: "The writing run's workflow version slug as recorded (x-workflow-slug); null when the record predates it." }),
+    campaignId: z.string().nullable().openapi({ description: "The campaign the writing run was dispatched for." }),
+    workflowSource: z.string().nullable().openapi({ description: "holding_run only: `serve` or the re-point cause that handed the row to that run." }),
+    reason: z.enum(["no_recorded_run", "undated"]).nullable().openapi({ description: "Why the writer is unknown (never guessed)." }),
+  })
+  .openapi("SentMessageWrittenBy");
+
+const SentMessageSchema = z
+  .object({
+    id: z.string().openapi({ description: "Outreach subject key (= the timeline fact id), crm fact id, or follow-up ledger row id." }),
+    kind: z.enum(["email_sent", "reply_sent", "message_out", "followup_act"]),
+    source: z.enum(["outreach", "crm", "followup_ledger"]),
+    channel: z.string().nullable().openapi({ description: "`email`, crm's channel name (whatsapp, linkedin, gmail...), null for a bare act." }),
+    campaignId: z.string().nullable().openapi({ description: "The campaign the record itself names (crm messages name none)." }),
+    brandIds: z.array(z.string()),
+    sentAt: z.string().nullable(),
+    writtenBy: WrittenBySchema,
+  })
+  .openapi("SentMessage");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/leads/{leadId}/sent-messages",
+  summary: "Every message we sent a lead, any channel, with the workflow run that wrote it (internal, service-auth)",
+  description:
+    "WRITTEN-BY-1019-SENDER. One entry per message we sent the lead at the x-org-id: outreach `email_sent` / `reply_sent` (current fact per " +
+    "subject), crm `message_out` (every Unibox channel, matched on the lead's addresses and phones), and follow-up ledger acts no message was " +
+    "paired with. `writtenBy`: a person when the copy says so; else the run that recorded the act (ledger, within 10 min); else for a sequence " +
+    "email the run holding the person's row of the campaign at the send; else unknown with a reason. Date order (undated last). Internal only: " +
+    "no customer read carries these fields.",
+  request: { params: z.object({ leadId: z.string().uuid() }) },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "Every message we sent the lead",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ leadId: z.string(), messages: z.array(SentMessageSchema), count: z.number().int() })
+            .openapi("SentMessagesResponse"),
+        },
+      },
+    },
+    400: { description: "leadId not a uuid, or x-org-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "The lead holds no row of this org" },
+    500: { description: "Internal server error" },
+  },
+});
+
 const ProvenanceSourceSchema = z
   .object({
     audienceId: z.string(),
