@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
-const { loadReplyLatencyByGroups } = await import("../../src/lib/reply-latency.js");
+const { loadReplyLatencyByGroups, REPLY_LATENCY_BUCKETS } = await import("../../src/lib/reply-latency.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -107,10 +107,24 @@ describe.skipIf(!hasRealDatabase)("first message -> first positive reply per cam
     expect(out.map((o) => o.key)).toEqual(["campaign", "fleet", "silent", "unknown"]);
     expect(out[0].campaignIds).toEqual([cold, whatsapp, writer]);
     // campaign: 48h, 6h, 12h -> median 12h, average 22h.
-    expect(out[0].timeToFirstPositiveReply).toEqual({ sampleSize: 3, medianMs: 12 * HOUR, averageMs: 22 * HOUR });
+    const campaign = out[0].timeToFirstPositiveReply;
+    expect({ sampleSize: campaign.sampleSize, medianMs: campaign.medianMs, averageMs: campaign.averageMs }).toEqual({ sampleSize: 3, medianMs: 12 * HOUR, averageMs: 22 * HOUR });
+    // interpolated over [6, 12, 48]: p10 = 6 + 0.2*6, p25 = 6 + 0.5*6, p75 = 12 + 0.5*36, p90 = 12 + 0.8*36.
+    expect(campaign.percentilesMs).toEqual({ p10: 7.2 * HOUR, p25: 9 * HOUR, p50: 12 * HOUR, p75: 30 * HOUR, p90: 40.8 * HOUR });
+    const counts = (d: typeof campaign.distribution) => Object.fromEntries(d.filter((b) => b.count > 0).map((b) => [b.key, b.count]));
+    expect(campaign.distribution.map((b) => b.key)).toEqual(REPLY_LATENCY_BUCKETS.map((b) => b.key));
+    // 6h falls in [6h, 12h) (lower bound inclusive), 12h in [12h, 24h), 48h in [2d, 3d).
+    expect(counts(campaign.distribution)).toEqual({ "6h_12h": 1, "12h_1d": 1, "2d_3d": 1 });
+    expect(campaign.distribution.at(-1)!.cumulativeCount).toBe(3);
     // fleet: + 2h -> median (6+12)/2 = 9h, average 17h.
-    expect(out[1].timeToFirstPositiveReply).toEqual({ sampleSize: 4, medianMs: 9 * HOUR, averageMs: 17 * HOUR });
-    expect(out[2].timeToFirstPositiveReply).toEqual({ sampleSize: 0, medianMs: null, averageMs: null });
-    expect(out[3].timeToFirstPositiveReply).toEqual({ sampleSize: 0, medianMs: null, averageMs: null });
+    const fleet = out[1].timeToFirstPositiveReply;
+    expect({ sampleSize: fleet.sampleSize, medianMs: fleet.medianMs, averageMs: fleet.averageMs }).toEqual({ sampleSize: 4, medianMs: 9 * HOUR, averageMs: 17 * HOUR });
+    expect(fleet.percentilesMs.p50).toBe(fleet.medianMs);
+    expect(counts(fleet.distribution)).toEqual({ "1h_3h": 1, "6h_12h": 1, "12h_1d": 1, "2d_3d": 1 });
+    expect(fleet.distribution.reduce((s, b) => s + b.count, 0)).toBe(4);
+    // empty groups: nulls and no buckets, never zeros.
+    const empty = { sampleSize: 0, medianMs: null, averageMs: null, percentilesMs: { p10: null, p25: null, p50: null, p75: null, p90: null }, distribution: [] };
+    expect(out[2].timeToFirstPositiveReply).toEqual(empty);
+    expect(out[3].timeToFirstPositiveReply).toEqual(empty);
   });
 });
