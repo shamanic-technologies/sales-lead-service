@@ -9650,6 +9650,27 @@ const UniboxRowSchema = z
   })
   .openapi("UniboxRow");
 
+/** DEALS-LIFECYCLE-1021: a LIST row also names the campaigns that reached the person (a Deals card). The card's `lead` stays UniboxRow. */
+const UniboxListRowSchema = UniboxRowSchema.extend({
+  campaigns: z
+    .array(
+      z.object({
+        campaignId: z.string().openapi({ description: "The campaign the customer launched (each of its pipes folds into it), else the campaign itself. Same id as the lead card's campaigns[].campaignId." }),
+        name: z.string().openapi({ description: "What the customer calls it (the lead card's name for it)." }),
+        pipeCampaignIds: z.array(z.string()).openapi({ description: "The pipe campaigns folded into it that filed this person." }),
+        servedAt: z.string().nullable().openapi({ description: "First time it served them; null = filed, never served." }),
+      }),
+    )
+    .nullable()
+    .openapi({
+      description:
+        "Every campaign of the brand this relation is a lead on, as the lead card (GET /orgs/leads/unibox-lead) names them: the customer's campaign once, its pipes folded in; a filing that is no campaign (signup, Unibox conversation) is not listed. Most recent first (servedAt desc, never served last). On a scoped read (offerId / campaignId) only the scope's campaigns. [] = a lead of no campaign; null = campaign-service unreadable, see campaignsReason.",
+    }),
+  campaignsReason: z.enum(["source_unreadable"]).nullable().openapi({
+    description: "Why campaigns is null: source_unreadable = campaign-service could not name the campaigns for this read. Null when campaigns is served.",
+  }),
+}).openapi("UniboxListRow");
+
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/unibox",
@@ -9683,7 +9704,7 @@ registry.registerPath({
             offerId: z.string().nullable().optional().openapi({ description: "The offer scope; present only on a scoped read." }),
             campaignId: z.string().nullable().optional().openapi({ description: "The campaign scope; present only on a scoped read." }),
             lifecycleLadder: z.array(LifecycleRungSchema),
-            rows: z.array(UniboxRowSchema),
+            rows: z.array(UniboxListRowSchema),
             total: z.number().int(),
             nextCursor: z.string().nullable(),
             builtAt: z.string().nullable(),

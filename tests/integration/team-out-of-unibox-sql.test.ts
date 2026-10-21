@@ -65,6 +65,8 @@ describe.skipIf(!hasRealDatabase)("the org's team is out of its Unibox and never
     await refreshUniboxRows(scope);
     const before = await readUniboxPage(scope, {}, { limit: 50, cursor: null });
     expect(before.total).toBe(4);
+    // campaign-service is not mocked here: the list still answers, each row saying its campaigns are unknown (never "none").
+    expect(before.rows.every((r) => r.campaigns === null && r.campaignsReason === "source_unreadable")).toBe(true);
 
     setTestOrgMembers(orgId, [memberAddress.toUpperCase()]);
     const built = await refreshUniboxRows(scope);
