@@ -626,10 +626,10 @@ export async function resolveProbe(input: { builtin: string } | { tregEndpointId
  * Token sizes the estimate assumes; the sample measures the real figure. A screenshot check is ONE image judgment
  * (`imageJudgeIn`: the judge's own count for a homepage screenshot fitted by chat-service, measured on the
  * SCREENSHOT-CHECK-QUESTION-1021 benchmark) + one evidence sentence written from the image (`imageEvidenceIn`:
- * Gemini's count for a 1920x1080 screenshot); a text check is the two-question judgment of the observation + the
+ * Gemini's count for a 1920x1080 screenshot + the question, 1,262 on average over the 102 re-judged evidence sentences); a text check is the two-question judgment of the observation + the
  * evidence sentence written from it.
  */
-const EST = { stateTokens: 8_000, questions: 2, evidenceIn: 8_000, evidenceOut: 60, imageJudgeIn: IMAGE_JUDGE_INPUT_TOKENS, imageEvidenceIn: 1_600 };
+const EST = { stateTokens: 8_000, questions: 2, evidenceIn: 8_000, evidenceOut: 60, imageJudgeIn: IMAGE_JUDGE_INPUT_TOKENS, imageEvidenceIn: 1_300 };
 
 export interface CostEstimate {
   perRowUsd: number;
