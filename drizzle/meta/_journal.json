@@ -827,6 +827,13 @@
       "when": 1788202400000,
       "tag": "0117_lead_feed_person_country",
       "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1788288800000,
+      "tag": "0118_leads_judge_brand",
+      "breakpoints": true
     }
   ]
 }

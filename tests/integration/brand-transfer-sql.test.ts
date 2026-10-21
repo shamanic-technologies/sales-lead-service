@@ -51,6 +51,7 @@ const BRAND_SCALAR_TABLES = [
   "brand_journalists",
   "lead_followup_dates",
   "lead_followup_due_serves",
+  "lead_crm_acts",
   "hot_lead_brands",
   "hot_lead_states",
   "hot_lead_fires",
@@ -196,6 +197,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO lead_followup_due_serves (org_id, brand_id, lead_id, source_campaign_id, lead_campaign_id)
       VALUES (${org}, ${brand}, ${leadId}::uuid, 'itest-source', ${lc.id}::uuid)`);
+    await db.execute(sql`
+      INSERT INTO lead_crm_acts (org_id, brand_id, lead_id, fact_id, type, contact_point, at)
+      VALUES (${org}, ${brand}, ${leadId}::uuid, ${`itest-${randomUUID()}`}, 'message_in', 'gmail:itest', now())`);
     await db.execute(sql`
       INSERT INTO brand_journalists (org_id, brand_id, lead_id, press_only, journalist, basis, pitch_campaign_ids)
       VALUES (${org}, ${brand}, ${leadId}::uuid, true, true, 'press_only', ${sql.param([campaignId])}::text[])`);

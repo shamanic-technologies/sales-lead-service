@@ -8,6 +8,7 @@ import { recentlyEmailedClause, type RecentlyEmailedScope } from "./recently-ema
 import { journalistClause, journalistScopeOf, type JournalistScope } from "./brand-journalists.js";
 import { loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
 import { toIsoTimestamp } from "./basic-leads.js";
+import { judgeAutomatedActs, recordTheirActs, refreshActedAt } from "./their-acts.js";
 
 /**
  * EVERY LEAD CARRIES A NEXT FOLLOW-UP DATE (LEAD-FOLLOWUP-DATE-1016, owner 2026-10-16: "Dans lead service, il faut
@@ -55,6 +56,8 @@ export interface ObservedSend {
   leadId: string;
   sentAt: string;
   channel: string;
+  /** The crm fact it was read off (Unibox facts only): what `lead_crm_acts` keeps of an act of theirs. */
+  fact?: { factId: string; type: string; contactPoint: string | null };
 }
 
 const gap = sql.raw(`interval '${DEFAULT_GAP_DAYS} days'`);
@@ -126,9 +129,13 @@ async function applyPastSends(orgId: string, brandId: string, leadIds: string[])
   ];
   await applySends(sends);
   await applyActions(uniboxTheirs.filter((u) => wanted.has(u.leadId)));
+  await refreshActedAt({ orgId, brandId });
 }
 
 interface UniboxFact {
+  fact_id: string;
+  type: string;
+  contact_point: string | null;
   org_id: string;
   brand_id: string;
   at: Date | string;
@@ -146,7 +153,7 @@ async function loadUniboxFacts(factFilter: SQL, whose: "ours" | "theirs" = "ours
   const kind =
     whose === "ours" ? sql`f.type = 'message_out'` : sql`f.type <> ALL(${sql.param([...CRM_NOT_THEIR_ACT])}::text[])`;
   return (await db.execute(sql`
-    SELECT f.org_id, f.brand_id, f.occurred_at AS at, COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel,
+    SELECT f.fact_id, f.type, f.contact_point, f.org_id, f.brand_id, f.occurred_at AS at, COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel,
       f.emails, f.phones, CASE WHEN (f.raw->>'humanId') ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human_id
     FROM crm_facts f
     WHERE ${kind} AND f.occurred_at IS NOT NULL AND ${factFilter}
@@ -197,7 +204,16 @@ async function matchUniboxSends(facts: readonly UniboxFact[]): Promise<ObservedS
       ...f.phones.flatMap((x) => p.get(digitsOf(x)) ?? []),
       ...(f.human_id ? (h.get(f.human_id) ?? []) : []),
     ]);
-    for (const leadId of leads) out.push({ orgId: f.org_id, brandId: f.brand_id, leadId, sentAt: toIsoTimestamp(f.at)!, channel: f.channel });
+    for (const leadId of leads) {
+      out.push({
+        orgId: f.org_id,
+        brandId: f.brand_id,
+        leadId,
+        sentAt: toIsoTimestamp(f.at)!,
+        channel: f.channel,
+        fact: { factId: f.fact_id, type: f.type, contactPoint: f.contact_point },
+      });
+    }
   }
   return out;
 }
@@ -291,24 +307,14 @@ export const CRM_NOT_THEIR_ACT = [
   "meeting_not_held",
 ] as const;
 
+/**
+ * Record every act of theirs read off the Unibox facts (`lead_crm_acts`, one row per fact x lead). Which of them COUNT
+ * toward the brand (`last_action_at`) is decided on every pass by `refreshActedAt` (their-acts.ts), because what
+ * decides it can change after the fact landed: crm-service's verdict on the conversation, the judgment "a person
+ * wrote it, not a machine" (LEADS-JUDGE-BRAND-1021).
+ */
 export async function applyActions(messages: readonly ObservedSend[]): Promise<void> {
-  const rows = latestPerLead(messages);
-  for (let i = 0; i < rows.length; i += 1_000) {
-    const chunk = rows.slice(i, i + 1_000);
-    await db.execute(sql`
-      UPDATE lead_followup_dates d SET last_action_at = s.at, updated_at = now()
-      FROM (
-        SELECT * FROM unnest(
-          ${sql.param(chunk.map((r) => r.orgId))}::text[],
-          ${sql.param(chunk.map((r) => r.brandId))}::text[],
-          ${sql.param(chunk.map((r) => r.leadId))}::uuid[],
-          ${sql.param(chunk.map((r) => r.sentAt))}::timestamptz[]
-        ) AS x(org_id, brand_id, lead_id, at)
-      ) s
-      WHERE d.org_id = s.org_id AND d.brand_id = s.brand_id AND d.lead_id = s.lead_id
-        AND (d.last_action_at IS NULL OR s.at > d.last_action_at)
-    `);
-  }
+  await recordTheirActs(messages);
 }
 
 /**
@@ -857,8 +863,17 @@ export function startLeadFollowupDatesWorker(beforeDates: () => Promise<unknown>
       await beforeDates().catch((err: unknown) => console.error("[lead-service] lead follow-up dates: intake before dating failed:", err));
       const ensured = await ensureLeadFollowupDates();
       const synced = await syncSendFeeds();
-      if (ensured.inserted > 0 || synced.batches > 1) {
-        console.log(`[lead-service] lead follow-up dates: dated=${ensured.inserted} sendBatches=${synced.batches}`);
+      // Which acts of theirs count (LEADS-JUDGE-BRAND-1021): judge the new messages "a person or a machine?", then
+      // re-derive every lead's last act from what counts now. A judgment failure leaves those messages uncounted.
+      const judged = await judgeAutomatedActs().catch((err: unknown) => {
+        console.error("[lead-service] lead follow-up dates: automatic-message judgments failed (those messages stay uncounted):", err);
+        return { judged: 0, automated: 0 };
+      });
+      const acted = await refreshActedAt(null);
+      if (ensured.inserted > 0 || synced.batches > 1 || judged.judged > 0 || acted.changed > 0) {
+        console.log(
+          `[lead-service] lead follow-up dates: dated=${ensured.inserted} sendBatches=${synced.batches} actsJudged=${judged.judged} automated=${judged.automated} actedChanged=${acted.changed}`,
+        );
       }
     } catch (err) {
       console.error("[lead-service] lead follow-up dates sweep failed:", err);

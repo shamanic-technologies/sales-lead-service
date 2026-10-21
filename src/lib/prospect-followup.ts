@@ -65,6 +65,8 @@ export const PROSPECT_FOLLOWUP_STOP_REASONS = [
   "meeting_booked",
   "positive_reply",
   "not_pure_prospect",
+  // LEADS-JUDGE-BRAND-1021: the judge or crm-service says they are not the brand's lead (relationship-tags.ts notBrandLeadOf).
+  "not_brand_lead",
   "not_contacted",
   // "Lead follow-up due" only (src/lib/lead-followup-date.ts `dueVerdict`): the person never acted toward the brand.
   "no_action_toward_us",
@@ -168,6 +170,7 @@ export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new
   else if (!f.relationship.policies.pure_prospect) {
     relationshipTags = PURE_PROSPECT_EXCLUDED.filter((t) => f.relationship!.tags.includes(t) || f.relationship!.unsureTags.includes(t));
     if (relationshipTags.length > 0) stops.add("not_pure_prospect");
+    else if (f.relationship.notBrandLead) stops.add("not_brand_lead");
     else if (f.relationship.subject && f.relationship.judgedAt === null) stops.add("relationship_not_judged");
     else stops.add("same_person_question_open");
   }
