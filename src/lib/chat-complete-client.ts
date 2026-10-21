@@ -4,8 +4,8 @@
  * goes here: a yes/no or a pick among options is a JUDGMENT (src/lib/qualification-judge.ts).
  *
  * Used for three writing jobs of the qualification checks: drafting the suggested criteria from a
- * brand's offer, describing a homepage screenshot in words, and stating the measured evidence in
- * one sentence. Google models: flash-lite (cheapest that reads images) unless a job asks for flash.
+ * brand's offer, and stating the measured evidence in one sentence (from a homepage screenshot for
+ * a screenshot check, the question and answer in hand). Google models: flash-lite (cheapest that reads images) unless a job asks for flash.
  */
 import { CHAT_SERVICE_API_KEY, CHAT_SERVICE_URL } from "../config.js";
 import { paymentRefusal } from "./credit-errors.js";
