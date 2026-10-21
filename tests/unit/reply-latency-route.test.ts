@@ -19,7 +19,7 @@ describe("POST /internal/reply-latency/grouped", () => {
       loadReplyLatencyByGroups: async (groups: Array<{ key: string; campaignIds: string[] }>) => {
         asked.push(groups);
         if (fail) throw new Error("db down");
-        return groups.map((g) => ({ ...g, timeToFirstPositiveReply: { sampleSize: 2, medianMs: 1000, averageMs: 1500 } }));
+        return groups.map((g) => ({ ...g, timeToFirstPositiveReply: { sampleSize: 2, medianMs: 1000, averageMs: 1500, percentilesMs: { p10: 100, p25: 500, p50: 1000, p75: 2000, p90: 2500 }, distribution: [] } }));
       },
     }));
     const mod = await import("../../src/routes/reply-latency.js");
@@ -41,7 +41,7 @@ describe("POST /internal/reply-latency/grouped", () => {
     expect(asked).toEqual([[{ key: "campaign", campaignIds: ["c1", "c2"] }, { key: "fleet", campaignIds: ["c1", "c2", "c3"] }]]);
     expect(res.body.basis).toBe("first_message_sent_to_first_positive_reply_since_inception");
     expect(res.body.groups.map((g: { key: string }) => g.key)).toEqual(["campaign", "fleet"]);
-    expect(res.body.groups[0].timeToFirstPositiveReply).toEqual({ sampleSize: 2, medianMs: 1000, averageMs: 1500 });
+    expect(res.body.groups[0].timeToFirstPositiveReply).toMatchObject({ sampleSize: 2, medianMs: 1000, averageMs: 1500, percentilesMs: { p90: 2500 } });
   });
 
   it("takes two groups of 500 ids each (bigger than the default 100kb body)", async () => {
