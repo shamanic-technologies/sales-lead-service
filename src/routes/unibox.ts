@@ -6,6 +6,11 @@
  *   GET /orgs/leads/unibox?brandId=[&status=&role=&type=&lifecycle=&interest=&conversation=&contactability=&fit=&q=&limit=&cursor=]
  *       Most recent activity first. Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
  *       the size of the filtered set; `nextCursor` pages it. Unknown filter value / bad bound = 400.
+ *   GET /orgs/leads/unibox-lifecycle-counts?brandId=[&offerId=&campaignId=&<the list's filters>]
+ *       DEALS-LIFECYCLE-1021: how many people of the filtered set stand on each lifecycle rung (ladder keys + `none`),
+ *       the ladder beside it; the counts sum to `total`. One board column = the list filtered on its rung.
+ *   Both reads take `offerId` and/or `campaignId` (unibox-scope.ts): only people who are a lead on a campaign of the
+ *       offer / of that campaign; the row and its Lifecycle stay the brand's. campaign-service unreadable = 502.
  *   GET /orgs/leads/unibox-lead?brandId=&(relationKey=|humanId=)
  *       One row = one RELATION (a human at a company, PERSON-RELATIONS-1017): `relationKey` names it; `humanId` alone =
  *       that human's most recently active row. The lead card: the six tags + every campaign the person is part of, with the furthest step in each. 404 = not
@@ -25,7 +30,16 @@ import {
   UNIBOX_STATUS,
   UNIBOX_TYPES,
 } from "../lib/unibox-dimensions.js";
-import { loadLifecycleCatalogue, readUniboxLead, readUniboxPage, UniboxCursorError, type UniboxFilters } from "../lib/unibox-model.js";
+import {
+  loadLifecycleCatalogue,
+  readUniboxLead,
+  readUniboxLifecycleCounts,
+  readUniboxPage,
+  UniboxCursorError,
+  type LifecycleCatalogue,
+  type UniboxFilters,
+} from "../lib/unibox-model.js";
+import { resolveUniboxScope, UniboxScopeUnavailableError } from "../lib/unibox-scope.js";
 
 const router = Router();
 
@@ -53,34 +67,82 @@ function brandOf(req: AuthenticatedRequest): string {
   return brandId;
 }
 
+/** An optional id param: absent = undefined, present = a non-blank string (an opaque campaign-service id). */
+function idParam(raw: unknown, name: string): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "string" || !raw.trim()) throw new BadQuery(`${name} must be a non-empty id`);
+  return raw.trim();
+}
+
+function filtersOf(req: AuthenticatedRequest, catalogue: LifecycleCatalogue): UniboxFilters {
+  return {
+    status: list(req.query.status, UNIBOX_STATUS, "status"),
+    roles: list(req.query.role, UNIBOX_ROLES, "role"),
+    types: list(req.query.type, UNIBOX_TYPES, "type"),
+    lifecycle: list(req.query.lifecycle, [...catalogue.ladder.map((r) => r.key), "none"], "lifecycle"),
+    interest: list(req.query.interest, UNIBOX_INTEREST, "interest"),
+    conversation: list(req.query.conversation, UNIBOX_CONVERSATION, "conversation"),
+    contactability: list(req.query.contactability, UNIBOX_CONTACTABILITY, "contactability"),
+    fit: list(req.query.fit, UNIBOX_FIT, "fit"),
+    q: typeof req.query.q === "string" && req.query.q.trim() ? req.query.q.trim() : undefined,
+  };
+}
+
+/** The offer / campaign scope named on the query, resolved to campaign ids (absent = the brand's whole Unibox). */
+async function scopeOf(req: AuthenticatedRequest, brandId: string): Promise<{ offerId: string | null; campaignId: string | null; campaignIds?: string[] }> {
+  const offerId = idParam(req.query.offerId, "offerId");
+  const campaignId = idParam(req.query.campaignId, "campaignId");
+  const campaignIds = await resolveUniboxScope({ orgId: req.orgId!, userId: req.userId ?? null, runId: req.runId ?? null, brandId }, { offerId, campaignId });
+  return { offerId: offerId ?? null, campaignId: campaignId ?? null, ...(campaignIds === undefined ? {} : { campaignIds }) };
+}
+
+function scopeFailed(res: import("express").Response, error: unknown): boolean {
+  if (!(error instanceof UniboxScopeUnavailableError)) return false;
+  console.error("[lead-service] unibox scope unresolved, refusing the read rather than widening it to the brand:", error.message);
+  res.status(502).json({ error: error.message, code: "scope_unavailable" });
+  return true;
+}
+
+router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+  try {
+    const brandId = brandOf(req);
+    const catalogue = await loadLifecycleCatalogue();
+    const filters = filtersOf(req, catalogue);
+    const { offerId, campaignId, campaignIds } = await scopeOf(req, brandId);
+    const counts = await readUniboxLifecycleCounts({ orgId: req.orgId!, brandId }, { ...filters, campaignIds });
+    res.json({ brandId, offerId, campaignId, lifecycleLadder: catalogue.ladder, ...counts });
+  } catch (error) {
+    if (error instanceof BadQuery) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    if (scopeFailed(res, error)) return;
+    console.error("[lead-service] unibox lifecycle counts read failed:", error);
+    res.status(500).json({ error: "unibox lifecycle counts read failed" });
+  }
+});
+
 router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
     const catalogue = await loadLifecycleCatalogue();
-    const filters: UniboxFilters = {
-      status: list(req.query.status, UNIBOX_STATUS, "status"),
-      roles: list(req.query.role, UNIBOX_ROLES, "role"),
-      types: list(req.query.type, UNIBOX_TYPES, "type"),
-      lifecycle: list(req.query.lifecycle, [...catalogue.ladder.map((r) => r.key), "none"], "lifecycle"),
-      interest: list(req.query.interest, UNIBOX_INTEREST, "interest"),
-      conversation: list(req.query.conversation, UNIBOX_CONVERSATION, "conversation"),
-      contactability: list(req.query.contactability, UNIBOX_CONTACTABILITY, "contactability"),
-      fit: list(req.query.fit, UNIBOX_FIT, "fit"),
-      q: typeof req.query.q === "string" && req.query.q.trim() ? req.query.q.trim() : undefined,
-    };
+    const filters = filtersOf(req, catalogue);
     let limit = DEFAULT_LIMIT;
     if (req.query.limit !== undefined) {
       limit = Number(req.query.limit);
       if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) throw new BadQuery(`limit must be an integer 1..${MAX_LIMIT}`);
     }
     const cursor = typeof req.query.cursor === "string" && req.query.cursor ? req.query.cursor : null;
-    const page = await readUniboxPage({ orgId: req.orgId!, brandId }, filters, { limit, cursor });
-    res.json({ brandId, lifecycleLadder: catalogue.ladder, ...page });
+    const { offerId, campaignId, campaignIds } = await scopeOf(req, brandId);
+    const page = await readUniboxPage({ orgId: req.orgId!, brandId }, campaignIds === undefined ? filters : { ...filters, campaignIds }, { limit, cursor });
+    // Unscoped answer byte-identical to before (no offerId/campaignId keys); a scoped one names its scope.
+    res.json({ brandId, ...(offerId || campaignId ? { offerId, campaignId } : {}), lifecycleLadder: catalogue.ladder, ...page });
   } catch (error) {
     if (error instanceof BadQuery || error instanceof UniboxCursorError) {
       res.status(400).json({ error: error.message });
       return;
     }
+    if (scopeFailed(res, error)) return;
     console.error("[lead-service] unibox list read failed:", error);
     res.status(500).json({ error: "unibox list read failed" });
   }
