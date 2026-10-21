@@ -14,7 +14,7 @@ const catalogue = {
     { key: "lead_found", rank: 1, label: "Lead found" },
     { key: "contacted", rank: 2, label: "Contacted" },
     { key: "engaged", rank: 3, label: "Engaged" },
-    { key: "signup_or_form", rank: 4, label: "Signup / Form submitted" },
+    { key: "signup_or_form", rank: 4, label: "Signed up" },
     { key: "meeting_booked", rank: 5, label: "Meeting booked" },
     { key: "meeting_attended", rank: 6, label: "Meeting attended" },
     { key: "paid_client", rank: 7, label: "Paid client" },
@@ -46,6 +46,13 @@ vi.mock("../../src/lib/fetch-retry.js", () => ({
     if (u.includes("/sales-funnel-campaigns?")) {
       return json({ salesFunnelCampaigns: [{ id: "sfc-1", salesFunnelName: "Cold email to meeting", units: [{ campaignId: "camp-cold" }] }] });
     }
+    // GET /campaigns (org-scoped, DEALS-LIFECYCLE-1021 scope): the cold pipe sells offer-1, the webinar offer-2.
+    if (u.endsWith("/campaigns")) {
+      return json({ campaigns: [
+        { id: "camp-cold", offerId: "offer-1" },
+        { id: "camp-webinar", offerId: "offer-2" },
+      ] });
+    }
     if (u.includes("/campaigns?")) return json({ campaigns: [{ id: "camp-cold", name: "pipe: cold email" }, { id: "camp-webinar", name: "Webinar" }] });
     throw new Error(`unexpected fetch ${u}`);
   },
@@ -61,7 +68,8 @@ const { clearRegistry, connectionTag, organizationLink, relation } = await impor
 const { readThread, toSubject } = await import("../../src/lib/relationship-subjects.js");
 const { refreshSubjects } = await import("../../src/lib/relationship-subjects.js");
 const { writeEvidence } = await import("../../src/lib/relationship-judge.js");
-const { refreshUniboxRows, readUniboxPage, readUniboxLead, resetLifecycleCatalogueCache } = await import("../../src/lib/unibox-model.js");
+const { refreshUniboxRows, readUniboxPage, readUniboxLead, readUniboxLifecycleCounts, resetLifecycleCatalogueCache } = await import("../../src/lib/unibox-model.js");
+const { resolveUniboxScope } = await import("../../src/lib/unibox-scope.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -200,6 +208,45 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     const second = await readUniboxPage(scope, {}, { limit: 1, cursor: first.nextCursor });
     expect(second.rows.map((r) => r.humanId)).toEqual([ana]);
     expect(second.nextCursor).toBeNull();
+  });
+
+  it("an offer / campaign scope keeps only its leads; counts per rung sum to the scoped total and narrow with the filters (DEALS-LIFECYCLE-1021)", async () => {
+    const sum = (c: { byLifecycle: Record<string, number> }) => Object.values(c.byLifecycle).reduce((a, b) => a + b, 0);
+    const all = await readUniboxLifecycleCounts(scope, {});
+    expect(all.total).toBe(2);
+    expect(sum(all)).toBe(all.total);
+    expect(all.byLifecycle).toEqual({ lead_found: 0, contacted: 0, engaged: 1, signup_or_form: 1, meeting_booked: 0, meeting_attended: 0, paid_client: 0, none: 0 });
+
+    const ctx = { orgId, brandId };
+    const offer1 = await resolveUniboxScope(ctx, { offerId: "offer-1" });
+    expect(offer1).toEqual(["camp-cold"]);
+    expect(await resolveUniboxScope(ctx, { campaignId: "sfc-1" })).toEqual(["camp-cold", "sfc-1"]);
+    expect(await resolveUniboxScope(ctx, {})).toBeUndefined();
+    // Ana was served under the cold pipe (offer-1); Ben is a CRM person, no lead of any campaign.
+    const scoped = await readUniboxPage(scope, { campaignIds: offer1 }, { limit: 10, cursor: null });
+    expect(scoped.rows.map((r) => r.humanId)).toEqual([ana]);
+    expect(scoped.total).toBe(1);
+    // Her Lifecycle stays the brand's.
+    expect(scoped.rows[0].lifecycle?.key).toBe("engaged");
+    const scopedCounts = await readUniboxLifecycleCounts(scope, { campaignIds: offer1 });
+    expect(scopedCounts).toMatchObject({ total: 1, byLifecycle: { engaged: 1, signup_or_form: 0, none: 0 } });
+    expect(sum(scopedCounts)).toBe(scoped.total);
+    // An offer no campaign sells = nobody (never the brand).
+    expect(await resolveUniboxScope(ctx, { offerId: "offer-3" })).toEqual([]);
+    expect((await readUniboxLifecycleCounts(scope, { campaignIds: [] })).total).toBe(0);
+    expect((await readUniboxPage(scope, { campaignIds: [] }, { limit: 10, cursor: null })).total).toBe(0);
+
+    // Filters narrow the counts exactly as they narrow the list.
+    for (const f of [{ fit: ["fit"] }, { fit: ["wrong_person"] }, { interest: ["interested"] }, { conversation: ["waiting_on_us"] }, { contactability: ["bounced"] }]) {
+      const c = await readUniboxLifecycleCounts(scope, f);
+      const p = await readUniboxPage(scope, f, { limit: 50, cursor: null });
+      expect(c.total).toBe(p.total);
+      expect(sum(c)).toBe(p.total);
+      for (const [key, n] of Object.entries(c.byLifecycle)) expect(p.rows.filter((r) => (r.lifecycle?.key ?? "none") === key)).toHaveLength(n);
+    }
+    expect((await readUniboxLifecycleCounts(scope, { fit: ["fit"] })).byLifecycle).toMatchObject({ signup_or_form: 1, engaged: 0 });
+    // A board column = the list filtered on its rung.
+    expect((await readUniboxPage(scope, { campaignIds: offer1, lifecycle: ["engaged"] }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ana]);
   });
 
   it("the lead card names every campaign with its furthest step; a non-lead has no card", async () => {

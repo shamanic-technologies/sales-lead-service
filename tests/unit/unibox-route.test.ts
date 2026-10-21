@@ -8,11 +8,19 @@ vi.mock("../../src/lib/trace-event.js", () => ({ traceEvent: vi.fn().mockResolve
 vi.mock("../../src/config.js", () => ({ LEAD_SERVICE_API_KEY: "test-api-key" }));
 const readUniboxPage = vi.fn();
 const readUniboxLead = vi.fn();
+const readUniboxLifecycleCounts = vi.fn();
+const resolveUniboxScope = vi.fn();
 class UniboxCursorError extends Error {}
+class UniboxScopeUnavailableError extends Error {}
+vi.mock("../../src/lib/unibox-scope.js", () => ({
+  resolveUniboxScope: (...a: unknown[]) => resolveUniboxScope(...a),
+  UniboxScopeUnavailableError,
+}));
 vi.mock("../../src/lib/unibox-model.js", () => ({
   loadLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map() }),
   readUniboxPage: (...a: unknown[]) => readUniboxPage(...a),
   readUniboxLead: (...a: unknown[]) => readUniboxLead(...a),
+  readUniboxLifecycleCounts: (...a: unknown[]) => readUniboxLifecycleCounts(...a),
   UniboxCursorError,
 }));
 
@@ -29,6 +37,11 @@ beforeAll(async () => {
 beforeEach(() => {
   readUniboxPage.mockReset();
   readUniboxLead.mockReset();
+  readUniboxLifecycleCounts.mockReset();
+  resolveUniboxScope.mockReset();
+  resolveUniboxScope.mockImplementation(async (_ctx: unknown, s: { offerId?: string; campaignId?: string }) =>
+    s.offerId || s.campaignId ? ["camp-a", "camp-b"] : undefined,
+  );
 });
 const get = (path: string) => request(app).get(path).set("x-api-key", "test-api-key").set("x-org-id", ORG);
 
@@ -58,11 +71,62 @@ describe("GET /orgs/leads/unibox", () => {
     expect(readUniboxPage).not.toHaveBeenCalled();
   });
 
+  it("an unscoped answer is unchanged (no scope keys); offerId/campaignId narrow to the resolved campaigns", async () => {
+    readUniboxPage.mockResolvedValue({ rows: [], total: 0, nextCursor: null, builtAt: null });
+    const plain = await get(`/orgs/leads/unibox?brandId=${BRAND}`);
+    expect(Object.keys(plain.body)).toEqual(["brandId", "lifecycleLadder", "rows", "total", "nextCursor", "builtAt"]);
+    expect(readUniboxPage.mock.calls[0][1]).not.toHaveProperty("campaignIds");
+    const scoped = await get(`/orgs/leads/unibox?brandId=${BRAND}&offerId=offer-1&campaignId=sfc-1&lifecycle=engaged`);
+    expect(scoped.status).toBe(200);
+    expect(scoped.body).toMatchObject({ brandId: BRAND, offerId: "offer-1", campaignId: "sfc-1" });
+    expect(resolveUniboxScope).toHaveBeenLastCalledWith(expect.objectContaining({ orgId: ORG, brandId: BRAND }), { offerId: "offer-1", campaignId: "sfc-1" });
+    expect(readUniboxPage.mock.calls[1][1]).toMatchObject({ lifecycle: ["engaged"], campaignIds: ["camp-a", "camp-b"] });
+  });
+
+  it("campaign-service unreadable = 502, never the whole brand; a blank offerId = 400", async () => {
+    resolveUniboxScope.mockRejectedValueOnce(new UniboxScopeUnavailableError("campaign-service down"));
+    const res = await get(`/orgs/leads/unibox?brandId=${BRAND}&offerId=offer-1`);
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("scope_unavailable");
+    expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&offerId=`)).status).toBe(400);
+    expect(readUniboxPage).not.toHaveBeenCalled();
+  });
+
   it("a foreign cursor = 400; a read failure = 500 (never an empty page)", async () => {
     readUniboxPage.mockRejectedValueOnce(new UniboxCursorError("cursor is not one this endpoint issued"));
     expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&cursor=zzz`)).status).toBe(400);
     readUniboxPage.mockRejectedValueOnce(new Error("db down"));
     expect((await get(`/orgs/leads/unibox?brandId=${BRAND}`)).status).toBe(500);
+  });
+});
+
+describe("GET /orgs/leads/unibox-lifecycle-counts", () => {
+  it("answers the counts per rung for the scope and filters, the ladder beside them", async () => {
+    readUniboxLifecycleCounts.mockResolvedValue({ total: 3, byLifecycle: { engaged: 2, none: 1 }, builtAt: null });
+    const res = await get(`/orgs/leads/unibox-lifecycle-counts?brandId=${BRAND}&offerId=offer-1&interest=interested&fit=fit`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      brandId: BRAND,
+      offerId: "offer-1",
+      campaignId: null,
+      lifecycleLadder: [{ key: "engaged", rank: 3, label: "Engaged" }],
+      total: 3,
+      byLifecycle: { engaged: 2, none: 1 },
+      builtAt: null,
+    });
+    expect(readUniboxLifecycleCounts).toHaveBeenCalledWith(
+      { orgId: ORG, brandId: BRAND },
+      expect.objectContaining({ interest: ["interested"], fit: ["fit"], campaignIds: ["camp-a", "camp-b"] }),
+    );
+  });
+
+  it("bad filter = 400, scope unreadable = 502, read failure = 500", async () => {
+    expect((await get(`/orgs/leads/unibox-lifecycle-counts?brandId=${BRAND}&fit=maybe`)).status).toBe(400);
+    expect((await get(`/orgs/leads/unibox-lifecycle-counts`)).status).toBe(400);
+    resolveUniboxScope.mockRejectedValueOnce(new UniboxScopeUnavailableError("down"));
+    expect((await get(`/orgs/leads/unibox-lifecycle-counts?brandId=${BRAND}&campaignId=c`)).status).toBe(502);
+    readUniboxLifecycleCounts.mockRejectedValueOnce(new Error("db down"));
+    expect((await get(`/orgs/leads/unibox-lifecycle-counts?brandId=${BRAND}`)).status).toBe(500);
   });
 });
 

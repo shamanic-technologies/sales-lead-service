@@ -16,7 +16,7 @@ const ladder = [
   { key: "lead_found", rank: 1, label: "Lead found" },
   { key: "contacted", rank: 2, label: "Contacted" },
   { key: "engaged", rank: 3, label: "Engaged" },
-  { key: "signup_or_form", rank: 4, label: "Signup / Form submitted" },
+  { key: "signup_or_form", rank: 4, label: "Signed up" },
   { key: "paid_client", rank: 7, label: "Paid client" },
 ];
 const ranks = new Map<string, number | null>([
