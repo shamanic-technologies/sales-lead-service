@@ -2564,7 +2564,8 @@ registry.registerPath({
         "crmPositiveReplyAt (ISO date of a positive reply the customer's own CRM evidences — their form " +
         "submitted after our first delivered email; null when none; count a person once when either it " +
         "or replyClassification says positive) and " +
-        "lead {firstName, lastName, photoUrl, currentTitle, seniority, organization {id, name, logoUrl, " +
+        "lead {firstName, lastName, photoUrl, currentTitle, seniority, country (the PERSON's own country, " +
+        "equal to `lead.country` on `basic`; null when unknown, never the company's), organization {id, name, logoUrl, " +
         "primaryDomain, websiteUrl, industry, estimatedNumEmployees, city, country}} — every value " +
         "identical to the same field on `basic`. No audience, offer, standing or closedDeal is " +
         "resolved, the response is gzip-encoded when the caller accepts it, and `include=campaigns` " +
@@ -3275,7 +3276,7 @@ const LeadChangesResponseSchema = z
     leads: z.array(z.record(z.string(), z.unknown())).openapi({
       description:
         "Rows to put into your copy, keyed by `id` — each exactly the element `GET /orgs/leads?view=compact` " +
-        "emits for that row (same fields, same values, including servedAt / lastServedAt / audienceId: " +
+        "emits for that row (same fields, same values, including lead.country and servedAt / lastServedAt / audienceId: " +
         "lastServedAt is when the run that currently holds the lead took it — a retry-pool re-hand-out " +
         "moves it and re-emits the row — and is the date to use for the run that contacted the lead). Unordered.",
     }),

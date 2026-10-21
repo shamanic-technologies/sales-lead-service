@@ -47,6 +47,10 @@ export function toCompactLead(
           photoUrl: r.lead.photoUrl,
           currentTitle: r.lead.currentTitle,
           seniority: r.lead.seniority,
+          // The PERSON's own country (where the person is), equal to `lead.country` on `view=basic`.
+          // Null when unknown, never the company's country in its place: a remote person and their
+          // employer's HQ differ (organization.country below is the company's).
+          country: r.lead.country ?? null,
           organization: org
             ? {
                 id: org.id,
