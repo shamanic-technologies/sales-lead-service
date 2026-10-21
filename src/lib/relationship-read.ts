@@ -22,6 +22,8 @@ import {
   levelOf,
   policyAllows,
   pureProspectAllows,
+  notBrandLeadOf,
+  type NotBrandLead,
   tagsIn,
   type RelationshipTag,
   type TagDetail,
@@ -56,6 +58,8 @@ export interface RelationshipBlock {
   subject: boolean;
   /** crm-service's live connection tags on the human: this brand's, and the org-wide `personal_*` ones. */
   connectionTags: string[];
+  /** Why the person is not a lead of the brand (a verdict said so, LEADS-JUDGE-BRAND-1021), else null. */
+  notBrandLead: NotBrandLead | null;
   /**
    * May a pipe stating each policy hand this person out? The one answer every server of people reads.
    * `pure_prospect`: no tag but prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts).
@@ -90,6 +94,7 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   details: [],
   subject: false,
   connectionTags: [],
+  notBrandLead: null,
   policies: { business_only: false, pure_prospect: false },
   merges: [],
   wroteToUs: false,
@@ -305,6 +310,7 @@ async function loadBlocks(
     const hasDirect = subj?.has_direct === true;
     const wroteToUs = subj?.wrote_to_us === true;
     const lead = decideLead(details);
+    const notBrandLead = notBrandLeadOf({ subject: isSubject, leadState: lead.state, connectionTags });
     const intent = intents.find((x) => x.human === h && x.company_key === key);
     return {
       humanId: h,
@@ -315,9 +321,10 @@ async function loadBlocks(
       details,
       subject: isSubject,
       connectionTags,
+      notBrandLead,
       policies: {
         business_only: policyAllows("business_only", { subject: isSubject, hasDirect, tags, unsureTags, judgedAt }),
-        pure_prospect: pureProspectAllows({ subject: isSubject, hasDirect, tags, unsureTags, judgedAt }),
+        pure_prospect: pureProspectAllows({ subject: isSubject, hasDirect, tags, unsureTags, judgedAt, notBrandLead }),
       },
       merges: mergesOf.get(h) ?? [],
       wroteToUs,
@@ -351,6 +358,7 @@ async function loadBlocks(
         pure_prospect: blocks.every((b) => b.policies.pure_prospect),
       },
       wroteToUs: blocks.some((b) => b.wroteToUs),
+      notBrandLead: blocks.find((b) => b.notBrandLead)?.notBrandLead ?? null,
     };
     for (const a of asked) if ((canon.get(a) ?? a) === h) out.set(a, block);
   }

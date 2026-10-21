@@ -146,7 +146,32 @@ export function pureProspectAllows(block: {
   tags: readonly RelationshipTag[];
   unsureTags: readonly RelationshipTag[];
   judgedAt: string | null;
+  /** LEADS-JUDGE-BRAND-1021: the judge or crm-service says they are not the brand's lead (`notBrandLeadOf`). */
+  notBrandLead?: NotBrandLead | null;
 }): boolean {
+  if (block.notBrandLead) return false;
   if (block.subject && block.hasDirect && block.judgedAt === null) return false;
   return !PURE_PROSPECT_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
+}
+
+/**
+ * Why a person is NOT a lead of the brand, or null (LEADS-JUDGE-BRAND-1021, owner 2026-10-21: a lead filed from the
+ * Unibox leaves, and is never served again, once a verdict says they are not the brand's):
+ *   - `judged_not_a_lead`: every lead tag that speaks (prospect, customer) says no: a person's word, or Jev reading the
+ *     thread beside the brand's own offers;
+ *   - `crm_not_to_brand`: crm-service judged their conversations and tags them professional NOT to the brand (another
+ *     business, a supplier, the owner's other activity) and never professional TO it, so they are no subject here.
+ * A person nobody judged and crm-service does not know (only our outreach found them) is no "no": null.
+ */
+export type NotBrandLead = "judged_not_a_lead" | "crm_not_to_brand";
+
+export const PROFESSIONAL_TO_BRAND = "professional_to_brand";
+export const PROFESSIONAL_NOT_TO_BRAND = "professional_not_to_brand";
+
+export function notBrandLeadOf(block: { subject: boolean; leadState: "yes" | "unsure" | "no" | null; connectionTags: readonly string[] }): NotBrandLead | null {
+  if (block.leadState === "no") return "judged_not_a_lead";
+  if (!block.subject && block.connectionTags.includes(PROFESSIONAL_NOT_TO_BRAND) && !block.connectionTags.includes(PROFESSIONAL_TO_BRAND)) {
+    return "crm_not_to_brand";
+  }
+  return null;
 }

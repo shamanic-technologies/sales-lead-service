@@ -8987,6 +8987,10 @@ export const RelationshipBlockSchema = z
     connectionTags: z.array(z.string()).openapi({
       description: "crm-service's live connection tags on the human: this brand's (professional_to_brand / professional_not_to_brand) and the org-wide personal_* ones.",
     }),
+    notBrandLead: z.enum(["judged_not_a_lead", "crm_not_to_brand"]).nullable().openapi({
+      description:
+        "LEADS-JUDGE-BRAND-1021: why the person is NOT a lead of this brand, else null. judged_not_a_lead = every lead tag that speaks (prospect, customer) says no (a person's word, or Jev reading the thread beside the brand's own offers); crm_not_to_brand = crm-service tags their conversations professional NOT to the brand and never TO it. Either one makes policies.pure_prospect false: never served again by a follow-up pipe, and filed out of the Unibox intake.",
+    }),
     merges: z.array(SettledMergeSchema).openapi({
       description: "Every merge that made this person (the judge's from 50% sure, or a person's answer), newest first: offer \"Not the same person\" with its linkId.",
     }),
@@ -9517,7 +9521,7 @@ export const ProspectFollowupVerdictSchema = z
     reason: z.string().nullable().openapi({ description: "The strongest stop when not owed (first of `reasons`), null when owed." }),
     reasons: z.array(z.string()).openapi({
       description:
-        "Every reason, strongest first (stops before not-yets): team_member (one of their addresses is a member's of the org owning the brand, or a +tag variant: its team, never a lead), opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), not_contacted (the brand never emailed them); not yet: in_conversation (their question / referral / proposal / hand-over is newer than our latest answer: the responder's), sequence_running (the sender still has a step to send them for this brand), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet). Empty when owed. A plain \"no thanks\" is not a stop.",
+        "Every reason, strongest first (stops before not-yets): team_member (one of their addresses is a member's of the org owning the brand, or a +tag variant: its team, never a lead), opted_out, do_not_contact, unsubscribed, bounced, disqualified, customer, meeting_attended, meeting_booked, positive_reply, not_pure_prospect (a tag other than prospect, yes or unsure: see relationshipTags), not_brand_lead (the relationship judge, reading the brand's own offers, or crm-service's verdict on their conversations says they are not this brand's lead), not_contacted (the brand never emailed them); not yet: in_conversation (their question / referral / proposal / hand-over is newer than our latest answer: the responder's), sequence_running (the sender still has a step to send them for this brand), relationship_not_judged (some source of the org knows them and the thread was never judged), same_person_question_open, identity_unresolved (no human yet). Empty when owed. A plain \"no thanks\" is not a stop.",
     }),
     relationshipTags: z.array(z.string()).openapi({ description: "The tags that make the person more than a prospect, when that is a reason." }),
   })

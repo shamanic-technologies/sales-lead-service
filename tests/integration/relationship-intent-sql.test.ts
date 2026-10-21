@@ -19,6 +19,11 @@ vi.mock("../../src/lib/qualification-judge.js", () => ({
     throw new Error("not used");
   },
 }));
+// The brand card the relationship judge reads (LEADS-JUDGE-BRAND-1021): a brand with no active offer here.
+vi.mock("../../src/lib/brand-client.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/lib/brand-client.js")>()),
+  getActiveOffers: async () => [],
+}));
 vi.mock("../../src/lib/company-client.js", () => ({
   getCompanies: async (ids: string[]) => ids.map((id) => ({ brandId: id, name: "Distribute.you", domain: "distribute.you" })),
   CompanyServiceError: class extends Error {},

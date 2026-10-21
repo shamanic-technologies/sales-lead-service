@@ -57,6 +57,11 @@ vi.mock("../../src/lib/fetch-retry.js", () => ({
     throw new Error(`unexpected fetch ${u}`);
   },
 }));
+// The brand card the relationship judge reads (LEADS-JUDGE-BRAND-1021): a brand with no active offer here.
+vi.mock("../../src/lib/brand-client.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/lib/brand-client.js")>()),
+  getActiveOffers: async () => [],
+}));
 vi.mock("../../src/lib/company-client.js", () => ({
   MAX_COMPANIES_PER_REQUEST: 1000,
   getCompanies: async (ids: string[]) => ids.map((brandId) => ({ brandId, name: "Acme", domain: "acme.com" })),

@@ -23,6 +23,8 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { isGatewayEmail } from "./email-gateway-client.js";
 
 export const UNIBOX_INTAKE_SOURCE = "unibox_conversation";
+/** A Unibox lead a verdict later said is not the brand's: filed out (`skipped`), kept as a record (LEADS-JUDGE-BRAND-1021). */
+export const NOT_BRAND_LEAD_REASON = "not_brand_lead";
 const CANDIDATE_LIMIT = 2_000;
 
 export function uniboxIntakeCampaignId(brandId: string): string {
@@ -161,4 +163,56 @@ async function fileCandidates(candidates: Candidate[], result: UniboxIntakeResul
       if (filing.status === "filed") result.filed++;
     }
   }
+}
+
+export interface UniboxReconcileResult {
+  filedOut: number;
+  filedBack: number;
+}
+
+/**
+ * A person filed from the Unibox STAYS a lead only while no verdict says they are not the brand's (LEADS-JUDGE-BRAND-1021,
+ * owner 2026-10-21: "a person stops being a lead of the brand when the judge, or crm-service's verdict on their
+ * conversation, says they are not the brand's lead"). Prod 2026-10-16: four of Doc Dinners' prospects filed as
+ * distribute.you leads stayed leads after crm-service read their threads as another business, and were emailed.
+ * The intake row is filed out (`status = 'skipped'`, `status_reason = 'not_brand_lead'`, never deleted: the serve and
+ * every send stay on record) and filed back the day the verdict turns (`relationship-tags.ts` `notBrandLeadOf`). The
+ * follow-up verdict refuses them anyway (`not_brand_lead`); this keeps the brand's lead list saying the same.
+ */
+export async function reconcileUniboxLeads(scope: { orgId: string; brandId: string } | null = null): Promise<UniboxReconcileResult> {
+  const out: UniboxReconcileResult = { filedOut: 0, filedBack: 0 };
+  const rows = (await db.execute(sql`
+    SELECT lc.id::text AS id, lc.org_id, lc.brand_ids[1] AS brand_id, lc.status, l.human_id::text AS human_id
+    FROM leads_campaigns lc JOIN leads l ON l.id = lc.lead_id
+    WHERE lc.campaign_id LIKE 'unibox:%' AND l.human_id IS NOT NULL
+      AND ((lc.status = 'served' AND lc.status_reason = ${UNIBOX_INTAKE_SOURCE}) OR (lc.status = 'skipped' AND lc.status_reason = ${NOT_BRAND_LEAD_REASON}))
+      AND (${scope?.orgId ?? null}::text IS NULL OR (lc.org_id = ${scope?.orgId ?? null} AND lc.campaign_id = ${scope ? uniboxIntakeCampaignId(scope.brandId) : null}))
+  `)) as unknown as Array<{ id: string; org_id: string; brand_id: string; status: string; human_id: string }>;
+  const byBrand = new Map<string, typeof rows>();
+  for (const r of rows) byBrand.set(`${r.org_id}|${r.brand_id}`, [...(byBrand.get(`${r.org_id}|${r.brand_id}`) ?? []), r]);
+  for (const group of byBrand.values()) {
+    const { org_id: orgId, brand_id: brandId } = group[0];
+    const blocks = await loadRelationships(orgId, brandId, [...new Set(group.map((r) => r.human_id))]);
+    const out_ = group.filter((r) => r.status === "served" && blocks.get(r.human_id)?.notBrandLead);
+    const back = group.filter((r) => r.status === "skipped" && !blocks.get(r.human_id)?.notBrandLead);
+    if (out_.length > 0) {
+      for (const r of out_) {
+        console.log(`[lead-service] unibox lead ${r.id} (human ${r.human_id}, brand ${brandId}) filed out: ${blocks.get(r.human_id)?.notBrandLead}`);
+      }
+      await db.execute(sql`
+        UPDATE leads_campaigns SET status = 'skipped', status_reason = ${NOT_BRAND_LEAD_REASON},
+          status_details = ${"A verdict says this person is not the brand's lead (LEADS-JUDGE-BRAND-1021)"}, updated_at = now()
+        WHERE id = ANY(${sql.param(out_.map((r) => r.id))}::uuid[]) AND status = 'served' AND status_reason = ${UNIBOX_INTAKE_SOURCE}
+      `);
+      out.filedOut += out_.length;
+    }
+    if (back.length > 0) {
+      await db.execute(sql`
+        UPDATE leads_campaigns SET status = 'served', status_reason = ${UNIBOX_INTAKE_SOURCE}, status_details = NULL, updated_at = now()
+        WHERE id = ANY(${sql.param(back.map((r) => r.id))}::uuid[]) AND status = 'skipped' AND status_reason = ${NOT_BRAND_LEAD_REASON}
+      `);
+      out.filedBack += back.length;
+    }
+  }
+  return out;
 }

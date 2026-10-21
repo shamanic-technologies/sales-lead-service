@@ -72,7 +72,7 @@ export async function intentSubjectsToJudge(scope: Scope, limit: number): Promis
 
 /** Judge one lead and freeze the answer. Throws on any failure (nothing written). */
 export async function judgeIntent(s: Subject, runId: string): Promise<number> {
-  const brand = await brandCard(s.brandId);
+  const brand = await brandCard(s.orgId, s.brandId);
   const thread = fitThread(await readThread(s), INTENT_THREAD_BUDGET_CHARS);
   const state = { context: CONTEXT, asOf: new Date().toISOString(), brand, person: { name: s.name, emails: s.emails, channels: s.channels }, thread };
   const { probabilities, model } = await judgeYesNo(state, { wants_business: WANTS_BUSINESS_QUESTION }, "platform");
