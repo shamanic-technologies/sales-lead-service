@@ -61,6 +61,7 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
   const ben = randomUUID(); // CRM person: signed up, a FAILED charge, wrote to us
   const friend = randomUUID(); // personal only: never a Unibox lead
   const createdLeads: string[] = [];
+  const createdOrgs: string[] = [];
   let seq = BigInt(Date.now()) * 1000n + 900_000_000n;
 
   async function crmFact(personKey: string, human: string, type: string, at: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -76,6 +77,7 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await clearRegistry(orgId);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
+    await db.execute(sql`DELETE FROM organizations WHERE id = ANY(${sql.param(createdOrgs)}::uuid[])`);
     for (const t of ["crm_facts", "relationship_subjects", "relationship_evidence", "lead_timeline_facts", "lead_disqualification_marks", "unibox_rows"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
@@ -89,8 +91,13 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     const anaCompany = randomUUID();
     await organizationLink({ orgId, brandId, human: ana, personKey: "email:ana@x.io", companyId: anaCompany });
 
-    const [lead] = (await db.execute(sql`INSERT INTO leads (name, human_id) VALUES ('Ana', ${ana}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
+    // Sourced with her name and title (UNIBOX-PERSON-NAME-1021): the row names her, never her address.
+    const [lead] = (await db.execute(sql`
+      INSERT INTO leads (first_name, last_name, name, human_id) VALUES ('Ana', 'Lopez', 'Ana Lopez', ${ana}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
     createdLeads.push(lead.id);
+    const [employer] = (await db.execute(sql`INSERT INTO organizations (name) VALUES ('Acme') RETURNING id::text`)) as unknown as Array<{ id: string }>;
+    createdOrgs.push(employer.id);
+    await db.execute(sql`INSERT INTO leads_organizations (lead_id, organization_id, title, current) VALUES (${lead.id}::uuid, ${employer.id}::uuid, 'Head of Sales', true)`);
     // The relation's leads are the ones on ITS addresses (PERSON-RELATIONS-1017).
     await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'email', 'ana@x.io', 'itest')`);
     await db.execute(sql`
@@ -139,6 +146,9 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(anaRow).toMatchObject({ lifecycle: { key: "engaged", rank: 3 }, fit: "wrong_person", fitNote: "left the company", conversation: "waiting_on_us" }); // replied after our email
     // "Ana @ Acme": the relation's company, named by brand-service.
     expect(anaRow.company).toMatchObject({ name: "Acme", domain: "acme.com" });
+    // Her name and title as sourced, not crm's "Ana" nor her address; Ben has no lead: crm's name.
+    expect(anaRow).toMatchObject({ name: "Ana Lopez", firstName: "Ana", lastName: "Lopez", title: "Head of Sales" });
+    expect(benRow).toMatchObject({ name: "Ben", firstName: null, lastName: null, title: null });
     expect(anaRow.steps.map((s) => s.step)).toEqual(["lead_found", "email_sent", "conversation", "website_visit"]);
   });
 

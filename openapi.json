@@ -13414,7 +13414,23 @@
           },
           "name": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "WHO it is, \"First Last\": the relation's lead as sourced, else the name crm-service read off the conversation. Never an email address; null = nobody knows their name."
+          },
+          "firstName": {
+            "type": "string",
+            "nullable": true,
+            "description": "First name (the relation's lead as sourced); null = unknown."
+          },
+          "lastName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Last name (the relation's lead as sourced); null = unknown."
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "description": "Current job title (the relation's lead, at the relation's company first); null = unknown."
           },
           "emails": {
             "type": "array",
@@ -13595,6 +13611,9 @@
           "companyKey",
           "company",
           "name",
+          "firstName",
+          "lastName",
+          "title",
           "emails",
           "phones",
           "personKeys",
