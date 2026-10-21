@@ -13181,12 +13181,89 @@
             "type": "integer",
             "nullable": true,
             "description": "Average of the same, in milliseconds; null when sampleSize is 0."
+          },
+          "percentilesMs": {
+            "type": "object",
+            "properties": {
+              "p10": {
+                "type": "integer",
+                "nullable": true
+              },
+              "p25": {
+                "type": "integer",
+                "nullable": true
+              },
+              "p50": {
+                "type": "integer",
+                "nullable": true
+              },
+              "p75": {
+                "type": "integer",
+                "nullable": true
+              },
+              "p90": {
+                "type": "integer",
+                "nullable": true
+              }
+            },
+            "required": [
+              "p10",
+              "p25",
+              "p50",
+              "p75",
+              "p90"
+            ],
+            "description": "Percentiles of the same sample in milliseconds, interpolated like the median (p50 = medianMs); every one null when sampleSize is 0."
+          },
+          "distribution": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "description": "Stable bucket key, e.g. `lt_1h`, `1d_2d`, `60d_plus`."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Human label, e.g. `1 to 2 days`."
+                },
+                "fromMs": {
+                  "type": "integer",
+                  "description": "Inclusive lower bound of the delay, ms."
+                },
+                "toMs": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "Exclusive upper bound, ms; null on the last, open-ended bucket (60 days or more)."
+                },
+                "count": {
+                  "type": "integer",
+                  "description": "People whose first positive reply fell in this bucket."
+                },
+                "cumulativeCount": {
+                  "type": "integer",
+                  "description": "People in this bucket or an earlier one (cumulative curve; the last one equals sampleSize)."
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "fromMs",
+                "toMs",
+                "count",
+                "cumulativeCount"
+              ]
+            },
+            "description": "People per delay bucket, shortest first: hours for the first day (under 1h, 1-3h, 3-6h, 6-12h, 12-24h), then days (1-2, 2-3, 3-5, 5-7, 7-10, 10-14, 14-21, 21-30, 30-60), then 60 days or more. Every bucket is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0."
           }
         },
         "required": [
           "sampleSize",
           "medianMs",
-          "averageMs"
+          "averageMs",
+          "percentilesMs",
+          "distribution"
         ]
       },
       "ReplyLatencyRequest": {
@@ -22791,7 +22868,7 @@
     "/internal/reply-latency/grouped": {
       "post": {
         "summary": "Per group of campaign ids: time from our first message (any channel) to the person's first positive reply, since inception (internal, service-auth, fleet-wide)",
-        "description": "For each group: every person (one lead at one org x brand) we sent a message to under one of the group's campaigns, on any channel: an email of ours on the lead timeline (`initial_email` / `followup`, any transport: the provider's sequences and our own sending, the AI follow-up writer included), a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs null. Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
+        "description": "For each group: every person (one lead at one org x brand) we sent a message to under one of the group's campaigns, on any channel: an email of ours on the lead timeline (`initial_email` / `followup`, any transport: the provider's sequences and our own sending, the AI follow-up writer included), a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs/percentiles null and an empty distribution. Beside the median and average: p10/p25/p50/p75/p90 and the people per delay bucket with the running count (histogram and cumulative curve of the same sample). Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
         "parameters": [
           {
             "in": "header",

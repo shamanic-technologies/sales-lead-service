@@ -9417,6 +9417,31 @@ export const ReplyLatencyMetricSchema = z
       .openapi({ description: "People (one lead at one org x brand) whose first positive reply came after our first message under the group. A person with no positive reply is not in the sample." }),
     medianMs: z.number().int().nullable().openapi({ description: "Median first message -> first positive reply, in milliseconds; null when sampleSize is 0." }),
     averageMs: z.number().int().nullable().openapi({ description: "Average of the same, in milliseconds; null when sampleSize is 0." }),
+    percentilesMs: z
+      .object({
+        p10: z.number().int().nullable(),
+        p25: z.number().int().nullable(),
+        p50: z.number().int().nullable(),
+        p75: z.number().int().nullable(),
+        p90: z.number().int().nullable(),
+      })
+      .openapi({ description: "Percentiles of the same sample in milliseconds, interpolated like the median (p50 = medianMs); every one null when sampleSize is 0." }),
+    distribution: z
+      .array(
+        z.object({
+          key: z.string().openapi({ description: "Stable bucket key, e.g. `lt_1h`, `1d_2d`, `60d_plus`." }),
+          label: z.string().openapi({ description: "Human label, e.g. `1 to 2 days`." }),
+          fromMs: z.number().int().openapi({ description: "Inclusive lower bound of the delay, ms." }),
+          toMs: z.number().int().nullable().openapi({ description: "Exclusive upper bound, ms; null on the last, open-ended bucket (60 days or more)." }),
+          count: z.number().int().openapi({ description: "People whose first positive reply fell in this bucket." }),
+          cumulativeCount: z.number().int().openapi({ description: "People in this bucket or an earlier one (cumulative curve; the last one equals sampleSize)." }),
+        }),
+      )
+      .openapi({
+        description:
+          "People per delay bucket, shortest first: hours for the first day (under 1h, 1-3h, 3-6h, 6-12h, 12-24h), then days (1-2, 2-3, 3-5, 5-7, 7-10, 10-14, 14-21, 21-30, 30-60), then 60 days or more. " +
+          "Every bucket is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0.",
+      }),
   })
   .openapi("ReplyLatencyMetric");
 
@@ -9443,7 +9468,8 @@ registry.registerPath({
     "a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). " +
     "Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: " +
     "a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). " +
-    "A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs null. " +
+    "A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs/percentiles null and an empty distribution. " +
+    "Beside the median and average: p10/p25/p50/p75/p90 and the people per delay bucket with the running count (histogram and cumulative curve of the same sample). " +
     "Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. " +
     "No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
   request: { body: { content: { "application/json": { schema: ReplyLatencyRequestSchema } } } },
