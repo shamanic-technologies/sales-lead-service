@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { contentOfAnswer, criterionKey, findImageUrl, normalizeDomain, subjectFromOrganization } from "../../src/lib/qualification.js";
-import { BUILTIN_PROBES } from "../../src/lib/qualification-probes.js";
+import { createHash } from "node:crypto";
+import { BUILTIN_PROBES, probeKey } from "../../src/lib/qualification-probes.js";
 import type { OrganizationView } from "../../src/lib/lead-shape.js";
 import { keepsDraft, readDraftChecks, recommendRoles, ROLE_REASONS, SuggestionDraftUnreadableError, type KeptDraft } from "../../src/lib/qualification-run.js";
 
@@ -36,6 +37,16 @@ describe("qualification helpers", () => {
     const spec = BUILTIN_PROBES.homepage_text.spec;
     expect(criterionKey("Is there a  newsletter?", spec)).toBe(criterionKey("is there a newsletter?", spec));
     expect(criterionKey("Is there a newsletter?", spec)).not.toBe(criterionKey("Is there a newsletter?", BUILTIN_PROBES.company_data.spec));
+  });
+
+  it("a screenshot check is judged under its own version, a text check keeps v4 (SCREENSHOT-CHECK-QUESTION-1021)", () => {
+    const shot = BUILTIN_PROBES.homepage_screenshot.spec;
+    const text = BUILTIN_PROBES.homepage_text.spec;
+    const q = "Is there no clearly visible phone number in the header?";
+    const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+    expect(criterionKey(q, shot)).toBe(sha(`img1\n${q.toLowerCase()}\n${probeKey(shot)}`));
+    // Text probes: byte-identical to the key before this change, so nothing of theirs is re-judged.
+    expect(criterionKey(q, text)).toBe(sha(`v4\n${q.toLowerCase()}\n${probeKey(text)}`));
   });
 });
 

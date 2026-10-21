@@ -2,7 +2,8 @@
  * The qualification checks' judgments, asked of the fleet's typed-judgment vendor (Jev) through
  * chat-service `POST /orgs/judgments`, billed to the org whose request asked (chat-service
  * declares the spend). Two shapes: a yes/no probability (`noul`) and a pick among options
- * (`choice`). The answer is frozen with the model RELEASE the vendor reports serving.
+ * (`choice`), over text or over an IMAGE (`judgeImageYesNo`, a screenshot check's own question asked of the screenshot).
+ * The answer is frozen with the model RELEASE the vendor reports serving.
  */
 import { CHAT_SERVICE_API_KEY, CHAT_SERVICE_URL } from "../config.js";
 import { paymentRefusal } from "./credit-errors.js";
@@ -36,16 +37,43 @@ export function wellFormedState(value: unknown): unknown {
   return value;
 }
 
+/** The typed judges chat-service offers for a judgment (its `judge` field). */
+export const IMAGE_JUDGES = ["jev", "openai-luna"] as const;
+export type ImageJudge = (typeof IMAGE_JUDGES)[number];
+
+/**
+ * The judge that answers screenshot checks, picked on the benchmark of every stored screenshot x every criterion that
+ * used it (SCREENSHOT-CHECK-QUESTION-1021, 2026-10-21): jev and openai-luna agreed on underdogroofing.com (phone shown =
+ * no); on 10 hand-checked disagreements jev made no error and luna one (read a clean page as outdated), and jev is the
+ * cheaper of the two ($0.00034 vs $0.00036 a check). openai-luna also 502d on 36 of 120 calls run 4 at a time.
+ */
+export const SCREENSHOT_JUDGE: ImageJudge = "jev";
+
+/** The input-token cost name chat-service declares a judgment under, per judge (output is free at both). */
+export const JUDGE_INPUT_COST_NAMES: Record<ImageJudge, string> = {
+  jev: "typesafe-jev-1.13-tokens-input",
+  "openai-luna": "openai-gpt-6-luna-decisions-tokens-input",
+};
+
+/** Input tokens one screenshot judgment costs at SCREENSHOT_JUDGE (image + questions): 4,082 on average over the 120 stored screenshot checks of the benchmark. */
+export const IMAGE_JUDGE_INPUT_TOKENS = 4_100;
+
 async function ask(
   state: unknown,
   questions: Record<string, Record<string, unknown>>,
   id: JudgmentPayer,
+  extra: { imageUrl?: string; judge?: ImageJudge } = {},
 ): Promise<{ answers: Record<string, Record<string, unknown>>; model: string }> {
   const path = id === "platform" ? "/internal/platform-judgments" : "/orgs/judgments";
   const res = await fetchWithRetry(`${CHAT_SERVICE_URL}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...(id === "platform" ? {} : identityHeaders(id)) },
-    body: JSON.stringify({ state: wellFormedState(state), questions }),
+    body: JSON.stringify({
+      state: wellFormedState(state),
+      questions,
+      ...(extra.imageUrl ? { image: { url: extra.imageUrl } } : {}),
+      ...(extra.judge ? { judge: extra.judge } : {}),
+    }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -83,13 +111,40 @@ export async function judgeYesNo<K extends string>(
     wire[k] = { type: "noul", instructions: q.instructions, ...(q.whenTrue && q.whenFalse ? { criteria: { true: q.whenTrue, false: q.whenFalse } } : {}) };
   }
   const { answers, model } = await ask(state, wire, id);
+  return { probabilities: readProbabilities(answers, Object.keys(questions) as K[]), model };
+}
+
+/**
+ * Several yes/no questions about ONE image (plus a small state naming whose it is), in one call to the named judge.
+ * A judge that takes no `criteria` (openai-luna) gets the yes/no boundaries written into its instructions instead.
+ */
+export async function judgeImageYesNo<K extends string>(
+  state: unknown,
+  imageUrl: string,
+  questions: Record<K, YesNoQuestion>,
+  id: JudgmentPayer,
+  judge: ImageJudge = SCREENSHOT_JUDGE,
+): Promise<{ probabilities: Record<K, number>; model: string }> {
+  const wire: Record<string, Record<string, unknown>> = {};
+  for (const [k, q] of Object.entries(questions) as Array<[K, YesNoQuestion]>) {
+    const bounded = q.whenTrue && q.whenFalse;
+    wire[k] =
+      judge === "jev"
+        ? { type: "noul", instructions: q.instructions, ...(bounded ? { criteria: { true: q.whenTrue, false: q.whenFalse } } : {}) }
+        : { type: "noul", instructions: bounded ? `${q.instructions}\nYes: ${q.whenTrue}\nNo: ${q.whenFalse}` : q.instructions };
+  }
+  const { answers, model } = await ask(state, wire, id, { imageUrl, judge });
+  return { probabilities: readProbabilities(answers, Object.keys(questions) as K[]), model };
+}
+
+function readProbabilities<K extends string>(answers: Record<string, Record<string, unknown>>, keys: K[]): Record<K, number> {
   const probabilities = {} as Record<K, number>;
-  for (const k of Object.keys(questions) as K[]) {
+  for (const k of keys) {
     const p = answers[k].noul;
     if (typeof p !== "number" || !Number.isFinite(p) || p < 0 || p > 1) throw new Error(`[lead-service] judgment "${k}" answered without a readable probability`);
     probabilities[k] = p;
   }
-  return { probabilities, model };
+  return probabilities;
 }
 
 export async function judgeChoice(
