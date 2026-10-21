@@ -99,7 +99,7 @@ export const BUILTIN_PROBES: Record<BuiltinProbeKey, { description: string; spec
   },
   homepage_screenshot: {
     description:
-      "A screenshot of the first screen of the company's homepage, read by a vision model (is the key message clear above the fold, does it look modern, is there a clear call to action).",
+      "A screenshot of the first screen of the company's homepage, each question asked of the image itself (is the key message clear above the fold, does it look modern, is there a clear call to action, is a phone number shown in the header).",
     spec: {
       kind: "treg",
       label: "Homepage first screen",

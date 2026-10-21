@@ -38,7 +38,7 @@ import { complete, stripDashes } from "./chat-complete-client.js";
 import { storeImage } from "./image-store-client.js";
 import type { OrganizationView } from "./lead-shape.js";
 import { priceCentsPerUnit } from "./price-client.js";
-import { MAX_STATE_CHARS, judgeYesNo } from "./qualification-judge.js";
+import { IMAGE_JUDGE_INPUT_TOKENS, JUDGE_INPUT_COST_NAMES, MAX_STATE_CHARS, SCREENSHOT_JUDGE, judgeImageYesNo, judgeYesNo } from "./qualification-judge.js";
 import {
   BUILTIN_PROBES,
   MissingCompanyFactError,
@@ -122,7 +122,8 @@ export function companyDataContent(org: OrganizationView): string {
 /** Two criteria asking the same question through the same probe share their verdicts. */
 export function criterionKey(question: string, spec: ProbeSpec): string {
   const q = question.trim().replace(/\s+/g, " ").toLowerCase();
-  return createHash("sha256").update(`${JUDGE_VERSION}\n${q}\n${probeKey(spec)}`).digest("hex");
+  const version = spec.kind === "treg" && spec.reading === "screenshot" ? SCREENSHOT_JUDGE_VERSION : JUDGE_VERSION;
+  return createHash("sha256").update(`${version}\n${q}\n${probeKey(spec)}`).digest("hex");
 }
 
 /**
@@ -134,6 +135,13 @@ export function criterionKey(question: string, spec: ProbeSpec): string {
  * evidence supports the given answer (v3 wrote "No, ..." under a yes).
  */
 export const JUDGE_VERSION = "v4";
+
+/**
+ * The screenshot checks' own version (text checks keep JUDGE_VERSION, untouched). img1: the criterion's question is asked of
+ * the image itself (SCREENSHOT-CHECK-QUESTION-1021); v4 judged a generic description of the page, which said nothing
+ * about what most questions asked (underdogroofing.com: phones in the header, answered "no phone").
+ */
+export const SCREENSHOT_JUDGE_VERSION = "img1";
 
 export function probeLabel(spec: ProbeSpec): string {
   return spec.kind === "company_data" ? "Company data we hold" : spec.label;
@@ -180,12 +188,6 @@ export function findImageUrl(body: unknown): string | null {
   }
   return fallback;
 }
-
-const VISION_PROMPT =
-  "You look at the first screen of a company's homepage for a sales researcher. Describe only what is visible, " +
-  "in plain words, under 120 words: the main headline (quote it), what the company offers as stated on screen, " +
-  "whether a call-to-action button is visible and its text, any sign-up or newsletter form, and how the page looks " +
-  "(clean or cluttered, modern or dated, readable or not). Do not guess anything that is not visible.";
 
 async function freshObservation(key: string, domain: string): Promise<QualificationObservationRow | null> {
   const okSince = new Date(Date.now() - OBSERVATION_FRESH_DAYS * 86_400_000).toISOString();
@@ -269,14 +271,15 @@ export async function observe(spec: ProbeSpec, subject: CompanySubject, org: Org
         reasons.push(`${call.endpointId}: answered without an image`);
         continue;
       }
+      // The image IS the observation: each criterion asks its own question of it (SCREENSHOT-CHECK-QUESTION-1021).
+      // A generic description written once per page never mentioned what a question asked (a phone in the header)
+      // and the judge read that silence as an answer.
       const imageUrl = await storeImage(providerUrl, `${subject.domain}-${Date.now()}.png`, deps.identity);
-      const described = await complete({ systemPrompt: VISION_PROMPT, message: `Homepage of ${subject.domain}.`, imageUrl, maxTokens: 400 }, deps.identity);
       const observation = await recordObservation({
         probeKey: key,
         domain: subject.domain,
         status: "ok",
         endpointId: call.endpointId,
-        content: stripDashes(described.content),
         imageUrl,
         vendorCostMicro: charged,
         runId: deps.identity.runId,
@@ -318,21 +321,22 @@ const EVIDENCE_PROMPT =
   "\"no sign-up form on the homepage\"). Never contradict the answer, never start with yes or no, never invent a " +
   "figure. No dashes.";
 
+const SCREENSHOT_EVIDENCE_PROMPT =
+  "A yes/no question about the first screen of a company's homepage has already been answered from this screenshot. " +
+  "Write the ONE visible fact on the screenshot that supports THAT answer, for a salesperson who will cite it in an email. " +
+  "One sentence, under 30 words, plain words, quoting the text on screen when it helps (\"the header shows 615-208-2454\", " +
+  "\"the only button above the fold reads Book now\"). Never contradict the answer, never start with yes or no, never " +
+  "describe anything the question is not about. No dashes.";
+
 export interface JudgeResult {
   verdict: QualificationVerdictRow;
   reused: boolean;
 }
 
-export async function judge(criterion: { question: string; probe: ProbeSpec }, observation: QualificationObservationRow, subject: CompanySubject, deps: QualificationDeps): Promise<JudgeResult> {
-  const key = criterionKey(criterion.question, criterion.probe);
-  const [prior] = await db
-    .select()
-    .from(qualificationVerdicts)
-    .where(and(eq(qualificationVerdicts.criterionKey, key), eq(qualificationVerdicts.observationId, observation.id)))
-    .limit(1);
-  if (prior) return { verdict: prior, reused: true };
+type VerdictInsert = typeof qualificationVerdicts.$inferInsert;
 
-  let row: typeof qualificationVerdicts.$inferInsert;
+async function judgeText(key: string, criterion: { question: string; probe: ProbeSpec }, observation: QualificationObservationRow, subject: CompanySubject, deps: QualificationDeps): Promise<VerdictInsert> {
+  let row: VerdictInsert;
   if (observation.status !== "ok" || !observation.content) {
     row = { criterionKey: key, domain: subject.domain, observationId: observation.id, verdict: "unavailable", reason: `probe_failed: ${observation.reason ?? "no content"}`, runId: deps.identity.runId };
   } else {
@@ -374,6 +378,66 @@ export async function judge(criterion: { question: string; probe: ProbeSpec }, o
       row = { criterionKey: key, domain: subject.domain, observationId: observation.id, verdict, yesProbability: probabilities.holds, evidence: stripDashes(evidence.content), judgmentModel: model, runId: deps.identity.runId };
     }
   }
+  return row;
+}
+
+/**
+ * A screenshot criterion: its OWN question asked of the stored image by ONE typed image judgment
+ * (SCREENSHOT-CHECK-QUESTION-1021, owner 2026-10-21: "l'instruction doit être une variable de ce qui est
+ * demandé"). The gate and the answer ride the same call; the evidence sentence is written from the image
+ * for THAT question and answer, so it names what is on screen (the phone number, the button text).
+ */
+async function judgeScreenshot(key: string, criterion: { question: string; probe: ProbeSpec }, observation: QualificationObservationRow, subject: CompanySubject, deps: QualificationDeps): Promise<VerdictInsert> {
+  const base = { criterionKey: key, domain: subject.domain, observationId: observation.id, runId: deps.identity.runId };
+  if (observation.status !== "ok" || !observation.imageUrl) {
+    return { ...base, verdict: "unavailable", reason: `probe_failed: ${observation.reason ?? "no screenshot"}` };
+  }
+  const { probabilities, model } = await judgeImageYesNo(
+    { company: { name: subject.companyName, domain: subject.domain }, source: probeLabel(criterion.probe), observedAt: observation.observedAt },
+    observation.imageUrl,
+    {
+      answerable: {
+        instructions: `Is this image a usable screenshot of the first screen of ${subject.domain}'s homepage?`,
+        whenTrue: "It shows this company's homepage, so whatever it shows or does not show is a fact about that first screen.",
+        whenFalse: "It is blank, an error page, a cookie or login wall covering the page, a bot challenge, or clearly another company's site.",
+      },
+      holds: {
+        instructions: criterion.question,
+        whenTrue: "The screenshot shows the condition holds for this company.",
+        whenFalse: "The screenshot shows the condition does not hold for this company.",
+      },
+    },
+    deps.identity,
+  );
+  if (probabilities.answerable < YES_THRESHOLD) {
+    return { ...base, verdict: "unavailable", yesProbability: probabilities.holds, reason: `observation_cannot_answer: P(answerable)=${probabilities.answerable.toFixed(3)}`, judgmentModel: model };
+  }
+  const verdict: QualificationVerdict = probabilities.holds > YES_THRESHOLD ? "yes" : "no";
+  const evidence = await complete(
+    {
+      systemPrompt: SCREENSHOT_EVIDENCE_PROMPT,
+      message: `Company: ${subject.companyName ?? subject.domain} (${subject.domain})\nQuestion: ${criterion.question}\nAnswer: ${verdict}`,
+      imageUrl: observation.imageUrl,
+      maxTokens: 300,
+    },
+    deps.identity,
+  );
+  return { ...base, verdict, yesProbability: probabilities.holds, evidence: stripDashes(evidence.content), judgmentModel: model };
+}
+
+export async function judge(criterion: { question: string; probe: ProbeSpec }, observation: QualificationObservationRow, subject: CompanySubject, deps: QualificationDeps): Promise<JudgeResult> {
+  const key = criterionKey(criterion.question, criterion.probe);
+  const [prior] = await db
+    .select()
+    .from(qualificationVerdicts)
+    .where(and(eq(qualificationVerdicts.criterionKey, key), eq(qualificationVerdicts.observationId, observation.id)))
+    .limit(1);
+  if (prior) return { verdict: prior, reused: true };
+
+  const row =
+    criterion.probe.kind === "treg" && criterion.probe.reading === "screenshot"
+      ? await judgeScreenshot(key, criterion, observation, subject, deps)
+      : await judgeText(key, criterion, observation, subject, deps);
   const [inserted] = await db.insert(qualificationVerdicts).values(row).onConflictDoNothing().returning();
   if (inserted) return { verdict: inserted, reused: false };
   // A concurrent request froze the same judgment first: that one is the answer.
@@ -558,8 +622,14 @@ export async function resolveProbe(input: { builtin: string } | { tregEndpointId
 // Estimated cost per row, from catalogue prices (shown before a client turns a check on)
 // ---------------------------------------------------------------------------------------------
 
-/** Token sizes the estimate assumes; the sample measures the real figure. */
-const EST = { stateTokens: 8_000, questions: 2, evidenceIn: 8_000, evidenceOut: 60, visionIn: 2_000, visionOut: 250 };
+/**
+ * Token sizes the estimate assumes; the sample measures the real figure. A screenshot check is ONE image judgment
+ * (`imageJudgeIn`: the judge's own count for a homepage screenshot fitted by chat-service, measured on the
+ * SCREENSHOT-CHECK-QUESTION-1021 benchmark) + one evidence sentence written from the image (`imageEvidenceIn`:
+ * Gemini's count for a 1920x1080 screenshot); a text check is the two-question judgment of the observation + the
+ * evidence sentence written from it.
+ */
+const EST = { stateTokens: 8_000, questions: 2, evidenceIn: 8_000, evidenceOut: 60, imageJudgeIn: IMAGE_JUDGE_INPUT_TOKENS, imageEvidenceIn: 1_600 };
 
 export interface CostEstimate {
   perRowUsd: number;
@@ -569,12 +639,16 @@ export interface CostEstimate {
 }
 
 export async function estimateCostPerRow(spec: ProbeSpec): Promise<CostEstimate> {
-  const [jevIn, liteIn, liteOut] = await Promise.all([
-    priceCentsPerUnit("typesafe-jev-1.13-tokens-input"),
+  const [judgeIn, liteIn, liteOut] = await Promise.all([
+    priceCentsPerUnit(JUDGE_INPUT_COST_NAMES[SCREENSHOT_JUDGE]),
     priceCentsPerUnit("google-flash-lite-3.1-tokens-input"),
     priceCentsPerUnit("google-flash-lite-3.1-tokens-output"),
   ]);
-  let aiCents = EST.stateTokens * EST.questions * jevIn + EST.evidenceIn * liteIn + EST.evidenceOut * liteOut;
+  const screenshot = spec.kind === "treg" && spec.reading === "screenshot";
+  const jevIn = screenshot ? 0 : await priceCentsPerUnit(JUDGE_INPUT_COST_NAMES.jev);
+  const aiCents = screenshot
+    ? EST.imageJudgeIn * judgeIn + EST.imageEvidenceIn * liteIn + EST.evidenceOut * liteOut
+    : EST.stateTokens * EST.questions * jevIn + EST.evidenceIn * liteIn + EST.evidenceOut * liteOut;
   let probeCents = 0;
   let storageCents = 0;
   if (spec.kind === "treg") {
@@ -583,10 +657,7 @@ export async function estimateCostPerRow(spec: ProbeSpec): Promise<CostEstimate>
     const r = catalogEntryToCall(entry);
     if (!r.ok) throw new Error(`[lead-service] ${spec.calls[0].endpointId} is no longer usable: ${r.reason}`);
     probeCents = r.vendorUsd * 1_000_000 * (await priceCentsPerUnit(TREG_COST_NAME));
-    if (spec.reading === "screenshot") {
-      aiCents += EST.visionIn * liteIn + EST.visionOut * liteOut;
-      storageCents = await priceCentsPerUnit("cloudflare-r2-class-a-operation");
-    }
+    if (screenshot) storageCents = await priceCentsPerUnit("cloudflare-r2-class-a-operation");
   }
   const round = (c: number) => Math.round(c * 10_000) / 1_000_000; // cents -> USD, 6 decimals
   return { perRowUsd: round(probeCents + aiCents + storageCents), probeUsd: round(probeCents), aiUsd: round(aiCents), storageUsd: round(storageCents) };
