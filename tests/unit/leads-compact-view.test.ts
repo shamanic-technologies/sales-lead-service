@@ -114,7 +114,9 @@ function basicRow(i: number, status: string) {
       currentTitle: "Head of Sales",
       city: "Paris",
       state: null,
-      country: "France",
+      // The PERSON is in the US while their employer is French, and lc-1's person country is
+      // unknown, so the compact row can be told apart from the company's country.
+      country: i === 1 ? null : "United States",
       organization:
         i === 2
           ? null
@@ -198,7 +200,7 @@ describe("GET /orgs/leads?view=compact", () => {
     expect(res.body.leads).toHaveLength(4);
     for (const lead of res.body.leads) expect(Object.keys(lead).sort()).toEqual(COMPACT_KEYS);
     expect(Object.keys(res.body.leads[0].lead).sort()).toEqual(
-      ["firstName", "lastName", "photoUrl", "currentTitle", "seniority", "organization"].sort(),
+      ["firstName", "lastName", "photoUrl", "currentTitle", "seniority", "country", "organization"].sort(),
     );
     expect(Object.keys(res.body.leads[0].lead.organization).sort()).toEqual(
       ["id", "name", "logoUrl", "primaryDomain", "websiteUrl", "industry", "estimatedNumEmployees", "city", "country"].sort(),
@@ -239,6 +241,18 @@ describe("GET /orgs/leads?view=compact", () => {
     expect(compact.body.leads[2].bounced).toBe(true);
     // A row that was never served carries no evidence, exactly as on basic.
     expect(compact.body.leads[3].contacted).toBe(false);
+  });
+
+  it("states the PERSON's own country, null when unknown, never the company's in its place", async () => {
+    const res = await get(`?brandId=${BRAND}&view=compact`);
+    expect(res.status).toBe(200);
+    expect(res.body.leads[0].lead.country).toBe("United States");
+    expect(res.body.leads[0].lead.organization.country).toBe("France");
+    expect(res.body.leads[1].lead.country).toBeNull();
+    expect(res.body.leads[1].lead.organization.country).toBe("France");
+    // A row with no company still states the person's country.
+    expect(res.body.leads[2].lead.organization).toBeNull();
+    expect(res.body.leads[2].lead.country).toBe("United States");
   });
 
   it("states when the lead was served, by the run that holds it, and the audience it was drawn from", async () => {
