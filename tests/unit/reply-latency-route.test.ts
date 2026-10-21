@@ -19,7 +19,7 @@ describe("POST /internal/reply-latency/grouped", () => {
       loadReplyLatencyByGroups: async (groups: Array<{ key: string; campaignIds: string[] }>) => {
         asked.push(groups);
         if (fail) throw new Error("db down");
-        return groups.map((g) => ({ ...g, timeToFirstPositiveReply: { sampleSize: 2, medianMs: 1000, averageMs: 1500, percentilesMs: { p10: 100, p25: 500, p50: 1000, p75: 2000, p90: 2500 }, distribution: [] } }));
+        return groups.map((g) => ({ ...g, timeToFirstPositiveReply: { sampleSize: 2, medianMs: 1000, averageMs: 1500, percentilesMs: { p10: 100, p25: 500, p50: 1000, p75: 2000, p90: 2500 }, distribution: [], dailyDistribution: [] } }));
       },
     }));
     const mod = await import("../../src/routes/reply-latency.js");

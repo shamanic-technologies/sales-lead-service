@@ -33,6 +33,11 @@ import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
  * last bucket) with the running count, so a reader draws a histogram AND a cumulative curve without recomputing.
  * Every bucket is served (zeros included) and the counts sum to `sampleSize`; an empty sample = every percentile null
  * and `distribution` [] (never a row of zeros).
+ *
+ * THE SAME SAMPLE PER DAY (TTFPR-DAY-BINS-1021, owner 2026-10-21: "des bins par day ... N=21"): `dailyDistribution`
+ * over `REPLY_LATENCY_DAY_BUCKETS`: Day 1 = under 24 h after the first message, Day k = [k-1, k) days, ... Day 21 =
+ * [20, 21) days, then "21 days or more". Same shape and rules as `distribution` (lower bound inclusive: exactly 24 h is
+ * Day 2, exactly 21 days is 21+; counts sum to `sampleSize`; [] when empty).
  */
 
 export const REPLY_LATENCY_MAX_GROUPS = 100;
@@ -60,8 +65,20 @@ export const REPLY_LATENCY_BUCKETS: ReadonlyArray<{ key: string; label: string; 
   { key: "60d_plus", label: "60 days or more", fromMs: 60 * D, toMs: null },
 ];
 
+export const REPLY_LATENCY_DAY_BINS = 21;
+
+/** Per-day buckets: Day 1 .. Day 21 ([k-1, k) days), then 21 days or more. */
+export const REPLY_LATENCY_DAY_BUCKETS: ReadonlyArray<{ key: string; label: string; fromMs: number; toMs: number | null }> = [
+  ...Array.from({ length: REPLY_LATENCY_DAY_BINS }, (_, i) => ({ key: `day_${i + 1}`, label: `Day ${i + 1}`, fromMs: i * D, toMs: (i + 1) * D })),
+  { key: `day_${REPLY_LATENCY_DAY_BINS}_plus`, label: `${REPLY_LATENCY_DAY_BINS} days or more`, fromMs: REPLY_LATENCY_DAY_BINS * D, toMs: null },
+];
+
+type BucketDef = { key: string; label: string; fromMs: number; toMs: number | null };
+
 /** Thresholds for Postgres `width_bucket` (bucket i+1 starts at thresholds[i]; below the first = bucket 0). */
-const BUCKET_THRESHOLDS_SQL = `ARRAY[${REPLY_LATENCY_BUCKETS.slice(1).map((b) => b.fromMs).join(",")}]::float8[]`;
+const thresholdsSql = (buckets: ReadonlyArray<BucketDef>) => `ARRAY[${buckets.slice(1).map((b) => b.fromMs).join(",")}]::float8[]`;
+const BUCKET_THRESHOLDS_SQL = thresholdsSql(REPLY_LATENCY_BUCKETS);
+const DAY_THRESHOLDS_SQL = thresholdsSql(REPLY_LATENCY_DAY_BUCKETS);
 
 export const REPLY_LATENCY_PERCENTILES = [0.1, 0.25, 0.5, 0.75, 0.9] as const;
 
@@ -87,9 +104,12 @@ export interface ReplyLatencyBucket {
 const NO_PERCENTILES: ReplyLatencyPercentiles = { p10: null, p25: null, p50: null, p75: null, p90: null };
 
 /** Every bucket with its count and running count, from `width_bucket` index -> people. Pure. */
-export function buildReplyLatencyDistribution(countsByIndex: ReadonlyMap<number, number>): ReplyLatencyBucket[] {
+export function buildReplyLatencyDistribution(
+  countsByIndex: ReadonlyMap<number, number>,
+  buckets: ReadonlyArray<BucketDef> = REPLY_LATENCY_BUCKETS,
+): ReplyLatencyBucket[] {
   let running = 0;
-  return REPLY_LATENCY_BUCKETS.map((b, i) => {
+  return buckets.map((b, i) => {
     const count = countsByIndex.get(i) ?? 0;
     running += count;
     return { ...b, count, cumulativeCount: running };
@@ -107,6 +127,8 @@ export interface ReplyLatencyMetric {
   percentilesMs: ReplyLatencyPercentiles;
   /** People per delay bucket, summing to `sampleSize`; [] when `sampleSize` is 0. */
   distribution: ReplyLatencyBucket[];
+  /** People per day (Day 1 .. Day 21, then 21 days or more), summing to `sampleSize`; [] when `sampleSize` is 0. */
+  dailyDistribution: ReplyLatencyBucket[];
 }
 
 export interface ReplyLatencyGroup {
@@ -115,7 +137,7 @@ export interface ReplyLatencyGroup {
   timeToFirstPositiveReply: ReplyLatencyMetric;
 }
 
-const EMPTY: ReplyLatencyMetric = { sampleSize: 0, medianMs: null, averageMs: null, percentilesMs: NO_PERCENTILES, distribution: [] };
+const EMPTY: ReplyLatencyMetric = { sampleSize: 0, medianMs: null, averageMs: null, percentilesMs: NO_PERCENTILES, distribution: [], dailyDistribution: [] };
 
 type Num = number | string | null;
 const num = (v: Num): number | null => (v === null || v === undefined ? null : Math.round(Number(v)));
@@ -175,14 +197,19 @@ export async function loadReplyLatencyByGroups(groups: ReadonlyArray<{ key: stri
     hist AS (
       SELECT gkey, width_bucket(ms::float8, ${sql.raw(BUCKET_THRESHOLDS_SQL)}) AS b, count(*)::int AS n
       FROM latency GROUP BY 1, 2
+    ),
+    day_hist AS (
+      SELECT gkey, width_bucket(ms::float8, ${sql.raw(DAY_THRESHOLDS_SQL)}) AS b, count(*)::int AS n
+      FROM latency GROUP BY 1, 2
     )
     SELECT l.gkey, count(*)::int AS n,
            percentile_cont(0.5) WITHIN GROUP (ORDER BY ms) AS median_ms,
            avg(ms) AS average_ms,
            to_json(percentile_cont(${sql.raw(`ARRAY[${REPLY_LATENCY_PERCENTILES.join(",")}]::float8[]`)}) WITHIN GROUP (ORDER BY ms::float8)) AS percentiles_ms,
-           (SELECT json_agg(json_build_array(h.b, h.n)) FROM hist h WHERE h.gkey = l.gkey) AS hist
+           (SELECT json_agg(json_build_array(h.b, h.n)) FROM hist h WHERE h.gkey = l.gkey) AS hist,
+           (SELECT json_agg(json_build_array(h.b, h.n)) FROM day_hist h WHERE h.gkey = l.gkey) AS day_hist
     FROM latency l GROUP BY l.gkey
-  `)) as unknown as Array<{ gkey: string; n: number; median_ms: Num; average_ms: Num; percentiles_ms: Num[] | string; hist: Array<[number, number]> | string }>;
+  `)) as unknown as Array<{ gkey: string; n: number; median_ms: Num; average_ms: Num; percentiles_ms: Num[] | string; hist: Array<[number, number]> | string; day_hist: Array<[number, number]> | string }>;
 
   const byKey = new Map(rows.map((r) => [r.gkey, r]));
   return normalized.map((g) => {
@@ -190,11 +217,16 @@ export async function loadReplyLatencyByGroups(groups: ReadonlyArray<{ key: stri
     if (!r || Number(r.n) === 0) return { ...g, timeToFirstPositiveReply: EMPTY };
     const sampleSize = Number(r.n);
     const pct = (typeof r.percentiles_ms === "string" ? JSON.parse(r.percentiles_ms) : r.percentiles_ms) as Num[];
-    const hist = (typeof r.hist === "string" ? JSON.parse(r.hist) : r.hist) as Array<[number, number]>;
-    const distribution = buildReplyLatencyDistribution(new Map(hist.map(([b, n]) => [Number(b), Number(n)])));
-    if (distribution[distribution.length - 1].cumulativeCount !== sampleSize) {
-      throw new Error(`reply-latency: group ${g.key} buckets sum to ${distribution[distribution.length - 1].cumulativeCount}, sample is ${sampleSize}`);
-    }
+    const toDistribution = (raw: Array<[number, number]> | string, buckets: ReadonlyArray<BucketDef>, what: string) => {
+      const hist = (typeof raw === "string" ? JSON.parse(raw) : raw) as Array<[number, number]>;
+      const d = buildReplyLatencyDistribution(new Map(hist.map(([b, n]) => [Number(b), Number(n)])), buckets);
+      if (d[d.length - 1].cumulativeCount !== sampleSize) {
+        throw new Error(`reply-latency: group ${g.key} ${what} sum to ${d[d.length - 1].cumulativeCount}, sample is ${sampleSize}`);
+      }
+      return d;
+    };
+    const distribution = toDistribution(r.hist, REPLY_LATENCY_BUCKETS, "buckets");
+    const dailyDistribution = toDistribution(r.day_hist, REPLY_LATENCY_DAY_BUCKETS, "day bins");
     const [p10, p25, p50, p75, p90] = pct.map(num);
     const metric: ReplyLatencyMetric = {
       sampleSize,
@@ -202,6 +234,7 @@ export async function loadReplyLatencyByGroups(groups: ReadonlyArray<{ key: stri
       averageMs: num(r.average_ms),
       percentilesMs: { p10, p25, p50, p75, p90 },
       distribution,
+      dailyDistribution,
     };
     return { ...g, timeToFirstPositiveReply: metric };
   });
