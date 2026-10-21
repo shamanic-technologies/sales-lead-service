@@ -584,8 +584,27 @@ export interface UniboxFilters {
   campaignIds?: readonly string[];
 }
 
+/**
+ * A campaign that reached the row's person, named as the lead card names it (DEALS-LIFECYCLE-1021: a Deals card says
+ * which campaign reached that person): the customer's campaign once, its pipes folded in.
+ */
+export interface UniboxRowCampaign {
+  campaignId: string;
+  name: string;
+  pipeCampaignIds: string[];
+  /** First time it served them (the card's `servedAt`); null = filed, never served. */
+  servedAt: string | null;
+}
+
+/** A list row: the row plus the campaigns that reached the person (read in the page's own statement, no extra trip). */
+export interface UniboxListRow extends UniboxRow {
+  /** Most recent first; within the read's offer/campaign scope when one is given. null = campaign-service unreadable. */
+  campaigns: UniboxRowCampaign[] | null;
+  campaignsReason: "source_unreadable" | null;
+}
+
 export interface UniboxPage {
-  rows: UniboxRow[];
+  rows: UniboxListRow[];
   total: number;
   nextCursor: string | null;
   builtAt: string | null;
@@ -625,6 +644,36 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     lastMessage: (r.last_message as UniboxLastMessage | null) ?? null,
     lastMessageReason: (r.last_message_reason as UniboxLastMessageReason | null) ?? null,
   };
+}
+
+/**
+ * Pure: the person's campaign filings at the grain the customer knows, as the lead card folds them (a pipe folds into the
+ * campaign it belongs to; a filing that is no campaign, `signups:<brand>` / `unibox:<brand>`, is not listed). Most
+ * recent first (undated last), then by name.
+ */
+export function foldRowCampaigns(
+  filings: ReadonlyArray<{ campaignId: string; servedAt: string | null }>,
+  displays: ReadonlyMap<string, CampaignDisplay>,
+): UniboxRowCampaign[] {
+  const byCampaign = new Map<string, UniboxRowCampaign & { parts: Set<string> }>();
+  for (const f of filings) {
+    const display = displays.get(f.campaignId);
+    if (!display) continue;
+    let v = byCampaign.get(display.id);
+    if (!v) byCampaign.set(display.id, (v = { campaignId: display.id, name: display.name, pipeCampaignIds: [], servedAt: null, parts: new Set() }));
+    v.parts.add(f.campaignId);
+    if (f.servedAt !== null && (v.servedAt === null || Date.parse(f.servedAt) < Date.parse(v.servedAt))) v.servedAt = f.servedAt;
+  }
+  return [...byCampaign.values()]
+    .map(({ parts, ...c }) => ({ ...c, pipeCampaignIds: [...parts].sort() }))
+    .sort((a, b) => {
+      if (a.servedAt !== b.servedAt) {
+        if (a.servedAt === null) return 1;
+        if (b.servedAt === null) return -1;
+        return Date.parse(b.servedAt) - Date.parse(a.servedAt);
+      }
+      return a.name.localeCompare(b.name) || a.campaignId.localeCompare(b.campaignId);
+    });
 }
 
 function encodeCursor(at: string, human: string, company: string): string {
@@ -677,16 +726,46 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
   const after = page.cursor === null ? null : decodeCursor(page.cursor);
   const keyset =
     after === null ? sql`` : sql`AND (u.last_activity_at, u.human_id, u.company_key) < (${after.at}::timestamptz, ${after.human}::uuid, ${after.company})`;
-  const [rows, totals, built] = await Promise.all([
+  // The campaigns that reached each row's person ride the page's own statement (one trip, only the page's rows):
+  // their `leads_campaigns` filings at the brand, inside the read's scope when one is given.
+  const inScope = f.campaignIds === undefined ? sql`` : sql`AND lc.campaign_id = ANY(${sql.param([...f.campaignIds])}::text[])`;
+  const [rows, totals, built, displays] = await Promise.all([
     db.execute(sql`
-      SELECT u.* FROM unibox_rows u WHERE ${where} ${keyset}
-      ORDER BY u.last_activity_at DESC, u.human_id DESC, u.company_key DESC LIMIT ${page.limit + 1}
+      WITH page AS (
+        SELECT u.* FROM unibox_rows u WHERE ${where} ${keyset}
+        ORDER BY u.last_activity_at DESC, u.human_id DESC, u.company_key DESC LIMIT ${page.limit + 1}
+      )
+      SELECT page.*, (
+        SELECT coalesce(json_agg(json_build_object('campaignId', x.campaign_id, 'servedAt', x.served_at)), '[]'::json)
+        FROM (
+          SELECT lc.campaign_id, min(lc.served_at) AS served_at FROM leads_campaigns lc
+          WHERE lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids) AND lc.lead_id = ANY(page.lead_ids) ${inScope}
+          GROUP BY lc.campaign_id
+        ) x
+      ) AS row_campaigns
+      FROM page
+      ORDER BY page.last_activity_at DESC, page.human_id DESC, page.company_key DESC
     `) as unknown as Promise<Array<Record<string, unknown>>>,
     db.execute(sql`SELECT count(*)::int AS n FROM unibox_rows u WHERE ${where}`) as unknown as Promise<Array<{ n: number }>>,
     db.execute(sql`SELECT max(updated_at) AS at FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}`) as unknown as Promise<Array<{ at: Ts | null }>>,
+    loadCampaignDisplays(scope.orgId, scope.brandId).catch((error: unknown) => {
+      // The list still answers (every other field is ours); the rows say their campaigns are unknown, never "none".
+      console.error(`[lead-service] unibox list: campaign names unreadable (org ${scope.orgId} brand ${scope.brandId}), rows served with campaigns: null:`, error);
+      return null;
+    }),
   ]);
   const more = rows.length > page.limit;
-  const items = rows.slice(0, page.limit).map((r) => toRow(r, catalogue.ladder));
+  const items: UniboxListRow[] = rows.slice(0, page.limit).map((r) => {
+    const filings = ((r.row_campaigns as Array<{ campaignId: string; servedAt: Ts | null }> | null) ?? []).map((c) => ({
+      campaignId: String(c.campaignId),
+      servedAt: iso(c.servedAt),
+    }));
+    return {
+      ...toRow(r, catalogue.ladder),
+      campaigns: displays === null ? null : foldRowCampaigns(filings, displays),
+      campaignsReason: displays === null ? "source_unreadable" : null,
+    };
+  });
   const last = items[items.length - 1];
   return { rows: items, total: totals[0]?.n ?? 0, nextCursor: more && last ? encodeCursor(last.lastActivityAt, last.humanId, last.companyKey) : null, builtAt: iso(built[0]?.at ?? null) };
 }

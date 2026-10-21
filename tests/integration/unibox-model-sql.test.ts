@@ -182,6 +182,14 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(anaRow).toMatchObject({ name: "Ana Lopez", firstName: "Ana", lastName: "Lopez", title: "Head of Sales" });
     expect(benRow).toMatchObject({ name: "Ben", firstName: null, lastName: null, title: null });
     expect(anaRow.steps.map((s) => s.step)).toEqual(["lead_found", "email_sent", "conversation", "website_visit"]);
+    // DEALS-LIFECYCLE-1021: each row names the campaigns that reached the person, as the card names them, most recent first;
+    // the signup filing is no campaign; Ben (a CRM person) is a lead of none.
+    expect(anaRow.campaigns).toEqual([
+      { campaignId: "camp-webinar", name: "Webinar", pipeCampaignIds: ["camp-webinar"], servedAt: "2026-10-05T09:00:00.000Z" },
+      { campaignId: "sfc-1", name: "Cold email to meeting", pipeCampaignIds: ["camp-cold"], servedAt: "2026-10-01T09:00:00.000Z" },
+    ]);
+    expect(anaRow.campaignsReason).toBeNull();
+    expect(benRow).toMatchObject({ campaigns: [], campaignsReason: null });
     // The first words of each thread's last message, who wrote it, by which channel (crm-service's thread).
     expect(anaRow.lastMessage).toEqual({
       at: "2026-10-03T12:00:00.000Z", side: "ours", sentBy: "automation", channel: "email", source: "instantly", subject: "Re: Data, not docs",
@@ -228,6 +236,12 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(scoped.total).toBe(1);
     // Her Lifecycle stays the brand's.
     expect(scoped.rows[0].lifecycle?.key).toBe("engaged");
+    // Her campaigns narrow to the scope's (the webinar sells another offer); same name as on her card.
+    expect(scoped.rows[0].campaigns?.map((c) => [c.campaignId, c.name])).toEqual([["sfc-1", "Cold email to meeting"]]);
+    const card = await readUniboxLead(scope, ana);
+    for (const rowCampaign of (await readUniboxPage(scope, {}, { limit: 10, cursor: null })).rows.find((r) => r.humanId === ana)!.campaigns!) {
+      expect(card!.campaigns.find((c) => c.campaignId === rowCampaign.campaignId)).toMatchObject({ name: rowCampaign.name, pipeCampaignIds: rowCampaign.pipeCampaignIds, servedAt: rowCampaign.servedAt });
+    }
     const scopedCounts = await readUniboxLifecycleCounts(scope, { campaignIds: offer1 });
     expect(scopedCounts).toMatchObject({ total: 1, byLifecycle: { engaged: 1, signup_or_form: 0, none: 0 } });
     expect(sum(scopedCounts)).toBe(scoped.total);
