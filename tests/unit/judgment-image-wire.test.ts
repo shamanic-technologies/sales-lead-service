@@ -41,6 +41,21 @@ describe("image judgment wire", () => {
     expect(holds.instructions).toBe("Is there no phone in the header?\nYes: No phone.\nNo: A phone.");
   });
 
+  it("cloudflare-clef judges take criteria like jev (only openai-luna folds them)", async () => {
+    for (const judge of ["cloudflare-clef", "cloudflare-clef-flash"] as const) {
+      sent.length = 0;
+      await judgeImageYesNo({ company: "x" }, "https://r2.example/a.png", questions, "platform", judge);
+      expect(sent[0].body.judge).toBe(judge);
+      expect((sent[0].body.questions as Record<string, unknown>).holds).toEqual({ type: "noul", instructions: "Is there no phone in the header?", criteria: { true: "No phone.", false: "A phone." } });
+    }
+  });
+
+  it("every judge has its input cost name", async () => {
+    const { IMAGE_JUDGES, JUDGE_INPUT_COST_NAMES } = await import("../../src/lib/qualification-judge.js");
+    for (const j of IMAGE_JUDGES) expect(JUDGE_INPUT_COST_NAMES[j]).toMatch(/-tokens-input$/);
+    expect(JUDGE_INPUT_COST_NAMES["cloudflare-clef-flash"]).toBe("cloudflare-clef-flash-tokens-input");
+  });
+
   it("a text judgment sends neither image nor judge (bytes unchanged)", async () => {
     const { judgeYesNo } = await import("../../src/lib/qualification-judge.js");
     await judgeYesNo("state", { holds: { instructions: "?" } }, "platform");
