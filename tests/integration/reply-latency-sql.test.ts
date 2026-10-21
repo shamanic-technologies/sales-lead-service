@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
-const { loadReplyLatencyByGroups, REPLY_LATENCY_BUCKETS } = await import("../../src/lib/reply-latency.js");
+const { loadReplyLatencyByGroups, REPLY_LATENCY_BUCKETS, REPLY_LATENCY_DAY_BUCKETS } = await import("../../src/lib/reply-latency.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -28,6 +28,7 @@ describe.skipIf(!hasRealDatabase)("first message -> first positive reply per cam
   const writer = `itest-writer-${tag}`;
   const coldB = `itest-cold-b-${tag}`;
   const silent = `itest-silent-${tag}`;
+  const edges = `itest-edges-${tag}`;
   const leads: string[] = [];
 
   async function person(): Promise<string> {
@@ -97,14 +98,23 @@ describe.skipIf(!hasRealDatabase)("first message -> first positive reply per cam
     const g = await person();
     await send(orgA, brandA, g, silent, 0);
 
+    // day-bin edges (TTFPR-DAY-BINS-1021), own group: exactly 24h -> Day 2, just under 24h -> Day 1,
+    // exactly 21 days -> 21+, just under 21 days -> Day 21.
+    for (const h of [24, 23.5, 21 * 24, 21 * 24 - 0.5]) {
+      const p = await person();
+      await send(orgA, brandA, p, edges, 0);
+      await positive(orgA, brandA, p, h);
+    }
+
     const out = await loadReplyLatencyByGroups([
       { key: "campaign", campaignIds: [cold, whatsapp, writer, cold] },
       { key: "fleet", campaignIds: [cold, whatsapp, writer, coldB] },
       { key: "silent", campaignIds: [silent] },
       { key: "unknown", campaignIds: [`itest-nobody-${tag}`] },
+      { key: "edges", campaignIds: [edges] },
     ]);
 
-    expect(out.map((o) => o.key)).toEqual(["campaign", "fleet", "silent", "unknown"]);
+    expect(out.map((o) => o.key)).toEqual(["campaign", "fleet", "silent", "unknown", "edges"]);
     expect(out[0].campaignIds).toEqual([cold, whatsapp, writer]);
     // campaign: 48h, 6h, 12h -> median 12h, average 22h.
     const campaign = out[0].timeToFirstPositiveReply;
@@ -116,6 +126,10 @@ describe.skipIf(!hasRealDatabase)("first message -> first positive reply per cam
     // 6h falls in [6h, 12h) (lower bound inclusive), 12h in [12h, 24h), 48h in [2d, 3d).
     expect(counts(campaign.distribution)).toEqual({ "6h_12h": 1, "12h_1d": 1, "2d_3d": 1 });
     expect(campaign.distribution.at(-1)!.cumulativeCount).toBe(3);
+    // per day: 6h and 12h on Day 1, 48h on Day 3 (exactly 2 days = start of Day 3).
+    expect(campaign.dailyDistribution.map((b) => b.key)).toEqual(REPLY_LATENCY_DAY_BUCKETS.map((b) => b.key));
+    expect(counts(campaign.dailyDistribution)).toEqual({ day_1: 2, day_3: 1 });
+    expect(campaign.dailyDistribution.at(-1)!.cumulativeCount).toBe(3);
     // fleet: + 2h -> median (6+12)/2 = 9h, average 17h.
     const fleet = out[1].timeToFirstPositiveReply;
     expect({ sampleSize: fleet.sampleSize, medianMs: fleet.medianMs, averageMs: fleet.averageMs }).toEqual({ sampleSize: 4, medianMs: 9 * HOUR, averageMs: 17 * HOUR });
@@ -123,8 +137,12 @@ describe.skipIf(!hasRealDatabase)("first message -> first positive reply per cam
     expect(counts(fleet.distribution)).toEqual({ "1h_3h": 1, "6h_12h": 1, "12h_1d": 1, "2d_3d": 1 });
     expect(fleet.distribution.reduce((s, b) => s + b.count, 0)).toBe(4);
     // empty groups: nulls and no buckets, never zeros.
-    const empty = { sampleSize: 0, medianMs: null, averageMs: null, percentilesMs: { p10: null, p25: null, p50: null, p75: null, p90: null }, distribution: [] };
+    const empty = { sampleSize: 0, medianMs: null, averageMs: null, percentilesMs: { p10: null, p25: null, p50: null, p75: null, p90: null }, distribution: [], dailyDistribution: [] };
     expect(out[2].timeToFirstPositiveReply).toEqual(empty);
     expect(out[3].timeToFirstPositiveReply).toEqual(empty);
+    const edgeDays = out[4].timeToFirstPositiveReply.dailyDistribution;
+    expect(edgeDays).toHaveLength(22);
+    expect(counts(edgeDays)).toEqual({ day_1: 1, day_2: 1, day_21: 1, day_21_plus: 1 });
+    expect(edgeDays.reduce((s, b) => s + b.count, 0)).toBe(out[4].timeToFirstPositiveReply.sampleSize);
   });
 });

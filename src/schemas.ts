@@ -9442,6 +9442,22 @@ export const ReplyLatencyMetricSchema = z
           "People per delay bucket, shortest first: hours for the first day (under 1h, 1-3h, 3-6h, 6-12h, 12-24h), then days (1-2, 2-3, 3-5, 5-7, 7-10, 10-14, 14-21, 21-30, 30-60), then 60 days or more. " +
           "Every bucket is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0.",
       }),
+    dailyDistribution: z
+      .array(
+        z.object({
+          key: z.string().openapi({ description: "Stable day key: `day_1` .. `day_21`, then `day_21_plus`." }),
+          label: z.string().openapi({ description: "Human label: `Day 1` .. `Day 21`, then `21 days or more`." }),
+          fromMs: z.number().int().openapi({ description: "Inclusive lower bound of the delay, ms ((k-1) x 24 h for Day k)." }),
+          toMs: z.number().int().nullable().openapi({ description: "Exclusive upper bound, ms (k x 24 h for Day k); null on `21 days or more`." }),
+          count: z.number().int().openapi({ description: "People whose first positive reply fell on this day." }),
+          cumulativeCount: z.number().int().openapi({ description: "People on this day or an earlier one (the last one equals sampleSize)." }),
+        }),
+      )
+      .openapi({
+        description:
+          "The same sample per day after our first message: Day 1 = under 24 hours, Day 2 = 24 to 48 hours, ... Day 21 = 20 to 21 days, then 21 days or more (22 bins). " +
+          "Lower bound inclusive (exactly 24 hours is Day 2, exactly 21 days is 21 days or more). Every bin is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0.",
+      }),
   })
   .openapi("ReplyLatencyMetric");
 
@@ -9469,7 +9485,7 @@ registry.registerPath({
     "Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: " +
     "a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). " +
     "A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs/percentiles null and an empty distribution. " +
-    "Beside the median and average: p10/p25/p50/p75/p90 and the people per delay bucket with the running count (histogram and cumulative curve of the same sample). " +
+    "Beside the median and average: p10/p25/p50/p75/p90, the people per delay bucket with the running count (histogram and cumulative curve of the same sample), and the same sample per day (Day 1 .. Day 21, then 21 days or more). " +
     "Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. " +
     "No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
   request: { body: { content: { "application/json": { schema: ReplyLatencyRequestSchema } } } },
