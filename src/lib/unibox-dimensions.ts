@@ -204,3 +204,44 @@ export const STEP_OF_TIMELINE_LABEL: Readonly<Record<string, string>> = {
   paid_client: "paid_client",
   industry_update_video: "industry_update_video",
 };
+
+/**
+ * WHO the row is (UNIBOX-PERSON-NAME-1021, owner 2026-10-21: "Andreas Oberleitner @ Platomics", never his address).
+ * The relation's own leads speak first (the person as sourced: first name, last name, current title), then the name
+ * crm-service read off the conversation. A "name" holding an address is no name. Unknown = null, never a guess.
+ */
+export interface UniboxLeadIdentity {
+  leadId: string;
+  firstName: string | null;
+  lastName: string | null;
+  name: string | null;
+  /** Current job titles, the one at the relation's company first. */
+  titles: string[];
+}
+
+export interface UniboxPersonIdentity {
+  name: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  title: string | null;
+}
+
+function realName(s: string | null | undefined): string | null {
+  const t = (s ?? "").trim().replace(/\s+/g, " ");
+  return t === "" || t.includes("@") ? null : t;
+}
+
+export function personIdentityOf(crmName: string | null, leads: readonly UniboxLeadIdentity[]): UniboxPersonIdentity {
+  const sorted = [...leads].sort((a, b) => a.leadId.localeCompare(b.leadId));
+  const named = sorted.find((l) => realName(l.firstName) || realName(l.lastName) || realName(l.name)) ?? null;
+  const firstName = named ? realName(named.firstName) : null;
+  const lastName = named ? realName(named.lastName) : null;
+  const leadName = [firstName, lastName].filter((x) => x !== null).join(" ") || (named ? realName(named.name) : null);
+  const titleOf = (l: UniboxLeadIdentity | null) => l?.titles.map((t) => t.trim()).find((t) => t !== "") ?? null;
+  return {
+    name: leadName || realName(crmName),
+    firstName,
+    lastName,
+    title: titleOf(named) ?? sorted.map(titleOf).find((t) => t !== null) ?? null,
+  };
+}
