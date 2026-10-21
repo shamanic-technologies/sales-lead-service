@@ -38,24 +38,27 @@ export function wellFormedState(value: unknown): unknown {
 }
 
 /** The typed judges chat-service offers for a judgment (its `judge` field). */
-export const IMAGE_JUDGES = ["jev", "openai-luna"] as const;
+export const IMAGE_JUDGES = ["jev", "openai-luna", "cloudflare-clef", "cloudflare-clef-flash"] as const;
 export type ImageJudge = (typeof IMAGE_JUDGES)[number];
 
 /**
  * The judge that answers screenshot checks, picked on the benchmark of every stored screenshot x every criterion that
- * used it (SCREENSHOT-CHECK-QUESTION-1021, 2026-10-21): jev and openai-luna agreed on underdogroofing.com (phone shown =
- * no); on 10 hand-checked disagreements jev made no error and luna one (read a clean page as outdated), and jev is the
- * cheaper of the two ($0.00034 vs $0.00036 a check). openai-luna also 502d on 36 of 120 calls run 4 at a time.
+ * used it, accuracy first, cost second (IMAGE-JUDGE-CLEF-1021, 2026-10-21: 111 checks, 72 screenshots, 3 criteria; the
+ * 42 disagreements checked by eye, 6 too ambiguous to score). Right on 105 scored: jev 105 ($0.00035 a check), cloudflare-clef
+ * 103 ($0.00065), openai-luna 94 ($0.00037, read clean pages as outdated), cloudflare-clef-flash 79 ($0.00010, answered
+ * "CTA absent" yes on 23 pages showing one and missed both cookie walls). All four got the phone-in-header question 33/33.
  */
 export const SCREENSHOT_JUDGE: ImageJudge = "jev";
 
-/** The input-token cost name chat-service declares a judgment under, per judge (output is free at both). */
+/** The input-token cost name chat-service declares a judgment under, per judge (output is free at every judge). */
 export const JUDGE_INPUT_COST_NAMES: Record<ImageJudge, string> = {
   jev: "typesafe-jev-1.13-tokens-input",
   "openai-luna": "openai-gpt-6-luna-decisions-tokens-input",
+  "cloudflare-clef": "cloudflare-clef-tokens-input",
+  "cloudflare-clef-flash": "cloudflare-clef-flash-tokens-input",
 };
 
-/** Input tokens one screenshot judgment costs at SCREENSHOT_JUDGE (image + questions): 4,082 on average over the 120 stored screenshot checks of the benchmark. */
+/** Input tokens one screenshot judgment costs at SCREENSHOT_JUDGE (image + questions): 4,117 on average over the 111 stored screenshot checks of the benchmark. */
 export const IMAGE_JUDGE_INPUT_TOKENS = 4_100;
 
 async function ask(
@@ -129,9 +132,9 @@ export async function judgeImageYesNo<K extends string>(
   for (const [k, q] of Object.entries(questions) as Array<[K, YesNoQuestion]>) {
     const bounded = q.whenTrue && q.whenFalse;
     wire[k] =
-      judge === "jev"
-        ? { type: "noul", instructions: q.instructions, ...(bounded ? { criteria: { true: q.whenTrue, false: q.whenFalse } } : {}) }
-        : { type: "noul", instructions: bounded ? `${q.instructions}\nYes: ${q.whenTrue}\nNo: ${q.whenFalse}` : q.instructions };
+      judge === "openai-luna"
+        ? { type: "noul", instructions: bounded ? `${q.instructions}\nYes: ${q.whenTrue}\nNo: ${q.whenFalse}` : q.instructions }
+        : { type: "noul", instructions: q.instructions, ...(bounded ? { criteria: { true: q.whenTrue, false: q.whenFalse } } : {}) };
   }
   const { answers, model } = await ask(state, wire, id, { imageUrl, judge });
   return { probabilities: readProbabilities(answers, Object.keys(questions) as K[]), model };
