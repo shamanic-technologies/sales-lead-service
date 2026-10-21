@@ -223,6 +223,8 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       // Every lead's next follow-up date and each "Lead follow-up due" hand-out (LEAD-FOLLOWUP-DATE-1016).
       { table: "lead_followup_dates", touchesUpdatedAt: true },
       { table: "lead_followup_due_serves", touchesUpdatedAt: false },
+      // Every act of theirs read off the crm copy (LEADS-JUDGE-BRAND-1021), keyed like the facts they come from.
+      { table: "lead_crm_acts", touchesUpdatedAt: false },
       // Who is hot and what each new hot fact did (HOT-LEAD-PROPOSAL-1019): moved so a person who stays hot never re-fires.
       { table: "hot_lead_brands", touchesUpdatedAt: false },
       { table: "hot_lead_states", touchesUpdatedAt: true },
@@ -233,6 +235,12 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       DELETE FROM lead_followup_dates s
       WHERE ${brandScalarPending}
         AND EXISTS (SELECT 1 FROM lead_followup_dates t WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id)
+    `);
+    // An act the target already holds for the same lead and fact is the same act: drop the source copy.
+    await tx.execute(sql`
+      DELETE FROM lead_crm_acts s
+      WHERE ${brandScalarPending}
+        AND EXISTS (SELECT 1 FROM lead_crm_acts t WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id AND t.fact_id = s.fact_id)
     `);
     // A journalist row the target already holds for the same lead is rewritten by the next refresh: drop the source copy.
     await tx.execute(sql`

@@ -93,6 +93,8 @@ export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean): 
   const unsureTags = block.unsureTags.filter((t) => PURE_PROSPECT_EXCLUDED.includes(t));
   // A tag stated, evidenced or judged (sure or not) that is not prospect: whatever else is unknown, not a lead.
   if (tags.length > 0 || unsureTags.length > 0) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
+  // The judge (reading the brand's offers) or crm-service says they are not the brand's lead (LEADS-JUDGE-BRAND-1021).
+  if (block.notBrandLead) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
   if (block.policies.pure_prospect) {
     // A non-subject is a pure prospect by definition, unless a source of the org knows them: then crm-service's
     // connection tags decide (PROFESSIONAL-LEADS-1017). Not tagged yet = "we do not know", never "a stranger";

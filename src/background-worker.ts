@@ -32,7 +32,7 @@ import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
 import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
-import { fileUniboxLeads } from "./lib/unibox-leads.js";
+import { fileUniboxLeads, reconcileUniboxLeads } from "./lib/unibox-leads.js";
 import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
@@ -92,6 +92,8 @@ let uniboxTicks = 0;
 startLeadFollowupDatesWorker(async () => {
   // The intake reads every relationship of every candidate: every 7th tick (~15 min) is plenty.
   if (uniboxTicks++ % 7 !== 0) return;
+  const kept = await reconcileUniboxLeads();
+  if (kept.filedOut > 0 || kept.filedBack > 0) console.log(`[lead-service] unibox leads: filedOut=${kept.filedOut} filedBack=${kept.filedBack} (LEADS-JUDGE-BRAND-1021)`);
   const r = await fileUniboxLeads();
   if (r.filed > 0 || r.ambiguous > 0 || r.malformed > 0) console.log(`[lead-service] unibox intake: candidates=${r.candidates} filed=${r.filed} notProspect=${r.notProspect} ambiguous=${r.ambiguous} malformed=${r.malformed}`);
 });

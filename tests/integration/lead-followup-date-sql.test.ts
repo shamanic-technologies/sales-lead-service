@@ -21,6 +21,7 @@ vi.mock("../../src/lib/email-gateway-client.js", () => ({
 const { db } = await import("../../src/db/index.js");
 const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const fd = await import("../../src/lib/lead-followup-date.js");
+const { refreshActedAt } = await import("../../src/lib/their-acts.js");
 const { claimStockedLead } = await import("../../src/lib/source-stock.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -53,6 +54,29 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
 
   async function dateOf(leadId: string) {
     return fd.loadFollowupDate(orgId, brandId, leadId);
+  }
+
+  /** crm-service reads these points as professional TO the brand (a relationship subject of the brand holds them; no thread to judge). */
+  async function toBrandSubject(humanId: string, points: string[]) {
+    await db.execute(sql`
+      INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, contact_points, has_direct)
+      VALUES (${orgId}, ${brandId}, ${humanId}::uuid, '', ${sql.param(points)}::text[], false)
+      ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET contact_points = excluded.contact_points`);
+  }
+
+  /** Jev's frozen answer "a person or a machine?" for one inbound message. */
+  async function judgedHuman(factId: string, automated = false) {
+    await db.execute(sql`
+      INSERT INTO crm_act_judgments (fact_id, automated, probability, model) VALUES (${factId}, ${automated}, ${automated ? 0.97 : 0.03}, 'jev-itest')
+      ON CONFLICT (fact_id) DO UPDATE SET automated = excluded.automated`);
+  }
+
+  /** crm-service judged this conversation NOT about the brand. */
+  async function notAboutBrand(point: string) {
+    await db.execute(sql`
+      INSERT INTO crm_registry_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${point}, '{}', '{}', 'connection_tag', 'none', 'crm', ${randomUUID()},
+        ${JSON.stringify({ tag: "professional_not_to_brand", brandId, userIds: [], basis: [{ kind: "conversation", ref: point }] })}::jsonb, '{}'::jsonb)`);
   }
 
   async function setDue(leadId: string, at = "2026-01-01T00:00:00Z") {
@@ -204,12 +228,18 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await setDue(client.leadId, "2025-01-01T00:00:00Z");
     await setDue(friend.leadId, "2025-02-01T00:00:00Z");
     for (const p of [older, client, friend]) await act(p.leadId);
-    // The phone-only person wrote to us on WhatsApp: an act of theirs read off the Unibox facts.
+    // The phone-only person wrote to us on WhatsApp: an act of theirs read off the Unibox facts, on a point crm-service
+    // reads as professional to the brand, a person's words (LEADS-JUDGE-BRAND-1021).
+    const waPoint = `phone:${randomUUID()}`;
+    const waFact = randomUUID();
     await db.execute(sql`
       INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, ${`phone:${randomUUID()}`}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
+      VALUES (${waFact}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${waPoint}, ${waPoint}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
         'message_in', '2026-10-01T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
+    await toBrandSubject(waOnly.humanId, [waPoint]);
+    await judgedHuman(waFact);
     await fd.syncSendFeeds(30_000);
+    await refreshActedAt({ orgId, brandId });
     await db.execute(sql`
       INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
       VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
@@ -294,12 +324,45 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     expect((await dateOf(never.leadId)).nextFollowupAt).toBe("2026-01-01T00:00:00.000Z");
     expect((await fd.dueVerdict({ orgId, brandId, leadId: emailedOnly.leadId }, {})).reason).toBe("no_action_toward_us");
 
-    // They write to us once on WhatsApp (matched by email here): served.
-    await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`email:${emailedOnly.email}`}, ${`email:${emailedOnly.email}`}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
-        'message_in', '2026-10-02T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
+    // LEADS-JUDGE-BRAND-1021: an out-of-office (judged automatic) and a message in a conversation crm-service judged NOT
+    // about this brand are no act toward it. Both land on the person's Gmail point; nothing is served.
+    const gmailPoint = `gmail:${emailedOnly.email}`;
+    const ooo = randomUUID();
+    const offBrand = randomUUID();
+    const insertMessage = (factId: string, point: string, at: string, payload: Record<string, unknown>) =>
+      db.execute(sql`
+        INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+        -- Above every seq in the shared table: another suite's higher seq would carry the feed cursor past this fact.
+        VALUES (${factId}, GREATEST(${nextSeq()}::bigint, (SELECT COALESCE(max(seq), 0) + 1 FROM crm_facts)), ${orgId}, ${brandId}, ${point}, ${point}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
+          'message_in', ${at}::timestamptz, 'sent_at', ${point.split(":")[0]}, ${randomUUID()}, ${JSON.stringify(payload)}::jsonb, '{}'::jsonb)`);
+    await insertMessage(ooo, gmailPoint, "2026-09-20T08:00:00Z", { channel: "email", subject: "Automatic reply: out of office", text: "I am out of the office." });
+    await toBrandSubject(emailedOnly.humanId, [gmailPoint]);
+    await judgedHuman(ooo, true);
     await fd.syncSendFeeds(30_000);
+    await refreshActedAt({ orgId, brandId });
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false });
+    expect(await serveDue()).toBeNull();
+    const otherPoint = `gmail:other-${randomUUID().slice(0, 6)}@distribute.you`;
+    await insertMessage(offBrand, otherPoint, "2026-09-21T08:00:00Z", { channel: "email", text: "How do you handle these dinner events?" });
+    await toBrandSubject(emailedOnly.humanId, [gmailPoint, otherPoint]);
+    await judgedHuman(offBrand);
+    await notAboutBrand(otherPoint);
+    await fd.syncSendFeeds(30_000);
+    await refreshActedAt({ orgId, brandId });
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false });
+    expect(await serveDue()).toBeNull();
+
+    // They write to us once on WhatsApp (matched by email here), a person's words on a point of the brand: served.
+    const waPoint = `email:${emailedOnly.email}`;
+    const written = randomUUID();
+    await insertMessage(written, waPoint, "2026-10-02T08:00:00Z", { channel: "whatsapp" });
+    await toBrandSubject(emailedOnly.humanId, [gmailPoint, otherPoint, waPoint]);
+    await fd.syncSendFeeds(30_000);
+    await refreshActedAt({ orgId, brandId });
+    // Not judged yet = not counted (fail closed), then judged a person's words = counted.
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false });
+    await judgedHuman(written);
+    await refreshActedAt({ orgId, brandId });
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
     expect((await serveDue())?.leadId).toBe(emailedOnly.leadId);
     // The never-contacted one: an open, an auto-reply and an Instantly-reported click prove nothing (machines).

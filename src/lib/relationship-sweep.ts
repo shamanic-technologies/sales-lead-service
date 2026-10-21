@@ -14,7 +14,7 @@
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
  */
 import { createRun, updateRun } from "./runs-client.js";
-import { judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
+import { brandCardOf, judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
 import { intentSubjectsToJudge, judgeIntent } from "./relationship-intent-judge.js";
 import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects.js";
 import { recomputePolicy } from "./relationship-read.js";
@@ -59,7 +59,15 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
   };
   let failed = false;
   try {
-    const todo = await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK);
+    // The brand card Jev reads (LEADS-JUDGE-BRAND-1021): unreadable = nobody judged this tick, the rest still refreshes.
+    const cardHash = await brandCardOf(scope.orgId, scope.brandId).then(
+      (c) => c.hash,
+      (err: unknown) => {
+        console.error(`[lead-service] relationship sweep: brand card of ${scope.brandId} unreadable, nobody judged this tick:`, err);
+        return null;
+      },
+    );
+    const todo = cardHash === null ? [] : await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK, cardHash);
     if (todo.length > 0) {
       const id = await identity();
       let next = 0;

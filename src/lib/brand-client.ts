@@ -160,3 +160,21 @@ export async function getOfferText(orgId: string, brandId: string, offerId: stri
   }
   return { offerId: offer.offerId, name: offer.name, description: offer.description, fields: values };
 }
+
+/**
+ * The brand's ACTIVE offers (id + name), for the org owning the configuration (brand-service
+ * `/internal/brands/{id}/offers`). Fails loud on any non-2xx or an unreadable body.
+ */
+export async function getActiveOffers(orgId: string, brandId: string): Promise<Array<{ offerId: string; name: string }>> {
+  const res = await fetchWithRetry(`${BRAND_SERVICE_URL}/internal/brands/${encodeURIComponent(brandId)}/offers`, {
+    method: "GET",
+    headers: buildHeaders(orgId),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`[lead-service] brand-service offers of brand ${brandId} failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const body = (await res.json()) as { offers?: Array<{ offerId?: unknown; name?: unknown; status?: unknown }> };
+  if (!Array.isArray(body.offers)) throw new Error(`[lead-service] brand-service offers of brand ${brandId} answered without an offers array`);
+  return body.offers
+    .filter((o) => o?.status === "active" && typeof o.offerId === "string" && typeof o.name === "string")
+    .map((o) => ({ offerId: o.offerId as string, name: o.name as string }));
+}

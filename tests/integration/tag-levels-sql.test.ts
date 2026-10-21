@@ -20,6 +20,11 @@ vi.mock("../../src/lib/human-identity-client.js", async (orig) => ({
   stateHumanFact: (...a: unknown[]) => stateHumanFact(...a),
   withdrawHumanFact: (...a: unknown[]) => withdrawHumanFact(...a),
 }));
+// The brand card the relationship judge reads (LEADS-JUDGE-BRAND-1021): a brand with no active offer here.
+vi.mock("../../src/lib/brand-client.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/lib/brand-client.js")>()),
+  getActiveOffers: async () => [],
+}));
 vi.mock("../../src/lib/company-client.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/company-client.js")>()),
   resolveCompanies: (...a: unknown[]) => resolveCompanies(...a),
