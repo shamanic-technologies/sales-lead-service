@@ -24,11 +24,24 @@ const catalogue = {
     ["meeting_booked", 5], ["meeting_attended", 6], ["paid_client", 7], ["purchase", 7],
   ].map(([key, lifecycleRank]) => ({ key, lifecycleRank })),
 };
+/** crm-service's latest message per relation, keyed by the human the relation key names (set by the test). */
+const latestByHuman = new Map<string, Record<string, unknown>>();
+const latestAsked: string[][] = [];
 vi.mock("../../src/lib/fetch-retry.js", () => ({
-  fetchWithRetry: async (url: string) => {
+  fetchWithRetry: async (url: string, init?: { body?: string }) => {
     const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     const u = String(url);
     if (u.endsWith("/public/catalogue/steps")) return json(catalogue);
+    if (u.endsWith("/internal/people/relations/latest-messages")) {
+      const { relationKeys } = JSON.parse(String(init?.body)) as { relationKeys: string[] };
+      latestAsked.push(relationKeys);
+      return json({
+        relations: relationKeys.map((relationKey) => {
+          const message = [...latestByHuman.entries()].find(([h]) => relationKey.includes(h))?.[1] ?? null;
+          return { relationKey, status: message ? "message" : "no_message", reason: null, message, gaps: [] };
+        }),
+      });
+    }
     // campaign-service: the cold pipe is a unit of a sales funnel campaign the customer named; the webinar is not.
     if (u.includes("/sales-funnel-campaigns?")) {
       return json({ salesFunnelCampaigns: [{ id: "sfc-1", salesFunnelName: "Cold email to meeting", units: [{ campaignId: "camp-cold" }] }] });
@@ -122,6 +135,17 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await crmFact("email:ben@acme.io", ben, "payment", "2026-10-05T10:00:00Z", { status: "failed", amountMinor: 9900, amountRefunded: 0 });
     await crmFact("email:ben@acme.io", ben, "message_in", "2026-10-06T10:00:00Z", { text: "any news?" });
 
+    // UNIBOX-LAST-MESSAGE-PREVIEW-1021: our latest email to Ana (quoted history below it), Ben's own WhatsApp.
+    const msg = (over: Record<string, unknown>) => ({
+      source: "instantly", channel: "email", direction: "outbound", sentBy: "automation", subject: null, textBasis: "original",
+      textCleanStatus: null, textTruncated: false, from: null, ref: {}, ...over,
+    });
+    latestByHuman.set(ana, msg({
+      at: "2026-10-03T12:00:00.000Z", subject: "Re: Data, not docs",
+      text: "Last note from me, Ana.\n\nIf a call feels like too much right now, there's a lighter option.\n\nOn Fri, Oct 3, 2026 at 10:00 AM Ana <ana@x.io> wrote:\n> interested",
+    }));
+    latestByHuman.set(ben, msg({ at: "2026-10-06T10:00:00.000Z", source: "matrix", channel: "whatsapp", direction: "inbound", sentBy: null, text: "any news?", textBasis: "as_written" }));
+
     await refreshSubjects(scope);
     await writeEvidence(scope);
     const built = await refreshUniboxRows(scope);
@@ -150,6 +174,18 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(anaRow).toMatchObject({ name: "Ana Lopez", firstName: "Ana", lastName: "Lopez", title: "Head of Sales" });
     expect(benRow).toMatchObject({ name: "Ben", firstName: null, lastName: null, title: null });
     expect(anaRow.steps.map((s) => s.step)).toEqual(["lead_found", "email_sent", "conversation", "website_visit"]);
+    // The first words of each thread's last message, who wrote it, by which channel (crm-service's thread).
+    expect(anaRow.lastMessage).toEqual({
+      at: "2026-10-03T12:00:00.000Z", side: "ours", sentBy: "automation", channel: "email", source: "instantly", subject: "Re: Data, not docs",
+      preview: "Last note from me, Ana. If a call feels like too much right now, there's a lighter option.",
+    });
+    expect(benRow).toMatchObject({ lastMessage: { side: "theirs", sentBy: null, channel: "whatsapp", preview: "any news?" }, lastMessageReason: null });
+
+    // Settled rows are not asked again on the next pass; their preview stays served.
+    latestAsked.length = 0;
+    await refreshUniboxRows(scope);
+    expect(latestAsked.flat()).toEqual([]);
+    expect((await readUniboxPage(scope, {}, { limit: 10, cursor: null })).rows[1].lastMessage?.preview).toMatch(/^Last note from me, Ana\./);
   });
 
   it("filters on any dimension, pages with a cursor, and refuses nothing it served", async () => {
