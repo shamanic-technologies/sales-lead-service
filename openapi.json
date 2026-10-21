@@ -13421,6 +13421,67 @@
         ],
         "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
       },
+      "UniboxListRow": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/UniboxRow"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "campaigns": {
+                "type": "array",
+                "nullable": true,
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "campaignId": {
+                      "type": "string",
+                      "description": "The campaign the customer launched (each of its pipes folds into it), else the campaign itself. Same id as the lead card's campaigns[].campaignId."
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "What the customer calls it (the lead card's name for it)."
+                    },
+                    "pipeCampaignIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "The pipe campaigns folded into it that filed this person."
+                    },
+                    "servedAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "First time it served them; null = filed, never served."
+                    }
+                  },
+                  "required": [
+                    "campaignId",
+                    "name",
+                    "pipeCampaignIds",
+                    "servedAt"
+                  ]
+                },
+                "description": "Every campaign of the brand this relation is a lead on, as the lead card (GET /orgs/leads/unibox-lead) names them: the customer's campaign once, its pipes folded in; a filing that is no campaign (signup, Unibox conversation) is not listed. Most recent first (servedAt desc, never served last). On a scoped read (offerId / campaignId) only the scope's campaigns. [] = a lead of no campaign; null = campaign-service unreadable, see campaignsReason."
+              },
+              "campaignsReason": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "source_unreadable",
+                  null
+                ],
+                "description": "Why campaigns is null: source_unreadable = campaign-service could not name the campaigns for this read. Null when campaigns is served."
+              }
+            },
+            "required": [
+              "campaigns",
+              "campaignsReason"
+            ]
+          }
+        ]
+      },
       "UniboxRow": {
         "type": "object",
         "properties": {
@@ -23435,7 +23496,7 @@
                     "rows": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/UniboxRow"
+                        "$ref": "#/components/schemas/UniboxListRow"
                       }
                     },
                     "total": {
