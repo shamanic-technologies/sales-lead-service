@@ -44,6 +44,8 @@ import {
   type UniboxRole,
   type UniboxStatus,
   type UniboxType,
+  personIdentityOf,
+  type UniboxLeadIdentity,
 } from "./unibox-dimensions.js";
 
 const CATALOGUE_TIMEOUT_MS = 10_000;
@@ -115,7 +117,12 @@ export interface UniboxRow {
   companyKey: string;
   /** The company of the relation, to print "Name @ Company" (+ logo by domain); null = unknown. */
   company: { id: string; name: string | null; domain: string | null } | null;
+  /** WHO it is: first + last name (the relation's lead as sourced, else crm's), never an address; null = unknown. */
   name: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  /** Current job title (the relation's lead); null = unknown. */
+  title: string | null;
   emails: string[];
   phones: string[];
   /** crm-service's person keys of the relation. */
@@ -197,7 +204,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
   for (const s of subjects) for (const c of s.contact_points ?? []) subjectsOfPoint.set(c, [...(subjectsOfPoint.get(c) ?? []), keyOf(s)]);
   const points = [...subjectsOfPoint.keys()];
 
-  const [timeline, crm, humanFacts, marks] = await Promise.all([
+  const [timeline, crm, humanFacts, marks, identities] = await Promise.all([
     leadIds.length === 0
       ? Promise.resolve([] as Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>)
       : (db.execute(sql`
@@ -227,7 +234,16 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       GROUP BY 1
     `) as unknown as Promise<Array<{ human: string; opted_out: boolean; do_not_contact: boolean }>>,
     loadLeadAndCompanyMarks({ orgId: scope.orgId, brandIds: [scope.brandId], leadIds }),
+    leadIds.length === 0
+      ? Promise.resolve([] as Array<{ lead_id: string; first_name: string | null; last_name: string | null; name: string | null; titles: Array<{ org: string; title: string }> | null }>)
+      : (db.execute(sql`
+          SELECT l.id::text AS lead_id, l.first_name, l.last_name, l.name,
+            (SELECT json_agg(json_build_object('org', lo.organization_id::text, 'title', lo.title) ORDER BY lo.created_at DESC, lo.id)
+             FROM leads_organizations lo WHERE lo.lead_id = l.id AND lo.current AND coalesce(lo.title, '') <> '') AS titles
+          FROM leads l WHERE l.id = ANY(${sql.param(leadIds)}::uuid[])
+        `) as unknown as Promise<Array<{ lead_id: string; first_name: string | null; last_name: string | null; name: string | null; titles: Array<{ org: string; title: string }> | null }>>),
   ]);
+  const identityOfLead = new Map(identities.map((r) => [r.lead_id, r]));
 
   // Everything below is keyed on the SUBJECT (the relation), never the human.
   const steps = new Map<string, StepsReached>();
@@ -310,11 +326,20 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
     const lastOurs = oursAt.get(k) ?? null;
     const lifecycle = lifecycleOf(reached.keys(), catalogue.ranks, catalogue.ladder);
     const relationKeys = [...(s.relation_keys ?? [])].sort();
+    const who = personIdentityOf(
+      s.name,
+      myLeads.flatMap((id): UniboxLeadIdentity[] => {
+        const r = identityOfLead.get(id);
+        if (!r) return [];
+        const titles = [...(r.titles ?? [])].sort((a, b) => Number(b.org === s.company_key) - Number(a.org === s.company_key)).map((t) => t.title);
+        return [{ leadId: id, firstName: r.first_name, lastName: r.last_name, name: r.name, titles }];
+      }),
+    );
     out.push({
       humanId: s.human,
       companyKey: s.company_key,
       company: null,
-      name: s.name,
+      ...who,
       emails: s.emails ?? [],
       phones: s.phones ?? [],
       personKeys: [...(s.person_keys ?? [])].sort(),
@@ -420,6 +445,9 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
       cname: r.company?.name ?? null,
       cdomain: r.company?.domain ?? null,
       name: r.name,
+      fname: r.firstName,
+      lname: r.lastName,
+      title: r.title,
       emails: r.emails,
       phones: r.phones,
       pkeys: r.personKeys,
@@ -443,30 +471,30 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
     })),
   );
   await db.execute(sql`
-    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, company_name, company_domain, name, emails, phones, person_keys, relation_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
+    INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, company_name, company_domain, name, first_name, last_name, title, emails, phones, person_keys, relation_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
       steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, updated_at)
-    SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.cname, v.cdomain, v.name,
+    SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.cname, v.cdomain, v.name, v.fname, v.lname, v.title,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
       ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.rkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], v.status, ARRAY(SELECT jsonb_array_elements_text(v.roles)),
       ARRAY(SELECT jsonb_array_elements_text(v.types)),
       v.lkey, v.lrank, v.steps, v.interest, v.conversation, v.contactability, v.fit, v.note,
       v.theirs::timestamptz, v.ours::timestamptz, v.activity::timestamptz, ARRAY(SELECT jsonb_array_elements_text(v.conn)),
-      lower(coalesce(v.name, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
-    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, cname text, cdomain text, name text, emails jsonb, phones jsonb, pkeys jsonb, rkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
+      lower(coalesce(v.name, '') || ' ' || coalesce(v.title, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
+    FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, cname text, cdomain text, name text, fname text, lname text, title text, emails jsonb, phones jsonb, pkeys jsonb, rkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
       lkey text, lrank int, steps jsonb, interest text, conversation text, contactability text, fit text, note text, theirs text, ours text,
       activity text, conn jsonb)
     ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
-      company_name = excluded.company_name, company_domain = excluded.company_domain, name = excluded.name, emails = excluded.emails, phones = excluded.phones,
+      company_name = excluded.company_name, company_domain = excluded.company_domain, name = excluded.name, first_name = excluded.first_name, last_name = excluded.last_name, title = excluded.title, emails = excluded.emails, phones = excluded.phones,
       person_keys = excluded.person_keys, relation_keys = excluded.relation_keys, lead_ids = excluded.lead_ids, status = excluded.status, roles = excluded.roles,
       types = excluded.types, lifecycle_key = excluded.lifecycle_key, lifecycle_rank = excluded.lifecycle_rank, steps = excluded.steps,
       interest = excluded.interest, conversation = excluded.conversation, contactability = excluded.contactability, fit = excluded.fit,
       fit_note = excluded.fit_note, last_theirs_at = excluded.last_theirs_at, last_ours_at = excluded.last_ours_at,
       last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text, updated_at = now()
-    WHERE (unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
+    WHERE (unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.first_name, unibox_rows.last_name, unibox_rows.title, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
-      IS DISTINCT FROM (excluded.company_name, excluded.company_domain, excluded.name, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
+      IS DISTINCT FROM (excluded.company_name, excluded.company_domain, excluded.name, excluded.first_name, excluded.last_name, excluded.title, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
            excluded.connection_tags)
@@ -501,6 +529,9 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     companyKey: String(r.company_key ?? ""),
     company: r.company_key ? { id: String(r.company_key), name: (r.company_name as string | null) ?? null, domain: (r.company_domain as string | null) ?? null } : null,
     name: (r.name as string | null) ?? null,
+    firstName: (r.first_name as string | null) ?? null,
+    lastName: (r.last_name as string | null) ?? null,
+    title: (r.title as string | null) ?? null,
     emails: (r.emails as string[]) ?? [],
     phones: (r.phones as string[]) ?? [],
     personKeys: (r.person_keys as string[]) ?? [],

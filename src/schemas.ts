@@ -9556,7 +9556,12 @@ const UniboxRowSchema = z
     company: z.object({ id: z.string(), name: z.string().nullable(), domain: z.string().nullable() }).nullable().openapi({
       description: "The relation's company, to print \"Name @ Company\" and its logo (by domain); null = unknown.",
     }),
-    name: z.string().nullable(),
+    name: z.string().nullable().openapi({
+      description: "WHO it is, \"First Last\": the relation's lead as sourced, else the name crm-service read off the conversation. Never an email address; null = nobody knows their name.",
+    }),
+    firstName: z.string().nullable().openapi({ description: "First name (the relation's lead as sourced); null = unknown." }),
+    lastName: z.string().nullable().openapi({ description: "Last name (the relation's lead as sourced); null = unknown." }),
+    title: z.string().nullable().openapi({ description: "Current job title (the relation's lead, at the relation's company first); null = unknown." }),
     emails: z.array(z.string()),
     phones: z.array(z.string()),
     personKeys: z.array(z.string()).openapi({ description: "crm-service's person keys of the relation." }),
