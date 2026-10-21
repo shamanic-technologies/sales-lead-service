@@ -13256,6 +13256,48 @@
               ]
             },
             "description": "People per delay bucket, shortest first: hours for the first day (under 1h, 1-3h, 3-6h, 6-12h, 12-24h), then days (1-2, 2-3, 3-5, 5-7, 7-10, 10-14, 14-21, 21-30, 30-60), then 60 days or more. Every bucket is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0."
+          },
+          "dailyDistribution": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string",
+                  "description": "Stable day key: `day_1` .. `day_21`, then `day_21_plus`."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Human label: `Day 1` .. `Day 21`, then `21 days or more`."
+                },
+                "fromMs": {
+                  "type": "integer",
+                  "description": "Inclusive lower bound of the delay, ms ((k-1) x 24 h for Day k)."
+                },
+                "toMs": {
+                  "type": "integer",
+                  "nullable": true,
+                  "description": "Exclusive upper bound, ms (k x 24 h for Day k); null on `21 days or more`."
+                },
+                "count": {
+                  "type": "integer",
+                  "description": "People whose first positive reply fell on this day."
+                },
+                "cumulativeCount": {
+                  "type": "integer",
+                  "description": "People on this day or an earlier one (the last one equals sampleSize)."
+                }
+              },
+              "required": [
+                "key",
+                "label",
+                "fromMs",
+                "toMs",
+                "count",
+                "cumulativeCount"
+              ]
+            },
+            "description": "The same sample per day after our first message: Day 1 = under 24 hours, Day 2 = 24 to 48 hours, ... Day 21 = 20 to 21 days, then 21 days or more (22 bins). Lower bound inclusive (exactly 24 hours is Day 2, exactly 21 days is 21 days or more). Every bin is served (zero counts included) and the counts sum to sampleSize; [] when sampleSize is 0."
           }
         },
         "required": [
@@ -13263,7 +13305,8 @@
           "medianMs",
           "averageMs",
           "percentilesMs",
-          "distribution"
+          "distribution",
+          "dailyDistribution"
         ]
       },
       "ReplyLatencyRequest": {
@@ -22960,7 +23003,7 @@
     "/internal/reply-latency/grouped": {
       "post": {
         "summary": "Per group of campaign ids: time from our first message (any channel) to the person's first positive reply, since inception (internal, service-auth, fleet-wide)",
-        "description": "For each group: every person (one lead at one org x brand) we sent a message to under one of the group's campaigns, on any channel: an email of ours on the lead timeline (`initial_email` / `followup`, any transport: the provider's sequences and our own sending, the AI follow-up writer included), a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs/percentiles null and an empty distribution. Beside the median and average: p10/p25/p50/p75/p90 and the people per delay bucket with the running count (histogram and cumulative curve of the same sample). Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
+        "description": "For each group: every person (one lead at one org x brand) we sent a message to under one of the group's campaigns, on any channel: an email of ours on the lead timeline (`initial_email` / `followup`, any transport: the provider's sequences and our own sending, the AI follow-up writer included), a send of a channel that does not write by email (WhatsApp...), or an answer our follow-up worker sent (`acted`, under the acting campaign). Their FIRST such message is compared with their FIRST POSITIVE reply strictly after it, any campaign, any channel, at the same org x brand: a reply whose own verdict is positive, or the positive reply the brand's CRM evidences (the definition meeting attribution reads). A person with no positive reply (yet) is NOT in the sample: no censoring, no default delay, no zero; sampleSize 0 = medianMs/averageMs/percentiles null and an empty distribution. Beside the median and average: p10/p25/p50/p75/p90, the people per delay bucket with the running count (histogram and cumulative curve of the same sample), and the same sample per day (Day 1 .. Day 21, then 21 days or more). Since inception, never a time window. A message the copy cannot tie to a campaign (CRM message facts carry none) counts for no group. No org filter: a group may hold every org's campaigns on one pipe (fleet). A failed read is a 500, never zeros.",
         "parameters": [
           {
             "in": "header",
