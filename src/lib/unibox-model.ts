@@ -577,6 +577,11 @@ export interface UniboxFilters {
   contactability?: readonly string[];
   fit?: readonly string[];
   q?: string;
+  /**
+   * The offer / campaign scope, resolved to campaign ids (`unibox-scope.ts`, DEALS-LIFECYCLE-1021): only people who are
+   * a lead on one of them. Absent = the brand's whole Unibox; empty = nobody (an offer no campaign sells yet).
+   */
+  campaignIds?: readonly string[];
 }
 
 export interface UniboxPage {
@@ -654,6 +659,13 @@ function filterSql(scope: Scope, f: UniboxFilters) {
   if (f.conversation?.length) parts.push(sql`u.conversation = ANY(${sql.param([...f.conversation])}::text[])`);
   if (f.contactability?.length) parts.push(sql`u.contactability = ANY(${sql.param([...f.contactability])}::text[])`);
   if (f.fit?.length) parts.push(sql`u.fit = ANY(${sql.param([...f.fit])}::text[])`);
+  if (f.campaignIds !== undefined) {
+    // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once.
+    parts.push(sql`u.lead_ids && ARRAY(
+      SELECT lc.lead_id FROM leads_campaigns lc
+      WHERE lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids) AND lc.campaign_id = ANY(${sql.param([...f.campaignIds])}::text[])
+    )`);
+  }
   if (f.q) parts.push(sql`u.search_text LIKE ${"%" + f.q.toLowerCase().replace(/[\\%_]/g, (m) => "\\" + m) + "%"}`);
   return sql.join(parts, sql` AND `);
 }
@@ -677,6 +689,40 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
   const items = rows.slice(0, page.limit).map((r) => toRow(r, catalogue.ladder));
   const last = items[items.length - 1];
   return { rows: items, total: totals[0]?.n ?? 0, nextCursor: more && last ? encodeCursor(last.lastActivityAt, last.humanId, last.companyKey) : null, builtAt: iso(built[0]?.at ?? null) };
+}
+
+export interface UniboxLifecycleCounts {
+  /** Size of the filtered set; equals the sum of `byLifecycle`. */
+  total: number;
+  /** People per rung, keyed by the ladder's keys (every key present, 0 included) + `none` (no rung yet). */
+  byLifecycle: Record<string, number>;
+  builtAt: string | null;
+}
+
+/** How many people of the filtered set stand on each lifecycle rung (DEALS-LIFECYCLE-1021: the board's column headers). */
+export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters): Promise<UniboxLifecycleCounts> {
+  const catalogue = await loadLifecycleCatalogue();
+  const where = filterSql(scope, f);
+  const [groups, built] = await Promise.all([
+    db.execute(sql`SELECT u.lifecycle_key AS key, count(*)::int AS n FROM unibox_rows u WHERE ${where} GROUP BY 1`) as unknown as Promise<
+      Array<{ key: string | null; n: number }>
+    >,
+    db.execute(sql`SELECT max(updated_at) AS at FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}`) as unknown as Promise<Array<{ at: Ts | null }>>,
+  ]);
+  const byLifecycle: Record<string, number> = {};
+  for (const r of catalogue.ladder) byLifecycle[r.key] = 0;
+  byLifecycle.none = 0;
+  let total = 0;
+  for (const g of groups) {
+    const key = g.key ?? "none";
+    if (!(key in byLifecycle)) {
+      // A rung the ladder no longer serves (renamed before the next refresh): counted under its own key so the sum holds.
+      console.error(`[lead-service] unibox counts: rung "${key}" is not on the ladder (org ${scope.orgId} brand ${scope.brandId}, ${g.n} rows)`);
+    }
+    byLifecycle[key] = (byLifecycle[key] ?? 0) + g.n;
+    total += g.n;
+  }
+  return { total, byLifecycle, builtAt: iso(built[0]?.at ?? null) };
 }
 
 export interface UniboxCampaign {

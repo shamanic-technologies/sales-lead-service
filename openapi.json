@@ -23135,7 +23135,7 @@
     "/orgs/leads/unibox": {
       "get": {
         "summary": "The brand's Unibox: its leads (people crm-service tags professional to the brand) with six tag dimensions",
-        "description": "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400.",
+        "description": "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400. Optional scope (DEALS-LIFECYCLE-1021): `offerId` and/or `campaignId` keep only the people who are a lead on a campaign of that offer / of that campaign (a sales funnel campaign includes its pipes; both = the campaign's pipes selling the offer); each row and its Lifecycle stay the brand's. A scoped answer also carries `offerId` and `campaignId`. campaign-service unreadable = 502 (never the whole brand).",
         "parameters": [
           {
             "in": "header",
@@ -23255,6 +23255,24 @@
           },
           {
             "in": "query",
+            "name": "offerId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only the people who are a lead on any campaign selling this offer (campaign-service `offerId`). An offer no campaign sells = nobody."
+          },
+          {
+            "in": "query",
+            "name": "campaignId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only the people who are a lead on this campaign: a sales funnel campaign includes its pipes, a campaign includes every stored row of its identity. With offerId: the ones selling that offer."
+          },
+          {
+            "in": "query",
             "name": "status",
             "required": false,
             "schema": {
@@ -23355,6 +23373,16 @@
                     "brandId": {
                       "type": "string"
                     },
+                    "offerId": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The offer scope; present only on a scoped read."
+                    },
+                    "campaignId": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The campaign scope; present only on a scoped read."
+                    },
                     "lifecycleLadder": {
                       "type": "array",
                       "items": {
@@ -23393,6 +23421,294 @@
           },
           "400": {
             "description": "Invalid query"
+          },
+          "502": {
+            "description": "campaign-service unreadable: the scope's campaigns are unknown (code scope_unavailable)"
+          }
+        }
+      }
+    },
+    "/orgs/leads/unibox-lifecycle-counts": {
+      "get": {
+        "summary": "How many Unibox people stand on each lifecycle rung, for a brand / offer / campaign and the list's filters (the Deals board column headers)",
+        "description": "DEALS-LIFECYCLE-1021. Same scope and filters as GET /orgs/leads/unibox (status, role, type, lifecycle, interest, conversation, contactability, fit, q; `offerId` / `campaignId`), same population: `byLifecycle` counts its rows per rung of the ONE ladder (features-service), every ladder key present (0 included) + `none` (no rung yet); the counts sum to `total`. A board column = GET /orgs/leads/unibox with the same query + `lifecycle=<key>` (most recent activity first, `cursor` paging). Lifecycle = the highest rung the person reached at the brand (not per scope). Unknown filter value = 400; campaign-service unreadable = 502.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offerId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only the people who are a lead on any campaign selling this offer (campaign-service `offerId`). An offer no campaign sells = nobody."
+          },
+          {
+            "in": "query",
+            "name": "campaignId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Only the people who are a lead on this campaign: a sales funnel campaign includes its pipes, a campaign includes every stored row of its identity. With offerId: the ones selling that offer."
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "role",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lifecycle",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "interest",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "conversation",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "contactability",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "fit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "People per lifecycle rung",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "brandId": {
+                      "type": "string"
+                    },
+                    "offerId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "campaignId": {
+                      "type": "string",
+                      "nullable": true
+                    },
+                    "lifecycleLadder": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LifecycleRung"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "description": "Size of the filtered set = the sum of byLifecycle."
+                    },
+                    "byLifecycle": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "integer"
+                      },
+                      "description": "People per rung, keyed by the ladder's keys (lead_found, contacted, engaged, signup_or_form, meeting_booked, meeting_attended, paid_client) + `none`.",
+                      "example": {
+                        "lead_found": 120,
+                        "contacted": 80,
+                        "engaged": 9,
+                        "signup_or_form": 2,
+                        "meeting_booked": 1,
+                        "meeting_attended": 0,
+                        "paid_client": 0,
+                        "none": 0
+                      }
+                    },
+                    "builtAt": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  },
+                  "required": [
+                    "brandId",
+                    "offerId",
+                    "campaignId",
+                    "lifecycleLadder",
+                    "total",
+                    "byLifecycle",
+                    "builtAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query"
+          },
+          "502": {
+            "description": "campaign-service unreadable: the scope's campaigns are unknown (code scope_unavailable)"
           }
         }
       }

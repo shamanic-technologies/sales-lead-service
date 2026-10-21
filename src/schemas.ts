@@ -9549,6 +9549,24 @@ const LifecycleRungSchema = z
   .object({ key: z.string(), rank: z.number().int(), label: z.string() })
   .openapi("LifecycleRung", { description: "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)." });
 
+/** DEALS-LIFECYCLE-1021: the offer / campaign scope of the Unibox reads. */
+const UniboxScopeParams = [
+  {
+    in: "query" as const,
+    name: "offerId",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Only the people who are a lead on any campaign selling this offer (campaign-service `offerId`). An offer no campaign sells = nobody.",
+  },
+  {
+    in: "query" as const,
+    name: "campaignId",
+    required: false,
+    schema: { type: "string" as const },
+    description: "Only the people who are a lead on this campaign: a sales funnel campaign includes its pipes, a campaign includes every stored row of its identity. With offerId: the ones selling that offer.",
+  },
+];
+
 const UniboxRowSchema = z
   .object({
     humanId: z.string().openapi({ description: "The person (human-service human, this org's view). One row = one RELATION: this human at `companyKey` (PERSON-RELATIONS-1017); a human may have several rows." }),
@@ -9623,10 +9641,14 @@ registry.registerPath({
   description:
     "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), " +
     "interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the " +
-    "relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400.",
+    "relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400. " +
+    "Optional scope (DEALS-LIFECYCLE-1021): `offerId` and/or `campaignId` keep only the people who are a lead on a campaign of that offer / " +
+    "of that campaign (a sales funnel campaign includes its pipes; both = the campaign's pipes selling the offer); each row and its Lifecycle " +
+    "stay the brand's. A scoped answer also carries `offerId` and `campaignId`. campaign-service unreadable = 502 (never the whole brand).",
   parameters: [
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    ...UniboxScopeParams,
     ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "q", "cursor"].map((name) => ({
       in: "query" as const,
       name,
@@ -9642,6 +9664,8 @@ registry.registerPath({
         "application/json": {
           schema: z.object({
             brandId: z.string(),
+            offerId: z.string().nullable().optional().openapi({ description: "The offer scope; present only on a scoped read." }),
+            campaignId: z.string().nullable().optional().openapi({ description: "The campaign scope; present only on a scoped read." }),
             lifecycleLadder: z.array(LifecycleRungSchema),
             rows: z.array(UniboxRowSchema),
             total: z.number().int(),
@@ -9652,6 +9676,53 @@ registry.registerPath({
       },
     },
     400: { description: "Invalid query" },
+    502: { description: "campaign-service unreadable: the scope's campaigns are unknown (code scope_unavailable)" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/unibox-lifecycle-counts",
+  summary: "How many Unibox people stand on each lifecycle rung, for a brand / offer / campaign and the list's filters (the Deals board column headers)",
+  description:
+    "DEALS-LIFECYCLE-1021. Same scope and filters as GET /orgs/leads/unibox (status, role, type, lifecycle, interest, conversation, " +
+    "contactability, fit, q; `offerId` / `campaignId`), same population: `byLifecycle` counts its rows per rung of the ONE ladder " +
+    "(features-service), every ladder key present (0 included) + `none` (no rung yet); the counts sum to `total`. A board column = " +
+    "GET /orgs/leads/unibox with the same query + `lifecycle=<key>` (most recent activity first, `cursor` paging). Lifecycle = the " +
+    "highest rung the person reached at the brand (not per scope). Unknown filter value = 400; campaign-service unreadable = 502.",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    ...UniboxScopeParams,
+    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "q"].map((name) => ({
+      in: "query" as const,
+      name,
+      required: false,
+      schema: { type: "string" as const },
+    })),
+  ],
+  responses: {
+    200: {
+      description: "People per lifecycle rung",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string(),
+            offerId: z.string().nullable(),
+            campaignId: z.string().nullable(),
+            lifecycleLadder: z.array(LifecycleRungSchema),
+            total: z.number().int().openapi({ description: "Size of the filtered set = the sum of byLifecycle." }),
+            byLifecycle: z.record(z.string(), z.number().int()).openapi({
+              description: "People per rung, keyed by the ladder's keys (lead_found, contacted, engaged, signup_or_form, meeting_booked, meeting_attended, paid_client) + `none`.",
+              example: { lead_found: 120, contacted: 80, engaged: 9, signup_or_form: 2, meeting_booked: 1, meeting_attended: 0, paid_client: 0, none: 0 },
+            }),
+            builtAt: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid query" },
+    502: { description: "campaign-service unreadable: the scope's campaigns are unknown (code scope_unavailable)" },
   },
 });
 
