@@ -9590,6 +9590,29 @@ const UniboxRowSchema = z
     lastOursAt: z.string().nullable(),
     lastActivityAt: z.string(),
     connectionTags: z.array(z.string()).openapi({ description: "crm-service's connection tags of the relation's own contact points." }),
+    lastMessage: z
+      .object({
+        at: z.string().nullable().openapi({ description: "When it was sent (ISO); null = the source gave no date." }),
+        side: z.enum(["theirs", "ours"]).nullable().openapi({ description: "theirs = the person wrote; ours = the brand did; null = neither (a message the source cannot place)." }),
+        sentBy: z.enum(["person", "automation"]).nullable().openapi({
+          description: "Ours only: person = typed by a human of the brand, automation = one of our machines (cold-email step, automated WhatsApp, Copilot, API); null = theirs, or the source does not say.",
+        }),
+        channel: z.string().openapi({ description: "email | whatsapp | telegram | discord | chat | api | mcp (crm-service's channel)." }),
+        source: z.string().openapi({ description: "Where crm-service read it: gmail | instantly | matrix | copilot | api." }),
+        subject: z.string().nullable(),
+        preview: z.string().nullable().openapi({
+          description: "The first words of the message on ONE line (quoted history and signature dropped when recognizable, cut on a word near 160 chars, … when cut); null = no readable words (lastMessageReason no_text).",
+        }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The LAST message of the row's thread, ours or theirs, every channel crm-service merges (GET /orgs/people/timeline?relationKey=); null = unknown, see lastMessageReason.",
+      }),
+    lastMessageReason: z.enum(["no_message", "source_unreadable", "relation_unknown", "no_relation", "no_text"]).nullable().openapi({
+      description:
+        "Why lastMessage (or its preview) is missing: no_message = the thread holds no message; source_unreadable = crm-service could not read a thread yet; relation_unknown = crm-service does not know the relation; no_relation = the row names no relation; no_text = a message with no readable words. Null when the row was not read yet (just built) or the preview is served.",
+    }),
   })
   .openapi("UniboxRow");
 

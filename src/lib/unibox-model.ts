@@ -24,6 +24,14 @@ import { loadCampaignDisplays, type CampaignDisplay } from "./campaign-names-cli
 import { getCompanies, MAX_COMPANIES_PER_REQUEST } from "./company-client.js";
 import { anyMemberAddress, loadOrgMemberKeys } from "./org-members.js";
 import {
+  fetchLatestMessages,
+  lastMessageOfRow,
+  needsAsking,
+  type UniboxLastMessage,
+  type UniboxLastMessageAnswer,
+  type UniboxLastMessageReason,
+} from "./unibox-last-message.js";
+import {
   contactabilityOf,
   conversationOf,
   fitOf,
@@ -149,6 +157,9 @@ export interface UniboxRow {
   lastOursAt: string | null;
   lastActivityAt: string;
   connectionTags: string[];
+  /** The first words of the thread's LAST message (ours or theirs), read off crm-service's thread; null = unknown, see `lastMessageReason`. */
+  lastMessage: UniboxLastMessage | null;
+  lastMessageReason: UniboxLastMessageReason | null;
 }
 
 interface SubjectRow {
@@ -365,6 +376,9 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       lastOursAt: lastOurs,
       lastActivityAt: activity.get(k) ?? iso(s.updated_at)!,
       connectionTags: block?.connectionTags ?? [],
+      // Filled by `attachLastMessages` (crm-service's thread); not derived here.
+      lastMessage: null,
+      lastMessageReason: null,
     });
   }
   return out;
@@ -388,7 +402,8 @@ export async function refreshUniboxRows(scope: Scope): Promise<{ rows: number; r
   for (let i = 0; i < subjects.length; i += CHUNK) {
     const rows = await deriveUniboxRows(scope, subjects.slice(i, i + CHUNK), catalogue);
     await nameCompanies(rows);
-    await writeRows(scope, rows);
+    const asked = await attachLastMessages(scope, rows);
+    await writeRows(scope, rows, asked);
     written += rows.length;
   }
   const removed = (await db.execute(sql`
@@ -436,7 +451,51 @@ async function nameCompanies(rows: UniboxRow[]): Promise<void> {
   }
 }
 
-async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void> {
+/**
+ * The last message of each row whose thread may have moved (`needsAsking`), from crm-service (UNIBOX-LAST-MESSAGE-PREVIEW-1021).
+ * Returns the rows asked (`human|company`); every other row keeps what is stored. crm-service unreadable = logged
+ * loudly, nothing asked, stored previews kept: a blip never blanks the Unibox nor fails the refresh.
+ */
+async function attachLastMessages(scope: Scope, rows: UniboxRow[]): Promise<Set<string>> {
+  const asked = new Set<string>();
+  if (rows.length === 0) return asked;
+  const key = (h: string, c: string) => `${h}|${c}`;
+  const stored = (await db.execute(sql`
+    SELECT human_id::text AS human, company_key, last_message, last_message_reason, last_message_checked_at
+    FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
+      AND (human_id::text || '|' || company_key) = ANY(${sql.param(rows.map((r) => key(r.humanId, r.companyKey)))}::text[])
+  `)) as unknown as Array<{ human: string; company_key: string; last_message: UniboxLastMessage | null; last_message_reason: string | null; last_message_checked_at: Ts | null }>;
+  const before = new Map(stored.map((s) => [key(s.human, s.company_key), s]));
+  const now = Date.now();
+  const todo = rows.filter((r) => {
+    const s = before.get(key(r.humanId, r.companyKey));
+    return needsAsking(s && { checkedAt: iso(s.last_message_checked_at), reason: s.last_message_reason }, r.lastActivityAt, now);
+  });
+  for (const r of rows) {
+    const s = before.get(key(r.humanId, r.companyKey));
+    if (s) {
+      r.lastMessage = s.last_message ?? null;
+      r.lastMessageReason = (s.last_message_reason as UniboxLastMessageReason | null) ?? null;
+    }
+  }
+  if (todo.length === 0) return asked;
+  let answers;
+  try {
+    answers = await fetchLatestMessages(scope.orgId, scope.brandId, todo.flatMap((r) => r.relationKeys));
+  } catch (err) {
+    console.error(`[lead-service] unibox last messages unreadable for org ${scope.orgId} brand ${scope.brandId} (${todo.length} rows kept as stored):`, err);
+    return asked;
+  }
+  for (const r of todo) {
+    const a: UniboxLastMessageAnswer = lastMessageOfRow(r.relationKeys, answers);
+    r.lastMessage = a.lastMessage;
+    r.lastMessageReason = a.reason;
+    asked.add(key(r.humanId, r.companyKey));
+  }
+  return asked;
+}
+
+async function writeRows(scope: Scope, rows: readonly UniboxRow[], asked: ReadonlySet<string> = new Set()): Promise<void> {
   if (rows.length === 0) return;
   const data = JSON.stringify(
     rows.map((r) => ({
@@ -468,33 +527,39 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[]): Promise<void
       ours: r.lastOursAt,
       activity: r.lastActivityAt,
       conn: r.connectionTags,
+      lmasked: asked.has(`${r.humanId}|${r.companyKey}`),
+      lm: r.lastMessage,
+      lmreason: r.lastMessageReason,
     })),
   );
   await db.execute(sql`
     INSERT INTO unibox_rows (org_id, brand_id, human_id, company_key, company_name, company_domain, name, first_name, last_name, title, emails, phones, person_keys, relation_keys, lead_ids, status, roles, types, lifecycle_key, lifecycle_rank,
-      steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, updated_at)
+      steps, interest, conversation, contactability, fit, fit_note, last_theirs_at, last_ours_at, last_activity_at, connection_tags, search_text, last_message, last_message_reason, last_message_checked_at, updated_at)
     SELECT ${scope.orgId}, ${scope.brandId}, v.human, v.company, v.cname, v.cdomain, v.name, v.fname, v.lname, v.title,
       ARRAY(SELECT jsonb_array_elements_text(v.emails)), ARRAY(SELECT jsonb_array_elements_text(v.phones)),
       ARRAY(SELECT jsonb_array_elements_text(v.pkeys)), ARRAY(SELECT jsonb_array_elements_text(v.rkeys)), ARRAY(SELECT jsonb_array_elements_text(v.leads))::uuid[], v.status, ARRAY(SELECT jsonb_array_elements_text(v.roles)),
       ARRAY(SELECT jsonb_array_elements_text(v.types)),
       v.lkey, v.lrank, v.steps, v.interest, v.conversation, v.contactability, v.fit, v.note,
       v.theirs::timestamptz, v.ours::timestamptz, v.activity::timestamptz, ARRAY(SELECT jsonb_array_elements_text(v.conn)),
-      lower(coalesce(v.name, '') || ' ' || coalesce(v.title, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')), now()
+      lower(coalesce(v.name, '') || ' ' || coalesce(v.title, '') || ' ' || array_to_string(ARRAY(SELECT jsonb_array_elements_text(v.emails)), ' ')),
+      v.lm, v.lmreason, CASE WHEN v.lmasked THEN now() END, now()
     FROM jsonb_to_recordset(${data}::jsonb) AS v(human uuid, company text, cname text, cdomain text, name text, fname text, lname text, title text, emails jsonb, phones jsonb, pkeys jsonb, rkeys jsonb, leads jsonb, status text, roles jsonb, types jsonb,
       lkey text, lrank int, steps jsonb, interest text, conversation text, contactability text, fit text, note text, theirs text, ours text,
-      activity text, conn jsonb)
+      activity text, conn jsonb, lm jsonb, lmreason text, lmasked boolean)
     ON CONFLICT (org_id, brand_id, human_id, company_key) DO UPDATE SET
       company_name = excluded.company_name, company_domain = excluded.company_domain, name = excluded.name, first_name = excluded.first_name, last_name = excluded.last_name, title = excluded.title, emails = excluded.emails, phones = excluded.phones,
       person_keys = excluded.person_keys, relation_keys = excluded.relation_keys, lead_ids = excluded.lead_ids, status = excluded.status, roles = excluded.roles,
       types = excluded.types, lifecycle_key = excluded.lifecycle_key, lifecycle_rank = excluded.lifecycle_rank, steps = excluded.steps,
       interest = excluded.interest, conversation = excluded.conversation, contactability = excluded.contactability, fit = excluded.fit,
       fit_note = excluded.fit_note, last_theirs_at = excluded.last_theirs_at, last_ours_at = excluded.last_ours_at,
-      last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text, updated_at = now()
-    WHERE (unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.first_name, unibox_rows.last_name, unibox_rows.title, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
+      last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text,
+      last_message = excluded.last_message, last_message_reason = excluded.last_message_reason,
+      last_message_checked_at = COALESCE(excluded.last_message_checked_at, unibox_rows.last_message_checked_at), updated_at = now()
+    WHERE excluded.last_message_checked_at IS NOT NULL OR (unibox_rows.last_message, unibox_rows.last_message_reason, unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.first_name, unibox_rows.last_name, unibox_rows.title, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
-      IS DISTINCT FROM (excluded.company_name, excluded.company_domain, excluded.name, excluded.first_name, excluded.last_name, excluded.title, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
+      IS DISTINCT FROM (excluded.last_message, excluded.last_message_reason, excluded.company_name, excluded.company_domain, excluded.name, excluded.first_name, excluded.last_name, excluded.title, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
            excluded.connection_tags)
@@ -552,6 +617,8 @@ function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): Un
     lastOursAt: iso(r.last_ours_at as Ts | null),
     lastActivityAt: iso(r.last_activity_at as Ts)!,
     connectionTags: (r.connection_tags as string[]) ?? [],
+    lastMessage: (r.last_message as UniboxLastMessage | null) ?? null,
+    lastMessageReason: (r.last_message_reason as UniboxLastMessageReason | null) ?? null,
   };
 }
 
