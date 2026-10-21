@@ -175,6 +175,22 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     expect((full.get(people.Ada.rowId)!.lead as { firstName: string }).firstName).toBe("Augusta");
   });
 
+  it("delivers a person whose own country was set, stating it exactly as view=compact does", async () => {
+    await db.update(leads).set({ country: "United States" }).where(eq(leads.id, people.Ada.leadId));
+
+    const res = await changes(cursor);
+    expect(res.status).toBe(200);
+    expect(res.body.full).toBe(false);
+    expect((res.body.leads as Row[]).map((r) => r.id)).toEqual([people.Ada.rowId]);
+    copy = apply(copy, res.body);
+    cursor = res.body.cursor;
+    const full = await fullCompact();
+    expect(sorted(copy)).toEqual(sorted(full));
+    expect((full.get(people.Ada.rowId)!.lead as { country: string | null }).country).toBe("United States");
+    // A person whose country is unknown states null, never their company's country.
+    expect((full.get(people.Jane.rowId)!.lead as { country: string | null }).country).toBeNull();
+  });
+
   it("follows a person's winning row when they are served again under another campaign", async () => {
     // Ada's newer serve wins the per-person dedup: her old row leaves, the new one arrives.
     const [row] = await db
