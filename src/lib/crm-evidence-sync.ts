@@ -46,6 +46,7 @@ import {
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { loadCrmFunnelEvents } from "./crm-fact-events.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
+import { withFirstChannelSends } from "./first-touch.js";
 
 export interface CrmJudgingResult {
   /** Contacts walked. */
@@ -223,7 +224,7 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
   const leadIds = Array.from(byLead.keys()).filter((id) => rowsByLead.has(id));
 
   const emails = await primaryEmails(leadIds);
-  const firstDelivered = new Map<string, string | null>();
+  const firstEmailDelivered = new Map<string, string | null>();
   const emailList = Array.from(new Set(emails.values()));
   if (emailList.length > 0) {
     const status = await checkDeliveryStatus(
@@ -235,9 +236,11 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     const byEmail = new Map(status.results.map((r) => [r.email.toLowerCase(), r]));
     for (const [leadId, email] of emails) {
       const result = byEmail.get(email);
-      firstDelivered.set(leadId, result ? flattenBrandStatus(result).firstDeliveredAt : null);
+      firstEmailDelivered.set(leadId, result ? flattenBrandStatus(result).firstDeliveredAt : null);
     }
   }
+  // Our first touch on ANY channel a pipe sends on (first-touch.ts): a WhatsApp send counts like a delivered email.
+  const firstDelivered = await withFirstChannelSends(orgId, brandId, leadIds, firstEmailDelivered);
 
   const [nonCrm, causeStatements] = await Promise.all([
     loadNonCrmOutcomeKeys(brandId, leadIds),
