@@ -33,6 +33,7 @@ import { db } from "../db/index.js";
 import { crmCauseRule, type CrmCauseRuleReason } from "./crm-evidence.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
+import { withFirstChannelSends } from "./first-touch.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 
 export type OutcomeCauseReason = CrmCauseRuleReason | "not_matched";
@@ -175,7 +176,7 @@ async function primaryEmails(leadIds: string[]): Promise<Map<string, string>> {
 
 const GATEWAY_BATCH = 100;
 
-/** Our first delivered email to each lead at BRAND scope; null when never delivered. */
+/** Our first touch of each lead at BRAND scope (delivered email or a non-email pipe send); null when none. */
 async function firstDeliveries(
   orgId: string,
   brandId: string,
@@ -197,12 +198,13 @@ async function firstDeliveries(
       byEmail.set(r.email.toLowerCase(), flattenBrandStatus(r).firstDeliveredAt);
     }
   }
-  // A lead with no registered email is somebody we could not have delivered to.
+  // A lead with no registered email is somebody we could not have emailed.
   for (const id of leadIds) {
     const email = emails.get(id);
     out.set(id, email ? (byEmail.get(email) ?? null) : null);
   }
-  return out;
+  // Our first touch on ANY channel a pipe sends on (first-touch.ts): a WhatsApp send counts like a delivered email.
+  return withFirstChannelSends(orgId, brandId, leadIds, out);
 }
 
 export interface OutcomeCauseSweepResult {
