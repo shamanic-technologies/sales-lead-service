@@ -1,3 +1,4 @@
+import { errorMessage, errorString, messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { eq, lt, sql } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
@@ -236,7 +237,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
             if (err instanceof OriginNotFedError) {
               // A source that does not feed this pipe: nobody is served from it here, never "keeping the label".
               console.error(`[lead-service] buffer/next origin_not_fed campaign=${campaignId} ${err.message}`);
-              freshServeRefused = { reason: ORIGIN_NOT_FED_REASON, detail: err.message };
+              freshServeRefused = { reason: ORIGIN_NOT_FED_REASON, detail: messageOf(err) };
             } else {
               console.error(
                 `[lead-service] buffer/next sourcing origin unresolved runId=${runId} campaignId=${campaignId} audienceId=${req.audienceId} outreachFeatureSlug=${featureSlug}:`,
@@ -319,8 +320,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         console.error(`[lead-service] on-demand run ${opened.runId} of unit ${opened.campaignId} not closed after a failed setup:`, closeErr),
       );
     }
-    traceEvent(runId, { service: "lead-service", event: "buffer-next-setup-failed", level: "error", detail: err instanceof Error ? err.message : String(err) }, req.headers).catch(() => {});
-    return res.status(500).json({ error: "Lead serve setup failed", detail: err instanceof Error ? err.message : String(err) });
+    traceEvent(runId, { service: "lead-service", event: "buffer-next-setup-failed", level: "error", detail: errorMessage(err) }, req.headers).catch(() => {});
+    return res.status(500).json({ error: "Lead serve setup failed", detail: errorMessage(err) });
   }
 
   // The campaign the serve RUN (and every call under it) is filed under: the ON source campaign, else
@@ -541,18 +542,18 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       // The pipe stated a step filter the people's owner refused (crm-service 400 on a step): the WORKFLOW is wrong,
       // never an empty pool. Loud, nothing served, nothing cached (a corrected workflow re-asks with a new run).
       console.error(`[lead-service] buffer/next step_filter_refused campaign=${campaignId}: ${error.message}`);
-      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-step-filter-refused", level: "error", detail: error.message }, req.headers).catch(() => {});
+      traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-step-filter-refused", level: "error", detail: messageOf(error) }, req.headers).catch(() => {});
       try {
         await updateRun(serveRunId, "failed", runMeta);
         await closeOnDemand("failed");
       } catch (runErr) {
         console.error("[lead-service] Failed to close run after step-filter refusal:", runErr);
       }
-      return res.status(400).json({ error: "step_filter_refused", detail: error.message });
+      return res.status(400).json({ error: "step_filter_refused", detail: messageOf(error) });
     }
 
     console.error("[lead-service] buffer/next error:", error);
-    traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: String(error) }, req.headers).catch(() => {});
+    traceEvent(serveRunId, { service: "lead-service", event: "buffer-next-error", level: "error", detail: errorString(error) }, req.headers).catch(() => {});
     try {
       await updateRun(serveRunId, "failed", runMeta);
       await closeOnDemand("failed");

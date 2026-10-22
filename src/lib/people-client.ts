@@ -1,3 +1,4 @@
+import { messageOf } from "./db-error.js";
 import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import type { EmailPolicy } from "./email-policy.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
@@ -411,7 +412,7 @@ export async function nextCandidate(audienceId: string, ctx: ServiceContext): Pr
   try {
     return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: serveBody(ctx), ctx });
   } catch (error) {
-    if (error instanceof PeopleServiceError && error.status === 422) throw new CandidatesUnsupportedError(error.message);
+    if (error instanceof PeopleServiceError && error.status === 422) throw new CandidatesUnsupportedError(messageOf(error));
     throw error;
   }
 }

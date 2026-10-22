@@ -1,3 +1,4 @@
+import { errorMessage, errorString, messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { sql } from "../db/index.js";
@@ -630,7 +631,7 @@ async function resolveStandings(
   } catch (error) {
     console.error(
       "[lead-service] lead standing could not be resolved for this chunk; every row in it reads " +
-        `as unresolved rather than as a guess: ${(error as Error).message}`,
+        `as unresolved rather than as a guess: ${errorMessage(error)}`,
     );
     // Say WHICH read failed: the replies (instantly-service) or the statements (this database).
     const reason: LeadStandingUnresolvedReason =
@@ -734,14 +735,14 @@ async function resolveLeadReadScope(
       } catch (error) {
         console.error(
           `[lead-service] offer scope unresolved for offerId=${offerIdStr} orgId=${req.orgId} — ` +
-            `refusing the read rather than widening it to the brand: ${(error as Error).message}`,
+            `refusing the read rather than widening it to the brand: ${errorMessage(error)}`,
         );
         return {
           kind: "error",
           status: 502,
           error:
             error instanceof OfferCampaignsUnavailableError
-              ? error.message
+              ? messageOf(error)
               : "campaign-service unavailable",
         };
       }
@@ -893,7 +894,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       // and dropped is the bug being fixed here, so nothing about paging fails quietly.
       page = parseLeadListPage(req.query);
     } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      return res.status(400).json({ error: errorMessage(error) });
     }
 
     // WHICH population this read is about — the offer/campaign-identity resolution, the delivery
@@ -994,7 +995,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
         if (error instanceof ReadModelUnavailableError) {
           console.error(
             "[lead-service] a filtered/ordered read is refused: its read model could not be built " +
-              `or brought up to date, and a wrongly-filtered list is worse than none: ${error.message}`,
+              `or brought up to date, and a wrongly-filtered list is worse than none: ${messageOf(error)}`,
           );
           throw new LeadReadRefused(
             502,
@@ -1397,7 +1398,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
       if (streamingStarted || res.headersSent) {
         // Stream already open — can't send a 500 body. Destroy the socket so the caller
         // sees a truncated/aborted response and treats it as a failure (fail loud).
-        res.destroy(error instanceof Error ? error : new Error(String(error)));
+        res.destroy(error instanceof Error ? error : new Error(errorString(error)));
       } else {
         res.status(500).json({ error: "Internal server error" });
       }
@@ -1446,7 +1447,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
       statuses = parseLeadStatusFilter(req.query.status);
       searchTokens = parseLeadSearch(req.query.q);
     } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      return res.status(400).json({ error: errorMessage(error) });
     }
 
     const resolved = await resolveLeadReadScope(req, statuses);
@@ -1471,7 +1472,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: Au
       if (error instanceof ReadModelUnavailableError) {
         console.error(
           "[lead-service] bucket counts refused: the read model they are counted from could not " +
-            `be built or brought up to date: ${error.message}`,
+            `be built or brought up to date: ${messageOf(error)}`,
         );
         return res.status(502).json({
           error: error.source === "standing" ? "lead standing unavailable" : "email-gateway unavailable",
@@ -1566,7 +1567,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       searchTokens = parseLeadSearch(req.query.q);
       withStages = parseStandingBreakdown(req.query.breakdown);
     } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      return res.status(400).json({ error: errorMessage(error) });
     }
 
     const resolved = await resolveLeadReadScope(req, statuses);
@@ -1595,7 +1596,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: 
       if (error instanceof ReadModelUnavailableError) {
         console.error(
           "[lead-service] standing counts refused: the read model they are counted from could " +
-            `not be built or brought up to date: ${error.message}`,
+            `not be built or brought up to date: ${messageOf(error)}`,
         );
         return res.status(502).json({
           error: error.source === "standing" ? "lead standing unavailable" : "email-gateway unavailable",
@@ -1661,7 +1662,7 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async
         since = decodeFeedPosition(raw.trim());
       }
     } catch (error) {
-      return res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+      return res.status(400).json({ error: errorMessage(error) });
     }
 
     const resolved = await resolveLeadReadScope(req, statuses);
@@ -1681,7 +1682,7 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async
     } catch (error) {
       if (error instanceof ReadModelUnavailableError) {
         console.error(
-          `[lead-service] lead changes refused: the feed could not be brought up to date: ${error.message}`,
+          `[lead-service] lead changes refused: the feed could not be brought up to date: ${messageOf(error)}`,
         );
         return res.status(502).json({ error: "email-gateway unavailable" });
       }
@@ -1705,7 +1706,7 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async
     try {
       read = await readChangeFeed(feed, since ? since.version : null);
     } catch (error) {
-      if (error instanceof FeedPositionError) return res.status(400).json({ error: error.message });
+      if (error instanceof FeedPositionError) return res.status(400).json({ error: messageOf(error) });
       throw error;
     }
 

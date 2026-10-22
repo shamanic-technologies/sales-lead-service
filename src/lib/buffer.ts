@@ -1,3 +1,4 @@
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
@@ -300,7 +301,7 @@ export async function pullNext(
     console.warn(
       `[lead-service] campaign offer unresolved for campaign=${params.campaignId} — ` +
         `the goal read falls back to brand scope, which brand-service refuses on a multi-offer brand: ` +
-        (err instanceof Error ? err.message : String(err)),
+        (errorMessage(err)),
     );
   }
   const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx, offerId);

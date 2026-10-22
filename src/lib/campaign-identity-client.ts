@@ -15,6 +15,7 @@
  * customer sees one stored row again for as long as the outage lasts) and never fabricates a
  * figure — the opposite of what the fail-loud rule targets. It is never widened to the brand.
  */
+import { errorMessage } from "./db-error.js";
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { buildCampaignFamilies, type CampaignIdentityRow } from "./campaign-identity.js";
@@ -87,7 +88,7 @@ export async function resolveCampaignFamily(
     console.error(
       `[lead-service] campaign identity unavailable for campaignId=${campaignId} orgId=${ctx.orgId} — ` +
         `campaign-scoped read falls back to the single stored row (its totals will be smaller than ` +
-        `the identity's): ${(error as Error).message}`,
+        `the identity's): ${errorMessage(error)}`,
     );
     return [campaignId];
   }

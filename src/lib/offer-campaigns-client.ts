@@ -31,6 +31,7 @@
  * `campaignId` are both taken as given and used as filters), and an offer no campaign names is
  * indistinguishable from an offer with no campaigns yet — both are honestly empty.
  */
+import { errorMessage } from "./db-error.js";
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
@@ -93,7 +94,7 @@ export async function resolveOfferCampaignIds(
   } catch (error) {
     throw new OfferCampaignsUnavailableError(
       `campaign-service is unreachable, so the campaigns selling offer ${offerId} are unknown: ${
-        (error as Error).message
+        errorMessage(error)
       }`,
     );
   }
@@ -111,7 +112,7 @@ export async function resolveOfferCampaignIds(
   } catch (error) {
     throw new OfferCampaignsUnavailableError(
       `campaign-service /campaigns returned an unreadable body, so the campaigns selling offer ${offerId} are unknown: ${
-        (error as Error).message
+        errorMessage(error)
       }`,
     );
   }

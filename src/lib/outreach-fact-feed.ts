@@ -10,6 +10,7 @@
  * the whole page LOUD and the cursor stays: skipping it would lose a fact for good. What a fact
  * MEANS is decided in timeline-facts.ts / timeline-labels.ts.
  */
+import { errorMessage } from "./db-error.js";
 import { INSTANTLY_SERVICE_API_KEY, INSTANTLY_SERVICE_URL } from "../config.js";
 import { sql } from "../db/index.js";
 import { fetchWithRetry } from "./fetch-retry.js";
@@ -99,7 +100,7 @@ export async function fetchOutreachFactsPage(cursor: string | null, limit: numbe
       signal: AbortSignal.timeout(60_000),
     });
   } catch (error) {
-    throw new Error(`[outreach-fact-feed] instantly-service unreachable for ${path}: ${(error as Error).message}`);
+    throw new Error(`[outreach-fact-feed] instantly-service unreachable for ${path}: ${errorMessage(error)}`);
   }
   if (!response.ok) {
     const body = await response.text().catch(() => "");

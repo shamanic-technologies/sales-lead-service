@@ -12,6 +12,7 @@
  * carries. The override is about the PERSON and the step within the brand, because the CRM evidence
  * is about the person, not about one campaign row. Policy: crm-evidence.ts.
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -68,8 +69,8 @@ router.post(
     } catch (error) {
       // A sibling that could not answer is a 502 with its reason — never a partial sync reported
       // as done. Nothing is set aside when a read fails (see crm-evidence-sync.ts).
-      if (error instanceof CrmServiceError || /email-gateway/i.test((error as Error).message)) {
-        res.status(502).json({ error: (error as Error).message });
+      if (error instanceof CrmServiceError || /email-gateway/i.test(errorMessage(error))) {
+        res.status(502).json({ error: errorMessage(error) });
         return;
       }
       throw error;

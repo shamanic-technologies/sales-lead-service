@@ -30,6 +30,7 @@
  * fact lands within minutes. Idempotent on the row (`idx_lc_lead_campaign`); nothing deleted: a
  * withdrawn signup fact leaves the lead as it is (a correction about a fact, not about the person).
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { leads } from "../db/schema.js";
@@ -235,7 +236,7 @@ export function startBrandSignupsWorker(
         await afterFiling(brand).catch((error: unknown) =>
           console.error(
             `[lead-service] brand signups: CRM evidence pass for brand ${brand.brandId} failed, the Signup ` +
-              `fact waits for the next pass: ${(error as Error).message}`,
+              `fact waits for the next pass: ${errorMessage(error)}`,
           ),
         );
       }

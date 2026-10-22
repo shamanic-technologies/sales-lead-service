@@ -21,6 +21,7 @@
  * opt-out), or is a machine. A message not judged (no run on the read, the judgment failed) is read as
  * WAITING and the gap is stated: the list never reads a person answered or closed on a guess.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { PEOPLE_FACTS_FEED } from "./crm-fact-feed.js";
@@ -282,8 +283,8 @@ export async function judgeUnansweredPersonalMessages(
         );
       } catch (error) {
         report.complete = false;
-        report.unjudged.push({ leadId: message.leadId, factId: message.factId, reason: (error as Error).message.slice(0, 300) });
-        console.warn(`[lead-service] personal message judgment failed fact=${message.factId}: ${(error as Error).message}`);
+        report.unjudged.push({ leadId: message.leadId, factId: message.factId, reason: errorMessage(error).slice(0, 300) });
+        console.warn(`[lead-service] personal message judgment failed fact=${message.factId}: ${errorMessage(error)}`);
       }
     }
   };

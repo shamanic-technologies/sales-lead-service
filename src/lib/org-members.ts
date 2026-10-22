@@ -16,6 +16,7 @@
  * FAIL LOUD: client-service unreadable throws `OrgMembersUnavailableError`; every reader fails its pass (rows kept,
  * nothing filed), never "nobody is a member". Generic: no per-org or per-address list anywhere.
  */
+import { errorMessage } from "./db-error.js";
 import { CLIENT_SERVICE_API_KEY, CLIENT_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
@@ -71,7 +72,7 @@ async function fetchMemberEmails(orgId: string): Promise<string[]> {
     try {
       response = await fetchWithRetry(url, { headers: { "x-api-key": CLIENT_SERVICE_API_KEY }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (error) {
-      throw new OrgMembersUnavailableError(`client-service unreachable reading the members of org ${orgId}: ${(error as Error).message}`);
+      throw new OrgMembersUnavailableError(`client-service unreachable reading the members of org ${orgId}: ${errorMessage(error)}`);
     }
     if (!response.ok) {
       const body = await response.text().catch(() => "");

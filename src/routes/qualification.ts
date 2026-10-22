@@ -7,6 +7,7 @@
  * Routes that SPEND (suggestions, sample) need the caller's full identity (org, user, run): the
  * spend hangs on a child run of the caller's run, so every cent is attributed. Reads never spend.
  */
+import { errorMessage, messageOf } from "../lib/db-error.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
@@ -75,7 +76,7 @@ function fail(res: Response, error: unknown, what: string): void {
     return;
   }
   console.error(`[lead-service] ${what} failed:`, error);
-  res.status(502).json({ error: `${what} failed`, detail: (error as Error).message });
+  res.status(502).json({ error: `${what} failed`, detail: errorMessage(error) });
 }
 
 /** A spending route opens its own child run under the caller's run. */
@@ -246,7 +247,7 @@ router.post(
       res.status(201).json({ criterion });
     } catch (error) {
       if (error instanceof TregEndpointUnknownError) {
-        res.status(400).json({ error: "Unusable probe", code: "unusable_probe", reason: error.message });
+        res.status(400).json({ error: "Unusable probe", code: "unusable_probe", reason: messageOf(error) });
         return;
       }
       fail(res, error, "qualification criterion create");

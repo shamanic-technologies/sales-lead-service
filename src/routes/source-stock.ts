@@ -2,6 +2,7 @@
  * A source's stock, asked again whether each find is its own, and finds given back to the source they belong to
  * (LEAK-1012 part 2): src/lib/source-stock-recheck.ts.
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router, Response } from "express";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import { SourceCampaignUnresolvedError } from "../lib/source-campaign.js";
@@ -22,8 +23,8 @@ async function answer(res: Response, label: string, work: () => Promise<unknown>
     res.json(await work());
   } catch (error) {
     if (siblingDown(error)) {
-      console.error(`[lead-service] ${label} unavailable: ${(error as Error).message}`);
-      res.status(502).json({ error: "dependency_unavailable", detail: (error as Error).message });
+      console.error(`[lead-service] ${label} unavailable: ${errorMessage(error)}`);
+      res.status(502).json({ error: "dependency_unavailable", detail: errorMessage(error) });
       return;
     }
     console.error(`[lead-service] ${label} failed:`, error);

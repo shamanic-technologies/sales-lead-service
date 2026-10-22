@@ -1,3 +1,4 @@
+import { errorMessage, messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { z } from "zod";
 import { apiKeyAuth } from "../middleware/auth.js";
@@ -60,12 +61,12 @@ router.post("/internal/transfer-brand", apiKeyAuth, async (req, res) => {
   } catch (err) {
     if (err instanceof SharedBrandRowsError) {
       console.error(`[lead-service] transfer-brand refused: ${detail}: ${err.message}`);
-      res.status(409).json({ error: err.message, shared: err.shared });
+      res.status(409).json({ error: messageOf(err), shared: err.shared });
       return;
     }
     console.error(`[lead-service] transfer-brand failed: ${detail}`, err);
     res.status(500).json({
-      error: `transfer-brand failed, nothing was moved: ${err instanceof Error ? err.message : String(err)}`,
+      error: `transfer-brand failed, nothing was moved: ${errorMessage(err)}`,
     });
   }
 });

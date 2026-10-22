@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { CrmFactFeedNotCaughtUpError } from "../lib/crm-fact-events.js";
@@ -67,7 +68,7 @@ router.get(
       res.json({ step, people });
     } catch (error) {
       if (error instanceof CrmFactFeedNotCaughtUpError) {
-        res.status(503).json({ error: "crm_copy_not_caught_up", message: error.message });
+        res.status(503).json({ error: "crm_copy_not_caught_up", message: messageOf(error) });
         return;
       }
       console.error(`[lead-service] step-reached unreadable for brand ${brandId} step ${step}:`, error);

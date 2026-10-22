@@ -21,6 +21,7 @@
  * re-syncs a post's engagers every 6 h for 7 days), and `POST /internal/social-engagements/sync` for an
  * immediate pass (a workflow right after its engagers sync, a staff replay).
  */
+import { errorMessage } from "./db-error.js";
 import { z } from "zod";
 import { SOCIAL_SERVICE_API_KEY, SOCIAL_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
@@ -89,7 +90,7 @@ export async function fetchSocialEngagements(since: Date): Promise<SocialEngagem
       signal: AbortSignal.timeout(30_000),
     });
   } catch (error) {
-    throw new SocialEngagementsUnavailableError(`social-service unreachable: ${(error as Error).message}`);
+    throw new SocialEngagementsUnavailableError(`social-service unreachable: ${errorMessage(error)}`);
   }
   if (!res.ok) {
     throw new SocialEngagementsUnavailableError(`social-service answered ${res.status}: ${(await res.text()).slice(0, 300)}`);
@@ -272,7 +273,7 @@ export async function sweepSocialEngagements(): Promise<void> {
       );
     }
   } catch (error) {
-    console.error(`[lead-service] social engagements sweep failed, the facts not yet filed wait for the next pass: ${(error as Error).message}`);
+    console.error(`[lead-service] social engagements sweep failed, the facts not yet filed wait for the next pass: ${errorMessage(error)}`);
   } finally {
     sweeping = false;
   }

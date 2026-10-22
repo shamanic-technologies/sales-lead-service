@@ -42,6 +42,7 @@
  * WhatsApp/LinkedIn messages of ours (crm fact copy) are not answers here: the copy does not say
  * whether a person or our AI wrote them, and a side is never guessed.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { CAMPAIGN_SERVICE_API_KEY, CAMPAIGN_SERVICE_URL } from "../config.js";
@@ -649,7 +650,7 @@ async function fetchOrgCampaignCards(orgId: string): Promise<CampaignCard[]> {
       signal: AbortSignal.timeout(30_000),
     });
   } catch (error) {
-    throw new MeetingAttributionUnavailableError(`campaign-service unreachable for org ${orgId}: ${(error as Error).message}`);
+    throw new MeetingAttributionUnavailableError(`campaign-service unreachable for org ${orgId}: ${errorMessage(error)}`);
   }
   if (!response.ok) {
     throw new MeetingAttributionUnavailableError(

@@ -12,6 +12,7 @@
  * `:id` = a list row id (what every row of GET /orgs/leads carries) or the lead's own id. Mounted BEFORE
  * the leads router: `/orgs/leads/not-a-person` is not a lead id.
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { listNotAPerson, liftNotAPerson, resolveOrgLead, stateNotAPerson } from "../lib/not-a-person.js";
@@ -51,7 +52,7 @@ router.get("/orgs/leads/not-a-person", apiKeyAuth, requireOrgId, async (req: Aut
   try {
     leadId = optionalString(req.query.leadId, "leadId");
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   if (leadId && !UUID_RE.test(leadId)) {
@@ -89,7 +90,7 @@ router.put("/orgs/leads/:id/not-a-person", apiKeyAuth, requireOrgId, async (req:
   try {
     note = readNote(body.note, false);
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   try {
@@ -155,7 +156,7 @@ router.get("/orgs/brands/:brandId/conversions", apiKeyAuth, requireOrgId, async 
       limit = n;
     }
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   if (leadIdRaw && !UUID_RE.test(leadIdRaw)) {
@@ -199,7 +200,7 @@ router.post(
     try {
       note = readNote((req.body ?? {}).note, true)!;
     } catch (error) {
-      res.status(400).json({ error: (error as Error).message });
+      res.status(400).json({ error: errorMessage(error) });
       return;
     }
     try {

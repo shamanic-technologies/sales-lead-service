@@ -25,6 +25,7 @@
  *     flattenCampaignSubsetStatus) — it would restamp brand-wide evidence onto every card, which
  *     is the bug being fixed.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { notMarkedNotAPerson } from "./not-a-person.js";
 import { toIsoTimestamp } from "./basic-leads.js";
@@ -190,7 +191,7 @@ async function loadFamilies(options: CampaignBreakdownOptions): Promise<Campaign
     console.error(
       `[lead-service] campaign identities unavailable for orgId=${options.orgId} — every campaign ` +
         `card is one stored campaign row rather than one identity (a person served under a stopped ` +
-        `ancestor reads on its own card): ${(error as Error).message}`,
+        `ancestor reads on its own card): ${errorMessage(error)}`,
     );
     return null;
   }

@@ -18,6 +18,7 @@
  * Runs on the background thread (`startChannelSendReconcileWorker`) over rows served in the last
  * `RECONCILE_WINDOW_MS`; `reconcileChannelSends({ servedSince: null })` walks every age (the one-time pass).
  */
+import { messageOf } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { channelSendKey, ChannelSendsUnavailableError, fetchChannelSendsBatch } from "./channel-send-client.js";
@@ -150,7 +151,7 @@ export async function reconcileChannelSends(opts: { servedSince: Date | null; dr
       done = await reconcileCampaign(campaignId, campaignRows, dryRun, nowMs);
     } catch (err) {
       if (!(err instanceof ChannelSendsUnavailableError)) throw err;
-      done = { campaignId, rows: campaignRows.length, marked: 0, noEmail: 0, skipped: err.message };
+      done = { campaignId, rows: campaignRows.length, marked: 0, noEmail: 0, skipped: messageOf(err) };
       result.failedCampaigns += 1;
     }
     result.campaigns.push(done);

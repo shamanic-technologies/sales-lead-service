@@ -14,6 +14,7 @@
  * where the same read on an idle loop took 0.3s (2026-10-08). The interval sweeps already run on
  * their own thread (src/background-worker.ts); this gives the dashboard's reads one too.
  */
+import { errorMessage } from "./lib/db-error.js";
 import * as Sentry from "@sentry/node";
 import express from "express";
 import cors from "cors";
@@ -189,7 +190,7 @@ async function boot(): Promise<void> {
     onRetry: (attempt, delayMs, err) => {
       console.warn(
         `[lead-service] DB not reachable yet (attempt ${attempt}), retrying in ${delayMs}ms:`,
-        err instanceof Error ? err.message : err,
+        err instanceof Error ? errorMessage(err) : err,
       );
     },
   });

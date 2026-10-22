@@ -37,6 +37,7 @@
  * accompanied by a `console.error`. It is NEVER a guess: no brand, no funnel and no sibling
  * campaign is ever substituted for an offer the campaign did not itself name.
  */
+import { messageOf } from "./db-error.js";
 import {
   BRAND_SERVICE_URL,
   BRAND_SERVICE_API_KEY,
@@ -185,7 +186,7 @@ export function createOfferCardResolver(ctx: OfferResolveContext): OfferCardReso
         console.error(
           `[lead-service] offer unresolved for orgId=${ctx.orgId} — campaign-service could not say ` +
             `which offer each campaign sells, so leads carry no offer on this read (their campaignId ` +
-            `is unchanged): ${error.message}`,
+            `is unchanged): ${messageOf(error)}`,
         );
         return new Map<string, CampaignOffer>();
       });
@@ -199,7 +200,7 @@ export function createOfferCardResolver(ctx: OfferResolveContext): OfferCardReso
       names = fetchBrandOfferNames(brandId, ctx).catch((error: Error) => {
         console.error(
           `[lead-service] offer names unresolved for brandId=${brandId} orgId=${ctx.orgId} — ` +
-            `leads carry their offer id with no name on this read: ${error.message}`,
+            `leads carry their offer id with no name on this read: ${messageOf(error)}`,
         );
         return new Map<string, string>();
       });

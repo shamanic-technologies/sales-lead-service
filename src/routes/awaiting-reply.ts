@@ -15,6 +15,7 @@
  * Rule and IO: src/lib/awaiting-reply.ts, awaiting-reply-read.ts. Mounted BEFORE the leads router so
  * `/orgs/leads/awaiting-reply` is not read as a lead id (the gateway reaches it through `/v1/leads/:id`).
  */
+import { messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { sql } from "../db/index.js";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -31,7 +32,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function respondReadFailure(res: Response, error: unknown, what: string) {
   if (error instanceof OutreachCopyNotReadyError) {
-    res.status(503).json({ error: error.message, code: "outreach_copy_not_ready" });
+    res.status(503).json({ error: messageOf(error), code: "outreach_copy_not_ready" });
     return;
   }
   console.error(`[lead-service] ${what} failed:`, error);

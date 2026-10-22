@@ -11,6 +11,7 @@
  * fails is logged loudly and the sweep carries on: one customer's CRM being unreadable is not a
  * reason to leave every other customer's stale.
  */
+import { errorMessage } from "./db-error.js";
 import { listCrmBrands, syncCrmEvidence, type CrmEvidenceSyncResult } from "./crm-evidence-sync.js";
 import { withScopeLock } from "./scope-lock.js";
 
@@ -64,7 +65,7 @@ export async function sweepCrmEvidence(): Promise<void> {
       } catch (error) {
         console.error(
           `[crm-evidence] brand=${brandId} org=${orgId} could not be synced, so its CRM evidence ` +
-            `stays as it was: ${(error as Error).message}`,
+            `stays as it was: ${errorMessage(error)}`,
         );
       }
     }

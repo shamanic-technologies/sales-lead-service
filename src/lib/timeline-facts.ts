@@ -15,6 +15,7 @@
  * FAIL LOUD per brand: a source that cannot be read fails that brand's sweep and leaves its rows as
  * they were (never an empty write that would read as "nothing happened"); the sweep moves on.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
@@ -468,7 +469,7 @@ export async function sweepTimelineFacts(): Promise<void> {
       } catch (error) {
         console.error(
           `[lead-service] timeline brand=${brand_id} org=${org_id} could not be synced, its facts stay ` +
-            `as they were: ${(error as Error).message}`,
+            `as they were: ${errorMessage(error)}`,
         );
       }
     }

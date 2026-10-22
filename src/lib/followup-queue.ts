@@ -61,6 +61,7 @@
  * reasons, stop reason) is untouched. A later hand-over closes an open grant. `handedClaimableSql` is
  * the one predicate, used by the read and the claim.
  */
+import { errorString } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
@@ -589,7 +590,7 @@ export async function resolveResponderStartedAt(
     });
   } catch (err) {
     throw new FollowupResponderStartUnavailableError(
-      `campaign-service unreachable for campaign ${actingCampaignId}: ${String(err)}`,
+      `campaign-service unreachable for campaign ${actingCampaignId}: ${errorString(err)}`,
     );
   }
   if (!campaign) {

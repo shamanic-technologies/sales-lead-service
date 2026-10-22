@@ -22,6 +22,7 @@
  *     judgments and writing through chat-service, screenshot storage through cloudflare-service,
  *     all on one run, so every cent is in runs under a seeded cost name.
  */
+import { messageOf } from "./db-error.js";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -253,7 +254,7 @@ export async function observe(spec: ProbeSpec, subject: CompanySubject, org: Org
       params = bindCall(call, subject);
     } catch (error) {
       if (error instanceof MissingCompanyFactError) {
-        reasons.push(`${call.endpointId}: ${error.message}`);
+        reasons.push(`${call.endpointId}: ${messageOf(error)}`);
         continue;
       }
       throw error;

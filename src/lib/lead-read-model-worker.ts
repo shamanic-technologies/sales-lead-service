@@ -24,6 +24,7 @@
  * INSIDE the sweep, and each model is refreshed under the same per-scope lock a read takes, so a
  * sweep, a read and another sweep can never build the same scope twice at once.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { DEFAULT_LEAD_LIST_STATUSES } from "./lead-list-query.js";
 import {
@@ -122,7 +123,7 @@ export async function sweepReadModels(): Promise<void> {
       } catch (error) {
         console.error(
           `[lead-read-model] scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) could ` +
-            `not be refreshed; a read past its bound will rebuild it or answer 502: ${(error as Error).message}`,
+            `not be refreshed; a read past its bound will rebuild it or answer 502: ${errorMessage(error)}`,
         );
       }
     }

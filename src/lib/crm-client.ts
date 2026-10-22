@@ -18,6 +18,7 @@
  * read and a CRM holding nothing are different facts, and collapsing them would tell a customer
  * their CRM is empty.
  */
+import { errorMessage } from "./db-error.js";
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { canonicalizeOpportunityState, type CrmOpportunityState } from "./crm-pairing.js";
@@ -61,7 +62,7 @@ async function getJson<T>(path: string, ctx: CrmIdentityContext): Promise<T> {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    throw new CrmServiceError(`crm-service unreachable for ${path}: ${(error as Error).message}`);
+    throw new CrmServiceError(`crm-service unreachable for ${path}: ${errorMessage(error)}`);
   }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -71,7 +72,7 @@ async function getJson<T>(path: string, ctx: CrmIdentityContext): Promise<T> {
     return (await response.json()) as T;
   } catch (error) {
     throw new CrmServiceError(
-      `crm-service answer for ${path} was not readable JSON: ${(error as Error).message}`,
+      `crm-service answer for ${path} was not readable JSON: ${errorMessage(error)}`,
     );
   }
 }
@@ -468,7 +469,7 @@ export async function fetchCrmFactsPage(cursor: string | null, limit: number): P
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    throw new CrmServiceError(`crm-service unreachable for ${path}: ${(error as Error).message}`);
+    throw new CrmServiceError(`crm-service unreachable for ${path}: ${errorMessage(error)}`);
   }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -478,7 +479,7 @@ export async function fetchCrmFactsPage(cursor: string | null, limit: number): P
   try {
     body = (await response.json()) as typeof body;
   } catch (error) {
-    throw new CrmServiceError(`crm-service answer for ${path} was not readable JSON: ${(error as Error).message}`);
+    throw new CrmServiceError(`crm-service answer for ${path} was not readable JSON: ${errorMessage(error)}`);
   }
   if (!Array.isArray(body.facts)) throw new CrmServiceError(`crm-service ${path} answered with no facts array`);
   if (typeof body.hasMore !== "boolean") throw new CrmServiceError(`crm-service ${path} answered with no hasMore`);

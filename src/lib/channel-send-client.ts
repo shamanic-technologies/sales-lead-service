@@ -16,6 +16,7 @@
  * match; the per-person read answered such an email with a 400, which failed the whole pull, so it still does
  * (named in the error, never read as "nothing sent").
  */
+import { errorMessage } from "./db-error.js";
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { isCrmMatchableEmail, keepAccepted } from "./receiver-email-format.js";
@@ -115,7 +116,7 @@ export async function fetchChannelSendsBatch(
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
   } catch (error) {
-    throw new ChannelSendsUnavailableError(`crm-service unreachable for ${what}: ${(error as Error).message}`);
+    throw new ChannelSendsUnavailableError(`crm-service unreachable for ${what}: ${errorMessage(error)}`);
   }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
@@ -125,7 +126,7 @@ export async function fetchChannelSendsBatch(
   try {
     body = (await response.json()) as { sends?: unknown; invalidEmails?: unknown };
   } catch (error) {
-    throw new ChannelSendsUnavailableError(`crm-service answer for ${what} was not JSON: ${(error as Error).message}`);
+    throw new ChannelSendsUnavailableError(`crm-service answer for ${what} was not JSON: ${errorMessage(error)}`);
   }
   if (!Array.isArray(body.sends) || !Array.isArray(body.invalidEmails)) {
     throw new ChannelSendsUnavailableError(`crm-service answer for ${what} carries no sends/invalidEmails arrays`);

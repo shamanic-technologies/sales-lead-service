@@ -1,3 +1,4 @@
+import { errorMessage, errorString } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { streamBrandJourneys } from "../lib/brand-journeys.js";
@@ -46,7 +47,7 @@ router.get(
       offers = await fetchOrgCampaignOffers({ orgId, brandId });
     } catch (error) {
       console.error(`[lead-service] timeline-journeys campaign offers unreadable for brand ${brandId}:`, error);
-      res.status(502).json({ error: "campaign_offers_unavailable", message: (error as Error).message });
+      res.status(502).json({ error: "campaign_offers_unavailable", message: errorMessage(error) });
       return;
     }
 
@@ -81,7 +82,7 @@ router.get(
       } else {
         console.error(`[lead-service] timeline-journeys error for brand ${brandId}:`, error);
         if (streamingStarted || res.headersSent) {
-          res.destroy(error instanceof Error ? error : new Error(String(error)));
+          res.destroy(error instanceof Error ? error : new Error(errorString(error)));
         } else {
           res.status(500).json({ error: "Internal server error" });
         }
