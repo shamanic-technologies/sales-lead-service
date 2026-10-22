@@ -124,6 +124,11 @@ export interface FollowupActedLead {
   actedCount: number;
   firstActedAt: string | null;
   lastActedAt: string | null;
+  /**
+   * BEST-TPL-LLM-1022-LS: the LLM alias of this campaign's LATEST act on the person that STATED one (as the acting
+   * run stated it, `followup_actions.llm_alias`); null when no act did (every act before 2026-10-22). Never guessed.
+   */
+  latestLlmAlias: string | null;
 }
 
 export interface FollowupActingCampaignSummary {
@@ -148,6 +153,7 @@ interface RawRow {
   acted_count: number | string;
   first_acted_at: Date | string | null;
   last_acted_at: Date | string | null;
+  latest_llm_alias: string | null;
 }
 
 function toIso(value: Date | string | null): string | null {
@@ -180,7 +186,9 @@ export async function readFollowupActions(params: {
       max(fa.occurred_at) FILTER (WHERE fa.action = 'claimed') AS last_claimed_at,
       count(*) FILTER (WHERE fa.action = 'acted') AS acted_count,
       min(fa.occurred_at) FILTER (WHERE fa.action = 'acted') AS first_acted_at,
-      max(fa.occurred_at) FILTER (WHERE fa.action = 'acted') AS last_acted_at
+      max(fa.occurred_at) FILTER (WHERE fa.action = 'acted') AS last_acted_at,
+      (array_agg(fa.llm_alias ORDER BY fa.occurred_at DESC, fa.id DESC)
+        FILTER (WHERE fa.action = 'acted' AND fa.llm_alias IS NOT NULL))[1] AS latest_llm_alias
     FROM followup_actions fa
     LEFT JOIN LATERAL (
       SELECT lower(cm.value) AS email
@@ -207,6 +215,7 @@ export async function readFollowupActions(params: {
     actedCount: Number(r.acted_count),
     firstActedAt: toIso(r.first_acted_at),
     lastActedAt: toIso(r.last_acted_at),
+    latestLlmAlias: r.latest_llm_alias ?? null,
   }));
 
   // Every campaign asked about is answered, including one that acted on nobody: an absent key would
