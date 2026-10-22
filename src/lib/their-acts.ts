@@ -72,15 +72,17 @@ const scoped = (alias: SQL, scope: ActScope | null): SQL =>
 
 /**
  * SQL CTEs `to_brand_points` (org, brand, cp): the contact points an act may count on (rule 1), for the scope.
- * The subjects' points are unnested once (a per-act `= ANY(contact_points)` scans every subject).
+ * The subjects' points are unnested once (a per-act `= ANY(contact_points)` scans every subject). Each list is
+ * MATERIALIZED: inlined, the planner estimated one row and re-ran the not-this-brand aggregation over every crm tag
+ * for each act (the fleet pass hit the statement timeout every 2 min in prod; materialized: 0.95 s).
  */
 function toBrandPointsCte(scope: ActScope | null): SQL {
   return sql`
-    subject_points AS (
+    subject_points AS MATERIALIZED (
       SELECT DISTINCT s.org_id, s.brand_id, cp FROM relationship_subjects s CROSS JOIN LATERAL unnest(s.contact_points) AS cp
       WHERE ${scoped(sql`s`, scope)}
     ),
-    not_brand_conversations AS (
+    not_brand_conversations AS MATERIALIZED (
       SELECT r.org_id, r.brand_id, b->>'ref' AS cp
       FROM crm_registry_facts r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.payload->'basis', '[]'::jsonb)) AS b
       WHERE r.type = 'connection_tag' AND b->>'kind' = 'conversation' AND ${scoped(sql`r`, scope)}
@@ -88,7 +90,7 @@ function toBrandPointsCte(scope: ActScope | null): SQL {
       GROUP BY 1, 2, 3
       HAVING bool_and(r.payload->>'tag' IS DISTINCT FROM 'professional_to_brand')
     ),
-    to_brand_points AS (
+    to_brand_points AS MATERIALIZED (
       SELECT p.org_id, p.brand_id, p.cp FROM subject_points p
       WHERE NOT EXISTS (SELECT 1 FROM not_brand_conversations n WHERE n.org_id = p.org_id AND n.brand_id = p.brand_id AND n.cp = p.cp)
     )`;
