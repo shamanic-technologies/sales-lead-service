@@ -126,6 +126,25 @@ describe("the writes attribute to the DISPATCHED campaign (x-campaign-id)", () =
     );
   });
 
+  it("BEST-TPL-LLM-1022-LS: an 'acted' statement carries the LLM alias its run states", async () => {
+    writeFollowupStatement.mockResolvedValue({ id: ROW });
+    const nextDueAt = new Date(Date.now() + 86_400_000).toISOString();
+    await request(app).post(`/orgs/leads/${ROW}/followups`).set(auth).send({ kind: "acted", nextDueAt, llmAlias: "claude-sonnet-5" });
+    expect(writeFollowupStatement).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "acted", llmAlias: "claude-sonnet-5" }));
+    await request(app).post(`/orgs/leads/${ROW}/followups`).set(auth).send({ kind: "acted", nextDueAt });
+    expect(writeFollowupStatement).toHaveBeenLastCalledWith(expect.objectContaining({ kind: "acted", llmAlias: null }));
+  });
+
+  it("llmAlias on a statement that sends nothing is refused (400 llm_alias_only_on_acted), nothing written", async () => {
+    const res = await request(app)
+      .post(`/orgs/leads/${ROW}/followups`)
+      .set(auth)
+      .send({ kind: "scheduled", dueAt: new Date(Date.now() + 86_400_000).toISOString(), llmAlias: "claude-sonnet-5" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("llm_alias_only_on_acted");
+    expect(writeFollowupStatement).not.toHaveBeenCalled();
+  });
+
   it("no x-campaign-id is refused, never claimed under a guessed responder", async () => {
     pickFollowupCandidate.mockResolvedValue({ claimed: null, reason: "nothing_due" });
     const res = await request(app)

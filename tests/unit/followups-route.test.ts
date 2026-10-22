@@ -670,6 +670,17 @@ describe("POST /orgs/campaigns/:campaignId/followup-actions/by-email", () => {
     );
   });
 
+  it("BEST-TPL-LLM-1022-LS: stores the LLM alias the acting run states; absent = null, never guessed", async () => {
+    lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "p@x.com" });
+    recordActedByEmail.mockResolvedValue("recorded");
+    await request(app).post(url).set(headers).send({ email: "p@x.com", llmAlias: " gemini-3-flash " });
+    expect(recordActedByEmail).toHaveBeenLastCalledWith(expect.objectContaining({ llmAlias: "gemini-3-flash" }));
+    await request(app).post(url).set(headers).send({ email: "p@x.com" });
+    expect(recordActedByEmail).toHaveBeenLastCalledWith(expect.objectContaining({ llmAlias: null }));
+    const empty = await request(app).post(url).set(headers).send({ email: "p@x.com", llmAlias: "  " });
+    expect(empty.status).toBe(400);
+  });
+
   it("a retry of the same run answers 200 already_recorded", async () => {
     lookupFollowupRowByEmail.mockResolvedValue({ ok: true, id: ROW, leadId: "lead-1", email: "p@x.com" });
     recordActedByEmail.mockResolvedValue("already_recorded");

@@ -28,6 +28,14 @@ import { SAME_ACT_WINDOW_MS } from "./meeting-attribution.js";
  *   4. else `unknown` with the reason. An undated message is never paired.
  * `workflowSlug` is the run's x-workflow-slug as recorded (the versioned slug); null when the record predates
  * it (ledger rows before migration 0114): `runId` still names the run, resolvable at runs-service.
+ *
+ * WHICH LLM wrote it (BEST-TPL-LLM-1022-LS, owner 2026-10-22: workflows no longer fix their LLM, features-service
+ * picks each leg's best LLM per send, so the version no longer implies the model): `llmAlias` is the alias the
+ * acting run STATED when it recorded the act (`followup_actions.llm_alias`, migration 0119), on `recorded_act` only.
+ * Never derived from the version or the run. Null with `llmAliasReason`:
+ *   - `not_stated`: a recorded act whose run stated none (every act recorded before 0119 reads so);
+ *   - `no_recorded_act`: the writer is not a recorded act (a person, a sequence email's holding run: the copy
+ *     content-generation keeps names that model, or unknown).
  */
 
 export type SentMessageKind = "email_sent" | "reply_sent" | "message_out" | "followup_act";
@@ -35,6 +43,8 @@ export type SentMessageKind = "email_sent" | "reply_sent" | "message_out" | "fol
 export type WrittenByBasis = "person" | "recorded_act" | "holding_run";
 
 export type WrittenByUnknownReason = "no_recorded_run" | "undated";
+
+export type LlmAliasUnknownReason = "not_stated" | "no_recorded_act";
 
 export interface WrittenBy {
   by: "workflow" | "person" | "unknown";
@@ -46,6 +56,9 @@ export interface WrittenBy {
   /** holding_run only: `serve` or the re-point cause that handed the row to that run. */
   workflowSource: string | null;
   reason: WrittenByUnknownReason | null;
+  /** The LLM alias the acting run stated it wrote this message with (recorded_act only); null = see llmAliasReason. */
+  llmAlias: string | null;
+  llmAliasReason: LlmAliasUnknownReason | null;
 }
 
 export interface SentMessage {
@@ -82,6 +95,8 @@ export interface LedgerAct {
   heldByCampaignId: string;
   runId: string | null;
   workflowSlug: string | null;
+  /** The LLM alias the run stated on the act; null = none stated. */
+  llmAlias: string | null;
   brandIds: string[];
   occurredAt: string;
 }
@@ -113,6 +128,8 @@ function fromAct(a: LedgerAct): WrittenBy {
     campaignId: a.actingCampaignId,
     workflowSource: null,
     reason: null,
+    llmAlias: a.llmAlias,
+    llmAliasReason: a.llmAlias === null ? "not_stated" : null,
   };
 }
 
@@ -124,6 +141,8 @@ const UNKNOWN = (reason: WrittenByUnknownReason): WrittenBy => ({
   campaignId: null,
   workflowSource: null,
   reason,
+  llmAlias: null,
+  llmAliasReason: "no_recorded_act",
 });
 
 /** Attribute every message to its writer (pure); unpaired acts are listed as messages of their own. */
@@ -148,6 +167,8 @@ export function attributeSentMessages(records: readonly MessageRecord[], acts: r
           campaignId: m.campaignId,
           workflowSource: m.holding.workflowSource,
           reason: null,
+          llmAlias: null,
+          llmAliasReason: "no_recorded_act",
         };
       } else {
         writtenBy = UNKNOWN(m.sentAt === null ? "undated" : "no_recorded_run");
@@ -209,6 +230,7 @@ interface RawAct {
   held_by_campaign_id: string;
   run_id: string | null;
   workflow_slug: string | null;
+  llm_alias: string | null;
   brand_ids: string[];
   occurred_at: RawTimestamp;
 }
@@ -268,7 +290,7 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
         )
     ` as unknown as Promise<RawCrm[]>,
     sql`
-      SELECT id::text AS id, acting_campaign_id, held_by_campaign_id, run_id, workflow_slug, brand_ids, occurred_at
+      SELECT id::text AS id, acting_campaign_id, held_by_campaign_id, run_id, workflow_slug, llm_alias, brand_ids, occurred_at
       FROM followup_actions
       WHERE lead_id = ${leadId}::uuid AND org_id = ${orgId} AND action = 'acted'
     ` as unknown as Promise<RawAct[]>,
@@ -307,6 +329,7 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
     heldByCampaignId: a.held_by_campaign_id,
     runId: a.run_id,
     workflowSlug: a.workflow_slug,
+    llmAlias: a.llm_alias,
     brandIds: a.brand_ids ?? [],
     occurredAt: toIsoTimestamp(a.occurred_at) as string,
   }));

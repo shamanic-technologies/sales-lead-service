@@ -1045,6 +1045,8 @@ export async function writeFollowupStatement(params: {
   runId?: string | null;
   /** The writing run's workflow version (x-workflow-slug): recorded on an 'acted' ledger row, null = none stated. */
   workflowSlug?: string | null;
+  /** 'acted' only: the LLM alias the run wrote the message with (BEST-TPL-LLM-1022-LS), null = none stated. */
+  llmAlias?: string | null;
   /** The occurrence through which the brand named this person (scheduled only; ignored otherwise). */
   statedBy?: FollowupOccurrenceStatement | null;
 }): Promise<FollowupState | null> {
@@ -1099,7 +1101,7 @@ export async function writeFollowupStatement(params: {
     )${
       acted
         ? sql`, logged AS (
-      ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`, params.workflowSlug ?? null)}
+      ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`, params.workflowSlug ?? null, params.llmAlias ?? null)}
     )`
         : sql``
     }

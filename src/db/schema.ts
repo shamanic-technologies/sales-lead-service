@@ -482,6 +482,8 @@ export const followupActions = pgTable(
     runId: text("run_id"),
     /** The workflow VERSION of the run that wrote the row (x-workflow-slug); NULL = before 0114 or none stated. */
     workflowSlug: text("workflow_slug"),
+    /** 'acted' only: the LLM alias the acting run wrote that message with, as it stated it; NULL = before 0119 or none stated. */
+    llmAlias: text("llm_alias"),
     action: text("action").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     source: text("source").notNull().default("live"),

@@ -5729,6 +5729,13 @@ registry.registerPath({
                 description: "The person's email address, matched exactly (case-folded).",
                 example: "prospect@example.com",
               }),
+              llmAlias: z.string().optional().openapi({
+                description:
+                  "BEST-TPL-LLM-1022-LS: the LLM alias the acting run wrote this message with, as resolved for the run (e.g. features-service writer-pick). " +
+        "Stored on the act and served on GET /internal/leads/{leadId}/sent-messages as writtenBy.llmAlias. Optional: absent = the run states none " +
+        "(served as unknown with a reason, never guessed). Trimmed, 1..200 chars.",
+                example: "gemini-3-flash",
+              }),
             })
             .openapi("FollowupActedByEmailRequest"),
         },
@@ -5911,6 +5918,14 @@ const FollowupStatementRequestSchema = z
       description:
         "REQUIRED on kind=stopped and kind=handed: why nothing is owed right now, stated by the caller and stored verbatim (\"answered_again\", \"meeting_booked\", \"not_interested\"). Absent is a 400, never an empty string.",
       example: "answered_again",
+    }),
+    llmAlias: z.string().optional().openapi({
+      description:
+        "kind=acted ONLY (any other kind with it = 400 llm_alias_only_on_acted). " +
+        "BEST-TPL-LLM-1022-LS: the LLM alias the acting run wrote this message with, as resolved for the run (e.g. features-service writer-pick). " +
+        "Stored on the act and served on GET /internal/leads/{leadId}/sent-messages as writtenBy.llmAlias. Optional: absent = the run states none " +
+        "(served as unknown with a reason, never guessed). Trimmed, 1..200 chars.",
+      example: "gemini-3-flash",
     }),
   })
   .openapi("FollowupStatementRequest", {
@@ -8137,6 +8152,17 @@ const WrittenBySchema = z
     campaignId: z.string().nullable().openapi({ description: "The campaign the writing run was dispatched for." }),
     workflowSource: z.string().nullable().openapi({ description: "holding_run only: `serve` or the re-point cause that handed the row to that run." }),
     reason: z.enum(["no_recorded_run", "undated"]).nullable().openapi({ description: "Why the writer is unknown (never guessed)." }),
+    llmAlias: z.string().nullable().openapi({
+      description:
+        "BEST-TPL-LLM-1022-LS: the LLM alias the writing run STATED when it recorded the act (recorded_act only), never derived from the " +
+        "workflow version or the run. Null = see llmAliasReason.",
+    }),
+    llmAliasReason: z.enum(["not_stated", "no_recorded_act"]).nullable().openapi({
+      description:
+        "Why llmAlias is null (null when it is set). not_stated = a recorded act whose run stated no LLM (every act recorded before " +
+        "2026-10-22 reads so); no_recorded_act = the writer is not a recorded act (a person, a sequence email's holding run: " +
+        "content-generation's copy names that model, or unknown).",
+    }),
   })
   .openapi("SentMessageWrittenBy");
 
@@ -8161,7 +8187,8 @@ registry.registerPath({
     "WRITTEN-BY-1019-SENDER. One entry per message we sent the lead at the x-org-id: outreach `email_sent` / `reply_sent` (current fact per " +
     "subject), crm `message_out` (every Unibox channel, matched on the lead's addresses and phones), and follow-up ledger acts no message was " +
     "paired with. `writtenBy`: a person when the copy says so; else the run that recorded the act (ledger, within 10 min); else for a sequence " +
-    "email the run holding the person's row of the campaign at the send; else unknown with a reason. Date order (undated last). Internal only: " +
+    "email the run holding the person's row of the campaign at the send; else unknown with a reason. `writtenBy.llmAlias` = the LLM " +
+    "the acting run stated on the act (BEST-TPL-LLM-1022-LS), else null + llmAliasReason. Date order (undated last). Internal only: " +
     "no customer read carries these fields.",
   request: { params: z.object({ leadId: z.string().uuid() }) },
   parameters: [
