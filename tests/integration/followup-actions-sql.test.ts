@@ -211,4 +211,32 @@ describe.skipIf(!hasRealDatabase)("follow-up actions ledger against a real datab
       handed: 0, ongoing: 0, meetingsBooked: 0, dropped: 0,
     });
   });
+
+  it("BEST-TPL-LLM-1022-LS: each (acting campaign, person) row names the LLM of its LATEST act that stated one", async () => {
+    const llmBrand = randomUUID();
+    const llmActing = `itest-acting-llm-${randomUUID()}`;
+    const [leadRow] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
+    const [lc] = await db
+      .insert(leadsCampaigns)
+      .values({ leadId: leadRow.id, campaignId: heldBy, orgId, brandIds: [llmBrand], status: "served", servedAt: new Date() })
+      .returning({ id: leadsCampaigns.id });
+    const [leadRow2] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
+    const [lc2] = await db
+      .insert(leadsCampaigns)
+      .values({ leadId: leadRow2.id, campaignId: heldBy, orgId, brandIds: [llmBrand], status: "served", servedAt: new Date() })
+      .returning({ id: leadsCampaigns.id });
+    const act = (id: string, run: string, at: string, llmAlias?: string) =>
+      recordActedByEmail({ orgId, leadCampaignId: id, actingCampaignId: llmActing, runId: run, llmAlias, nowIso: at });
+    // Person 1: an old act with no LLM, then gemini, then claude, then a later act stating none.
+    await act(lc.id, `r1-${lc.id}`, "2026-10-01T00:00:00.000Z");
+    await act(lc.id, `r2-${lc.id}`, "2026-10-02T00:00:00.000Z", "gemini-3-flash");
+    await act(lc.id, `r3-${lc.id}`, "2026-10-03T00:00:00.000Z", "claude-sonnet-5");
+    await act(lc.id, `r4-${lc.id}`, "2026-10-04T00:00:00.000Z");
+    // Person 2: acts recorded before the field only.
+    await act(lc2.id, `r5-${lc2.id}`, "2026-10-01T00:00:00.000Z");
+
+    const { leads: rows } = await readFollowupActions({ brandId: llmBrand, campaignIds: [llmActing] });
+    expect(rows.find((r) => r.leadId === leadRow.id)).toMatchObject({ actedCount: 4, latestLlmAlias: "claude-sonnet-5" });
+    expect(rows.find((r) => r.leadId === leadRow2.id)).toMatchObject({ actedCount: 1, latestLlmAlias: null });
+  });
 });
