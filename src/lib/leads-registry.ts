@@ -491,10 +491,16 @@ export async function registerServedEmail(params: {
   return owner;
 }
 
+// drizzle-orm >= 0.44 wraps driver errors in a DrizzleQueryError whose `.cause`
+// is the postgres.js error carrying `code` / `constraint_name`: follow `.cause` down.
 function isGlobalContactDupKey(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const e = err as { code?: string; constraint_name?: string };
-  return e.code === "23505" && e.constraint_name === "idx_lcm_channel_value";
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && typeof cur === "object" && cur !== null; depth++) {
+    const e = cur as { code?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (typeof e.code === "string") return e.code === "23505" && e.constraint_name === "idx_lcm_channel_value";
+    cur = e.cause;
+  }
+  return false;
 }
 
 /**

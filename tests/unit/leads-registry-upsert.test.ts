@@ -62,6 +62,27 @@ describe("upsertContactMethod", () => {
     expect(result).toEqual({ inserted: false, reason: "global_collision" });
   });
 
+  it("recognises the global collision through drizzle's DrizzleQueryError wrapper (driver error on .cause)", async () => {
+    const driverErr = Object.assign(
+      new Error('duplicate key value violates unique constraint "idx_lcm_channel_value"'),
+      { code: "23505", constraint_name: "idx_lcm_channel_value" },
+    );
+    const { DrizzleQueryError } = await import("drizzle-orm/errors");
+    onConflictDoUpdate.mockRejectedValueOnce(new DrizzleQueryError("insert ...", [], driverErr));
+
+    const { upsertContactMethod } = await import("../../src/lib/leads-registry.js");
+
+    const result = await upsertContactMethod({
+      leadId: "lead-2b",
+      channel: "email",
+      value: "shared2@x.com",
+      status: "verified",
+      source: "apollo",
+    });
+
+    expect(result).toEqual({ inserted: false, reason: "global_collision" });
+  });
+
   it("rethrows non-dup Postgres errors (e.g. serialization failures)", async () => {
     const serializationErr = Object.assign(new Error("could not serialize"), { code: "40001" });
     onConflictDoUpdate.mockRejectedValueOnce(serializationErr);
