@@ -31,6 +31,7 @@ import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
+import { startStaffIdentityMarksWorker } from "./lib/not-a-person.js";
 import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
 import { fileUniboxLeads, reconcileUniboxLeads } from "./lib/unibox-leads.js";
 import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
@@ -86,6 +87,8 @@ startChannelSendReconcileWorker();
 // Who each brand only ever pitched to the press (or a person / Jev says is a journalist): never a lead, refused by
 // every sales pool and claim (brand-journalists.ts, JOURNALISTS-NOT-LEADS-1016).
 startBrandJournalistsWorker();
+// A lead whose every email is a staff address is not a real person: out of every figure (not-a-person.ts, FAKE-OUTCOMES-1022).
+startStaffIdentityMarksWorker();
 // Every lead of every brand carries a next follow-up date, moved by every send we observe on any channel; the brand's
 // Unibox prospects are filed as its leads first (lead-followup-date.ts, unibox-leads.ts, LEAD-FOLLOWUP-DATE-1016).
 let uniboxTicks = 0;

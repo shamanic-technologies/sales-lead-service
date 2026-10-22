@@ -17,6 +17,7 @@ import leadsRoutes from "./routes/leads.js";
 import awaitingReplyRoutes from "./routes/awaiting-reply.js";
 import uniboxRoutes from "./routes/unibox.js";
 import disqualificationRoutes from "./routes/disqualifications.js";
+import notAPersonRoutes from "./routes/not-a-person.js";
 import qualificationRoutes from "./routes/qualification.js";
 import wonLeadsRoutes from "./routes/won-leads.js";
 import neverColdContactRoutes from "./routes/never-cold-contact.js";
@@ -85,6 +86,8 @@ app.use(qualificationRoutes);
 app.use(awaitingReplyRoutes);
 // Before the leads router too: `/orgs/leads/disqualifications` must not be read as a lead id.
 app.use(disqualificationRoutes);
+// Before the leads router: /orgs/leads/not-a-person is not a lead id (FAKE-OUTCOMES-1022).
+app.use(notAPersonRoutes);
 // Before the leads router: /orgs/leads/unibox and /unibox-lead are not lead ids (UNIBOX-SIX-TAGS-1017).
 app.use(uniboxRoutes);
 app.use(leadsRoutes);

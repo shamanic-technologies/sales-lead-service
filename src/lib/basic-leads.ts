@@ -1,4 +1,5 @@
 import { sql } from "../db/index.js";
+import { notMarkedNotAPerson } from "./not-a-person.js";
 import {
   campaignScopeIds,
   leadCampaignBaseRelation,
@@ -298,6 +299,7 @@ function basicLeadQuery(
       SELECT lc.*
       FROM ${from}
       WHERE lc.org_id = ${f.orgId}
+        AND ${notMarkedNotAPerson("lc")}
         ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
         ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
         ${leadStatusScope(f) ? sql`AND lc.status = ANY(${leadStatusScope(f)!})` : sql``}
@@ -380,6 +382,7 @@ export async function* walkBasicLeadChunks(
     SELECT lc.id::text AS id
     FROM ${leadCampaignBaseRelation(f)}
     WHERE lc.org_id = ${f.orgId}
+      AND ${notMarkedNotAPerson("lc")}
       ${f.brandId ? sql`AND ${f.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignScopeIds(f) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(f)!})` : sql``}
       ${leadStatusScope(f) ? sql`AND lc.status = ANY(${leadStatusScope(f)!})` : sql``}

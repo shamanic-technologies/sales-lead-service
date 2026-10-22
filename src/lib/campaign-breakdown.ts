@@ -26,6 +26,7 @@
  *     is the bug being fixed.
  */
 import { sql } from "../db/index.js";
+import { notMarkedNotAPerson } from "./not-a-person.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchOrgCampaignFamilies } from "./campaign-identity-client.js";
 import type { CampaignFamilies } from "./campaign-identity.js";
@@ -161,6 +162,7 @@ async function fetchMemberships(
     FROM leads_campaigns lc
     WHERE lc.org_id = ${scope.orgId}
       AND lc.lead_id = ANY(${leadIds}::uuid[])
+      AND ${notMarkedNotAPerson("lc")}
       ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignIds ? sql`AND lc.campaign_id = ANY(${campaignIds})` : sql``}
       ${statuses ? sql`AND lc.status = ANY(${statuses})` : sql``}

@@ -264,27 +264,67 @@ describe("POST /public/conversions", () => {
     expect(res.body).toEqual({ received: true });
   });
 
-  it("lastName-only match stores attributed (name is enough), NOT needs_review", async () => {
+  it("lastName-only match stores needs_review: a surname is never a counted outcome (FAKE-OUTCOMES-1022)", async () => {
     execute.mockResolvedValueOnce([{ brand_id: "brand-1", org_id: "org-1" }]); // token
-    execute.mockResolvedValueOnce([]); // dedupe (signature null → actually skipped; see below)
-    matchConversion.mockResolvedValueOnce({
-      matchedLeadId: "lead-7",
-      matchMethod: "last_name",
-      matchConfidence: "probabilistic",
-      attributionStatus: "attributed",
-      candidateCount: 2,
-    });
+    const { matchConversion: realMatch } = await vi.importActual<typeof import("../../src/lib/conversions.js")>(
+      "../../src/lib/conversions.js",
+    );
+    // The REAL waterfall decides the status: only the last_name tier finds anyone.
+    matchConversion.mockImplementationOnce((input: Parameters<typeof realMatch>[0]) => realMatch(input));
+    execute.mockResolvedValueOnce([{ lead_id: "lead-7" }, { lead_id: "lead-8" }]); // last_name tier
     const res = await request(app)
       .post("/public/conversions")
       .set("x-conversion-token", "pk_conv_ok")
       .send({ event: "signup", lastName: "Doe" });
     expect(res.status).toBe(200);
-    // no email/phone/dedupeKey → dedupe signature is null → no dedupe SELECT, straight to insert.
     expect(lastSql()).toContain("insert into conversion_events");
     const insertParams = compile(execute.mock.calls[execute.mock.calls.length - 1][0]).params;
-    expect(insertParams).toContain("attributed");
-    expect(insertParams).toContain("lead-7");
-    expect(insertParams).not.toContain("needs_review");
+    expect(insertParams).toContain("needs_review");
+    expect(insertParams).toContain("last_name");
+    expect(insertParams).not.toContain("attributed");
+  });
+
+  it("a conversion sent by a STAFF address is stored set aside: never a client outcome (FAKE-OUTCOMES-1022)", async () => {
+    execute.mockResolvedValueOnce([{ brand_id: "brand-1", org_id: "org-1" }]); // token
+    execute.mockResolvedValueOnce([]); // dedupe
+    matchConversion.mockResolvedValueOnce({
+      matchedLeadId: "lead-7",
+      matchMethod: "email",
+      matchConfidence: "deterministic",
+      attributionStatus: "attributed",
+      candidateCount: 1,
+    });
+    execute.mockResolvedValueOnce([{ withdrawn_at: "2026-10-22T10:00:00.000Z" }]); // insert
+    const res = await request(app)
+      .post("/public/conversions")
+      .set("x-conversion-token", "pk_conv_ok")
+      .send({ event: "signup", email: "Kevin.Lourd+stdvocab1016@gmail.com" });
+    expect(res.status).toBe(200);
+    const insert = compile(execute.mock.calls[2][0]);
+    expect(insert.sql.toLowerCase()).toContain("withdrawn_reason");
+    expect(insert.params).toContain("staff_identity");
+    expect(insert.params.some((p) => p instanceof Date)).toBe(false);
+    // Set aside = nothing superseded on its account: no further statement ran.
+    expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  it("a real address is stored live (no withdrawal reason)", async () => {
+    execute.mockResolvedValueOnce([{ brand_id: "brand-1", org_id: "org-1" }]); // token
+    execute.mockResolvedValueOnce([]); // dedupe
+    matchConversion.mockResolvedValueOnce({
+      matchedLeadId: null,
+      matchMethod: null,
+      matchConfidence: "unmatched",
+      attributionStatus: "unmatched",
+      candidateCount: 0,
+    });
+    const res = await request(app)
+      .post("/public/conversions")
+      .set("x-conversion-token", "pk_conv_ok")
+      .send({ event: "signup", email: "jane@acme.com" });
+    expect(res.status).toBe(200);
+    const insert = compile(execute.mock.calls[2][0]);
+    expect(insert.params).not.toContain("staff_identity");
   });
 
   it("duplicate dedupeKey → 200, no second attribution insert", async () => {
