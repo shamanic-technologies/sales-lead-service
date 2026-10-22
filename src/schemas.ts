@@ -4660,6 +4660,11 @@ const FollowupActedLeadSchema = z
     }),
     firstActedAt: z.string().nullable(),
     lastActedAt: z.string().nullable(),
+    latestLlmAlias: z.string().nullable().openapi({
+      description:
+        "BEST-TPL-LLM-1022-LS: the LLM alias of this campaign's LATEST act on the person that stated one (body llmAlias on the act, " +
+        "as the acting run stated it); null when no act stated one (every act recorded before 2026-10-22). Never derived from the workflow version.",
+    }),
   })
   .openapi("FollowupActedLead");
 

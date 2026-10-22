@@ -89,6 +89,7 @@ describe("GET /internal/brands/:brandId/followup-actions", () => {
           actedCount: 2,
           firstActedAt: "2026-09-21T15:23:10.902Z",
           lastActedAt: "2026-09-21T19:04:44.615Z",
+          latestLlmAlias: "gemini-3-flash",
         },
       ],
       campaigns: [{ campaignId: AI, leadsClaimed: 1, leadsActed: 1, claims: 2, acts: 2 }],
