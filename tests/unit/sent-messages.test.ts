@@ -30,6 +30,7 @@ function act(over: Partial<Acts[number]>): Acts[number] {
     heldByCampaignId: "c-cold",
     runId: "run-fu",
     workflowSlug: "ai-follow-up-email-algenib-v11",
+    llmAlias: null,
     brandIds: [B],
     occurredAt: "2026-10-19T10:01:00.000Z",
     ...over,
@@ -50,6 +51,8 @@ describe("attributeSentMessages (WRITTEN-BY-1019-SENDER)", () => {
       campaignId: "c-cold",
       workflowSource: "retry_claim",
       reason: null,
+      llmAlias: null,
+      llmAliasReason: "no_recorded_act",
     });
   });
 
@@ -78,6 +81,7 @@ describe("attributeSentMessages (WRITTEN-BY-1019-SENDER)", () => {
     const out = attributeSentMessages([rec({ kind: "reply_sent", sentBy: "human", campaignId: "c-fu" })], [act({})]);
     expect(out.find((m) => m.id === "m1")!.writtenBy).toEqual({
       by: "person", basis: "person", runId: null, workflowSlug: null, campaignId: null, workflowSource: null, reason: null,
+      llmAlias: null, llmAliasReason: "no_recorded_act",
     });
     expect(out).toHaveLength(2);
   });
@@ -93,5 +97,27 @@ describe("attributeSentMessages (WRITTEN-BY-1019-SENDER)", () => {
     expect(out.find((m) => m.id === "auto")!.writtenBy).toMatchObject({ by: "unknown", reason: "no_recorded_run", runId: null });
     expect(out.find((m) => m.id === "undated")!.writtenBy).toMatchObject({ by: "unknown", reason: "undated" });
     expect(out[out.length - 1].id).toBe("undated");
+  });
+
+  it("BEST-TPL-LLM-1022-LS: names the LLM the act's run STATED; an act stating none reads not_stated, never guessed from the version", () => {
+    const out = attributeSentMessages(
+      [rec({ id: "wa", kind: "message_out", source: "crm", channel: "whatsapp", campaignId: null })],
+      [
+        act({ id: "stated", llmAlias: "gemini-3-flash" }),
+        act({ id: "old", runId: "run-old", llmAlias: null, occurredAt: "2026-10-18T10:00:00.000Z" }),
+      ],
+    );
+    expect(out.find((m) => m.id === "wa")!.writtenBy).toMatchObject({
+      basis: "recorded_act", workflowSlug: "ai-follow-up-email-algenib-v11", llmAlias: "gemini-3-flash", llmAliasReason: null,
+    });
+    // The unpaired act recorded before the field: same workflow version, LLM unknown with a reason.
+    expect(out.find((m) => m.id === "old")!.writtenBy).toMatchObject({
+      basis: "recorded_act", workflowSlug: "ai-follow-up-email-algenib-v11", llmAlias: null, llmAliasReason: "not_stated",
+    });
+  });
+
+  it("an unknown writer carries no LLM, with the reason", () => {
+    const [m] = attributeSentMessages([rec({ campaignId: "c-x" })], []);
+    expect(m.writtenBy).toMatchObject({ by: "unknown", llmAlias: null, llmAliasReason: "no_recorded_act" });
   });
 });
