@@ -1,6 +1,7 @@
 import { Router, type Response } from "express";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, getServiceContext } from "../middleware/auth.js";
 import { sql } from "../db/index.js";
+import { notMarkedNotAPerson } from "../lib/not-a-person.js";
 import {
   checkDeliveryStatus,
   type StatusResult,
@@ -293,6 +294,7 @@ async function fetchLeadCampaignChunk(
     FROM ${leadCampaignBaseRelation(scope)}
     LEFT JOIN leads l ON l.id = lc.lead_id
     WHERE lc.org_id = ${scope.orgId}
+      AND ${notMarkedNotAPerson("lc")}
       ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignScopeIds(scope) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(scope)!})` : sql``}
       ${leadStatusScope(scope) ? sql`AND lc.status = ANY(${leadStatusScope(scope)!})` : sql``}

@@ -11,6 +11,7 @@
  *  - "Not a client, not a personal contact" is NOT decided here: it is the answering pipe's lead strategy (`leads-only`).
  */
 import { anyMemberAddress } from "./org-members.js";
+import { isStaffEmail } from "./staff-identity.js";
 
 /** The trigger id features-service declares (kind `reported`, reportedBy lead-service). */
 export const HOT_LEAD_TRIGGER = "hot_lead";
@@ -31,20 +32,7 @@ export function isHot(answers: { lead: { state: string | null }; wantsBusiness: 
   return answers.lead.state === "yes" && answers.wantsBusiness.state === "yes";
 }
 
-/**
- * Staff, byte-equal with the fleet staff lists (crm-service / client-service / billing-service `isStaffEmail`, from
- * api-service STAFF_EMAILS), plus any `@distribute.you` address. Plus-addressing ignored.
- */
-export const STAFF_EMAILS: readonly string[] = ["kevin.lourd@gmail.com", "kevin@distribute.you", "kevin@pressbeat.io"];
-export const STAFF_DOMAIN = "@distribute.you";
-
-export function isStaffEmail(email: string | null | undefined): boolean {
-  const e = email?.trim().toLowerCase();
-  if (!e || !e.includes("@")) return false;
-  if (e.endsWith(STAFF_DOMAIN)) return true;
-  const [local, domain] = e.split("@");
-  return STAFF_EMAILS.includes(`${local.split("+")[0]}@${domain}`);
-}
+export { isStaffEmail, STAFF_EMAILS, STAFF_DOMAIN } from "./staff-identity.js";
 
 export type HotFireVerdict = { fire: true } | { fire: false; reason: "own_team" | "staff" };
 

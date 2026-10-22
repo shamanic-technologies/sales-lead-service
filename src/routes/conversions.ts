@@ -29,6 +29,8 @@ import {
 } from "../lib/measured-visits.js";
 import { toIsoTimestamp } from "../lib/basic-leads.js";
 import { supersedeReplyOutcome } from "../lib/existing-customer.js";
+import { isStaffEmail } from "../lib/staff-identity.js";
+import { STAFF_IDENTITY_WITHDRAWAL } from "../lib/withdrawal-reasons.js";
 
 const router = Router();
 
@@ -195,25 +197,33 @@ router.post("/public/conversions", conversionTokenAuth, wrap(async (req: Convers
   // `Date` throws `ERR_INVALID_ARG_TYPE ... Received an instance of Date` at Bind time —
   // a client-side throw invisible to raw-SQL/EXECUTE tests — which 500'd every real
   // conversion in prod (#357). The ISO string casts to timestamptz for the column.
-  await db.execute(sql`
+  // An event sent by a STAFF identity (our own test, FAKE-OUTCOMES-1022) is recorded, set aside at
+  // write: never a client outcome, whatever lead it matched. A lead the org marked not a real person
+  // is set aside by the conversion_events trigger (migration 0120).
+  const staff = isStaffEmail(body.email);
+  const inserted = (await db.execute(sql`
     INSERT INTO conversion_events (
       brand_id, org_id, event, email, phone, first_name, last_name, company_url,
       dedupe_key, dedupe_signature, value_cents, matched_lead_id, match_method,
-      match_confidence, attribution_status, candidate_count, received_at
+      match_confidence, attribution_status, candidate_count, received_at,
+      withdrawn_at, withdrawn_reason
     ) VALUES (
       ${brandId}, ${orgId}, ${event}, ${body.email ?? null}, ${body.phone ?? null},
       ${body.firstName ?? null}, ${body.lastName ?? null}, ${body.companyUrl ?? null},
       ${body.dedupeKey ?? null}, ${dedupeSignature}, ${body.valueCents ?? null},
       ${match.matchedLeadId}, ${match.matchMethod}, ${match.matchConfidence},
-      ${match.attributionStatus}, ${match.candidateCount}, ${now.toISOString()}
+      ${match.attributionStatus}, ${match.candidateCount}, ${now.toISOString()},
+      ${staff ? now.toISOString() : null}, ${staff ? STAFF_IDENTITY_WITHDRAWAL : null}
     )
     ON CONFLICT (brand_id, dedupe_signature) WHERE dedupe_signature IS NOT NULL DO NOTHING
-  `);
+    RETURNING withdrawn_at
+  `)) as unknown as Array<{ withdrawn_at: Date | string | null }>;
+  const counts = inserted.length > 0 && inserted[0].withdrawn_at === null;
 
   // A sale the website reports for a person whose sale we had only read off their reply ("I
   // already buy from you") is the stronger fact: the reply-read row is set aside so the deal
   // counts once (existing-customer.ts).
-  if (match.attributionStatus === "attributed" && match.matchedLeadId) {
+  if (counts && match.attributionStatus === "attributed" && match.matchedLeadId) {
     await supersedeReplyOutcome(brandId, match.matchedLeadId, event);
   }
 

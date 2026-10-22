@@ -1,4 +1,5 @@
 import { sql } from "../db/index.js";
+import { notMarkedNotAPerson } from "./not-a-person.js";
 
 // Shared scope for the two `GET /orgs/leads` code paths (slim `?view=basic` and the
 // default full path). Mirrors the headers/query the route reads. `leads_campaigns`
@@ -314,6 +315,7 @@ export function leadCampaignBaseRelation(f: LeadListScope) {
     SELECT DISTINCT ON (lc0.lead_id) lc0.*
     FROM leads_campaigns lc0
     WHERE lc0.org_id = ${f.orgId}
+      AND ${notMarkedNotAPerson("lc0")}
       ${f.brandId ? sql`AND ${f.brandId} = ANY(lc0.brand_ids)` : sql``}
       ${campaignIds ? sql`AND lc0.campaign_id = ANY(${campaignIds})` : sql``}
       ${leadStatusScope(f) ? sql`AND lc0.status = ANY(${leadStatusScope(f)!})` : sql``}
