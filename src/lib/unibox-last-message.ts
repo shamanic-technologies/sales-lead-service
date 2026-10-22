@@ -12,6 +12,7 @@
  * crm-service's store lags its sources (2026-10-21: a cold email sent 05:08 was indexed 05:46), so a row is asked
  * again while its activity is recent (`needsAsking`) and left alone once settled; a failed read keeps what is stored.
  */
+import { errorMessage } from "./db-error.js";
 import { CRM_SERVICE_API_KEY, CRM_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { messagePreview } from "./unibox-preview.js";
@@ -88,7 +89,7 @@ export async function fetchLatestMessages(orgId: string, brandId: string, relati
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
     } catch (err) {
-      throw new LatestMessagesUnavailableError(`crm-service unreachable for ${path}: ${(err as Error).message}`);
+      throw new LatestMessagesUnavailableError(`crm-service unreachable for ${path}: ${errorMessage(err)}`);
     }
     if (!response.ok) {
       const body = await response.text().catch(() => "");

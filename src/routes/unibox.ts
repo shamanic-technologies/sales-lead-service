@@ -19,6 +19,7 @@
  * Mounted BEFORE the leads router so neither path is read as a lead id; the gateway reaches both through
  * `/v1/leads/:id` (path + query forwarded).
  */
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import {
@@ -99,7 +100,7 @@ async function scopeOf(req: AuthenticatedRequest, brandId: string): Promise<{ of
 function scopeFailed(res: import("express").Response, error: unknown): boolean {
   if (!(error instanceof UniboxScopeUnavailableError)) return false;
   console.error("[lead-service] unibox scope unresolved, refusing the read rather than widening it to the brand:", error.message);
-  res.status(502).json({ error: error.message, code: "scope_unavailable" });
+  res.status(502).json({ error: messageOf(error), code: "scope_unavailable" });
   return true;
 }
 
@@ -113,7 +114,7 @@ router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, asyn
     res.json({ brandId, offerId, campaignId, lifecycleLadder: catalogue.ladder, ...counts });
   } catch (error) {
     if (error instanceof BadQuery) {
-      res.status(400).json({ error: error.message });
+      res.status(400).json({ error: messageOf(error) });
       return;
     }
     if (scopeFailed(res, error)) return;
@@ -139,7 +140,7 @@ router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: Authentic
     res.json({ brandId, ...(offerId || campaignId ? { offerId, campaignId } : {}), lifecycleLadder: catalogue.ladder, ...page });
   } catch (error) {
     if (error instanceof BadQuery || error instanceof UniboxCursorError) {
-      res.status(400).json({ error: error.message });
+      res.status(400).json({ error: messageOf(error) });
       return;
     }
     if (scopeFailed(res, error)) return;
@@ -164,7 +165,7 @@ router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, async (req: Auth
     res.json({ brandId, ...card });
   } catch (error) {
     if (error instanceof BadQuery) {
-      res.status(400).json({ error: error.message });
+      res.status(400).json({ error: messageOf(error) });
       return;
     }
     console.error("[lead-service] unibox lead read failed:", error);

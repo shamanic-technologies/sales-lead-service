@@ -21,6 +21,7 @@
  * verdicts, never held in memory, so a poll and the POST answer the same thing. A preview whose process died (deploy)
  * reads `failed` / `interrupted` after PREVIEW_STALE_MS; asking again reuses everything already paid.
  */
+import { errorMessage } from "./db-error.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { organizations, qualificationCriteria, qualificationPreviews, type QualificationCriterionRow, type QualificationPreviewRow } from "../db/schema.js";
@@ -170,7 +171,7 @@ async function mapLimit<T>(items: T[], limit: number, fn: (t: T) => Promise<void
 
 function errorCode(error: unknown): string {
   if (error instanceof InsufficientCreditError) return `insufficient_credit: ${error.message}`;
-  return `failed: ${(error as Error).message ?? String(error)}`.slice(0, 2000);
+  return `failed: ${errorMessage(error) ?? String(error)}`.slice(0, 2000);
 }
 
 /**

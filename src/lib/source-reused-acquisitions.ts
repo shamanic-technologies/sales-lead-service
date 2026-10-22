@@ -1,3 +1,4 @@
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { APOLLO_SERVICE_API_KEY, APOLLO_SERVICE_URL } from "../config.js";
 import { db } from "../db/index.js";
@@ -242,7 +243,7 @@ export async function computeSourceReusedAcquisitions(finds: OwnRunFind[], ask: 
         }
         for (const id of answer.unpricedRunIds) unpriced.add(id);
       } catch (error) {
-        console.error(`[lead-service] acquisition-costs unavailable for org ${orgId}: ${error instanceof Error ? error.message : String(error)}`);
+        console.error(`[lead-service] acquisition-costs unavailable for org ${orgId}: ${errorMessage(error)}`);
         unavailable(orgId, "apollo_service_unavailable");
       }
     }

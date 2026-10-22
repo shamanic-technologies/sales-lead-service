@@ -11,6 +11,7 @@
  * human-service down = nothing recorded, asked again next tick. The standing reads the copy back
  * (human-events.ts -> human_fact_copies), so a person's opt-out at one company shows at every other.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { HumanIdentityError, stateHumanFact, withdrawHumanFact } from "./human-identity-client.js";
@@ -61,7 +62,7 @@ export async function stateObservedOptOuts(): Promise<{ stated: number; withdraw
       failed++;
       console.error(
         `[lead-service] human opt-outs: stating ${p.source_ref} on human ${p.human_id} failed` +
-          `${err instanceof HumanIdentityError ? ` (${err.status})` : ""}: ${(err as Error).message}`,
+          `${err instanceof HumanIdentityError ? ` (${err.status})` : ""}: ${errorMessage(err)}`,
       );
     }
   }
@@ -81,7 +82,7 @@ export async function stateObservedOptOuts(): Promise<{ stated: number; withdraw
       withdrawn++;
     } catch (err) {
       failed++;
-      console.error(`[lead-service] human opt-outs: withdrawing fact ${t.fact_id} failed: ${(err as Error).message}`);
+      console.error(`[lead-service] human opt-outs: withdrawing fact ${t.fact_id} failed: ${errorMessage(err)}`);
     }
   }
   return { stated, withdrawn, failed };

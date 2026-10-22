@@ -11,6 +11,7 @@
  * it; whether a follow-up is still owed is a question this service answers from its OWN follow-up
  * state, never from a plan written before anybody replied.
  */
+import { errorMessage } from "./db-error.js";
 import {
   CONTENT_GENERATION_SERVICE_URL,
   CONTENT_GENERATION_SERVICE_API_KEY,
@@ -83,7 +84,7 @@ export async function fetchGeneratedEmail(
   } catch (error) {
     return {
       ok: false,
-      reason: `content-generation-service unreachable: ${(error as Error).message}`,
+      reason: `content-generation-service unreachable: ${errorMessage(error)}`,
     };
   }
 
@@ -121,7 +122,7 @@ export async function fetchGeneratedEmail(
   } catch (error) {
     return {
       ok: false,
-      reason: `content-generation-service payload unreadable: ${(error as Error).message}`,
+      reason: `content-generation-service payload unreadable: ${errorMessage(error)}`,
     };
   }
 }

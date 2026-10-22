@@ -18,6 +18,7 @@
  * and it is LOUD: the reason rides on the answer (`crm_unreadable`) and the cause is logged. It is
  * never cached, so the next read asks again.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { fetchCrmConnection, fetchCrmStageMeanings } from "./crm-client.js";
@@ -103,7 +104,7 @@ export async function loadCrmColdEligibility(
   } catch (error) {
     console.error(
       `[lead-cold] crm-service could not say whether brand ${brandId}'s CRM is usable, so no lead ` +
-        `of it goes cold on this read: ${(error as Error).message}`,
+        `of it goes cold on this read: ${errorMessage(error)}`,
     );
     return CRM_COLD_INELIGIBLE("crm_unreadable");
   }

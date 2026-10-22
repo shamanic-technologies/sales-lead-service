@@ -46,6 +46,7 @@
  * FAIL LOUD. A feed that cannot be reconciled or caught up (email-gateway unreachable) is an error
  * the route answers 502 with — never an answer that silently skipped the rows it could not read.
  */
+import { errorMessage } from "./db-error.js";
 import { createHash } from "node:crypto";
 import { sql } from "../db/index.js";
 import { streamBasicLeadChunks, walkBasicLeadChunks, type BasicLeadRow } from "./basic-leads.js";
@@ -653,7 +654,7 @@ export async function sweepChangeFeeds(): Promise<void> {
       } catch (error) {
         console.error(
           `[lead-change-feed] feed ${raw.id} (org=${raw.org_id} brand=${raw.scope.brandId ?? "-"}) could ` +
-            `not be kept current; a read past its bound will reconcile it or answer 502: ${(error as Error).message}`,
+            `not be kept current; a read past its bound will reconcile it or answer 502: ${errorMessage(error)}`,
         );
       }
     }

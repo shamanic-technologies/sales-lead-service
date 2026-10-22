@@ -41,6 +41,7 @@
  * `READ_MODEL_SERVE_ON_OUTAGE_MS` is held: then that one is served, its age stated and logged as an
  * error, so one sibling down never takes a brand's whole list down.
  */
+import { errorMessage, messageOf } from "./db-error.js";
 import { createHash } from "node:crypto";
 import type postgres from "postgres";
 import { sql } from "../db/index.js";
@@ -308,7 +309,7 @@ export async function readModelDelivery(
     });
   } catch (error) {
     if (error instanceof EvidenceUnavailableError) {
-      throw new ReadModelUnavailableError("email-gateway", error.message);
+      throw new ReadModelUnavailableError("email-gateway", messageOf(error));
     }
     throw error;
   }
@@ -364,7 +365,7 @@ async function deriveRows(
   try {
     await attachLeadStandings(enriched, resolver);
   } catch (error) {
-    throw new ReadModelUnavailableError("standing", (error as Error).message);
+    throw new ReadModelUnavailableError("standing", errorMessage(error));
   }
   return enriched.map((row) => ({
     id: row.id,
@@ -818,7 +819,7 @@ export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel>
       model.servedStale = "catch_up_failed";
       console.error(
         `[lead-read-model] scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) served ` +
-          `WITHOUT its pending changes: a sibling is down (${error.source}): ${error.message}`,
+          `WITHOUT its pending changes: a sibling is down (${error.source}): ${messageOf(error)}`,
       );
     }
   } else {
@@ -842,7 +843,7 @@ export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel>
       console.error(
         `[lead-read-model] scope ${key} (org=${scope.orgId} brand=${scope.brandId ?? "-"}) could ` +
           `not be rebuilt, a sibling is down (${error.source}); serving evidence ` +
-          `${ageSeconds(fallback)}s old rather than refusing the read: ${error.message}`,
+          `${ageSeconds(fallback)}s old rather than refusing the read: ${messageOf(error)}`,
       );
       model = fallback;
     }

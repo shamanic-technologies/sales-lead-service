@@ -1,3 +1,4 @@
+import { errorMessage, messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { SocialEngagementsUnavailableError, syncSocialEngagements } from "../lib/social-engagements.js";
@@ -16,11 +17,11 @@ router.post("/internal/social-engagements/sync", apiKeyAuth, async (_req, res) =
   } catch (error) {
     if (error instanceof SocialEngagementsUnavailableError) {
       console.error(`[lead-service] social engagements sync unavailable: ${error.message}`);
-      res.status(502).json({ error: "social_engagements_unavailable", detail: error.message });
+      res.status(502).json({ error: "social_engagements_unavailable", detail: messageOf(error) });
       return;
     }
     console.error("[lead-service] social engagements sync failed:", error);
-    res.status(500).json({ error: "Internal server error", detail: (error as Error).message });
+    res.status(500).json({ error: "Internal server error", detail: errorMessage(error) });
   }
 });
 

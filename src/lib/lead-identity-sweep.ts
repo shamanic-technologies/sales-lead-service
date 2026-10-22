@@ -24,6 +24,8 @@
  * column-guarded): the backfill moves no lead row any consumer holds. A human-service or brand-service
  * failure leaves the batch untouched (retried next tick) and is logged; nothing is guessed meanwhile.
  */
+import { messageOf } from "./db-error.js";
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { resolveHuman, HumanIdentityError } from "./human-identity-client.js";
@@ -141,7 +143,7 @@ export async function pushEmployerFacts(limit = MAX_COMPANIES_PER_REQUEST): Prom
         if (!(one instanceof CompanyServiceError) || (one.status !== 400 && one.status !== 404)) throw one;
         console.error(
           `[lead-service] identity sweep: brand-service refused the facts of organization ${w.org.id} ` +
-            `(company ${w.org.company_id}): ${one.message}`,
+            `(company ${w.org.company_id}): ${messageOf(one)}`,
         );
       }
     }
@@ -195,7 +197,7 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
             console.error(`[lead-service] identity sweep: human-service refused the keys of lead ${row.lead_id}: ${err.message}`);
           } else {
             failed++;
-            console.error(`[lead-service] identity sweep: resolving lead ${row.lead_id} failed: ${(err as Error).message}`);
+            console.error(`[lead-service] identity sweep: resolving lead ${row.lead_id} failed: ${errorMessage(err)}`);
             continue;
           }
         }

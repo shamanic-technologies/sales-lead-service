@@ -1,3 +1,4 @@
+import { errorMessage } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -19,7 +20,7 @@ async function answer(res: Response, orgId: string, brandId: string, leadId: str
     res.json({ ...ids, leadId, brandId, ...verdict });
   } catch (err) {
     console.error(`[lead-service] prospect follow-up verdict failed org=${orgId} brand=${brandId} lead=${leadId}:`, err);
-    res.status(502).json({ error: "verdict_unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "verdict_unavailable", detail: errorMessage(err) });
   }
 }
 

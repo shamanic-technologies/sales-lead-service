@@ -20,6 +20,7 @@
  * Nothing here can make the list lie in the "answered" direction: a mirror or a judgment we could
  * not read leaves the person listed and is STATED (`complete: false` + reasons), never guessed.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { judgeYesNo } from "./qualification-judge.js";
@@ -259,7 +260,7 @@ async function checkPerson(person: OutsideCheckPerson, ctx: OutsideCheckContext)
         brandId: ctx.brandId,
       });
     } catch (error) {
-      return { reason: `judgment: ${(error as Error).message}` };
+      return { reason: `judgment: ${errorMessage(error)}` };
     }
     const p = verdict.probabilities.answers;
     await sql`

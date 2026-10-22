@@ -28,6 +28,7 @@
  * compare" reason attached. It never holds a brand's whole lead population. And it changes nothing
  * about what the conversion-attribution path does with the matcher they share.
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router } from "express";
 import {
   type AuthenticatedRequest,
@@ -657,7 +658,7 @@ function resyncEvidence(orgId: string, brandId: string): void {
   resyncBrand(orgId, brandId).catch((error) =>
     console.error(
       `[crm-pairings] evidence pass after a ruling failed for brand=${brandId}; the interval ` +
-        `will retry it: ${(error as Error).message}`,
+        `will retry it: ${errorMessage(error)}`,
     ),
   );
 }

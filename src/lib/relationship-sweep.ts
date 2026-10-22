@@ -13,6 +13,7 @@
  * sweep asks neither (PROFESSIONAL-LEADS-1017). Jev is platform-billed (no org request starts the sweep). A brand that
  * fails is logged and retried next tick; an org out of credit is skipped until it has credit again.
  */
+import { errorMessage } from "./db-error.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { brandCardOf, judgeSubject, subjectsToJudge, writeEvidence } from "./relationship-judge.js";
 import { intentSubjectsToJudge, judgeIntent } from "./relationship-intent-judge.js";
@@ -111,7 +112,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
     }
   } catch (err) {
     failed = true;
-    tick.error = err instanceof Error ? err.message : String(err);
+    tick.error = errorMessage(err);
     if (!(err instanceof InsufficientCreditError)) throw err;
     console.warn(`[lead-service] relationship sweep: org ${scope.orgId} spend refused (${tick.error}); skipped this tick`);
   } finally {

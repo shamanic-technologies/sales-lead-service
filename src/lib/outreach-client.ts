@@ -12,6 +12,7 @@
  * read this" and "this did not happen" are different facts and collapsing them would tell a
  * customer their prospect said nothing. A source failing must not take the whole answer down.
  */
+import { errorMessage } from "./db-error.js";
 import { INSTANTLY_SERVICE_URL, INSTANTLY_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
@@ -99,7 +100,7 @@ async function get<T>(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (error) {
-    return { ok: false, reason: `instantly-service unreachable: ${(error as Error).message}` };
+    return { ok: false, reason: `instantly-service unreachable: ${errorMessage(error)}` };
   }
 
   if (emptyStatuses.includes(response.status)) return { ok: true, data: empty };
@@ -115,7 +116,7 @@ async function get<T>(
   try {
     return { ok: true, data: parse(await response.json()) };
   } catch (error) {
-    return { ok: false, reason: `instantly-service payload unreadable: ${(error as Error).message}` };
+    return { ok: false, reason: `instantly-service payload unreadable: ${errorMessage(error)}` };
   }
 }
 

@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { z } from "zod";
 import { apiKeyAuth } from "../middleware/auth.js";
@@ -39,7 +40,7 @@ router.get("/internal/meeting-attribution", apiKeyAuth, async (req, res) => {
   } catch (error) {
     if (error instanceof MeetingAttributionUnavailableError) {
       console.error(`[lead-service] meeting attribution unavailable: ${error.message}`);
-      res.status(502).json({ error: "meeting_attribution_unavailable", detail: error.message });
+      res.status(502).json({ error: "meeting_attribution_unavailable", detail: messageOf(error) });
       return;
     }
     console.error("[lead-service] meeting attribution read failed:", error);
@@ -66,7 +67,7 @@ router.get("/internal/meeting-attribution/before-after", apiKeyAuth, async (req,
   } catch (error) {
     if (error instanceof MeetingAttributionUnavailableError) {
       console.error(`[lead-service] meeting booking before/after unavailable: ${error.message}`);
-      res.status(502).json({ error: "meeting_attribution_unavailable", detail: error.message });
+      res.status(502).json({ error: "meeting_attribution_unavailable", detail: messageOf(error) });
       return;
     }
     console.error("[lead-service] meeting booking before/after read failed:", error);

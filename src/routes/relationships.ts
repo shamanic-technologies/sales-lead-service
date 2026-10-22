@@ -2,6 +2,7 @@
  * Who a person is to a brand (RELATIONSHIP-TAGS-1014): the relationship block by human (crm-service's
  * Unibox, the CRM serve), the review page, and the owner's one-click fixes. Rules: src/lib/relationship-*.ts.
  */
+import { messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -54,7 +55,7 @@ function userOf(req: AuthenticatedRequest, res: Response): string | null {
 function fail(res: Response, where: string, err: unknown): void {
   console.error(`[lead-service] ${where} failed:`, err);
   if (err instanceof HumanIdentityError || err instanceof CompanyServiceError) {
-    res.status(502).json({ error: "dependency_unavailable", detail: err.message });
+    res.status(502).json({ error: "dependency_unavailable", detail: messageOf(err) });
     return;
   }
   res.status(500).json({ error: "internal_error" });
@@ -123,7 +124,7 @@ router.post(
         return;
       }
       if (err instanceof HumanIdentityError && err.status === 409) {
-        res.status(409).json({ error: "human_service_refused", detail: err.message });
+        res.status(409).json({ error: "human_service_refused", detail: messageOf(err) });
         return;
       }
       fail(res, "merge answer", err);
@@ -204,7 +205,7 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/company", apiKeyAuth, r
     res.json({ company });
   } catch (err) {
     if (err instanceof CompanyStatementError) {
-      res.status(400).json({ error: "invalid_domain", detail: err.message });
+      res.status(400).json({ error: "invalid_domain", detail: messageOf(err) });
       return;
     }
     fail(res, "company statement", err);

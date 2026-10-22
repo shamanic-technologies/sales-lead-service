@@ -1,3 +1,4 @@
+import { errorMessage } from "./db-error.js";
 /**
  * Boot readiness state.
  *
@@ -41,7 +42,7 @@ export function markBootReady(): void {
 
 export function markBootFailed(err: unknown): void {
   state = "failed";
-  failureMessage = err instanceof Error ? err.message : String(err);
+  failureMessage = errorMessage(err);
 }
 
 /** Test-only: restore the initial state between cases. */

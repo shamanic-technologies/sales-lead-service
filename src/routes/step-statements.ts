@@ -1,3 +1,4 @@
+import { errorString } from "../lib/db-error.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { sql } from "drizzle-orm";
@@ -768,7 +769,7 @@ router.get(
         brandId,
       );
     } catch (error) {
-      console.error(`[step-statements] could not derive whether lead row ${row.id} went cold: ${error}`);
+      console.error(`[step-statements] could not derive whether lead row ${row.id} went cold: ${errorString(error)}`);
       res.status(502).json({
         error:
           "The delivery layer could not say when this lead replied, so whether it went cold is " +

@@ -26,6 +26,7 @@
  * (the messages, the copy we generated) — bounded to a handful of campaigns, six requests in
  * flight, each on its own timeout.
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router, Request, Response, NextFunction } from "express";
 import { sql } from "../db/index.js";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
@@ -373,7 +374,7 @@ router.get(
       } catch (error) {
         deliveryRead = {
           ok: false,
-          reason: `email-gateway unreachable: ${(error as Error).message}`,
+          reason: `email-gateway unreachable: ${errorMessage(error)}`,
         };
       }
     } else {

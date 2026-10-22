@@ -1,3 +1,4 @@
+import { errorMessage } from "./db-error.js";
 import { and, asc, eq, isNull, lte, sql } from "drizzle-orm";
 import { CAMPAIGN_SERVICE_API_KEY, CAMPAIGN_SERVICE_URL } from "../config.js";
 import { db } from "../db/index.js";
@@ -82,7 +83,7 @@ export async function deliverLeadRequested(event: LeadRequestedEvent): Promise<D
   try {
     offerId = await resolveOfferId(event);
   } catch (err) {
-    return { kind: "retry", error: `offer read failed: ${err instanceof Error ? err.message : String(err)}` };
+    return { kind: "retry", error: `offer read failed: ${errorMessage(err)}` };
   }
   if (!offerId) {
     return { kind: "refused", error: `campaign ${event.requestedByCampaignId} states no offer: an event needs one` };
@@ -113,7 +114,7 @@ export async function deliverLeadRequested(event: LeadRequestedEvent): Promise<D
     if (response.status === 400) return { kind: "refused", error: `400 ${text}` };
     return { kind: "retry", error: `${response.status} ${text}` };
   } catch (err) {
-    return { kind: "retry", error: err instanceof Error ? err.message : String(err) };
+    return { kind: "retry", error: errorMessage(err) };
   }
 }
 

@@ -2,6 +2,7 @@
  * Running a criterion on leads, reading the stored answers back, and suggesting criteria for an
  * OFFER. The model lives in src/lib/qualification.ts.
  */
+import { messageOf } from "./db-error.js";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { leadsCampaigns, qualificationCriteria, qualificationObservations, qualificationVerdicts } from "../db/schema.js";
@@ -396,7 +397,7 @@ export async function generateSuggestions(params: OfferScope & { identity: Spend
     try {
       drafted = await ask();
     } catch (again) {
-      if (again instanceof ModelInvalidJsonError) throw new SuggestionDraftUnreadableError(again.message);
+      if (again instanceof ModelInvalidJsonError) throw new SuggestionDraftUnreadableError(messageOf(again));
       throw again;
     }
   }

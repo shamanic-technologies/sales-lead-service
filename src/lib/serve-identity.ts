@@ -8,6 +8,7 @@
  * `null`, logged loudly, the serve lands on the lead today's email-first rule picks, and the identity
  * sweep (lead-identity-sweep.ts) resolves that lead's human and company minutes later.
  */
+import { errorMessage } from "./db-error.js";
 import type { Person } from "./people-client.js";
 import { resolveHuman } from "./human-identity-client.js";
 import { resolveCompanies } from "./company-client.js";
@@ -52,7 +53,7 @@ export async function resolveServedIdentity(person: Person): Promise<ServedIdent
   } catch (err) {
     console.error(
       `[lead-service] serve identity unresolved (the identity sweep resolves it later): email=${person.email ?? ""} ` +
-        `providerPersonId=${person.providerPersonId ?? ""}: ${(err as Error).message}`,
+        `providerPersonId=${person.providerPersonId ?? ""}: ${errorMessage(err)}`,
     );
     return null;
   }

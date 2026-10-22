@@ -20,6 +20,7 @@
  * Mounted BEFORE the leads router so `/orgs/leads/disqualifications` is not read as a lead id (the
  * gateway reaches the GET through `/v1/leads/:id`).
  */
+import { errorMessage } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { sql } from "../db/index.js";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -87,7 +88,7 @@ router.get("/orgs/leads/disqualifications", apiKeyAuth, requireOrgId, async (req
     brandId = optionalString(req.query.brandId, "brandId") ?? req.brandIds?.[0] ?? null;
     offerId = optionalString(req.query.offerId, "offerId");
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   if (!brandId) {
@@ -129,7 +130,7 @@ router.put("/orgs/leads/:id/disqualification", apiKeyAuth, requireOrgId, async (
     note = normalizeDisqualificationNote(body.note);
     level = readLevel(body.level);
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   try {
@@ -199,7 +200,7 @@ router.delete("/orgs/leads/:id/disqualification", apiKeyAuth, requireOrgId, asyn
     offerId = optionalString(req.query.offerId, "offerId");
     level = readLevel(req.query.level);
   } catch (error) {
-    res.status(400).json({ error: (error as Error).message });
+    res.status(400).json({ error: errorMessage(error) });
     return;
   }
   try {

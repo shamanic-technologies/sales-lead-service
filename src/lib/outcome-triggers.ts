@@ -29,6 +29,7 @@
  *   - A delivery that fails (campaign-service down, catalogue unreadable) stays `pending` and is retried with
  *     backoff, logged loud each time; a 400 is `refused`, kept, never resent. Nothing is ever swallowed.
  */
+import { errorMessage } from "./db-error.js";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -332,7 +333,7 @@ async function recordSwept(reach: OutcomeReach, lookups: Lookups, now: Date): Pr
     firstFailureAt.set(reach.sourceRef, first);
     if (now.getTime() - first < UNRESOLVABLE_AFTER_MS) throw err;
     firstFailureAt.delete(reach.sourceRef);
-    const message = (err instanceof Error ? err.message : String(err)).slice(0, 500);
+    const message = (errorMessage(err)).slice(0, 500);
     console.error(
       `[lead-service] outcome ${reach.step} unresolvable for ${UNRESOLVABLE_AFTER_MS / 60_000} min, set aside (NOT fired): org=${reach.orgId} brand=${reach.brandId} ${reach.sourceRef}: ${message}`,
     );
@@ -434,7 +435,7 @@ export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): 
     try {
       triggers = await loadOutcomeTriggers();
     } catch (err) {
-      return await keepForRetry(row, `catalogue unreadable: ${err instanceof Error ? err.message : String(err)}`);
+      return await keepForRetry(row, `catalogue unreadable: ${errorMessage(err)}`);
     }
     const verdict = outcomeTriggerFor(row.step, triggers);
     if (!verdict.fire) {
@@ -453,7 +454,7 @@ export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): 
     try {
       prior = await priorDoorEvent(row, verdict.triggerId, person);
     } catch (err) {
-      return await keepForRetry(row, `prior occurrence unreadable: ${err instanceof Error ? err.message : String(err)}`);
+      return await keepForRetry(row, `prior occurrence unreadable: ${errorMessage(err)}`);
     }
     if (prior && prior.idempotencyKey !== idempotencyKey) {
       const detail = `already recorded at campaign-service (event ${prior.eventId}, ${prior.recordedVia})`;
@@ -484,7 +485,7 @@ export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): 
         signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
       });
     } catch (err) {
-      return await keepForRetry(row, err instanceof Error ? err.message : String(err));
+      return await keepForRetry(row, errorMessage(err));
     }
     const text = await response.text();
     if (response.ok) {

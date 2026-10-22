@@ -32,6 +32,7 @@
  * untouched. The list read itself still answers: a standing nobody can resolve is a fact about one
  * field, not a reason to fail a 57k-row walk.
  */
+import { errorMessage, messageOf } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import {
@@ -177,7 +178,7 @@ async function loadCampaignLegs(
     if (!(error instanceof CampaignLegsUnavailableError)) throw error;
     console.error(
       `[lead-standing] campaign-service could not say which legs this org's campaigns work, so ` +
-        `every lead's standing is unresolved rather than guessed: ${error.message}`,
+        `every lead's standing is unresolved rather than guessed: ${messageOf(error)}`,
     );
     return { legs: null, reason: "campaign_service_unavailable" };
   }
@@ -195,7 +196,7 @@ export function createLeadStandingResolver(
         campaignOffers = null;
         throw new ReplyVerdictsUnavailableError(
           `[lead-standing] campaign-service could not say which offer each campaign sells, so no ` +
-            `reply can be placed on an offer: ${(error as Error).message}`,
+            `reply can be placed on an offer: ${errorMessage(error)}`,
         );
       });
     }
