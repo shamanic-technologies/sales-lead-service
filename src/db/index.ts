@@ -69,6 +69,25 @@ export const POOL_OPTIONS = {
 
 export const sql = postgres(connectionString, POOL_OPTIONS);
 export const db = drizzle(sql, { schema });
+restorePostgresArrayTypes(sql);
+
+/**
+ * drizzle-orm >= 0.41 registers pass-through parsers/serializers on the postgres.js client for
+ * the array types date[] (1182), timestamptz[] (1185), timestamp[] (1115) and numeric[] (1231).
+ * postgres.js then skips its own array handling for them: a JS array bound to `$1::timestamptz[]`
+ * fails with ERR_INVALID_ARG_TYPE and such a column reads back as a raw '{...}' string. Drop those
+ * four overrides so postgres.js handles them exactly as it did under drizzle-orm 0.36.
+ */
+function restorePostgresArrayTypes(client: postgres.Sql): void {
+  const options = client.options as unknown as {
+    parsers: Record<string, unknown>;
+    serializers: Record<string, unknown>;
+  };
+  for (const oid of ["1182", "1185", "1115", "1231"]) {
+    delete options.parsers[oid];
+    delete options.serializers[oid];
+  }
+}
 
 /**
  * Liveness reads its own, tiny pool.
