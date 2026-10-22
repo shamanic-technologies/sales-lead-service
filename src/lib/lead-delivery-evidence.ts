@@ -19,6 +19,7 @@
  * enforces the bound (see lead-read-model.ts). FAIL LOUD: an address the gateway could not answer
  * for rejects the whole read; a stale or missing answer is never served as if it were current.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 
@@ -211,7 +212,7 @@ export async function readDeliveryEvidence(
         options.context,
       );
     } catch (error) {
-      throw new EvidenceUnavailableError((error as Error).message);
+      throw new EvidenceUnavailableError(errorMessage(error));
     }
     const answered = new Map<string, StatusResult>();
     for (const result of response.results) answered.set(result.email, result);

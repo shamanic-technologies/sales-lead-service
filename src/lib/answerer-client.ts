@@ -13,6 +13,7 @@
  * NEVER "answered" and NEVER "nobody" — an outage must not tell a customer their prospect is taken
  * care of, nor that nobody ever will be.
  */
+import { errorMessage } from "./db-error.js";
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { noteLegacyOutboundLegKey, servedLegKey } from "./leg-identity.js";
@@ -62,7 +63,7 @@ export async function fetchAnswerers(
     });
   } catch (error) {
     console.error("[answerer-client] campaign-service unreachable:", error);
-    return { ok: false, reason: `campaign-service unreachable: ${(error as Error).message}` };
+    return { ok: false, reason: `campaign-service unreachable: ${errorMessage(error)}` };
   }
 
   if (!response.ok) {
@@ -78,7 +79,7 @@ export async function fetchAnswerers(
   try {
     parsed = (await response.json()) as { campaigns?: AnswererEntry[] };
   } catch (error) {
-    return { ok: false, reason: `campaign-service answered an unreadable body: ${(error as Error).message}` };
+    return { ok: false, reason: `campaign-service answered an unreadable body: ${errorMessage(error)}` };
   }
   if (!Array.isArray(parsed.campaigns)) {
     return { ok: false, reason: "campaign-service answered without a `campaigns` list" };

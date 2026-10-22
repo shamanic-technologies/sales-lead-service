@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { LeadsFoundUnavailableError, readSourceLeadsFound } from "../lib/source-leads-found.js";
@@ -16,7 +17,7 @@ router.get("/internal/source-campaigns/leads-found", apiKeyAuth, async (_req, re
   } catch (error) {
     if (error instanceof LeadsFoundUnavailableError) {
       console.error(`[lead-service] leads-found read unavailable: ${error.message}`);
-      res.status(502).json({ error: "leads_found_unavailable", detail: error.message });
+      res.status(502).json({ error: "leads_found_unavailable", detail: messageOf(error) });
       return;
     }
     console.error("[lead-service] leads-found read failed:", error);

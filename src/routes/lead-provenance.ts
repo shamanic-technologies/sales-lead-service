@@ -1,3 +1,4 @@
+import { messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
@@ -35,7 +36,7 @@ router.post(
     } catch (error) {
       if (error instanceof AudienceServiceError || error instanceof SourcingOriginUnresolvedError) {
         console.error(`[lead-service] lead-provenance source unreadable for brand ${brandId}:`, error.message);
-        res.status(502).json({ error: "provenance_source_unavailable", message: error.message });
+        res.status(502).json({ error: "provenance_source_unavailable", message: messageOf(error) });
         return;
       }
       console.error(`[lead-service] lead-provenance error for brand ${brandId}:`, error);

@@ -8,6 +8,7 @@
  * NO SILENT FALLBACK. campaign-service unreachable is `CampaignLegsUnavailableError`, never an empty
  * map a caller would read as "no campaign states a leg".
  */
+import { errorMessage } from "./db-error.js";
 import { CAMPAIGN_SERVICE_URL, CAMPAIGN_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { noteLegacyOutboundLegKey, servedLegKey } from "./leg-identity.js";
@@ -97,7 +98,7 @@ async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaig
     });
   } catch (error) {
     throw new CampaignLegsUnavailableError(
-      `[campaign-leg-client] campaign-service unreachable for org ${ctx.orgId}: ${(error as Error).message}`,
+      `[campaign-leg-client] campaign-service unreachable for org ${ctx.orgId}: ${errorMessage(error)}`,
     );
   }
   if (!response.ok) {

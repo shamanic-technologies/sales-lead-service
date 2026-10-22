@@ -28,6 +28,7 @@
  * later), not attributed yet (a match can be resolved later) — is re-evaluated on every sweep; a
  * dated answer against a delivery is final, because a first delivery cannot move.
  */
+import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { crmCauseRule, type CrmCauseRuleReason } from "./crm-evidence.js";
@@ -269,7 +270,7 @@ export async function sweepOutcomeCauses(): Promise<OutcomeCauseSweepResult[]> {
       } catch (error) {
         console.error(
           `[outcome-cause] brand=${brandId} org=${orgId} could not be evaluated, so its unanswered ` +
-            `outcomes stay as they were: ${(error as Error).message}`,
+            `outcomes stay as they were: ${errorMessage(error)}`,
         );
       }
     }

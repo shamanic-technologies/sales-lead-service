@@ -14,6 +14,7 @@
  * neither, this source answers `{ ok: false }` with that reason — a stand-in identity is never
  * invented for it.
  */
+import { errorMessage } from "./db-error.js";
 import { GOOGLE_SERVICE_URL, GOOGLE_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import type { SourceRead } from "./outreach-client.js";
@@ -99,7 +100,7 @@ export async function fetchMailboxConversation(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (error) {
-    return { ok: false, reason: `google-service unreachable: ${(error as Error).message}` };
+    return { ok: false, reason: `google-service unreachable: ${errorMessage(error)}` };
   }
 
   if (response.status === 404) return { ok: true, data: null };
@@ -122,7 +123,7 @@ export async function fetchMailboxConversation(
       },
     };
   } catch (error) {
-    return { ok: false, reason: `google-service payload unreadable: ${(error as Error).message}` };
+    return { ok: false, reason: `google-service payload unreadable: ${errorMessage(error)}` };
   }
 }
 
@@ -167,7 +168,7 @@ export async function fetchStaffMailboxConversation(
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (error) {
-    return { ok: false, reason: `google-service unreachable: ${(error as Error).message}` };
+    return { ok: false, reason: `google-service unreachable: ${errorMessage(error)}` };
   }
 
   if (response.status === 404) return { ok: true, data: null };
@@ -190,6 +191,6 @@ export async function fetchStaffMailboxConversation(
       },
     };
   } catch (error) {
-    return { ok: false, reason: `google-service payload unreadable: ${(error as Error).message}` };
+    return { ok: false, reason: `google-service payload unreadable: ${errorMessage(error)}` };
   }
 }

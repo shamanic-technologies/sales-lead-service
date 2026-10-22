@@ -1,3 +1,4 @@
+import { errorString } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { streamServeRecords } from "../lib/serve-records.js";
@@ -52,7 +53,7 @@ router.get("/internal/brands/:brandId/serve-records", apiKeyAuth, requireOrgId, 
     } else {
       console.error(`[lead-service] serve-records error for brand ${brandId}:`, error);
       if (streamingStarted || res.headersSent) {
-        res.destroy(error instanceof Error ? error : new Error(String(error)));
+        res.destroy(error instanceof Error ? error : new Error(errorString(error)));
       } else {
         res.status(500).json({ error: "Internal server error" });
       }

@@ -12,6 +12,7 @@
  * FAIL LOUD: campaign-service unreadable = `UniboxScopeUnavailableError` (the route answers 502), never the whole
  * brand under an offer's name, never an empty board read as "nobody".
  */
+import { errorMessage } from "./db-error.js";
 import { fetchOrgCampaignRows, type CampaignIdentityContext } from "./campaign-identity-client.js";
 import { buildCampaignFamilies, type CampaignIdentityRow } from "./campaign-identity.js";
 import { loadCampaignDisplays } from "./campaign-names-client.js";
@@ -65,7 +66,7 @@ export async function resolveUniboxScope(
     if (displays && campaignId) for (const [id, d] of displays) if (d.id === campaignId && id !== campaignId) pipes.push(id);
   } catch (error) {
     throw new UniboxScopeUnavailableError(
-      `campaign-service unreadable, so the campaigns of offer=${scope.offerId ?? "-"} campaign=${scope.campaignId ?? "-"} are unknown: ${(error as Error).message}`,
+      `campaign-service unreadable, so the campaigns of offer=${scope.offerId ?? "-"} campaign=${scope.campaignId ?? "-"} are unknown: ${errorMessage(error)}`,
     );
   }
   return uniboxScopeCampaignIds(rows, scope, pipes);

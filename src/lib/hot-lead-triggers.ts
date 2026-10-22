@@ -21,6 +21,7 @@
  * Nothing is read before it is needed (members and offers only when somebody became hot); a read that fails stops the
  * pass before anything is written, so the transition is seen again on the next pass.
  */
+import { errorMessage } from "./db-error.js";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -322,7 +323,7 @@ async function deliverOne(row: FireRow, deps: HotLeadDeps): Promise<HotDeliveryR
     try {
       response = await deps.post(row.org_id, hotLeadEventBody(row));
     } catch (err) {
-      return await keepForRetry(row, err instanceof Error ? err.message : String(err));
+      return await keepForRetry(row, errorMessage(err));
     }
     if (response.status >= 200 && response.status < 300) {
       let eventId: string | null = null;

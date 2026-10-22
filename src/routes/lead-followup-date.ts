@@ -1,3 +1,4 @@
+import { errorMessage, messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -55,7 +56,7 @@ async function answer(req: AuthenticatedRequest, res: Response, r: { id: string;
     verdict = await dueVerdict({ orgId, brandId: r.brandId, leadId: r.leadId }, { userId: req.userId ?? null, runId: req.runId ?? null });
   } catch (err) {
     console.error(`[lead-service] follow-up date verdict failed org=${orgId} brand=${r.brandId} lead=${r.leadId}:`, err);
-    res.status(502).json({ error: "verdict_unavailable", detail: err instanceof Error ? err.message : String(err) });
+    res.status(502).json({ error: "verdict_unavailable", detail: errorMessage(err) });
     return;
   }
   const [followupDate, queued] = await Promise.all([loadFollowupDate(orgId, r.brandId, r.leadId), loadQueued(orgId, r.brandId, r.leadId, verdict)]);
@@ -121,7 +122,7 @@ router.put("/orgs/leads/:id/followup-date", apiKeyAuth, requireOrgId, async (req
     await answer(req, res, r, { replayed });
   } catch (err) {
     if (err instanceof FollowupStatementError) {
-      res.status(400).json({ error: err.code, detail: err.message, ...err.detail });
+      res.status(400).json({ error: err.code, detail: messageOf(err), ...err.detail });
       return;
     }
     console.error(`[lead-service] PUT followup-date failed id=${req.params.id}:`, err);

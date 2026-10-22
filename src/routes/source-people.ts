@@ -1,3 +1,4 @@
+import { errorMessage, messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { NotASourceCampaignError, readSourcingStats, SourceCampaignNotFoundError } from "../lib/source-people-read.js";
@@ -19,15 +20,15 @@ router.get("/orgs/campaigns/:campaignId/sourcing-stats", apiKeyAuth, requireOrgI
     res.json(stats);
   } catch (error) {
     if (error instanceof SourceCampaignNotFoundError) {
-      res.status(404).json({ error: "campaign_not_found", detail: error.message });
+      res.status(404).json({ error: "campaign_not_found", detail: messageOf(error) });
       return;
     }
     if (error instanceof NotASourceCampaignError) {
-      res.status(409).json({ error: "not_a_source_campaign", detail: error.message });
+      res.status(409).json({ error: "not_a_source_campaign", detail: messageOf(error) });
       return;
     }
     console.error(`[lead-service] sourcing-stats failed for campaign ${campaignId} org ${req.orgId}:`, error);
-    res.status(502).json({ error: "sourcing_stats_unavailable", detail: error instanceof Error ? error.message : String(error) });
+    res.status(502).json({ error: "sourcing_stats_unavailable", detail: errorMessage(error) });
   }
 });
 

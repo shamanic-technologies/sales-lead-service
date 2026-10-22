@@ -20,13 +20,14 @@
  * email-gateway unreachable is FAIL-LOUD (the caller answers 502): a guess in either direction is
  * a wrong number nothing would ever go red about.
  */
+import { errorMessage } from "./db-error.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 
 export class MeasuredVisitLookupError extends Error {
   constructor(cause: unknown) {
     super(
       `[measured-visits] email-gateway could not answer whether these visits were already ` +
-        `measured: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `measured: ${errorMessage(cause)}`,
     );
     this.name = "MeasuredVisitLookupError";
   }

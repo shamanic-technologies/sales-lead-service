@@ -11,6 +11,7 @@
  * correct one. This client keeps that promise: unreachable, a non-2xx, or a body that is not the
  * contract is `ReplyVerdictsUnavailableError`, never `[]`.
  */
+import { errorMessage } from "./db-error.js";
 import { INSTANTLY_SERVICE_URL, INSTANTLY_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { isZodEmail, keepAccepted } from "./receiver-email-format.js";
@@ -153,7 +154,7 @@ async function queryOnce(
     });
   } catch (error) {
     throw new ReplyVerdictsUnavailableError(
-      `[reply-verdicts-client] instantly-service unreachable for org ${ctx.orgId}: ${(error as Error).message}`,
+      `[reply-verdicts-client] instantly-service unreachable for org ${ctx.orgId}: ${errorMessage(error)}`,
     );
   }
   if (!response.ok) {
@@ -167,7 +168,7 @@ async function queryOnce(
     return parseReplyVerdictsBody(await response.json());
   } catch (error) {
     throw new ReplyVerdictsUnavailableError(
-      `[reply-verdicts-client] instantly-service reply-verdicts payload unreadable: ${(error as Error).message}`,
+      `[reply-verdicts-client] instantly-service reply-verdicts payload unreadable: ${errorMessage(error)}`,
     );
   }
 }
