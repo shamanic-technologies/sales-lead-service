@@ -3120,6 +3120,247 @@ registry.registerPath({
   },
 });
 
+// --- Not a real person + conversion withdrawal (FAKE-OUTCOMES-1022) ---
+
+const NotAPersonMarkSchema = z
+  .object({
+    leadId: z.string(),
+    basis: z.enum(["stated", "staff_identity"]).openapi({
+      description: "`stated` = the org said so (this route). `staff_identity` = every email of the lead is one of our staff addresses (automatic, not liftable).",
+    }),
+    note: z.string().nullable(),
+    statedByUserId: z.string().nullable(),
+    markedAt: z.string(),
+    emails: z.array(z.string()),
+    name: z.string().nullable(),
+  })
+  .openapi("NotAPersonMark");
+
+const LeadOrRowIdParams = z.object({
+  id: z.string().openapi({ param: { name: "id", in: "path" }, description: "A lead row id (leads_campaigns.id, as every row of GET /orgs/leads carries) or the lead's own id." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/not-a-person",
+  summary: "Leads of the org marked not a real person",
+  description:
+    "Every lead the org marked NOT a real person (a test, a staff mailbox), stated or automatic (`staff_identity`: every email of " +
+    "the lead is one of our staff addresses). Such a lead is out of every lead read of the org (lists, counts, Leads page, stats " +
+    "rows) and its conversion events are set aside, so no reply, visit, signup or sale of theirs counts in any figure.",
+  request: {
+    query: z.object({ leadId: z.string().optional().openapi({ description: "Narrow to one lead (lead row id or lead id)." }) }),
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: {
+      description: "Marks",
+      content: { "application/json": { schema: z.object({ total: z.number().int(), leads: z.array(NotAPersonMarkSchema) }).openapi("NotAPersonListResponse") } },
+    },
+    400: { description: "leadId is not a uuid" },
+    401: { description: "Unauthorized" },
+    500: { description: "Read failed" },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/leads/{id}/not-a-person",
+  summary: "Mark a lead as not a real person (a test)",
+  description:
+    "States that this lead is NOT a real person for the org (a test of ours, a staff mailbox, a fake signup). From then on the lead " +
+    "is out of every lead read of the org and every figure (no reply, visit, signup, meeting or sale of theirs counts), and its " +
+    "conversion events are set aside (answered in `conversionsSetAside`); later ones are set aside as they arrive. Nothing is " +
+    "deleted: DELETE lifts it and stands those conversions back up. x-user-id is required (who marked it). Restating replaces the note.",
+  request: {
+    params: LeadOrRowIdParams,
+    body: {
+      required: false,
+      content: {
+        "application/json": {
+          schema: z
+            .object({ note: z.string().max(2000).optional().openapi({ description: "Why, in your words. Optional.", example: "Our own AI reply test." }) })
+            .openapi("NotAPersonRequest"),
+        },
+      },
+    },
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: {
+      description: "Marked",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              leadId: z.string(),
+              notAPerson: z.literal(true),
+              alreadyMarked: z.boolean(),
+              conversionsSetAside: z.number().int(),
+              marks: z.array(NotAPersonMarkSchema),
+            })
+            .openapi("NotAPersonWriteResponse"),
+        },
+      },
+    },
+    400: { description: "id is not a uuid, x-user-id missing, or note over 2000 characters" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a lead of this org" },
+    500: { description: "Write failed" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/leads/{id}/not-a-person",
+  summary: "Lift the not-a-real-person mark",
+  description:
+    "Lifts the org's stated mark: the lead counts again and the conversions the mark set aside stand back up. An automatic " +
+    "`staff_identity` mark is not liftable (it follows the lead's addresses): `notAPerson` stays true and `stillMarkedBy` names it. " +
+    "x-user-id is required.",
+  request: { params: LeadOrRowIdParams },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: {
+      description: "Lifted (or nothing stated to lift)",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              leadId: z.string(),
+              lifted: z.boolean(),
+              notAPerson: z.boolean(),
+              stillMarkedBy: z.array(z.enum(["stated", "staff_identity"])),
+              message: z.string().optional(),
+              conversionsRestored: z.number().int(),
+            })
+            .openapi("NotAPersonLiftResponse"),
+        },
+      },
+    },
+    400: { description: "id is not a uuid, or x-user-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a lead of this org" },
+    500: { description: "Write failed" },
+  },
+});
+
+const BrandConversionSchema = z
+  .object({
+    id: z.string().openapi({ description: "The conversion id: what the withdraw route takes." }),
+    event: z.string().openapi({ description: "signup, meeting_booked, form_submission, sale, positive_reply (CRM), ..." }),
+    source: z.string().openapi({ description: "tracker (your website tag), crm, manual (a person's statement), reply (read off a prospect's reply)." }),
+    email: z.string().nullable(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    receivedAt: z.string().nullable(),
+    valueCents: z.number().int().nullable(),
+    leadId: z.string().nullable().openapi({ description: "The lead it is attributed to (or the candidate held for review)." }),
+    matchMethod: z.string().nullable(),
+    matchConfidence: z.string(),
+    attributionStatus: z.string().openapi({ description: "attributed | needs_review | unmatched. A name-only match is needs_review: never counted." }),
+    counted: z.boolean().openapi({ description: "Read by the outcome counts: attributed and not withdrawn." }),
+    withdrawn: z
+      .object({
+        at: z.string(),
+        byUserId: z.string().nullable(),
+        reason: z.string().nullable().openapi({ description: "wrong_attribution (a person, this route), staff_identity (sent by a staff address), not_a_person (lead marked), null (older withdrawals)." }),
+        note: z.string().nullable(),
+      })
+      .nullable(),
+  })
+  .openapi("BrandConversion");
+
+const BrandConversionParams = z.object({
+  brandId: z.string().openapi({ param: { name: "brandId", in: "path" } }),
+  conversionId: z.string().openapi({ param: { name: "conversionId", in: "path" }, description: "A conversion id from GET /orgs/brands/{brandId}/conversions." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/brands/{brandId}/conversions",
+  summary: "The brand's conversion events (signups, sales, meetings...)",
+  description:
+    "Every conversion event of the brand, newest first, with whether it COUNTS (`counted`) and, when set aside, why. Use it to find " +
+    "the id of a wrongly attributed conversion before withdrawing it.",
+  request: {
+    params: z.object({ brandId: z.string().openapi({ param: { name: "brandId", in: "path" } }) }),
+    query: z.object({
+      event: z.string().optional(),
+      leadId: z.string().optional().openapi({ description: "Lead row id or lead id." }),
+      email: z.string().optional().openapi({ description: "Case-insensitive." }),
+      limit: z.string().optional().openapi({ description: "1..200, default 50." }),
+    }),
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: {
+      description: "Conversions",
+      content: {
+        "application/json": {
+          schema: z.object({ brandId: z.string(), total: z.number().int(), conversions: z.array(BrandConversionSchema) }).openapi("BrandConversionsResponse"),
+        },
+      },
+    },
+    400: { description: "Malformed filter" },
+    401: { description: "Unauthorized" },
+    500: { description: "Read failed" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/brands/{brandId}/conversions/{conversionId}/withdraw",
+  summary: "Withdraw a wrongly attributed conversion",
+  description:
+    "Sets aside one conversion your website tag reported (or one read off a reply) that is wrong: attributed to the wrong person, a " +
+    "test of ours. It stops counting everywhere (outcome counts, Leads page, ROI). Nothing deleted: DELETE .../withdrawal undoes it. " +
+    "`note` (your words) and x-user-id are required. A CRM conversion is corrected by rejecting its pairing (409 `crm_evidence`); a " +
+    "person's own step statement through DELETE /orgs/leads/{id}/step-statements/{step} (409 `use_step_statements`).",
+  request: {
+    params: BrandConversionParams,
+    body: {
+      required: true,
+      content: {
+        "application/json": {
+          schema: z.object({ note: z.string().min(1).max(2000).openapi({ example: "Our own test signup, matched by surname only." }) }).openapi("WithdrawConversionRequest"),
+        },
+      },
+    },
+  },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: {
+      description: "Withdrawn (or already withdrawn)",
+      content: { "application/json": { schema: z.object({ alreadyWithdrawn: z.boolean(), conversion: BrandConversionSchema }).openapi("WithdrawConversionResponse") } },
+    },
+    400: { description: "conversionId not a uuid, note missing/too long, or x-user-id missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such conversion for this brand of the org" },
+    409: { description: "crm_evidence or use_step_statements: corrected elsewhere" },
+    500: { description: "Write failed" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/brands/{brandId}/conversions/{conversionId}/withdrawal",
+  summary: "Undo a conversion withdrawal",
+  description:
+    "Stands back up a conversion a person withdrew (reason `wrong_attribution`). Any other set-aside (staff address, lead marked not " +
+    "a real person) is 409 `not_withdrawn_by_a_person`.",
+  request: { params: BrandConversionParams },
+  parameters: [...AuthHeaders],
+  responses: {
+    200: { description: "Restored", content: { "application/json": { schema: z.object({ conversion: BrandConversionSchema }).openapi("RestoreConversionResponse") } } },
+    400: { description: "conversionId not a uuid" },
+    401: { description: "Unauthorized" },
+    404: { description: "No such conversion for this brand of the org" },
+    409: { description: "not_withdrawn_by_a_person" },
+    500: { description: "Write failed" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/leads/disqualifications",

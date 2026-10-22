@@ -18,6 +18,7 @@
  */
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { sql } from "../db/index.js";
+import { notMarkedNotAPerson } from "./not-a-person.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import {
   campaignScopeIds,
@@ -114,6 +115,7 @@ function leadIndexStatement(
 /** The outer scope filter the index statement and its id pass share, so both read one population. */
 function leadIndexScopeFilter(scope: LeadListScope) {
   return sql`lc.org_id = ${scope.orgId}
+      AND ${notMarkedNotAPerson("lc")}
       ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignScopeIds(scope) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(scope)!})` : sql``}
       ${leadStatusScope(scope) ? sql`AND lc.status = ANY(${leadStatusScope(scope)!})` : sql``}
@@ -201,6 +203,7 @@ export async function countLeadListRows(scope: LeadListScope): Promise<number> {
     SELECT count(*)::int AS n
     FROM ${leadCampaignBaseRelation(scope)}
     WHERE lc.org_id = ${scope.orgId}
+      AND ${notMarkedNotAPerson("lc")}
       ${scope.brandId ? sql`AND ${scope.brandId} = ANY(lc.brand_ids)` : sql``}
       ${campaignScopeIds(scope) ? sql`AND lc.campaign_id = ANY(${campaignScopeIds(scope)!})` : sql``}
       ${leadStatusScope(scope) ? sql`AND lc.status = ANY(${leadStatusScope(scope)!})` : sql``}

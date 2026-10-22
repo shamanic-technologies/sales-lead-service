@@ -89,9 +89,9 @@ describe("resolveAttributionStatus", () => {
     expect(resolveAttributionStatus("strong", 1)).toBe("attributed");
     expect(resolveAttributionStatus("strong", 2)).toBe("needs_review");
   });
-  it("probabilistic auto-attributes to the top candidate (name is enough)", () => {
-    expect(resolveAttributionStatus("probabilistic", 1)).toBe("attributed");
-    expect(resolveAttributionStatus("probabilistic", 9)).toBe("attributed");
+  it("a name-only (probabilistic) match is never attributed: held for review (FAKE-OUTCOMES-1022)", () => {
+    expect(resolveAttributionStatus("probabilistic", 1)).toBe("needs_review");
+    expect(resolveAttributionStatus("probabilistic", 9)).toBe("needs_review");
   });
   it("unmatched stays unmatched", () => {
     expect(resolveAttributionStatus("unmatched", 0)).toBe("unmatched");
@@ -191,14 +191,14 @@ describe("matchConversion waterfall", () => {
     expect(params).toContain("brand-1");
   });
 
-  it("last_name only → probabilistic/attributed to top candidate", async () => {
+  it("last_name only → probabilistic, held for review with the top candidate kept (never counted)", async () => {
     // no email/phone/domain enabled → first enabled tier is full_name (needs first+last),
     // here only lastName given so full_name is disabled; last_name tier runs.
     execute.mockResolvedValueOnce([{ lead_id: "lead-2" }, { lead_id: "lead-3" }]);
     const result = await matchConversion({ brandId: "brand-1", lastName: "Doe" });
     expect(result.matchMethod).toBe("last_name");
     expect(result.matchConfidence).toBe("probabilistic");
-    expect(result.attributionStatus).toBe("attributed");
+    expect(result.attributionStatus).toBe("needs_review");
     expect(result.matchedLeadId).toBe("lead-2"); // top = most-engaged candidate
     expect(result.candidateCount).toBe(2);
     expect(execute).toHaveBeenCalledOnce();

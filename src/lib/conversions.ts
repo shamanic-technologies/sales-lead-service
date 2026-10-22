@@ -137,10 +137,11 @@ export function computeDedupeSignature(params: {
 
 /**
  * Resolve the attribution status from the confidence tier and candidate count.
- * Product decision: a name is enough — name-only (probabilistic) matches auto-attribute
- * to the top candidate (the candidate set is already ordered most-engaged then recency).
- * The only tier still held for review is the strong-ambiguous case (domain+lastName with
- * >1 candidate), where two distinct people share a last name at the same company.
+ * A NAME is not evidence (owner, FAKE-OUTCOMES-1022: "is this person our lead?" is never an exact
+ * or surname match; people sign up from another address, and two people share a surname): a
+ * name-only (probabilistic) match is held for review with its top candidate kept, never attributed,
+ * so no outcome count reads it. Same for the strong-ambiguous case (domain+lastName with >1
+ * candidate), where two distinct people share a last name at the same company.
  */
 export function resolveAttributionStatus(
   confidence: MatchConfidence,
@@ -155,8 +156,8 @@ export function resolveAttributionStatus(
       // domain + lastname: single candidate → attribute; ambiguous → review.
       return candidateCount === 1 ? "attributed" : "needs_review";
     case "probabilistic":
-      // name-only: attribute to the top (most-engaged) candidate, regardless of count.
-      return "attributed";
+      // name-only: never evidence that THIS lead converted (FAKE-OUTCOMES-1022).
+      return "needs_review";
     case "unmatched":
       return "unmatched";
   }
