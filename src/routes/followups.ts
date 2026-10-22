@@ -56,11 +56,18 @@ const EMPTY_REASON_RANK: Record<FollowupEmptyReason, number> = {
 /** `leads_campaigns.id` is a uuid column, so anything else is a caller error, not a miss. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The LLM alias a run wrote one message with (BEST-TPL-LLM-1022-LS), stored on the `acted` ledger row and served
+ * on the sent-messages read. Stated by the acting run, never derived here.
+ */
+const LlmAliasSchema = z.string().trim().min(1).max(200);
+
 const FollowupStatementBodySchema = z.object({
   kind: z.enum(["scheduled", "acted", "stopped", "handed"]),
   dueAt: z.string().optional(),
   nextDueAt: z.string().optional(),
   reason: z.string().optional(),
+  llmAlias: LlmAliasSchema.optional(),
 });
 
 const WithdrawHandoverBodySchema = z.object({
@@ -70,6 +77,7 @@ const WithdrawHandoverBodySchema = z.object({
 
 const ActedByEmailBodySchema = z.object({
   email: z.string().trim().min(3).max(320),
+  llmAlias: LlmAliasSchema.optional(),
 });
 
 // `email` identifies the person whenever present (byte-identical). Without it, `phone` (E.164) identifies them
@@ -474,6 +482,7 @@ router.post(
       actingCampaignId: req.campaignId,
       runId: req.runId,
       workflowSlug: req.workflowSlug ?? null,
+      llmAlias: parsed.data.llmAlias ?? null,
       nowIso: new Date().toISOString(),
     });
     if (outcome === "row_gone") {
@@ -544,6 +553,14 @@ router.post(
     const body = parsed.data;
     const nowMs = Date.now();
 
+    if (body.llmAlias !== undefined && body.kind !== "acted") {
+      res.status(400).json({
+        error: "llmAlias names the LLM that wrote a message, so it is only accepted on kind=acted",
+        code: "llm_alias_only_on_acted",
+      });
+      return;
+    }
+
     let dueAtIso: string | null = null;
     let reason: string | null = null;
 
@@ -588,6 +605,7 @@ router.post(
       actingCampaignId: req.campaignId ?? null,
       runId: req.runId ?? null,
       workflowSlug: req.workflowSlug ?? null,
+      llmAlias: body.llmAlias ?? null,
     });
 
     if (!state) {

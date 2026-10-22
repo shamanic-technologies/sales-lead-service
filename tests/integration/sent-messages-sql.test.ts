@@ -59,11 +59,19 @@ describe.skipIf(!hasRealDatabase)("sent messages read against a real database", 
     // The follow-up workflow acts (its run recorded it, with its version) and its WhatsApp message lands in the crm copy.
     const outcome = await recordActedByEmail({
       orgId, leadCampaignId: row.id, actingCampaignId: cFu, runId: `run-fu-${tag}`,
-      workflowSlug: "ai-follow-up-whatsapp-v3", nowIso: "2026-10-10T10:00:00.000Z",
+      workflowSlug: "ai-follow-up-whatsapp-v3", llmAlias: "claude-sonnet-5", nowIso: "2026-10-10T10:00:00.000Z",
     });
     expect(outcome).toBe("recorded");
-    const [stored] = (await sql`SELECT workflow_slug FROM followup_actions WHERE run_id = ${`run-fu-${tag}`}`) as unknown as Array<{ workflow_slug: string }>;
+    const [stored] = (await sql`SELECT workflow_slug, llm_alias FROM followup_actions WHERE run_id = ${`run-fu-${tag}`}`) as unknown as Array<{ workflow_slug: string; llm_alias: string }>;
     expect(stored.workflow_slug).toBe("ai-follow-up-whatsapp-v3");
+    expect(stored.llm_alias).toBe("claude-sonnet-5");
+    // An act recorded without an LLM (as every act before BEST-TPL-LLM-1022-LS): unpaired, it stands as its own record.
+    expect(
+      await recordActedByEmail({
+        orgId, leadCampaignId: row.id, actingCampaignId: cFu, runId: `run-old-${tag}`,
+        workflowSlug: "ai-follow-up-whatsapp-v2", nowIso: "2026-10-08T10:00:00.000Z",
+      }),
+    ).toBe("recorded");
     const waFact = randomUUID();
     await sql`
       INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
@@ -79,9 +87,18 @@ describe.skipIf(!hasRealDatabase)("sent messages read against a real database", 
       [`ievt:s1-${tag}`, "email_sent", "email", "workflow", "holding_run", "cold-alpha", "run-serve"],
       [`ievt:s2-${tag}`, "email_sent", "email", "workflow", "holding_run", "cold-alpha-v2", "run-retry"],
       [`rsent:h-${tag}`, "reply_sent", "email", "person", "person", null, null],
+      [expect.any(String), "followup_act", null, "workflow", "recorded_act", "ai-follow-up-whatsapp-v2", `run-old-${tag}`],
       [waFact, "message_out", "whatsapp", "workflow", "recorded_act", "ai-follow-up-whatsapp-v3", `run-fu-${tag}`],
     ]);
     expect(messages[1].writtenBy.workflowSource).toBe("retry_claim");
-    expect(messages[3].writtenBy.campaignId).toBe(cFu);
+    expect(messages[4].writtenBy.campaignId).toBe(cFu);
+    // Which LLM wrote each: stated by the acting run, unknown with a reason otherwise.
+    expect(messages.map((m) => [m.writtenBy.llmAlias, m.writtenBy.llmAliasReason])).toEqual([
+      [null, "no_recorded_act"],
+      [null, "no_recorded_act"],
+      [null, "no_recorded_act"],
+      [null, "not_stated"],
+      ["claude-sonnet-5", null],
+    ]);
   });
 });
