@@ -23,7 +23,7 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *     `POST /internal/leads/ids/resolve`). Bonus checks, screening judgments and every child run that declares
  *     nothing roll into the lead-serve run's `lead_found`.
  *   - every meeting booked / attended and sale our outreach caused -> `meeting_booked` / `meeting_attended` /
- *     `paid_client` on the brand's recording run of the day (`factOutcomeDeclaration`, outcome-fact-declarations.ts).
+ *     `paid_client` on the brand's recording run of the day for that outcome (`factOutcomeDeclaration`, outcome-fact-declarations.ts).
  * Not declared, on purpose: qualification previews/samples/suggestions (sample companies that are not leads,
  * onboarding support), relationship sweeps (tags, not catalogue outcomes). No run here judges a positive reply
  * (instantly-service owns reply verdicts; a CRM form is crm-service's fact, no spend), so no `conversation`.

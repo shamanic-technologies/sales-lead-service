@@ -27,8 +27,12 @@ import { declareRunOutcomesNow, factOutcomeDeclaration, type FactOutcomeKey } fr
  * A fact our outreach did NOT lead to (`caused_by_outreach` false or null: a "theirs", an undated or never-touched
  * person, a reply-read "already a customer") is no occurrence of ours: nothing declared.
  *
- * The run: one `outcome-recording` run per (org, brand, UTC day), created and closed `completed` at once, no cost of
- * its own (instantly-service's pattern for Positive reply). It is a production order that states what was reached.
+ * The run: one `outcome-recording` run per (org, brand, UTC day, OUTCOME KEY), created and closed `completed` at once,
+ * no cost of its own (instantly-service's pattern for Positive reply). It is a production order that states what was
+ * reached. A run NEVER produces two different outcome keys (COST-ACCOUNTING-1023-LEAD-FIX): runs-service attributes a
+ * run's consumptions to the outcomes THAT RUN produced, split by quantity, so one run producing booked + attended +
+ * paid charged the `meeting_attended` a paid client consumed partly to `meeting_attended` itself (a loop with no
+ * finite cost; v0.83.180 did this on its first day, migration 0123 re-declared those facts on per-outcome runs).
  *
  * Once per (org, brand, lead, outcome), ever (`outcome_fact_declarations`): claimed BEFORE the declaration; a
  * declaration runs-service did not take waits in `run_outcome_outbox` (redelivered with backoff), one neither
@@ -93,15 +97,16 @@ export function resetOutcomeRecordingRunMemo(): void {
   runMemo.clear();
 }
 
-/** The brand's recording run of the UTC day, created once (persisted, a concurrent creator's run wins). Throws. */
-export async function outcomeRecordingRunFor(orgId: string, brandId: string, asOf: Date = new Date()): Promise<string> {
+/** The brand's recording run of the UTC day for ONE outcome key, created once (persisted, a concurrent creator's run wins). Throws. */
+export async function outcomeRecordingRunFor(orgId: string, brandId: string, outcomeKey: FactOutcomeKey, asOf: Date = new Date()): Promise<string> {
   const day = utcDay(asOf);
-  const key = `${orgId}|${brandId}|${day}`;
+  const key = `${orgId}|${brandId}|${day}|${outcomeKey}`;
   const cached = runMemo.get(key);
   if (cached) return cached;
   const read = async (): Promise<string | null> => {
     const rows = (await db.execute(sql`
-      SELECT run_id::text AS run_id FROM outcome_recording_runs WHERE org_id = ${orgId} AND brand_id = ${brandId} AND day = ${day}::date
+      SELECT run_id::text AS run_id FROM outcome_recording_runs
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND day = ${day}::date AND outcome_key = ${outcomeKey}
     `)) as unknown as Array<{ run_id: string }>;
     return rows[0]?.run_id ?? null;
   };
@@ -110,8 +115,9 @@ export async function outcomeRecordingRunFor(orgId: string, brandId: string, asO
     const run = await createRun({ orgId, brandId, serviceName: SERVICE_NAME, taskName: OUTCOME_RECORDING_TASK });
     await updateRun(run.id, "completed", { orgId, brandId });
     const inserted = (await db.execute(sql`
-      INSERT INTO outcome_recording_runs (org_id, brand_id, day, run_id) VALUES (${orgId}, ${brandId}, ${day}::date, ${run.id}::uuid)
-      ON CONFLICT (org_id, brand_id, day) DO NOTHING
+      INSERT INTO outcome_recording_runs (org_id, brand_id, day, outcome_key, run_id)
+      VALUES (${orgId}, ${brandId}, ${day}::date, ${outcomeKey}, ${run.id}::uuid)
+      ON CONFLICT (org_id, brand_id, day, outcome_key) DO NOTHING
       RETURNING run_id::text AS run_id
     `)) as unknown as Array<{ run_id: string }>;
     runId = inserted[0]?.run_id ?? (await read());
@@ -215,7 +221,7 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   let runId: string;
   let consumed: { outcomeKey: string; basis: ConsumedBasis };
   try {
-    runId = await outcomeRecordingRunFor(f.orgId, f.brandId);
+    runId = await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey);
     consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
   } catch (err) {
     summary.failed++;
