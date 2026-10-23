@@ -10,8 +10,8 @@
  *     email it verified deliverable, and the lead is handed to the writer next. A person nobody
  *     serves never pays for a Bonus check. Bonus never ranks nor declines anyone.
  *
- * Spend rides the serve's run, exactly like the must-pass spend (treg metered here, AI through
- * chat-service); each Bonus check applied is recorded (`qualification_checks`, subject
+ * Spend rides a `company-research` child run of the serve, which declares `company_researched` for the company
+ * when it paid new research (run-outcomes.ts); each Bonus check applied is recorded (`qualification_checks`, subject
  * `lead:<id>`), which is what the offer's pass rate counts.
  */
 import type { FullLead } from "./lead-shape.js";
@@ -19,6 +19,8 @@ import { listBrandCriteria, listCriteria, probeOf } from "./qualification.js";
 import { probeKey } from "./qualification-probes.js";
 import { readLeadQualification, runCriterionOnLeads, type LeadQualification } from "./qualification-run.js";
 import type { SpendIdentity } from "./treg-client.js";
+import { companyResearchedDeclaration, declareRunOutcomes } from "./run-outcomes.js";
+import { createRun, updateRun } from "./runs-client.js";
 import type { QualificationCriterionRow } from "../db/schema.js";
 
 export interface WriterChecks {
@@ -49,6 +51,30 @@ export async function offerChecks(orgId: string, brandId: string, offerId: strin
  * writer will see it. Bonus checks sharing a probe run one after the other so the second reads
  * the first's observation instead of paying for it again; different probes run side by side.
  */
+/**
+ * The serve's child run for its Bonus research. runs-service unable to open it: the research rides the serve's own run
+ * (logged loud, the serve is never failed for its bookkeeping) and nothing is declared for it.
+ */
+async function openResearchRun(serve: SpendIdentity): Promise<SpendIdentity> {
+  try {
+    const run = await createRun({
+      orgId: serve.orgId,
+      serviceName: "lead-service",
+      taskName: "company-research",
+      parentRunId: serve.runId,
+      ...(serve.userId ? { userId: serve.userId } : {}),
+      ...(serve.brandId ? { brandId: serve.brandId } : {}),
+      ...(serve.campaignId ? { campaignId: serve.campaignId } : {}),
+      ...(serve.workflowSlug ? { workflowSlug: serve.workflowSlug } : {}),
+      ...(serve.featureSlug ? { featureSlug: serve.featureSlug } : {}),
+    });
+    return { ...serve, runId: run.id };
+  } catch (err) {
+    console.error(`[lead-service] company-research run not opened under serve run ${serve.runId}: research rides the serve run, undeclared:`, err);
+    return serve;
+  }
+}
+
 export async function checksForWriter(lead: FullLead, criteria: QualificationCriterionRow[], identity: SpendIdentity | null): Promise<WriterChecks> {
   const bonus = criteria.filter((c) => c.mode === "mention");
   if (bonus.length && !identity) throw new Error(`[lead-service] Bonus checks on lead ${lead.leadId} need the serve's run id to declare their spend`);
@@ -57,10 +83,27 @@ export async function checksForWriter(lead: FullLead, criteria: QualificationCri
     const k = probeKey(probeOf(c));
     byProbe.set(k, [...(byProbe.get(k) ?? []), c]);
   }
-  await Promise.all(
-    [...byProbe.values()].map(async (group) => {
-      for (const criterion of group) await runCriterionOnLeads(criterion, [lead.leadId], identity!);
-    }),
-  );
+  if (bonus.length) {
+    // The research is its OWN production order (COST-ACCOUNTING-1023-P1): a child run of the serve, so its cost lands on
+    // `company_researched` (the writer consumes it), never on the serve's `lead_found`.
+    const research = await openResearchRun(identity!);
+    const researched = new Set<string>();
+    let ok = false;
+    try {
+      await Promise.all(
+        [...byProbe.values()].map(async (group) => {
+          for (const criterion of group) await runCriterionOnLeads(criterion, [lead.leadId], research, researched);
+        }),
+      );
+      ok = true;
+    } finally {
+      if (research.runId !== identity!.runId) {
+        if (researched.size > 0) declareRunOutcomes(companyResearchedDeclaration({ orgId: research.orgId, runId: research.runId, domains: [...researched] }));
+        updateRun(research.runId, ok ? "completed" : "failed", { orgId: research.orgId, userId: research.userId ?? undefined, brandId: research.brandId ?? undefined }).catch((err) =>
+          console.error(`[lead-service] company-research run ${research.runId} not closed:`, err),
+        );
+      }
+    }
+  }
   return readLeadQualification(lead, criteria);
 }

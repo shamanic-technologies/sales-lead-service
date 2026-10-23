@@ -30,6 +30,7 @@ import {
   InsufficientCreditError,
   judge,
   normalizeDomain,
+  noteResearch,
   observe,
   probeLabel,
   probeOf,
@@ -41,6 +42,7 @@ import {
 import { probeKey, type CompanySubject } from "./qualification-probes.js";
 import { readCompanyQualification, type LeadQualification } from "./qualification-run.js";
 import { TregMeter, type SpendIdentity } from "./treg-client.js";
+import { companyResearchedDeclaration, declareRunOutcomes } from "./run-outcomes.js";
 
 export { MAX_PREVIEW_COMPANIES } from "./qualification-probes.js";
 /** How long the POST waits for the run before answering 202 (the caller then polls). */
@@ -143,6 +145,7 @@ async function runChecks(criteria: QualificationCriterionRow[], subject: Company
         const spec = probeOf(criterion);
         const observed = await observe(spec, subject, org, deps);
         const judged = await judge({ question: criterion.question, probe: spec }, observed.observation, subject, deps);
+        noteResearch(deps, subject.domain, observed, judged);
         await recordCheck({ criterion, subject: `company:${subject.domain}`, domain: subject.domain, verdictId: judged.verdict.id, reason: judged.verdict.reason, runId: deps.identity.runId });
         verdicts.push(judged.verdict.verdict);
       }
@@ -181,14 +184,17 @@ function errorCode(error: unknown): string {
 export async function runPreview(preview: QualificationPreviewRow, criteria: QualificationCriterionRow[], identity: SpendIdentity, closeRun: (ok: boolean) => Promise<void>): Promise<void> {
   let ok = true;
   let error: string | null = null;
+  const researched = new Set<string>();
   try {
-    const deps: QualificationDeps = { meter: new TregMeter(identity), identity };
+    const deps: QualificationDeps = { meter: new TregMeter(identity), identity, researched };
     await mapLimit(preview.companies as PreviewCompany[], COMPANY_CONCURRENCY, (company) => checkCompany(company, criteria, deps));
   } catch (e) {
     ok = false;
     error = errorCode(e);
     console.error(`[lead-service] qualification preview ${preview.id} failed:`, e);
   }
+  // What was researched was researched, even on a run that failed later: stated on the run (COST-ACCOUNTING-1023-P1).
+  if (researched.size > 0) declareRunOutcomes(companyResearchedDeclaration({ orgId: identity.orgId, runId: identity.runId, domains: [...researched] }));
   try {
     await db
       .update(qualificationPreviews)

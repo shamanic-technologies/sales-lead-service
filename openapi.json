@@ -14164,6 +14164,90 @@
           "lastMessage",
           "lastMessageReason"
         ]
+      },
+      "LeadIdResolveResponse": {
+        "type": "object",
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "matchedBy": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "apollo_person_id",
+                    "email",
+                    "linkedin_url",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "leadId",
+                "matchedBy"
+              ]
+            }
+          }
+        },
+        "required": [
+          "people"
+        ]
+      },
+      "LeadIdResolveRequest": {
+        "type": "object",
+        "properties": {
+          "people": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "orgId": {
+                  "type": "string",
+                  "format": "uuid",
+                  "description": "Internal org UUID: the lead must be a lead OF this org (a lead row of the org)."
+                },
+                "brandIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "maxItems": 50,
+                  "description": "When given, the lead row must carry one of these brands."
+                },
+                "apolloPersonId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The provider person id the serve carried (`lead.apolloPersonId`). Checked first."
+                },
+                "email": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "A registered email, compared case-folded. Checked second."
+                },
+                "linkedinUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "A LinkedIn profile URL; matched on its /in/<handle>. Checked last."
+                }
+              },
+              "required": [
+                "orgId"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "people"
+        ]
       }
     },
     "parameters": {},
@@ -25368,6 +25452,50 @@
           },
           "404": {
             "description": "Not a lead of this brand (not tagged professional to it by crm-service)"
+          }
+        }
+      }
+    },
+    "/internal/leads/ids/resolve": {
+      "post": {
+        "summary": "Which lead is each person, for an org (internal, service-auth)",
+        "description": "For a service whose paid step ran BEFORE the person was a lead (apollo-service enrichment / verification under our serve) to name the person's lead id when it declares its outcome occurrences at runs-service (subjectService `lead-service`, subjectId = leadId; COST-ACCOUNTING-1023). Nothing is minted: `leadId: null` = not a lead of that org (yet): ask again later; a person never kept never resolves. A lead answers only when it holds a lead row of `orgId` (and of one of `brandIds` when given). Match order: apolloPersonId > email (case-folded) > LinkedIn handle; several leads on one key = null. Read only, answers in the order asked, up to 1000 items.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadIdResolveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One answer per asked person, same order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadIdResolveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "401": {
+            "description": "Unauthorized"
           }
         }
       }

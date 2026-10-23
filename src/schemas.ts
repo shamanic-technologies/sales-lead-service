@@ -10076,3 +10076,55 @@ registry.registerPath({
     404: { description: "Not a lead of this brand (not tagged professional to it by crm-service)" },
   },
 });
+
+// --- Lead id resolve: which lead is this person, for this org (COST-ACCOUNTING-1023-P1, src/lib/lead-id-resolve.ts) ---
+export const LEAD_ID_RESOLVE_MAX_ITEMS = 1000;
+
+export const LeadIdResolveItemSchema = z
+  .object({
+    orgId: z.string().uuid().openapi({ description: "Internal org UUID: the lead must be a lead OF this org (a lead row of the org)." }),
+    brandIds: z.array(z.string().min(1)).max(50).optional().openapi({ description: "When given, the lead row must carry one of these brands." }),
+    apolloPersonId: z.string().min(1).optional().openapi({ description: "The provider person id the serve carried (`lead.apolloPersonId`). Checked first." }),
+    email: z.string().min(1).optional().openapi({ description: "A registered email, compared case-folded. Checked second." }),
+    linkedinUrl: z.string().min(1).optional().openapi({ description: "A LinkedIn profile URL; matched on its /in/<handle>. Checked last." }),
+  })
+  .refine((i) => !!(i.apolloPersonId || i.email || i.linkedinUrl), { message: "each item needs apolloPersonId, email or linkedinUrl" });
+
+export const LeadIdResolveRequestSchema = z
+  .object({ people: z.array(LeadIdResolveItemSchema).min(1).max(LEAD_ID_RESOLVE_MAX_ITEMS) })
+  .openapi("LeadIdResolveRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/leads/ids/resolve",
+  summary: "Which lead is each person, for an org (internal, service-auth)",
+  description:
+    "For a service whose paid step ran BEFORE the person was a lead (apollo-service enrichment / verification under our serve) to name the " +
+    "person's lead id when it declares its outcome occurrences at runs-service (subjectService `lead-service`, subjectId = leadId; " +
+    "COST-ACCOUNTING-1023). Nothing is minted: `leadId: null` = not a lead of that org (yet): ask again later; a person never kept never " +
+    "resolves. A lead answers only when it holds a lead row of `orgId` (and of one of `brandIds` when given). Match order: apolloPersonId > " +
+    "email (case-folded) > LinkedIn handle; several leads on one key = null. Read only, answers in the order asked, up to 1000 items.",
+  request: { body: { content: { "application/json": { schema: LeadIdResolveRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "One answer per asked person, same order",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              people: z.array(
+                z.object({
+                  leadId: z.string().nullable(),
+                  matchedBy: z.enum(["apollo_person_id", "email", "linkedin_url"]).nullable(),
+                }),
+              ),
+            })
+            .openapi("LeadIdResolveResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid body" },
+    401: { description: "Unauthorized" },
+  },
+});
