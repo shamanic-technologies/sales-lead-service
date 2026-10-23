@@ -10086,9 +10086,11 @@ export const LeadIdResolveItemSchema = z
     brandIds: z.array(z.string().min(1)).max(50).optional().openapi({ description: "When given, the lead row must carry one of these brands." }),
     apolloPersonId: z.string().min(1).optional().openapi({ description: "The provider person id the serve carried (`lead.apolloPersonId`). Checked first." }),
     email: z.string().min(1).optional().openapi({ description: "A registered email, compared case-folded. Checked second." }),
+    humanId: z.string().min(1).optional().openapi({ description: "human-service human id (a merged-away id is followed to its canonical human). Checked third. Not a uuid = matches nothing (the batch is not refused)." }),
+    phone: z.string().min(1).optional().openapi({ description: "An E.164 phone (separators and a 00 prefix accepted), matched against registered phone contact methods. Checked fourth. Not E.164 = matches nothing (the batch is not refused)." }),
     linkedinUrl: z.string().min(1).optional().openapi({ description: "A LinkedIn profile URL; matched on its /in/<handle>. Checked last." }),
   })
-  .refine((i) => !!(i.apolloPersonId || i.email || i.linkedinUrl), { message: "each item needs apolloPersonId, email or linkedinUrl" });
+  .refine((i) => !!(i.apolloPersonId || i.email || i.humanId || i.phone || i.linkedinUrl), { message: "each item needs apolloPersonId, email, humanId, phone or linkedinUrl" });
 
 export const LeadIdResolveRequestSchema = z
   .object({ people: z.array(LeadIdResolveItemSchema).min(1).max(LEAD_ID_RESOLVE_MAX_ITEMS) })
@@ -10103,7 +10105,8 @@ registry.registerPath({
     "person's lead id when it declares its outcome occurrences at runs-service (subjectService `lead-service`, subjectId = leadId; " +
     "COST-ACCOUNTING-1023). Nothing is minted: `leadId: null` = not a lead of that org (yet): ask again later; a person never kept never " +
     "resolves. A lead answers only when it holds a lead row of `orgId` (and of one of `brandIds` when given). Match order: apolloPersonId > " +
-    "email (case-folded) > LinkedIn handle; several leads on one key = null. Read only, answers in the order asked, up to 1000 items.",
+    "email (case-folded) > humanId > phone (E.164) > LinkedIn handle; several leads on one key = null; an unreadable humanId/phone matches " +
+    "nothing (never a 400; only an item naming no key at all is). Read only, answers in the order asked, up to 1000 items.",
   request: { body: { content: { "application/json": { schema: LeadIdResolveRequestSchema } } } },
   parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
   responses: {
@@ -10116,7 +10119,7 @@ registry.registerPath({
               people: z.array(
                 z.object({
                   leadId: z.string().nullable(),
-                  matchedBy: z.enum(["apollo_person_id", "email", "linkedin_url"]).nullable(),
+                  matchedBy: z.enum(["apollo_person_id", "email", "human_id", "phone", "linkedin_url"]).nullable(),
                 }),
               ),
             })

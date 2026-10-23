@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
+import { canonicalE164 } from "./e164-phone.js";
 import { linkedinHandleOf } from "./social-identity.js";
 
 /**
@@ -11,9 +12,14 @@ import { linkedinHandleOf } from "./social-identity.js";
  * Nothing is minted: a person nobody kept never resolves, and that spend is a normal loss riding the kept ones.
  *
  * A lead answers only when it is a lead OF the org: a `leads_campaigns` row with that `org_id` (and, when
- * `brandIds` are given, one of them in the row's `brand_ids`). Match order, first that answers wins:
+ * `brandIds` are given, one of them in the row's `brand_ids`). Match order, first key that answers wins:
  * apollo person id (`leads.apollo_person_id`, unique) > registered email (case-folded, one email one lead) >
- * LinkedIn vanity handle off `leads.linkedin_url`. Several leads on the LinkedIn handle = no answer (never a pick).
+ * human-service human (`leads.human_id`, a merged-away id followed through `human_aliases`; a recorded duplicate
+ * lead of one human at one company answers by its survivor) > E.164 phone (a registered `phone` contact method,
+ * compared on its digits) > LinkedIn vanity handle off `leads.linkedin_url`. Several leads on one key = no answer
+ * (never a pick). A key that cannot be read (a phone that is not E.164, a human id that is not a uuid) matches
+ * nothing; the other keys of the item still answer, and the batch is never refused for it (crm-service, a WhatsApp
+ * writer known by human + phone only, declares `conversation` through it).
  */
 
 export interface ResolveItem {
@@ -21,10 +27,12 @@ export interface ResolveItem {
   brandIds?: string[];
   apolloPersonId?: string;
   email?: string;
+  humanId?: string;
+  phone?: string;
   linkedinUrl?: string;
 }
 
-export type MatchedBy = "apollo_person_id" | "email" | "linkedin_url";
+export type MatchedBy = "apollo_person_id" | "email" | "human_id" | "phone" | "linkedin_url";
 
 export interface ResolveAnswer {
   leadId: string | null;
@@ -43,15 +51,39 @@ type Row = { k: string; lead_id: string; org_id: string; brand_ids: string[] | n
 
 const toCandidates = (rows: Row[]): Candidate[] => rows.map((r) => ({ key: r.k, leadId: r.lead_id, orgId: r.org_id, brandIds: r.brand_ids ?? [] }));
 
+export interface KeyMaps {
+  apollo: Map<string, Candidate[]>;
+  email: Map<string, Candidate[]>;
+  human: Map<string, Candidate[]>;
+  phone: Map<string, Candidate[]>;
+  linkedin: Map<string, Candidate[]>;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** A human id as asked (lowercased uuid), or null when it is not one. */
+export function humanKeyOf(raw: string | null | undefined): string | null {
+  const v = raw?.trim().toLowerCase() ?? "";
+  return UUID_RE.test(v) ? v : null;
+}
+
+/** A phone's comparison key: the DIGITS of its E.164 form (stored phones are compared on their digits), or null. */
+export function phoneKeyOf(raw: string | null | undefined): string | null {
+  const e164 = canonicalE164(raw);
+  return e164 ? e164.slice(1) : null;
+}
+
 /** Pure: the answer for one item off the candidates each key found. */
 export function pickLead(
   item: ResolveItem,
-  byKey: { apollo: Map<string, Candidate[]>; email: Map<string, Candidate[]>; linkedin: Map<string, Candidate[]> },
+  byKey: KeyMaps,
 ): ResolveAnswer {
   const fits = (c: Candidate) => c.orgId === item.orgId && (!item.brandIds?.length || c.brandIds.some((b) => item.brandIds!.includes(b)));
   const tries: Array<[MatchedBy, Map<string, Candidate[]>, string | null]> = [
     ["apollo_person_id", byKey.apollo, item.apolloPersonId ?? null],
     ["email", byKey.email, item.email ? item.email.trim().toLowerCase() : null],
+    ["human_id", byKey.human, humanKeyOf(item.humanId)],
+    ["phone", byKey.phone, phoneKeyOf(item.phone)],
     ["linkedin_url", byKey.linkedin, linkedinHandleOf(item.linkedinUrl)],
   ];
   for (const [matchedBy, map, key] of tries) {
@@ -77,8 +109,10 @@ export async function resolveLeadIds(items: ResolveItem[]): Promise<ResolveAnswe
   const apolloIds = [...new Set(items.map((i) => i.apolloPersonId).filter((v): v is string => !!v))];
   const emails = [...new Set(items.map((i) => i.email?.trim().toLowerCase()).filter((v): v is string => !!v))];
   const handles = [...new Set(items.map((i) => linkedinHandleOf(i.linkedinUrl)).filter((v): v is string => !!v))];
+  const humans = [...new Set(items.map((i) => humanKeyOf(i.humanId)).filter((v): v is string => !!v))];
+  const phones = [...new Set(items.map((i) => phoneKeyOf(i.phone)).filter((v): v is string => !!v))];
 
-  const [apollo, email, linkedin] = await Promise.all([
+  const [apollo, email, human, phone, linkedin] = await Promise.all([
     apolloIds.length === 0
       ? []
       : (db.execute(sql`
@@ -93,6 +127,29 @@ export async function resolveLeadIds(items: ResolveItem[]): Promise<ResolveAnswe
           FROM lead_contact_methods lcm JOIN leads_campaigns lc ON lc.lead_id = lcm.lead_id
           WHERE lcm.channel = 'email' AND lower(lcm.value) = ANY(${sql.param(emails)}::text[]) AND lc.org_id = ANY(${sql.param(orgs)}::text[])
         `) as unknown as Promise<Row[]>),
+    humans.length === 0
+      ? []
+      : (db.execute(sql`
+          WITH asked AS (
+            SELECT a.asked, COALESCE(ha.human_id, a.asked) AS canonical
+            FROM unnest(${sql.param(humans)}::uuid[]) AS a(asked)
+            LEFT JOIN human_aliases ha ON ha.atomic_human_id = a.asked
+          )
+          SELECT DISTINCT asked.asked::text AS k, l.id::text AS lead_id, lc.org_id, lc.brand_ids
+          FROM asked
+          JOIN leads l ON l.human_id = asked.canonical
+          JOIN leads_campaigns lc ON lc.lead_id = l.id
+          WHERE lc.org_id = ANY(${sql.param(orgs)}::text[])
+            AND NOT EXISTS (SELECT 1 FROM lead_identity_duplicates d WHERE d.lead_id = l.id)
+        `) as unknown as Promise<Row[]>),
+    phones.length === 0
+      ? []
+      : (db.execute(sql`
+          SELECT DISTINCT regexp_replace(lcm.value, '\\D', '', 'g') AS k, lcm.lead_id::text AS lead_id, lc.org_id, lc.brand_ids
+          FROM lead_contact_methods lcm JOIN leads_campaigns lc ON lc.lead_id = lcm.lead_id
+          WHERE lcm.channel = 'phone' AND regexp_replace(lcm.value, '\\D', '', 'g') = ANY(${sql.param(phones)}::text[])
+            AND lc.org_id = ANY(${sql.param(orgs)}::text[])
+        `) as unknown as Promise<Row[]>),
     handles.length === 0
       ? []
       : (db.execute(sql`
@@ -102,6 +159,12 @@ export async function resolveLeadIds(items: ResolveItem[]): Promise<ResolveAnswe
             AND lc.org_id = ANY(${sql.param(orgs)}::text[])
         `) as unknown as Promise<Row[]>),
   ]);
-  const byKey = { apollo: group(toCandidates(apollo)), email: group(toCandidates(email)), linkedin: group(toCandidates(linkedin)) };
+  const byKey: KeyMaps = {
+    apollo: group(toCandidates(apollo)),
+    email: group(toCandidates(email)),
+    human: group(toCandidates(human)),
+    phone: group(toCandidates(phone)),
+    linkedin: group(toCandidates(linkedin)),
+  };
   return items.map((item) => pickLead(item, byKey));
 }
