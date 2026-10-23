@@ -10148,3 +10148,70 @@ registry.registerPath({
     401: { description: "Unauthorized" },
   },
 });
+
+// ─── Backfill of past serve runs' outcomes (COST-BACKFILL-1023-LEAD, src/lib/run-outcome-backfill.ts) ───
+
+export const RunOutcomeBackfillRequestSchema = z
+  .object({
+    dryRun: z.boolean().openapi({ description: "true = count what would be declared (runs-service is still asked to CONFIRM re-pointed finds, never to record); false = declare." }),
+  })
+  .openapi("RunOutcomeBackfillRequest");
+
+const RunOutcomeBackfillReportSchema = z
+  .object({
+    dryRun: z.boolean(),
+    since: z.string(),
+    finds: z.object({ direct: z.number().int(), archived: z.number().int(), repointed: z.number().int() }),
+    repointedUnconfirmed: z.number().int().openapi({ description: "Re-pointed finds whose finding run runs-service could not confirm (no single lead-serve child of the caller run holds served_at): not declared." }),
+    runs: z.number().int(),
+    occurrences: z.object({ produced: z.number().int(), consumed: z.number().int() }),
+    batches: z.number().int(),
+    recorded: z.number().int(),
+    alreadyRecorded: z.number().int(),
+    redated: z.number().int(),
+    refusedRuns: z.array(z.object({ runId: z.string(), reason: z.string(), message: z.string().optional() })),
+  })
+  .openapi("RunOutcomeBackfillReport");
+
+const RunOutcomeBackfillJobSchema = z
+  .object({
+    state: z.enum(["running", "done", "failed"]),
+    dryRun: z.boolean(),
+    startedAt: z.string(),
+    finishedAt: z.string().nullable(),
+    report: RunOutcomeBackfillReportSchema.nullable(),
+    error: z.string().nullable(),
+  })
+  .openapi("RunOutcomeBackfillJob");
+
+const backfillDescription =
+  "Declares, on our PAST serve runs, the `lead_found` (and the `email_checked` it consumed, when a verdict is recorded) the live serve " +
+  "declares since 2026-10-23, read from our own rows (a find row never re-pointed, its archived copy, or a re-pointed find whose run the " +
+  "serve's idempotent answer names and runs-service confirms), through runs-service's backfill door (`occurredAt: run_started_at`, " +
+  "`redate`). Since 2026-02-02; before 2026-05-08 no serve row exists here, so nothing is declared for those runs. Idempotent: a re-run " +
+  "records nothing new. Runs in the background (single flight); read the result with GET.";
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/run-outcomes/backfill",
+  summary: "Start the backfill of past serve runs' outcomes (internal, service-auth)",
+  description: backfillDescription,
+  request: { body: { content: { "application/json": { schema: RunOutcomeBackfillRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    202: { description: "Started", content: { "application/json": { schema: RunOutcomeBackfillJobSchema } } },
+    400: { description: "Invalid body" },
+    409: { description: "A backfill is already running", content: { "application/json": { schema: RunOutcomeBackfillJobSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/run-outcomes/backfill",
+  summary: "The last backfill of past serve runs' outcomes (internal, service-auth)",
+  description: backfillDescription,
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: { description: "The last job (null = none since boot)", content: { "application/json": { schema: z.object({ job: RunOutcomeBackfillJobSchema.nullable() }) } } },
+  },
+});

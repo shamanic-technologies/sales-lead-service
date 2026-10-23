@@ -14260,6 +14260,155 @@
         "required": [
           "people"
         ]
+      },
+      "RunOutcomeBackfillJob": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "running",
+              "done",
+              "failed"
+            ]
+          },
+          "dryRun": {
+            "type": "boolean"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "report": {
+            "$ref": "#/components/schemas/RunOutcomeBackfillReport"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "state",
+          "dryRun",
+          "startedAt",
+          "finishedAt",
+          "report",
+          "error"
+        ]
+      },
+      "RunOutcomeBackfillReport": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "since": {
+            "type": "string"
+          },
+          "finds": {
+            "type": "object",
+            "properties": {
+              "direct": {
+                "type": "integer"
+              },
+              "archived": {
+                "type": "integer"
+              },
+              "repointed": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "direct",
+              "archived",
+              "repointed"
+            ]
+          },
+          "repointedUnconfirmed": {
+            "type": "integer",
+            "description": "Re-pointed finds whose finding run runs-service could not confirm (no single lead-serve child of the caller run holds served_at): not declared."
+          },
+          "runs": {
+            "type": "integer"
+          },
+          "occurrences": {
+            "type": "object",
+            "properties": {
+              "produced": {
+                "type": "integer"
+              },
+              "consumed": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "produced",
+              "consumed"
+            ]
+          },
+          "batches": {
+            "type": "integer"
+          },
+          "recorded": {
+            "type": "integer"
+          },
+          "alreadyRecorded": {
+            "type": "integer"
+          },
+          "redated": {
+            "type": "integer"
+          },
+          "refusedRuns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "runId": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "runId",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "since",
+          "finds",
+          "repointedUnconfirmed",
+          "runs",
+          "occurrences",
+          "batches",
+          "recorded",
+          "alreadyRecorded",
+          "redated",
+          "refusedRuns"
+        ]
+      },
+      "RunOutcomeBackfillRequest": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean",
+            "description": "true = count what would be declared (runs-service is still asked to CONFIRM re-pointed finds, never to record); false = declare."
+          }
+        },
+        "required": [
+          "dryRun"
+        ]
       }
     },
     "parameters": {},
@@ -25524,6 +25673,99 @@
           },
           "401": {
             "description": "Unauthorized"
+          }
+        }
+      }
+    },
+    "/internal/run-outcomes/backfill": {
+      "post": {
+        "summary": "Start the backfill of past serve runs' outcomes (internal, service-auth)",
+        "description": "Declares, on our PAST serve runs, the `lead_found` (and the `email_checked` it consumed, when a verdict is recorded) the live serve declares since 2026-10-23, read from our own rows (a find row never re-pointed, its archived copy, or a re-pointed find whose run the serve's idempotent answer names and runs-service confirms), through runs-service's backfill door (`occurredAt: run_started_at`, `redate`). Since 2026-02-02; before 2026-05-08 no serve row exists here, so nothing is declared for those runs. Idempotent: a re-run records nothing new. Runs in the background (single flight); read the result with GET.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunOutcomeBackfillRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOutcomeBackfillJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "409": {
+            "description": "A backfill is already running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunOutcomeBackfillJob"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "summary": "The last backfill of past serve runs' outcomes (internal, service-auth)",
+        "description": "Declares, on our PAST serve runs, the `lead_found` (and the `email_checked` it consumed, when a verdict is recorded) the live serve declares since 2026-10-23, read from our own rows (a find row never re-pointed, its archived copy, or a re-pointed find whose run the serve's idempotent answer names and runs-service confirms), through runs-service's backfill door (`occurredAt: run_started_at`, `redate`). Since 2026-02-02; before 2026-05-08 no serve row exists here, so nothing is declared for those runs. Idempotent: a re-run records nothing new. Runs in the background (single flight); read the result with GET.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The last job (null = none since boot)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "job": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/RunOutcomeBackfillJob"
+                        },
+                        {
+                          "nullable": true
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "job"
+                  ]
+                }
+              }
+            }
           }
         }
       }
