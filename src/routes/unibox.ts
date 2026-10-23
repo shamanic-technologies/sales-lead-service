@@ -4,7 +4,8 @@
  * keeps the thread and the sending.
  *
  *   GET /orgs/leads/unibox?brandId=[&status=&role=&type=&lifecycle=&interest=&conversation=&contactability=&fit=&q=&limit=&cursor=]
- *       Most recent activity first. Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
+ *       Most recent activity first; `sort=company_asc|company_desc|stage_desc|stage_asc|last_touch_asc` names another
+ *       TOTAL order (PEOPLE-SORT-BY-COMPANY-1023, see UNIBOX_SORTS). Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
  *       the size of the filtered set; `nextCursor` pages it. Unknown filter value / bad bound = 400.
  *   GET /orgs/leads/unibox-lifecycle-counts?brandId=[&offerId=&campaignId=&<the list's filters>]
  *       DEALS-LIFECYCLE-1021: how many people of the filtered set stand on each lifecycle rung (ladder keys + `none`),
@@ -37,7 +38,9 @@ import {
   readUniboxLifecycleCounts,
   readUniboxPage,
   UniboxCursorError,
+  UNIBOX_SORTS,
   type LifecycleCatalogue,
+  type UniboxSort,
   type UniboxFilters,
 } from "../lib/unibox-model.js";
 import { resolveUniboxScope, UniboxScopeUnavailableError } from "../lib/unibox-scope.js";
@@ -134,8 +137,20 @@ router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: Authentic
       if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) throw new BadQuery(`limit must be an integer 1..${MAX_LIMIT}`);
     }
     const cursor = typeof req.query.cursor === "string" && req.query.cursor ? req.query.cursor : null;
+    // PEOPLE-SORT-BY-COMPANY-1023: absent = the default order, read exactly as before (no `sort` key passed down).
+    let sort: UniboxSort | undefined;
+    if (req.query.sort !== undefined) {
+      if (typeof req.query.sort !== "string" || !(UNIBOX_SORTS as readonly string[]).includes(req.query.sort.trim())) {
+        throw new BadQuery(`sort: unknown value; allowed: ${UNIBOX_SORTS.join(", ")} (absent = most recent activity first)`);
+      }
+      sort = req.query.sort.trim() as UniboxSort;
+    }
     const { offerId, campaignId, campaignIds } = await scopeOf(req, brandId);
-    const page = await readUniboxPage({ orgId: req.orgId!, brandId }, campaignIds === undefined ? filters : { ...filters, campaignIds }, { limit, cursor });
+    const page = await readUniboxPage(
+      { orgId: req.orgId!, brandId },
+      campaignIds === undefined ? filters : { ...filters, campaignIds },
+      sort === undefined ? { limit, cursor } : { limit, cursor, sort },
+    );
     // Unscoped answer byte-identical to before (no offerId/campaignId keys); a scoped one names its scope.
     res.json({ brandId, ...(offerId || campaignId ? { offerId, campaignId } : {}), lifecycleLadder: catalogue.ladder, ...page });
   } catch (error) {
