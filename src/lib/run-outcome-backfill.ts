@@ -170,33 +170,43 @@ export interface RepointedFind {
   emailChecked: boolean;
 }
 
-/** Source 3's candidates: re-pointed find rows + the caller runs whose idempotent answer named that lead. */
+/**
+ * Source 3's candidates: re-pointed find rows + the caller runs whose idempotent answer named that lead. Two plain reads
+ * joined here: one statement joining the cache's JSON on the rows was planned as a nested loop and ran past 10 min in prod.
+ */
 export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Promise<RepointedFind[]> {
   const rows = (await db.execute(sql`
-    WITH repointed AS (
-      SELECT lc.org_id, lc.lead_id, lc.served_at, lc.brand_ids, ${emailCheckedSql("lc")} AS email_checked
-        FROM leads_campaigns lc
-       WHERE lc.status_reason IN ('served', 'source_found') AND ${findDetailsSql("lc.status_details")}
-         AND lc.served_at >= ${BACKFILL_SINCE}::timestamptz
-         AND (lc.retry_claimed_at IS NOT NULL OR EXISTS (SELECT 1 FROM lead_campaign_run_repoints p WHERE p.lead_campaign_id = lc.id))
-         AND ${notJournalistSql("lc", "lc.brand_ids")} ${orgScopeSql("lc.org_id", scope)}
-    ),
-    answers AS (
-      SELECT i.org_id, i.idempotency_key, i.response->'lead'->'data'->>'leadId' AS lead_id
-        FROM idempotency_cache i
-       WHERE i.response->>'found' = 'true' AND i.idempotency_key ~* ${UUID_RE_SQL} ${orgScopeSql("i.org_id", scope)}
-    )
-    SELECT r.org_id, r.lead_id::text AS lead_id, to_char(r.served_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS served_at, a.idempotency_key AS caller_run_id, r.email_checked
-      FROM repointed r
-      JOIN answers a ON a.org_id = r.org_id AND a.lead_id = r.lead_id::text
-  `)) as unknown as Array<{ org_id: string; lead_id: string; served_at: string; caller_run_id: string; email_checked: boolean }>;
-  return rows.map((r) => ({
-    orgId: r.org_id,
-    leadId: r.lead_id,
-    servedAt: r.served_at,
-    callerRunId: r.caller_run_id.toLowerCase(),
-    emailChecked: r.email_checked === true,
-  }));
+    SELECT lc.org_id, lc.lead_id::text AS lead_id,
+           to_char(lc.served_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS served_at, ${emailCheckedSql("lc")} AS email_checked
+      FROM leads_campaigns lc
+     WHERE lc.status_reason IN ('served', 'source_found') AND ${findDetailsSql("lc.status_details")}
+       AND lc.served_at >= ${BACKFILL_SINCE}::timestamptz
+       AND (lc.retry_claimed_at IS NOT NULL OR EXISTS (SELECT 1 FROM lead_campaign_run_repoints p WHERE p.lead_campaign_id = lc.id))
+       AND ${notJournalistSql("lc", "lc.brand_ids")} ${orgScopeSql("lc.org_id", scope)}
+  `)) as unknown as Array<{ org_id: string; lead_id: string; served_at: string; email_checked: boolean }>;
+  if (rows.length === 0) return [];
+  const answers = (await db.execute(sql`
+    SELECT i.org_id, lower(i.idempotency_key) AS caller_run_id, i.response->'lead'->'data'->>'leadId' AS lead_id
+      FROM idempotency_cache i
+     WHERE i.response->>'found' = 'true' AND i.idempotency_key ~* ${UUID_RE_SQL} ${orgScopeSql("i.org_id", scope)}
+  `)) as unknown as Array<{ org_id: string; caller_run_id: string; lead_id: string | null }>;
+  const callersOf = new Map<string, string[]>();
+  for (const a of answers) {
+    if (!a.lead_id) continue;
+    const key = `${a.org_id} ${a.lead_id}`;
+    const list = callersOf.get(key);
+    if (list) list.push(a.caller_run_id);
+    else callersOf.set(key, [a.caller_run_id]);
+  }
+  return rows.flatMap((r) =>
+    (callersOf.get(`${r.org_id} ${r.lead_id}`) ?? []).map((callerRunId) => ({
+      orgId: r.org_id,
+      leadId: r.lead_id,
+      servedAt: r.served_at,
+      callerRunId,
+      emailChecked: r.email_checked === true,
+    })),
+  );
 }
 
 /** runs-service: the `lead-serve` runs of ours a caller run opened. Throws on any non-2xx. */
@@ -230,8 +240,15 @@ export async function resolveRepointedFinds(
   candidates: readonly RepointedFind[],
   lookup: (orgId: string, callerRunId: string) => Promise<ChildRun[]> = listLeadServeChildren,
 ): Promise<{ finds: PastFind[]; unconfirmed: number }> {
+  const children = new Map<string, Promise<ChildRun[]>>();
+  const childrenOf = (orgId: string, callerRunId: string) => {
+    const key = `${orgId} ${callerRunId}`;
+    let p = children.get(key);
+    if (!p) children.set(key, (p = lookup(orgId, callerRunId)));
+    return p;
+  };
   const resolved = await mapLimit(candidates, CHILD_LOOKUP_CONCURRENCY, async (c) => {
-    const child = findingChild(await lookup(c.orgId, c.callerRunId), c.servedAt);
+    const child = findingChild(await childrenOf(c.orgId, c.callerRunId), c.servedAt);
     return child ? ({ source: "repointed", runId: child.id.toLowerCase(), orgId: c.orgId, leadId: c.leadId, emailChecked: c.emailChecked } as PastFind) : null;
   });
   const finds = resolved.filter((f): f is PastFind => f !== null);
