@@ -223,6 +223,14 @@ export interface ObserveResult {
 export interface QualificationDeps {
   meter: TregMeter;
   identity: SpendIdentity;
+  /** Companies (domain) this run paid NEW research for (a charged probe or a new verdict): what it declares as
+   *  `company_researched` (run-outcomes.ts). Absent = nobody asks. */
+  researched?: Set<string>;
+}
+
+/** A check paid new research on the company when its probe was charged or its verdict newly judged. */
+export function noteResearch(deps: QualificationDeps, domain: string, observed: { chargedMicro: number }, judged: { reused: boolean }): void {
+  if (observed.chargedMicro > 0 || !judged.reused) deps.researched?.add(domain);
 }
 
 export async function observe(spec: ProbeSpec, subject: CompanySubject, org: OrganizationView, deps: QualificationDeps): Promise<ObserveResult> {
