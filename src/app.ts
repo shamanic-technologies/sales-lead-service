@@ -43,7 +43,8 @@ import candidateScreeningsRoutes from "./routes/candidate-screenings.js";
 import leadIdResolveRoutes from "./routes/lead-id-resolve.js";
 import runOutcomeBackfillRoutes from "./routes/run-outcome-backfill.js";
 import meetingAttributionRoutes from "./routes/meeting-attribution.js";
-import replyLatencyRoutes, { REPLY_LATENCY_PATH, replyLatencyBodyParser } from "./routes/reply-latency.js";
+import replyLatencyRoutes from "./routes/reply-latency.js";
+import { bodyParserErrorHandler, mountJsonParsers } from "./lib/body-limits.js";
 import sourceStockRoutes from "./routes/source-stock.js";
 import socialEngagementsRoutes from "./routes/social-engagements.js";
 import leadIdentityRoutes from "./routes/lead-identity.js";
@@ -58,8 +59,10 @@ const openapiPath = join(__dirname, "..", "openapi.json");
 const app = express();
 
 app.use(cors());
-app.use(REPLY_LATENCY_PATH, replyLatencyBodyParser);
-app.use(express.json());
+// Route-scoped JSON limits first, then the global 100kb default (src/lib/body-limits.ts).
+mountJsonParsers(app);
+// A body-parser refusal (too large, bad JSON) is a named 4xx, before anything else can read it as a 500.
+app.use(bodyParserErrorHandler);
 app.use(withRequestContext);
 
 app.get("/openapi.json", (_req, res) => {

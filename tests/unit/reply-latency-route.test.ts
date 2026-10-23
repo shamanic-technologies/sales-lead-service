@@ -23,10 +23,10 @@ describe("POST /internal/reply-latency/grouped", () => {
       },
     }));
     const mod = await import("../../src/routes/reply-latency.js");
-    // Same parser order as src/app.ts: the route's own parser, then the global default one.
+    const { mountJsonParsers } = await import("../../src/lib/body-limits.js");
+    // Same parsers as src/app.ts: route-scoped limits, then the global default one.
     const app = express();
-    app.use(mod.REPLY_LATENCY_PATH, mod.replyLatencyBodyParser);
-    app.use(express.json());
+    mountJsonParsers(app);
     app.use(mod.default);
     return app;
   }
@@ -53,11 +53,10 @@ describe("POST /internal/reply-latency/grouped", () => {
     expect(res.body.groups).toHaveLength(6);
   });
 
-  it("src/app.ts mounts the route's parser BEFORE the global 100kb one", () => {
+  it("src/app.ts mounts the route-scoped parsers (src/lib/body-limits.ts)", () => {
     const src = readFileSync(new URL("../../src/app.ts", import.meta.url), "utf8");
-    const own = src.indexOf("app.use(REPLY_LATENCY_PATH, replyLatencyBodyParser);");
-    expect(own).toBeGreaterThan(-1);
-    expect(own).toBeLessThan(src.indexOf("app.use(express.json());"));
+    expect(src).toContain("mountJsonParsers(app);");
+    expect(src).not.toContain("app.use(express.json());");
   });
 
   it("refuses no group, an empty group, or more than 500 ids", async () => {

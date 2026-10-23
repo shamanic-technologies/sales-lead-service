@@ -1,13 +1,11 @@
-import express, { Router } from "express";
+import { Router } from "express";
 import { z } from "zod";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { loadReplyLatencyByGroups, REPLY_LATENCY_MAX_GROUPS, REPLY_LATENCY_MAX_IDS_PER_GROUP } from "../lib/reply-latency.js";
 
 const router = Router();
 
-/** Groups of up to 500 campaign ids each outgrow the default 100kb body: app.ts mounts this BEFORE its global parser. */
-export const REPLY_LATENCY_PATH = "/internal/reply-latency";
-export const replyLatencyBodyParser = express.json({ limit: "4mb" });
+// Groups of up to 500 campaign ids each outgrow the default 100kb body: its own limit lives in src/lib/body-limits.ts.
 
 const Body = z.object({
   groups: z
