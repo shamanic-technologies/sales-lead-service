@@ -6,7 +6,7 @@
  *   - ours (caused_by_outreach = true) -> meeting_booked / meeting_attended / paid_client, subject = the lead,
  *     each consuming the outcome it came from (positive reply -> booked -> attended -> paid).
  *   - theirs (false), unasked (null) and withdrawn facts -> nothing.
- *   - a second pass declares nothing twice; one recording run per (org, brand, day).
+ *   - a second pass declares nothing twice; one recording run per (org, brand, day, outcome key).
  * Every pass is scoped to this file's org: the suite's files share one database.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -119,9 +119,18 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     ]);
     for (const id of [theirs, unasked, withdrawn]) expect(byLead(id)).toEqual([]);
 
-    // One recording run for the brand today, every declaration on it, under the org.
-    expect(runsCreated).toHaveLength(1);
+    // A day with a booked meeting, an attended meeting and a paid client opens THREE recording runs, one per outcome
+    // key: runs-service splits a run's consumptions over what that run produced, so a shared run would make
+    // `meeting_attended` consume itself (COST-ACCOUNTING-1023-LEAD-FIX). Every declaration under the org.
+    expect(runsCreated).toHaveLength(3);
     expect(new Set(declared.map((d) => d.runId))).toEqual(new Set(runsCreated));
+    const keysByRun = new Map<string, Set<string>>();
+    for (const d of declared) for (const p of d.body.produced) keysByRun.set(d.runId, (keysByRun.get(d.runId) ?? new Set()).add(p.outcomeKey));
+    expect([...keysByRun.values()].map((k) => [...k].sort()).sort()).toEqual([["meeting_attended"], ["meeting_booked"], ["paid_client"]]);
+    for (const d of declared) {
+      const produced = new Set(d.body.produced.map((p) => p.outcomeKey));
+      for (const c of d.body.consumed) expect(produced.has(c.outcomeKey)).toBe(false);
+    }
     expect(new Set(declared.map((d) => d.orgId))).toEqual(new Set([orgId]));
 
     const again = await sweepOutcomeFactDeclarations({ orgId });

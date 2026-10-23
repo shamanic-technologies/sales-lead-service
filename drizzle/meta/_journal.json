@@ -862,6 +862,13 @@
       "when": 1788548100000,
       "tag": "0122_outcome_fact_declarations",
       "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1788634500000,
+      "tag": "0123_outcome_recording_run_per_outcome",
+      "breakpoints": true
     }
   ]
 }
