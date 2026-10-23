@@ -10146,6 +10146,7 @@ registry.registerPath({
     },
     400: { description: "Invalid body" },
     401: { description: "Unauthorized" },
+    413: { description: "Body over the route's 10 MB limit (`error: payload_too_large`, `limitBytes`, `lengthBytes`): send fewer items per call. The documented 1000-item maximum always fits." },
   },
 });
 
