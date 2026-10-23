@@ -6,7 +6,6 @@ if (process.env.SENTRY_DSN) {
     environment: process.env.NODE_ENV || "development",
     tracesSampleRate: 0.1,
     sendDefaultPii: true,
-    registerEsmLoaderHooks: { exclude: [/drizzle-orm/] },
   });
   Sentry.setTag("service", "lead-service");
 }
