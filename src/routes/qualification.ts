@@ -17,6 +17,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { PassRate } from "../lib/qualification.js";
 import { buildFullLeadsBatch } from "../lib/lead-shape.js";
 import { createRun, getRunTotalCents, updateRun } from "../lib/runs-client.js";
+import { companyResearchedDeclaration, declareRunOutcomes } from "../lib/run-outcomes.js";
 import {
   InsufficientCreditError,
   estimateCostPerRow,
@@ -376,7 +377,9 @@ router.post(
       }
       identity = await openRun(req, res, brandId, "qualification-sample");
       if (!identity) return;
-      const rows = await runCriterionOnLeads(criterion, leadIds, identity);
+      const researched = new Set<string>();
+      const rows = await runCriterionOnLeads(criterion, leadIds, identity, researched);
+      if (researched.size > 0) declareRunOutcomes(companyResearchedDeclaration({ orgId, runId: identity.runId, domains: [...researched] }));
       await closeRun(identity, true);
       const total = await getRunTotalCents(identity.runId, orgId);
       res.json({

@@ -49,6 +49,7 @@ import type { RecentlyEmailedScope, RecentlyEmailedWindow } from "./recently-ema
 import { assertRecentlyEmailedReadable, leadRecentlyEmailed } from "./recently-emailed.js";
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { noteLeadFound } from "./outcome-triggers.js";
+import { declareRunOutcomes, leadFoundDeclaration } from "./run-outcomes.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 import { prepareNamedServe, type NamedLeadRequest } from "./named-lead-serve.js";
 
@@ -515,6 +516,11 @@ export async function pullNext(
     // The person was FOUND for this brand and offer: its `lead_found` outcome trigger rings campaign-service's door
     // once (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015). Not awaited: it never blocks, slows or fails the serve.
     noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, campaignId: params.campaignId, offerId });
+    // The serve run PRODUCED this lead_found (and consumed the email check it handed out): stated at runs-service so the
+    // run's cost lands on the outcome (run-outcomes.ts, COST-ACCOUNTING-1023-P1). Not awaited, never fails the serve.
+    if (params.runId) {
+      declareRunOutcomes(leadFoundDeclaration({ orgId: params.orgId, runId: params.runId, leadId, emailChecked: verificationVerdict !== null }));
+    }
 
     // Fresh contacts only: a person the brand emailed inside the window is not handed out. Already bought and filed
     // above, so nothing is lost: this campaign's paid pool (or the source's stock) hands them out later, filtered the

@@ -1206,6 +1206,23 @@ export const triggerEventOutbox = pgTable(
   (table) => [index("idx_trigger_event_outbox_due").on(table.nextAttemptAt)],
 );
 
+/** Run outcome declarations runs-service has not taken yet (run-outcomes.ts, COST-ACCOUNTING-1023-P1). Transient queue. */
+export const runOutcomeOutbox = pgTable(
+  "run_outcome_outbox",
+  {
+    idempotencyKey: text("idempotency_key").primaryKey(),
+    orgId: text("org_id").notNull(),
+    runId: uuid("run_id").notNull(),
+    declaration: jsonb("declaration").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    refusedAt: timestamp("refused_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_run_outcome_outbox_due").on(table.nextAttemptAt)],
+);
+
 /**
  * Every outcome reach this service recorded for a person and what its OUTCOME TRIGGER did at campaign-service
  * (migration 0094, EVERY-OUTCOME-FIRES-1015; src/lib/outcome-triggers.ts). ONCE per (org, brand, offer, step,

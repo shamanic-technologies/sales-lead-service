@@ -14,6 +14,7 @@ import {
   criterionKey,
   judge,
   listCriteria,
+  noteResearch,
   observe,
   probeLabel,
   probeOf,
@@ -88,9 +89,14 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R
  * Run one criterion on these leads. Leads at the same company are checked ONCE (one domain, one
  * observation, one verdict): the first pays, the others read it back as `reused`.
  */
-export async function runCriterionOnLeads(criterion: QualificationCriterionRow, leadIds: string[], identity: SpendIdentity): Promise<SampleRow[]> {
+export async function runCriterionOnLeads(
+  criterion: QualificationCriterionRow,
+  leadIds: string[],
+  identity: SpendIdentity,
+  researched?: Set<string>,
+): Promise<SampleRow[]> {
   const spec = probeOf(criterion);
-  const deps: QualificationDeps = { meter: new TregMeter(identity), identity };
+  const deps: QualificationDeps = { meter: new TregMeter(identity), identity, ...(researched ? { researched } : {}) };
   const leads = await buildFullLeadsBatch(leadIds);
   const microCents = spec.kind === "treg" ? await priceCentsPerUnit(TREG_COST_NAME) : 0;
 
@@ -127,6 +133,7 @@ export async function runCriterionOnLeads(criterion: QualificationCriterionRow, 
     const subject = subjectFromOrganization(org)!;
     const observed = await observe(spec, subject, org, deps);
     const judged = await judge({ question: criterion.question, probe: spec }, observed.observation, subject, deps);
+    noteResearch(deps, subject.domain, observed, judged);
     for (const lead of group) {
       await recordCheck({ criterion, subject: `lead:${lead.leadId}`, domain: subject.domain, verdictId: judged.verdict.id, reason: judged.verdict.reason, runId: identity.runId });
     }

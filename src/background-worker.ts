@@ -23,6 +23,7 @@ import { startTimelineFactsWorker } from "./lib/timeline-facts.js";
 import { startOutreachFactFeedWorker } from "./lib/outreach-fact-feed.js";
 import { startSocialEngagementsWorker } from "./lib/social-engagements.js";
 import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
+import { startRunOutcomeOutboxWorker } from "./lib/run-outcomes.js";
 import { startOutcomeTriggerWorker } from "./lib/outcome-triggers.js";
 import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
 import { startHumanEventsWorker } from "./lib/human-events.js";
@@ -63,6 +64,8 @@ startSocialEngagementsWorker();
 startBrandSignupsWorker(({ orgId, brandId }) => syncBrandOnce(orgId, brandId));
 // Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
+// Redelivers every run outcome declaration runs-service has not taken yet (run-outcomes.ts, COST-ACCOUNTING-1023-P1).
+startRunOutcomeOutboxWorker();
 // Every outcome a person reaches (CRM fact, outcome ledger, booking call) rings its outcome trigger at campaign-service
 // once, and every undelivered ring is retried (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015).
 startOutcomeTriggerWorker();
