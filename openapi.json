@@ -14183,6 +14183,8 @@
                   "enum": [
                     "apollo_person_id",
                     "email",
+                    "human_id",
+                    "phone",
                     "linkedin_url",
                     null
                   ]
@@ -14230,6 +14232,16 @@
                   "type": "string",
                   "minLength": 1,
                   "description": "A registered email, compared case-folded. Checked second."
+                },
+                "humanId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "human-service human id (a merged-away id is followed to its canonical human). Checked third. Not a uuid = matches nothing (the batch is not refused)."
+                },
+                "phone": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "An E.164 phone (separators and a 00 prefix accepted), matched against registered phone contact methods. Checked fourth. Not E.164 = matches nothing (the batch is not refused)."
                 },
                 "linkedinUrl": {
                   "type": "string",
@@ -25459,7 +25471,7 @@
     "/internal/leads/ids/resolve": {
       "post": {
         "summary": "Which lead is each person, for an org (internal, service-auth)",
-        "description": "For a service whose paid step ran BEFORE the person was a lead (apollo-service enrichment / verification under our serve) to name the person's lead id when it declares its outcome occurrences at runs-service (subjectService `lead-service`, subjectId = leadId; COST-ACCOUNTING-1023). Nothing is minted: `leadId: null` = not a lead of that org (yet): ask again later; a person never kept never resolves. A lead answers only when it holds a lead row of `orgId` (and of one of `brandIds` when given). Match order: apolloPersonId > email (case-folded) > LinkedIn handle; several leads on one key = null. Read only, answers in the order asked, up to 1000 items.",
+        "description": "For a service whose paid step ran BEFORE the person was a lead (apollo-service enrichment / verification under our serve) to name the person's lead id when it declares its outcome occurrences at runs-service (subjectService `lead-service`, subjectId = leadId; COST-ACCOUNTING-1023). Nothing is minted: `leadId: null` = not a lead of that org (yet): ask again later; a person never kept never resolves. A lead answers only when it holds a lead row of `orgId` (and of one of `brandIds` when given). Match order: apolloPersonId > email (case-folded) > humanId > phone (E.164) > LinkedIn handle; several leads on one key = null; an unreadable humanId/phone matches nothing (never a 400; only an item naming no key at all is). Read only, answers in the order asked, up to 1000 items.",
         "parameters": [
           {
             "in": "header",
