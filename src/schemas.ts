@@ -9971,6 +9971,23 @@ registry.registerPath({
       schema: { type: "string" as const },
     })),
     { in: "query" as const, name: "limit", required: false, schema: { type: "integer" as const, minimum: 1, maximum: 200 } },
+    {
+      in: "query" as const,
+      name: "sort",
+      required: false,
+      description:
+        "The order rows come back in. ABSENT => most recent activity first (`lastActivityAt` newest first), exactly as " +
+        "this endpoint has always answered, same cursor. `company_asc` / `company_desc` => people of ONE company side by " +
+        "side: companies by name A-Z / Z-A (case-insensitive; the company's domain when its name is unknown, then its id, " +
+        "so two companies sharing a name never interleave), and inside a company the most recent activity first; rows " +
+        "with no company come LAST in both directions (a company known only by its id just before them). `stage_desc` / " +
+        "`stage_asc` => Lifecycle rung highest first / lowest first (the `lifecycleLadder` rank), rows on no rung yet " +
+        "LAST in both directions, most recent activity first inside a rung. `last_touch_asc` => oldest activity first. " +
+        "Every order ends on the row's own key, so it is TOTAL: a `limit` + `cursor` walk visits every row exactly once, " +
+        "no gaps, no repeats. A cursor answers only the sort it was issued for (another sort's cursor = 400). An unknown " +
+        "value is a 400.",
+      schema: { type: "string" as const, enum: ["company_asc", "company_desc", "stage_desc", "stage_asc", "last_touch_asc"] },
+    },
   ],
   responses: {
     200: {

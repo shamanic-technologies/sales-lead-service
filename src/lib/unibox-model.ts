@@ -719,21 +719,146 @@ function filterSql(scope: Scope, f: UniboxFilters) {
   return sql.join(parts, sql` AND `);
 }
 
-/** One page of the brand's Unibox, most recent activity first. */
-export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { limit: number; cursor: string | null }): Promise<UniboxPage> {
+/**
+ * The orders a caller may name besides the default (PEOPLE-SORT-BY-COMPANY-1023). Absent = most recent activity first,
+ * served exactly as before (same cursor). Each named order is TOTAL: it ends on the row's key (human, company), so a
+ * cursor walk visits every row once.
+ *   company_asc / company_desc  people of one company side by side: companies by name (case-folded; domain when the
+ *                               name is unknown) then by key, so two companies sharing a name never interleave; inside
+ *                               a company, most recent activity first. Rows with no company come LAST in both directions.
+ *   stage_desc / stage_asc      Lifecycle rung (highest first / lowest first); rows on no rung yet come LAST in both.
+ *                               Inside a rung, most recent activity first.
+ *   last_touch_asc              oldest activity first (the default is the newest-first twin).
+ */
+export const UNIBOX_SORTS = ["company_asc", "company_desc", "stage_desc", "stage_asc", "last_touch_asc"] as const;
+export type UniboxSort = (typeof UNIBOX_SORTS)[number];
+
+type SortKey = { expr: ReturnType<typeof sql>; dir: "asc" | "desc"; cast: string };
+
+/** Every sort key is NOT NULL (coalesced), so a row comparison on them is exact. */
+function sortKeys(sort: UniboxSort): SortKey[] {
+  const at = { expr: sql`u.last_activity_at`, cast: "timestamptz" };
+  const human = { expr: sql`u.human_id`, cast: "uuid" };
+  const company = { expr: sql`u.company_key`, cast: "text" };
+  const cname = sql`lower(coalesce(nullif(u.company_name, ''), nullif(u.company_domain, ''), ''))`;
+  // 0 = a company we can name, 1 = a company known only by its key, 2 = no company.
+  const crank = sql`(CASE WHEN u.company_key = '' THEN 2 WHEN coalesce(nullif(u.company_name, ''), nullif(u.company_domain, '')) IS NULL THEN 1 ELSE 0 END)`;
+  switch (sort) {
+    case "company_asc":
+    case "company_desc": {
+      const dir = sort === "company_asc" ? "asc" : "desc";
+      return [
+        { expr: crank, dir: "asc", cast: "int" },
+        { expr: cname, dir, cast: "text" },
+        { ...company, dir },
+        { ...at, dir: "desc" },
+        { ...human, dir: "desc" },
+      ];
+    }
+    case "stage_desc":
+    case "stage_asc":
+      return [
+        { expr: sql`(u.lifecycle_rank IS NULL)::int`, dir: "asc", cast: "int" },
+        { expr: sql`coalesce(u.lifecycle_rank, 0)`, dir: sort === "stage_desc" ? "desc" : "asc", cast: "int" },
+        { ...at, dir: "desc" },
+        { ...human, dir: "desc" },
+        { ...company, dir: "desc" },
+      ];
+    case "last_touch_asc":
+      return [
+        { ...at, dir: "asc" },
+        { ...human, dir: "asc" },
+        { ...company, dir: "asc" },
+      ];
+  }
+}
+
+/** Inside the page statement (`u`) the keys are their expressions; over the page CTE, its `sk<i>` columns. */
+function sortOrderSql(keys: SortKey[], alias: string) {
+  return sql.join(
+    keys.map((k, i) => sql`${alias === "u" ? k.expr : sql.raw(`${alias}.sk${i}`)} ${sql.raw(k.dir === "asc" ? "ASC" : "DESC")}`),
+    sql`, `,
+  );
+}
+
+/** Rows strictly after `values` in the order `keys` (mixed directions: written out lexicographically). */
+function sortAfterSql(keys: SortKey[], values: string[]) {
+  const ors = keys.map((_, i) => {
+    const eqs = keys.slice(0, i).map((k, j) => sql`${k.expr} = ${values[j]}::${sql.raw(k.cast)}`);
+    const k = keys[i];
+    const cmp = sql`${k.expr} ${sql.raw(k.dir === "asc" ? ">" : "<")} ${values[i]}::${sql.raw(k.cast)}`;
+    return sql`(${sql.join([...eqs, cmp], sql` AND `)})`;
+  });
+  return sql`AND (${sql.join(ors, sql` OR `)})`;
+}
+
+function encodeSortCursor(sort: UniboxSort, values: string[]): string {
+  return Buffer.from(JSON.stringify({ sort, values })).toString("base64url");
+}
+
+function decodeSortCursor(c: string, sort: UniboxSort, size: number): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(c, "base64url").toString("utf8"));
+  } catch {
+    throw new UniboxCursorError("cursor is not one this endpoint issued");
+  }
+  const p = parsed as { sort?: unknown; values?: unknown };
+  if (!p || typeof p !== "object" || Array.isArray(p)) throw new UniboxCursorError("cursor is not one this endpoint issued");
+  if (p.sort !== sort) throw new UniboxCursorError(`cursor was issued for another sort; ask again without a cursor`);
+  if (!Array.isArray(p.values) || p.values.length !== size || p.values.some((v) => typeof v !== "string")) {
+    throw new UniboxCursorError("cursor is not one this endpoint issued");
+  }
+  return p.values as string[];
+}
+
+/** One page of the brand's Unibox, most recent activity first unless `sort` names another order. */
+export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { limit: number; cursor: string | null; sort?: UniboxSort }): Promise<UniboxPage> {
+  if (page.sort === undefined) {
+    // The default order, unchanged: (last_activity_at, human, company) newest first, the cursor it always issued.
+    const after = page.cursor === null ? null : decodeCursor(page.cursor);
+    const keyset =
+      after === null ? sql`` : sql`AND (u.last_activity_at, u.human_id, u.company_key) < (${after.at}::timestamptz, ${after.human}::uuid, ${after.company})`;
+    return readPage(scope, f, page.limit, {
+      keyset,
+      sortColumns: sql``,
+      order: (alias) => sql.raw(`${alias}.last_activity_at DESC, ${alias}.human_id DESC, ${alias}.company_key DESC`),
+      cursorOf: (last) => encodeCursor(last.item.lastActivityAt, last.item.humanId, last.item.companyKey),
+    });
+  }
+  const sort = page.sort;
+  const keys = sortKeys(sort);
+  const after = page.cursor === null ? null : decodeSortCursor(page.cursor, sort, keys.length);
+  return readPage(scope, f, page.limit, {
+    keyset: after === null ? sql`` : sortAfterSql(keys, after),
+    // Each key rides the page as text (`sk<i>`), so the next cursor holds the exact value the database compared.
+    sortColumns: sql`, ${sql.join(keys.map((k, i) => sql`${k.expr} AS ${sql.raw(`sk${i}`)}, (${k.expr})::text AS ${sql.raw(`skt${i}`)}`), sql`, `)}`,
+    order: (alias) => sortOrderSql(keys, alias),
+    cursorOf: (last) => encodeSortCursor(sort, keys.map((_, i) => String(last.raw[`skt${i}`]))),
+  });
+}
+
+async function readPage(
+  scope: Scope,
+  f: UniboxFilters,
+  limit: number,
+  o: {
+    keyset: ReturnType<typeof sql>;
+    sortColumns: ReturnType<typeof sql>;
+    order: (alias: string) => ReturnType<typeof sql>;
+    cursorOf: (last: { item: UniboxListRow; raw: Record<string, unknown> }) => string;
+  },
+): Promise<UniboxPage> {
   const catalogue = await loadLifecycleCatalogue();
   const where = filterSql(scope, f);
-  const after = page.cursor === null ? null : decodeCursor(page.cursor);
-  const keyset =
-    after === null ? sql`` : sql`AND (u.last_activity_at, u.human_id, u.company_key) < (${after.at}::timestamptz, ${after.human}::uuid, ${after.company})`;
   // The campaigns that reached each row's person ride the page's own statement (one trip, only the page's rows):
   // their `leads_campaigns` filings at the brand, inside the read's scope when one is given.
   const inScope = f.campaignIds === undefined ? sql`` : sql`AND lc.campaign_id = ANY(${sql.param([...f.campaignIds])}::text[])`;
   const [rows, totals, built, displays] = await Promise.all([
     db.execute(sql`
       WITH page AS (
-        SELECT u.* FROM unibox_rows u WHERE ${where} ${keyset}
-        ORDER BY u.last_activity_at DESC, u.human_id DESC, u.company_key DESC LIMIT ${page.limit + 1}
+        SELECT u.* ${o.sortColumns} FROM unibox_rows u WHERE ${where} ${o.keyset}
+        ORDER BY ${o.order("u")} LIMIT ${limit + 1}
       )
       SELECT page.*, (
         SELECT coalesce(json_agg(json_build_object('campaignId', x.campaign_id, 'servedAt', x.served_at)), '[]'::json)
@@ -744,7 +869,7 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
         ) x
       ) AS row_campaigns
       FROM page
-      ORDER BY page.last_activity_at DESC, page.human_id DESC, page.company_key DESC
+      ORDER BY ${o.order("page")}
     `) as unknown as Promise<Array<Record<string, unknown>>>,
     db.execute(sql`SELECT count(*)::int AS n FROM unibox_rows u WHERE ${where}`) as unknown as Promise<Array<{ n: number }>>,
     db.execute(sql`SELECT max(updated_at) AS at FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}`) as unknown as Promise<Array<{ at: Ts | null }>>,
@@ -754,8 +879,8 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
       return null;
     }),
   ]);
-  const more = rows.length > page.limit;
-  const items: UniboxListRow[] = rows.slice(0, page.limit).map((r) => {
+  const more = rows.length > limit;
+  const items: UniboxListRow[] = rows.slice(0, limit).map((r) => {
     const filings = ((r.row_campaigns as Array<{ campaignId: string; servedAt: Ts | null }> | null) ?? []).map((c) => ({
       campaignId: String(c.campaignId),
       servedAt: iso(c.servedAt),
@@ -767,7 +892,8 @@ export async function readUniboxPage(scope: Scope, f: UniboxFilters, page: { lim
     };
   });
   const last = items[items.length - 1];
-  return { rows: items, total: totals[0]?.n ?? 0, nextCursor: more && last ? encodeCursor(last.lastActivityAt, last.humanId, last.companyKey) : null, builtAt: iso(built[0]?.at ?? null) };
+  const nextCursor = more && last ? o.cursorOf({ item: last, raw: rows[items.length - 1] }) : null;
+  return { rows: items, total: totals[0]?.n ?? 0, nextCursor, builtAt: iso(built[0]?.at ?? null) };
 }
 
 export interface UniboxLifecycleCounts {

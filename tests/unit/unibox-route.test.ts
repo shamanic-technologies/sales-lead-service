@@ -17,6 +17,7 @@ vi.mock("../../src/lib/unibox-scope.js", () => ({
   UniboxScopeUnavailableError,
 }));
 vi.mock("../../src/lib/unibox-model.js", () => ({
+  UNIBOX_SORTS: ["company_asc", "company_desc", "stage_desc", "stage_asc", "last_touch_asc"],
   loadLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map() }),
   readUniboxPage: (...a: unknown[]) => readUniboxPage(...a),
   readUniboxLead: (...a: unknown[]) => readUniboxLead(...a),
@@ -90,6 +91,16 @@ describe("GET /orgs/leads/unibox", () => {
     expect(res.body.code).toBe("scope_unavailable");
     expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&offerId=`)).status).toBe(400);
     expect(readUniboxPage).not.toHaveBeenCalled();
+  });
+
+  it("sort (PEOPLE-SORT-BY-COMPANY-1023): a named order is passed down; absent passes no sort key; unknown = 400", async () => {
+    readUniboxPage.mockResolvedValue({ rows: [], total: 0, nextCursor: null, builtAt: null });
+    expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&sort=company_asc&limit=20`)).status).toBe(200);
+    expect(readUniboxPage.mock.calls[0][2]).toEqual({ limit: 20, cursor: null, sort: "company_asc" });
+    expect((await get(`/orgs/leads/unibox?brandId=${BRAND}`)).status).toBe(200);
+    expect(readUniboxPage.mock.calls[1][2]).toEqual({ limit: 50, cursor: null });
+    expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&sort=activity`)).status).toBe(400);
+    expect(readUniboxPage).toHaveBeenCalledTimes(2);
   });
 
   it("a foreign cursor = 400; a read failure = 500 (never an empty page)", async () => {
