@@ -22,6 +22,8 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *     declares that occurrence on its own verify run once the lead exists: it resolves the id through
  *     `POST /internal/leads/ids/resolve`). Bonus checks, screening judgments and every child run that declares
  *     nothing roll into the lead-serve run's `lead_found`.
+ *   - every meeting booked / attended and sale our outreach caused -> `meeting_booked` / `meeting_attended` /
+ *     `paid_client` on the brand's recording run of the day (`factOutcomeDeclaration`, outcome-fact-declarations.ts).
  * Not declared, on purpose: qualification previews/samples/suggestions (sample companies that are not leads,
  * onboarding support), relationship sweeps (tags, not catalogue outcomes). No run here judges a positive reply
  * (instantly-service owns reply verdicts; a CRM form is crm-service's fact, no spend), so no `conversation`.
@@ -76,6 +78,23 @@ export function companyResearchedDeclaration(input: { orgId: string; runId: stri
   };
 }
 
+/**
+ * A fact our outreach caused (outcome-fact-declarations.ts): a meeting booked / attended or a sale of the person,
+ * `meeting_booked` / `meeting_attended` / `paid_client` produced on the brand's recording run of the day, consuming
+ * the one outcome it came from. Subject = the lead, both ways.
+ */
+export const FACT_OUTCOME_KEYS = ["meeting_booked", "meeting_attended", "paid_client"] as const;
+export type FactOutcomeKey = (typeof FACT_OUTCOME_KEYS)[number];
+
+export function factOutcomeDeclaration(input: { orgId: string; runId: string; leadId: string; outcomeKey: FactOutcomeKey; consumedOutcomeKey: string }): RunOutcomeDeclaration {
+  return {
+    orgId: input.orgId,
+    runId: input.runId,
+    produced: [leadSubject(input.outcomeKey, input.leadId)],
+    consumed: [leadSubject(input.consumedOutcomeKey, input.leadId)],
+  };
+}
+
 export function declarationKey(d: RunOutcomeDeclaration): string {
   const first = d.produced[0] ?? d.consumed[0];
   if (!first) throw new Error(`run ${d.runId}: an outcome declaration states nothing`);
@@ -121,9 +140,18 @@ function describe(d: RunOutcomeDeclaration): string {
 
 /** Declare a run's outcomes. Called WITHOUT await; never throws, never rejects. A failed delivery lands in the outbox. */
 export function declareRunOutcomes(d: RunOutcomeDeclaration): void {
-  void (async () => {
+  void declareRunOutcomesNow(d);
+}
+
+/**
+ * Same, awaitable (a background sweep): resolves once runs-service took it or the outbox holds it. Never rejects.
+ * Answers what happened now: `delivered`, `retry` (queued for redelivery), `refused` (kept, never resent) or `lost`
+ * (neither delivered nor queued: the caller must ask again).
+ */
+export function declareRunOutcomesNow(d: RunOutcomeDeclaration): Promise<DeliveryResult["kind"] | "lost"> {
+  return (async () => {
     const result = await deliverRunOutcomes(d);
-    if (result.kind === "delivered") return;
+    if (result.kind === "delivered") return result.kind;
     console.error(`[lead-service] run outcomes NOT declared (${result.kind}), kept in run_outcome_outbox: ${describe(d)}: ${result.error}`);
     const now = new Date();
     await db
@@ -139,8 +167,10 @@ export function declareRunOutcomes(d: RunOutcomeDeclaration): void {
         refusedAt: result.kind === "refused" ? now : null,
       })
       .onConflictDoNothing();
-  })().catch((err) => {
+    return result.kind;
+  })().catch((err): "lost" => {
     console.error(`[lead-service] run outcomes LOST (outbox write failed): ${describe(d)}:`, err);
+    return "lost";
   });
 }
 

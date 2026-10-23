@@ -229,7 +229,18 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       { table: "hot_lead_brands", touchesUpdatedAt: false },
       { table: "hot_lead_states", touchesUpdatedAt: true },
       { table: "hot_lead_fires", touchesUpdatedAt: false },
+      // Which outcome facts of the brand's people were declared to the cost ledger (COST-ACCOUNTING-1023-P1): once per
+      // person and outcome, so it moves with them. Their recording runs (outcome_recording_runs) stay: a run is its org's.
+      { table: "outcome_fact_declarations", touchesUpdatedAt: false },
     ];
+    // A declaration the target already holds for the same person and outcome is the target's: drop the source copy.
+    await tx.execute(sql`
+      DELETE FROM outcome_fact_declarations s
+      WHERE ${brandScalarPending}
+        AND EXISTS (SELECT 1 FROM outcome_fact_declarations t
+                    WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id AND t.outcome_key = s.outcome_key
+                      AND (t.org_id, t.brand_id) IS DISTINCT FROM (s.org_id, s.brand_id))
+    `);
     // A date the target already holds for the same lead is the target's own: drop the source copy.
     await tx.execute(sql`
       DELETE FROM lead_followup_dates s
