@@ -55,6 +55,7 @@ const BRAND_SCALAR_TABLES = [
   "hot_lead_brands",
   "hot_lead_states",
   "hot_lead_fires",
+  "outcome_fact_declarations",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
@@ -226,6 +227,9 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO hot_lead_fires (org_id, brand_id, human_id, episode, offer_id, status, payload)
       VALUES (${org}, ${brand}, ${human}::uuid, 1, ${randomUUID()}, 'delivered', '{}'::jsonb)`);
+    await db.execute(sql`
+      INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis)
+      VALUES (${org}, ${brand}, ${leadId}::uuid, 'paid_client', ${randomUUID()}::uuid, ${randomUUID()}::uuid, 'conversation', 'no_evidence')`);
     await db.execute(sql`
       INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, p_wants_business, thread_seq, model, run_id)
       VALUES (${org}, ${brand}, ${human}::uuid, 0.9, 1, 'jev-test', 'run')`);
