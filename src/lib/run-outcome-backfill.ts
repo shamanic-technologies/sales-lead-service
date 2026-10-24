@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import { errorMessage } from "./db-error.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { crmIdentifiedRelationKeys } from "./crm-lead-identified.js";
-import { leadFoundDeclaration, type OutcomeItem } from "./run-outcomes.js";
+import { companyResearchedDeclaration, leadFoundDeclaration, type OutcomeItem } from "./run-outcomes.js";
 
 /**
  * THE OUTCOMES OF OUR PAST RUNS, DECLARED AS IF ON TIME (COST-BACKFILL-1023-LEAD, owner 2026-10-23: « chaque service
@@ -25,6 +25,11 @@ import { leadFoundDeclaration, type OutcomeItem } from "./run-outcomes.js";
  *      finding run is named by the serve's own idempotent answer (`idempotency_cache`, keyed on the CALLER's run, the
  *      answer naming the lead) AND confirmed by runs-service: the caller run's `lead-serve` child whose window holds the
  *      row's `served_at`. Both or nothing.
+ * Past qualification PREVIEWS (COST-SUPPORT-1024-LEAD): a preview run paid research on sample companies before the live
+ * declaration existed. Its `qualification_previews` row names the run; the companies it paid NEW research for are the
+ * domains of the CHARGED observations or the verdicts that run recorded (the live `noteResearch` rule: a charged probe,
+ * a new judgment). `company_researched` per such domain, the live builder. A preview that
+ * reused everything researched nothing new: not declared.
  * Not a find, never declared: a stock hand-over, a "Lead follow-up due" or contacted-prospects population (they bought
  * nobody), a journalist filed but not kept (a loss, as live), a run that failed or found nobody (its spend stays
  * "produced none": the truth). Before 2026-05-08 lead-service kept no serve rows (the buffer pipeline wrote none), so
@@ -303,6 +308,23 @@ export async function attachCrmRelationKeys(
   return finds.map((f) => ({ ...f, crmRelationKey: keys.get(f) ?? null }));
 }
 
+/** Past preview runs and the companies each paid NEW research for (observation or verdict recorded by the run). */
+export async function loadPastPreviewResearch(scope: BackfillScope = {}): Promise<BackfillRun[]> {
+  const rows = (await db.execute(sql`
+    SELECT lower(p.run_id) AS run_id, p.org_id, array_agg(DISTINCT d.domain ORDER BY d.domain) AS domains
+      FROM qualification_previews p
+      JOIN (SELECT run_id, domain FROM qualification_observations WHERE run_id IS NOT NULL AND vendor_cost_micro > 0
+            UNION SELECT run_id, domain FROM qualification_verdicts WHERE run_id IS NOT NULL) d ON d.run_id = p.run_id
+     WHERE p.run_id ~* ${UUID_RE_SQL} ${orgScopeSql("p.org_id", scope)}
+     GROUP BY 1, 2
+     ORDER BY 1
+  `)) as unknown as Array<{ run_id: string; org_id: string; domains: string[] }>;
+  return rows.map((r) => {
+    const d = companyResearchedDeclaration({ orgId: r.org_id, runId: r.run_id, domains: r.domains });
+    return { runId: r.run_id, orgId: r.org_id, produced: d.produced, consumed: d.consumed };
+  });
+}
+
 export interface BatchOutcome {
   recorded: number;
   alreadyRecorded: number;
@@ -376,6 +398,8 @@ export interface BackfillReport {
   since: string;
   finds: Record<FindSource, number>;
   repointedUnconfirmed: number;
+  /** Past preview runs declaring `company_researched`, and the companies they name. */
+  previewResearch: { runs: number; companies: number };
   runs: number;
   occurrences: { produced: number; consumed: number };
   batches: number;
@@ -393,7 +417,8 @@ export async function runOutcomeBackfill(
   const repointed = await resolveRepointedFinds(await loadRepointedFindCandidates(deps.scope), deps.lookup);
   // A run named by both a row of its own and a re-pointed find declares each lead once (groupFindsByRun).
   const finds = await attachCrmRelationKeys([...direct, ...repointed.finds], deps.relationLookup);
-  const runs = groupFindsByRun(finds);
+  const previews = await loadPastPreviewResearch(deps.scope);
+  const runs = [...groupFindsByRun(finds), ...previews];
   const batches = chunkBackfillRuns(runs);
   const report: BackfillReport = {
     dryRun: opts.dryRun,
@@ -404,6 +429,7 @@ export async function runOutcomeBackfill(
       repointed: repointed.finds.length,
     },
     repointedUnconfirmed: repointed.unconfirmed,
+    previewResearch: { runs: previews.length, companies: previews.reduce((n, r) => n + r.produced.length, 0) },
     runs: runs.length,
     occurrences: { produced: runs.reduce((n, r) => n + r.produced.length, 0), consumed: runs.reduce((n, r) => n + r.consumed.length, 0) },
     batches: batches.length,
