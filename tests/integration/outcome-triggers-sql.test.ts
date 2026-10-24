@@ -486,4 +486,41 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     expect(row.status).toBe("pending");
     expect(row.lastError).toMatch(/prior occurrence unreadable.*503/);
   });
+
+  it("MERGE-NO-REFIRE: a fact crm-service re-states after a merge never fires again; a new visit still fires", async () => {
+    const visit = { occurredAt: new Date(Date.now() - 60 * 60_000), source: "posthog", sourceRef: `visit-${randomUUID()}` };
+    await crmFact("website_visit", addr("visitor"), visit);
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours().map((c) => c.body.triggerId)).toEqual(["website_visited"]);
+
+    // The visitor is merged into a lead: crm-service withdraws the copy and re-issues the SAME visit under the lead.
+    const leadId = await seedLead("merged");
+    await crmFact("website_visit", addr("merged"), { ...visit, emails: [addr("merged"), addr("visitor")] });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours()).toHaveLength(1);
+    const restated = (await rowsOf({ step: "website_visit" })).filter((r) => r.skipReason === "restated_action");
+    expect(restated).toHaveLength(1);
+    expect(restated[0].status).toBe("skipped");
+
+    // A genuinely new visit by the merged person fires.
+    await crmFact("website_visit", addr("merged"), { source: "posthog", sourceRef: `visit-${randomUUID()}` });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours().map((c) => [c.body.triggerId, c.body.leadId])).toEqual([
+      ["website_visited", undefined],
+      ["website_visited", leadId],
+    ]);
+  });
+
+  it("MERGE-NO-REFIRE: a visit that could not name its person fires once, on its first nameable copy", async () => {
+    const visit = { occurredAt: new Date(Date.now() - 60 * 60_000), source: "posthog", sourceRef: `visit-${randomUUID()}` };
+    // No address on the first copy: the sweep never reads it as a reach.
+    await crmFact("website_visit", addr("anon"), { ...visit, emails: [] });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours()).toEqual([]);
+
+    await crmFact("website_visit", addr("named"), visit);
+    await crmFact("website_visit", addr("named"), { ...visit, emails: [addr("named"), addr("again")] });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours().map((c) => c.body.triggerId)).toEqual(["website_visited"]);
+  });
 });
