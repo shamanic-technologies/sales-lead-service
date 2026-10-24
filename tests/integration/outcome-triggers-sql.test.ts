@@ -488,7 +488,8 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
   });
 
   it("MERGE-NO-REFIRE: a fact crm-service re-states after a merge never fires again; a new visit still fires", async () => {
-    const visit = { occurredAt: new Date(Date.now() - 60 * 60_000), source: "posthog", sourceRef: `visit-${randomUUID()}` };
+    // Dated after arming (no back-fill), same instant on every copy.
+    const visit = { occurredAt: new Date(), source: "posthog", sourceRef: `visit-${randomUUID()}` };
     await crmFact("website_visit", addr("visitor"), visit);
     await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours().map((c) => c.body.triggerId)).toEqual(["website_visited"]);
@@ -512,7 +513,8 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
   });
 
   it("MERGE-NO-REFIRE: a visit that could not name its person fires once, on its first nameable copy", async () => {
-    const visit = { occurredAt: new Date(Date.now() - 60 * 60_000), source: "posthog", sourceRef: `visit-${randomUUID()}` };
+    // Dated after arming (no back-fill), same instant on every copy.
+    const visit = { occurredAt: new Date(), source: "posthog", sourceRef: `visit-${randomUUID()}` };
     // No address on the first copy: the sweep never reads it as a reach.
     await crmFact("website_visit", addr("anon"), { ...visit, emails: [] });
     await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
