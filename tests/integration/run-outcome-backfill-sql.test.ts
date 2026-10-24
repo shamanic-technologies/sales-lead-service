@@ -116,6 +116,52 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
       `);
     }
 
+    // LEDGER-HISTORY-1024: re-pointed, no cached answer names its finder. The ledger does: apollo's enrichment run,
+    // declaring email_found under this lead, is a child of exactly one of our lead-serve runs (ledgerRun).
+    const ledgerRun = randomUUID();
+    const enrichRun = randomUUID();
+    const viaLedger = await newLead("ledger@itest.example");
+    await row(viaLedger, { runId: randomUUID(), retryClaimedAt: new Date("2026-09-05T10:00:00Z"), statusDetails: "Served via audience l, email=ledger@itest.example" });
+    // Found twice (fb14dc76's shape in prod): its other find row names its own run, which our rows already credit.
+    // The ledger shows reveals under both serve runs; set aside the credited one, the other is the finder.
+    const foundTwice = await newLead("twice@itest.example");
+    const secondFindRun = randomUUID();
+    const firstFindRun = randomUUID();
+    const [enrichFirst, enrichSecond] = [randomUUID(), randomUUID()];
+    await row(foundTwice, { runId: randomUUID(), retryClaimedAt: new Date("2026-08-26T10:00:00Z"), statusDetails: "Served via audience t, email=twice@itest.example" });
+    await row(foundTwice, { runId: secondFindRun, statusDetails: "Served via audience t2, email=twice@itest.example" });
+    // Same, but two of our serve runs paid a reveal of the lead: not one, nothing declared.
+    const twoServes = await newLead("two-serves@itest.example");
+    await row(twoServes, { runId: randomUUID(), retryClaimedAt: new Date("2026-09-05T10:00:00Z"), statusDetails: "Served via audience l, email=two-serves@itest.example" });
+    const [enrichA, enrichB, serveA, serveB] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+    const heads = new Map([
+      [enrichFirst, { id: enrichFirst, parentRunId: firstFindRun, serviceName: "apollo-service", taskName: "enrichment", organizationId: orgId }],
+      [enrichSecond, { id: enrichSecond, parentRunId: secondFindRun, serviceName: "apollo-service", taskName: "enrichment", organizationId: orgId }],
+      [firstFindRun, { id: firstFindRun, parentRunId: null, serviceName: "lead-service", taskName: "lead-serve", organizationId: orgId }],
+      [secondFindRun, { id: secondFindRun, parentRunId: null, serviceName: "lead-service", taskName: "lead-serve", organizationId: orgId }],
+      [enrichRun, { id: enrichRun, parentRunId: ledgerRun, serviceName: "apollo-service", taskName: "enrichment", organizationId: orgId }],
+      [ledgerRun, { id: ledgerRun, parentRunId: randomUUID(), serviceName: "lead-service", taskName: "lead-serve", organizationId: orgId }],
+      [enrichA, { id: enrichA, parentRunId: serveA, serviceName: "apollo-service", taskName: "enrichment", organizationId: orgId }],
+      [enrichB, { id: enrichB, parentRunId: serveB, serviceName: "apollo-service", taskName: "enrichment", organizationId: orgId }],
+      [serveA, { id: serveA, parentRunId: null, serviceName: "lead-service", taskName: "lead-serve", organizationId: orgId }],
+      [serveB, { id: serveB, parentRunId: null, serviceName: "lead-service", taskName: "lead-serve", organizationId: orgId }],
+    ]);
+    const ledgerLookups = {
+      occurrences: async (leadIds: readonly string[]) =>
+        [
+          { leadId: viaLedger, outcomeKey: "email_found", runId: enrichRun, organizationId: orgId, serviceName: "apollo-service" },
+          { leadId: twoServes, outcomeKey: "email_found", runId: enrichA, organizationId: orgId, serviceName: "apollo-service" },
+          { leadId: twoServes, outcomeKey: "email_found", runId: enrichB, organizationId: orgId, serviceName: "apollo-service" },
+          { leadId: foundTwice, outcomeKey: "email_found", runId: enrichFirst, organizationId: orgId, serviceName: "apollo-service" },
+          { leadId: foundTwice, outcomeKey: "email_found", runId: enrichSecond, organizationId: orgId, serviceName: "apollo-service" },
+        ].filter((o) => leadIds.includes(o.leadId)),
+      run: async (id: string) => {
+        const h = heads.get(id);
+        if (!h) throw new Error(`unexpected run ${id}`);
+        return h;
+      },
+    };
+
     // Not finds.
     const handed = await newLead("handed@itest.example");
     await row(handed, { runId: randomUUID(), statusDetails: "Served from the stock of source campaign c (row r), email=handed@itest.example" });
@@ -137,13 +183,14 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
       return { status: 201, json: { recordedCount: 4, alreadyRecordedCount: 0, redatedCount: 0 }, text: "" };
     };
 
-    const report = await runOutcomeBackfill({ dryRun: false }, { post, lookup, scope: { orgId } });
-    expect(report.finds).toEqual({ direct: 4, archived: 1, repointed: 1 });
+    const report = await runOutcomeBackfill({ dryRun: false }, { post, lookup, ledgerLookups, scope: { orgId } });
+    expect(report.finds).toEqual({ direct: 5, archived: 1, repointed: 1, ledger: 2 });
     expect(report.repointedUnconfirmed).toBe(1);
+    expect(report.ledgerUnconfirmed).toBe(1);
 
     const sent = (bodies as Array<{ runs: Array<{ runId: string; produced: unknown[]; consumed?: unknown[]; occurredAt: string; redate: boolean }> }>).flatMap((b) => b.runs);
     const byRun = new Map(sent.map((r) => [r.runId, r]));
-    expect([...byRun.keys()].sort()).toEqual([findRun, checkedRun, archivedRun, originalRun, crmRun, crmPersonalRun].sort());
+    expect([...byRun.keys()].sort()).toEqual([findRun, checkedRun, archivedRun, originalRun, crmRun, crmPersonalRun, ledgerRun, firstFindRun, secondFindRun].sort());
     const lf = (leadId: string) => [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: leadId }];
     expect(byRun.get(findRun)).toEqual({ runId: findRun, produced: lf(plain), occurredAt: "run_started_at", redate: true });
     expect(byRun.get(checkedRun)).toEqual({
@@ -164,17 +211,21 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
     expect(byRun.get(archivedRun)?.produced).toEqual(lf(archived));
     expect(byRun.get(originalRun)?.produced).toEqual(lf(repointed));
     expect(byRun.has(retryRun)).toBe(false);
+    expect(byRun.get(ledgerRun)?.produced).toEqual(lf(viaLedger));
+    expect(byRun.has(serveA) || byRun.has(serveB)).toBe(false);
+    expect(byRun.get(firstFindRun)?.produced).toEqual(lf(foundTwice));
+    expect(byRun.get(secondFindRun)?.produced).toEqual(lf(foundTwice));
 
     // A re-run sends the same bytes (runs-service answers already_recorded: nothing new written there).
     const again: unknown[] = [];
-    await runOutcomeBackfill({ dryRun: false }, { post: async (b) => (again.push(b), { status: 200, json: { recordedCount: 0, alreadyRecordedCount: 4 }, text: "" }), lookup, scope: { orgId } });
+    await runOutcomeBackfill({ dryRun: false }, { post: async (b) => (again.push(b), { status: 200, json: { recordedCount: 0, alreadyRecordedCount: 4 }, text: "" }), lookup, ledgerLookups, scope: { orgId } });
     expect(again).toEqual(bodies);
 
     // A dry run declares nothing.
     const dry: unknown[] = [];
-    const dryReport = await runOutcomeBackfill({ dryRun: true }, { post: async (b) => (dry.push(b), { status: 201, json: {}, text: "" }), lookup, scope: { orgId } });
+    const dryReport = await runOutcomeBackfill({ dryRun: true }, { post: async (b) => (dry.push(b), { status: 201, json: {}, text: "" }), lookup, ledgerLookups, scope: { orgId } });
     expect(dry).toEqual([]);
-    expect(dryReport.runs).toBe(6);
+    expect(dryReport.runs).toBe(9);
   });
 
   it("names the one crm relation carrying the lead's email (company tie-break, withdrawn and untagged ignored)", async () => {
