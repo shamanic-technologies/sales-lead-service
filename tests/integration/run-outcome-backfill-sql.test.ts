@@ -7,6 +7,8 @@
  *   - a re-pointed find -> credited to the caller run's lead-serve child whose window holds served_at, never to the
  *     re-hand run now on the row;
  *   - a stock hand-over, a follow-up population, a journalist, a find before 2026-02-02 -> nothing;
+ *   - a find from the client's CRM -> also consumes crm-service's `lead_identified` on the crm relation carrying its
+ *     email (LEAD-IDENTIFIED-CONSUME-1024); a personal or withdrawn relation, or a non-CRM find, consumes nothing new;
  *   - a re-run declares the same bytes (runs-service answers already_recorded).
  * Every read is scoped to this file's org: the suite's files share one database.
  */
@@ -17,6 +19,7 @@ import { sql } from "drizzle-orm";
 const { db } = await import("../../src/db/index.js");
 const { leads, leadsCampaigns, leadContactMethods } = await import("../../src/db/schema.js");
 const { runOutcomeBackfill } = await import("../../src/lib/run-outcome-backfill.js");
+const { crmIdentifiedRelationKeys } = await import("../../src/lib/crm-lead-identified.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -26,11 +29,23 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
   const brandId = randomUUID();
   const createdLeads: string[] = [];
 
-  async function newLead(email?: string, verdict?: string): Promise<string> {
-    const [lead] = await db.insert(leads).values({ firstName: "Itest", lastName: "Backfill" }).returning({ id: leads.id });
+  async function newLead(email?: string, verdict?: string, source = "apollo", companyId?: string): Promise<string> {
+    const [lead] = await db.insert(leads).values({ firstName: "Itest", lastName: "Backfill", ...(companyId ? { companyId } : {}) }).returning({ id: leads.id });
     createdLeads.push(lead.id);
-    if (email) await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: email, source: "apollo", verificationVerdict: verdict ?? null });
+    if (email) await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: email, source, verificationVerdict: verdict ?? null });
     return lead.id;
+  }
+
+  /** A crm relation fact as crm-service's feed copies it (crm_registry_facts). Returns its fact id. */
+  async function relation(email: string, relationKey: string, over: { capacity?: string; tags?: string[]; companyId?: string } = {}): Promise<string> {
+    const factId = `itest-${randomUUID()}`;
+    const payload = { relationKey, capacity: over.capacity ?? "professional", tags: (over.tags ?? ["professional_to_brand"]).map((tag) => ({ tag })), companyId: over.companyId ?? null };
+    await db.execute(sql`
+      INSERT INTO crm_registry_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, raw)
+      VALUES (${factId}, ${String(Math.floor(Math.random() * 1e15) + 9e15)}::bigint, ${orgId}, ${brandId}, ${`person:${randomUUID()}`},
+              ARRAY[${email}]::text[], ARRAY[]::text[], 'relation', 'observed', 'crm', ${factId}, ${JSON.stringify(payload)}::jsonb, '{}'::jsonb)
+    `);
+    return factId;
   }
 
   async function row(leadId: string, over: Partial<typeof leadsCampaigns.$inferInsert>): Promise<string> {
@@ -43,6 +58,7 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
 
   afterAll(async () => {
     await db.execute(sql`DELETE FROM idempotency_cache WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM crm_registry_facts WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM requeued_serves WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM brand_journalists WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
@@ -60,6 +76,18 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
 
     const plain = await newLead("plain@itest.example");
     await row(plain, { runId: findRun, statusDetails: `Served via audience ${randomUUID()}, email=plain@itest.example` });
+
+    // From the client's CRM, identified by crm-service's registry: consumes its lead_identified.
+    const crmRun = randomUUID();
+    const crmRel = `rel:${randomUUID()}:pro`;
+    const crmLead = await newLead("crm@itest.example", undefined, "crm");
+    await row(crmLead, { runId: crmRun, statusDetails: "Served via audience c, email=crm@itest.example" });
+    await relation("crm@itest.example", crmRel);
+    // From the CRM, but crm-service's only relation for them is personal: nothing new consumed.
+    const crmPersonalRun = randomUUID();
+    const crmPersonal = await newLead("crm-personal@itest.example", undefined, "crm");
+    await row(crmPersonal, { runId: crmPersonalRun, statusDetails: "Served via audience c, email=crm-personal@itest.example" });
+    await relation("crm-personal@itest.example", `rel:${randomUUID()}:personal`, { capacity: "personal", tags: ["personal_friend"] });
 
     const checked = await newLead("checked@itest.example", "valid");
     await row(checked, { runId: checkedRun, statusReason: "source_found", statusDetails: "Lead served, email=checked@itest.example, leadId=x" });
@@ -104,12 +132,12 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
     };
 
     const report = await runOutcomeBackfill({ dryRun: false }, { post, lookup, scope: { orgId } });
-    expect(report.finds).toEqual({ direct: 2, archived: 1, repointed: 1 });
+    expect(report.finds).toEqual({ direct: 4, archived: 1, repointed: 1 });
     expect(report.repointedUnconfirmed).toBe(1);
 
     const sent = (bodies as Array<{ runs: Array<{ runId: string; produced: unknown[]; consumed?: unknown[]; occurredAt: string; redate: boolean }> }>).flatMap((b) => b.runs);
     const byRun = new Map(sent.map((r) => [r.runId, r]));
-    expect([...byRun.keys()].sort()).toEqual([findRun, checkedRun, archivedRun, originalRun].sort());
+    expect([...byRun.keys()].sort()).toEqual([findRun, checkedRun, archivedRun, originalRun, crmRun, crmPersonalRun].sort());
     const lf = (leadId: string) => [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: leadId }];
     expect(byRun.get(findRun)).toEqual({ runId: findRun, produced: lf(plain), occurredAt: "run_started_at", redate: true });
     expect(byRun.get(checkedRun)).toEqual({
@@ -119,6 +147,14 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
       occurredAt: "run_started_at",
       redate: true,
     });
+    expect(byRun.get(crmRun)).toEqual({
+      runId: crmRun,
+      produced: lf(crmLead),
+      consumed: [{ outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: crmRel }],
+      occurredAt: "run_started_at",
+      redate: true,
+    });
+    expect(byRun.get(crmPersonalRun)).toEqual({ runId: crmPersonalRun, produced: lf(crmPersonal), occurredAt: "run_started_at", redate: true });
     expect(byRun.get(archivedRun)?.produced).toEqual(lf(archived));
     expect(byRun.get(originalRun)?.produced).toEqual(lf(repointed));
     expect(byRun.has(retryRun)).toBe(false);
@@ -132,6 +168,47 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
     const dry: unknown[] = [];
     const dryReport = await runOutcomeBackfill({ dryRun: true }, { post: async (b) => (dry.push(b), { status: 201, json: {}, text: "" }), lookup, scope: { orgId } });
     expect(dry).toEqual([]);
-    expect(dryReport.runs).toBe(4);
+    expect(dryReport.runs).toBe(6);
+  });
+
+  it("names the one crm relation carrying the lead's email (company tie-break, withdrawn and untagged ignored)", async () => {
+    const company = randomUUID();
+    const single = await newLead("Single@itest.example", undefined, "crm");
+    const singleRel = `rel:${randomUUID()}:pro`;
+    await relation("single@itest.example", singleRel);
+
+    const tied = await newLead("tied@itest.example", undefined, "crm", company);
+    const tiedPro = `rel:${randomUUID()}:pro`;
+    const tiedOrg = `rel:${randomUUID()}:org:${company}`;
+    await relation("tied@itest.example", tiedPro);
+    await relation("tied@itest.example", tiedOrg, { companyId: company });
+
+    const twoAtCompany = await newLead("two@itest.example", undefined, "crm", company);
+    await relation("two@itest.example", `rel:${randomUUID()}:org:${company}`, { companyId: company });
+    await relation("two@itest.example", `rel:${randomUUID()}:org:${company}`, { companyId: company });
+
+    const withdrawn = await newLead("withdrawn@itest.example", undefined, "crm");
+    const gone = await relation("withdrawn@itest.example", `rel:${randomUUID()}:pro`);
+    await db.execute(sql`
+      INSERT INTO crm_registry_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, raw, withdrawn_of)
+      VALUES (${`itest-${randomUUID()}`}, ${String(Math.floor(Math.random() * 1e15) + 9e15)}::bigint, ${orgId}, ${brandId}, 'p', ARRAY[]::text[], ARRAY[]::text[],
+              'withdrawn', 'observed', 'crm', 'w', '{}'::jsonb, '{}'::jsonb, ${gone})
+    `);
+
+    const untagged = await newLead("untagged@itest.example", undefined, "crm");
+    await relation("untagged@itest.example", `rel:${randomUUID()}:pro`, { tags: ["professional_not_to_brand"] });
+
+    const otherBrand = await newLead("single2@itest.example", undefined, "crm");
+    await relation("single2@itest.example", `rel:${randomUUID()}:pro`);
+
+    const q = (leadId: string, brandIds = [brandId]) => ({ orgId, leadId, brandIds });
+    expect(await crmIdentifiedRelationKeys([q(single), q(tied), q(twoAtCompany), q(withdrawn), q(untagged), q(otherBrand, [randomUUID()])])).toEqual([
+      singleRel,
+      tiedOrg,
+      null,
+      null,
+      null,
+      null,
+    ]);
   });
 });

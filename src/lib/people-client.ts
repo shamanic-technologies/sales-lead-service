@@ -16,7 +16,8 @@ import { isCreditInsufficientError } from "./credit-errors.js";
  * returns someone new. lead-service just records the person and feeds it down.
  */
 
-export type PeopleProvider = "apollo" | "apify";
+/** `crm` = the client's own CRM (crm-service), served through the same gateway. */
+export type PeopleProvider = "apollo" | "apify" | "crm";
 
 export class PeopleServiceError extends Error {
   readonly status: number;
