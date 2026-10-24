@@ -64,6 +64,8 @@ import {
   LEDGER_SOURCE_BOUND_STEPS,
   ledgerSourceRef,
   stepsOfLedgerRow,
+  RESTATED_ACTION,
+  actionAlreadyAnswered,
   type CatalogueOutcomeTrigger,
 } from "./outcome-trigger-rules.js";
 
@@ -637,6 +639,32 @@ interface CrmFactRow {
   withdrawn: boolean;
 }
 
+/**
+ * A CRM fact that RE-STATES an action an earlier copy already answered (crm-service re-issues a fact under a new id
+ * when its person is merged, identified or re-minted: same source, source ref, type, date): kept `skipped`
+ * `restated_action`, nothing sent (outcome-trigger-rules.ts RESTATED_ACTION). THROWS on a failed read.
+ */
+async function isRestatedAction(f: CrmFactRow, step: string, at: string | null): Promise<boolean> {
+  const earlier = (await db.execute(sql`
+    SELECT o.status, o.skip_reason
+    FROM crm_facts c1
+    JOIN crm_facts c2
+      ON c2.org_id = c1.org_id AND c2.brand_id = c1.brand_id AND c2.type = c1.type
+     AND c2.occurred_at IS NOT DISTINCT FROM c1.occurred_at
+     AND c2.source = c1.source AND c2.source_ref = c1.source_ref AND c2.fact_id <> c1.fact_id
+    JOIN outcome_trigger_fires o ON o.source_ref = 'crm:' || c2.fact_id AND o.step = ${step}
+    WHERE c1.fact_id = ${f.fact_id}
+  `)) as unknown as Array<{ status: string; skip_reason: string | null }>;
+  if (!actionAlreadyAnswered(earlier.map((r) => ({ status: r.status, skipReason: r.skip_reason })))) return false;
+  await db.execute(sql`
+    INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, occurred_at, source, status, skip_reason)
+    VALUES (${`crm:${f.fact_id}`}, ${f.org_id}, ${f.brand_id}, '', ${step}, '', ${at}::timestamptz, 'crm_fact', 'skipped', ${RESTATED_ACTION})
+    ON CONFLICT DO NOTHING
+  `);
+  console.log(`[lead-service] outcome ${step} NOT fired (${RESTATED_ACTION}): org=${f.org_id} brand=${f.brand_id} crm:${f.fact_id} re-states an action already answered`);
+  return true;
+}
+
 /** New CRM facts since the cursor, in copy order. A failure stops at that fact: the cursor never passes it. */
 async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
   let reaches = 0;
@@ -664,7 +692,9 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
           emails.length > 0 &&
           rowReaches({ emails, name: f.full_name, phones: f.phones ?? [], at, type: f.type, payload: f.payload }) &&
           isFreshReach(at, state.armedAt, now);
-        if (reaches_ && step) {
+        if (reaches_ && step && (await isRestatedAction(f, step, at))) {
+          reaches++;
+        } else if (reaches_ && step) {
           pending.push(
             ...(await recordSwept(
               {
