@@ -59,8 +59,9 @@ describe("fact outcome declarations", () => {
     expect(consumedOutcomeFor("meeting_booked", none)).toEqual({ outcomeKey: "conversation", basis: "no_evidence" });
   });
 
-  it("an attended meeting consumes the booked one", () => {
-    expect(consumedOutcomeFor("meeting_attended", { ...none, positiveReply: true })).toEqual({ outcomeKey: "meeting_booked", basis: "meeting_booked" });
+  it("an attended meeting consumes the booking we declared, else the entry outcome (never an undeclared booking)", () => {
+    expect(consumedOutcomeFor("meeting_attended", { ...none, positiveReply: true, declaredMeetingBooked: true })).toEqual({ outcomeKey: "meeting_booked", basis: "meeting_booked" });
+    expect(consumedOutcomeFor("meeting_attended", { ...none, positiveReply: true })).toEqual({ outcomeKey: "conversation", basis: "positive_reply" });
   });
 
   it("a paid client consumes the last of attended / booked we declared, else the entry outcome", () => {

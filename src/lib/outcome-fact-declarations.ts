@@ -33,7 +33,7 @@ import { declareRunOutcomesNow, FACT_OUTCOME_KEYS, factOutcomeDeclaration, OUTCO
  * ours only after our first touch: outcome-cause.ts); a signup, a form or a direct purchase the person's
  * `website_visit` before it, else their `conversation`, else the `message_sent`; a booked meeting the person's
  * `conversation` (a positive reply before it), else their `website_visit`, else their `form_submitted`; attended
- * consumes `meeting_booked`; paid client the direct purchase we declared, else the last of attended / booked, else
+ * consumes the `meeting_booked` we declared, else the entry outcome; paid client the direct purchase we declared, else the last of attended / booked, else
  * the same entry outcome. No entry evidence at all = `conversation`
  * with basis `no_evidence`: runs-service then counts it as unknown provenance (never $0, never charged), which is the
  * truth (outreach caused it, the step it went through is not seen here).
@@ -126,7 +126,9 @@ export function consumedOutcomeFor(outcome: FactOutcomeKey, e: ConsumptionEviden
     return sent();
   }
   if (outcome === "meeting_booked") return entry();
-  if (outcome === "meeting_attended") return { outcomeKey: "meeting_booked", basis: "meeting_booked" };
+  // A meeting attended consumes the booking only when we declared one (a CRM can state attended with no booking
+  // fact: consuming an undeclared booking named a subject nobody produced, LEDGER-HISTORY-1024); else the entry.
+  if (outcome === "meeting_attended") return e.declaredMeetingBooked ? { outcomeKey: "meeting_booked", basis: "meeting_booked" } : entry();
   if (e.declaredPurchase) return { outcomeKey: "purchase", basis: "purchase" };
   if (e.declaredMeetingAttended) return { outcomeKey: "meeting_attended", basis: "meeting_attended" };
   if (e.declaredMeetingBooked) return { outcomeKey: "meeting_booked", basis: "meeting_booked" };
