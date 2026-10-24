@@ -1,6 +1,31 @@
 import { describe, expect, it } from "vitest";
-import { firstReachedStates, type StateEvidence } from "../../src/lib/lead-states.js";
-import { decodeLeadStatesCursor, encodeLeadStatesCursor, groupLeadStates, LeadStatesCursorError } from "../../src/lib/lead-states-read.js";
+import { assertCatalogueCovers, firstReachedStates as reach, LeadStateCatalogueError, type StateEvidence, type StepLeadState } from "../../src/lib/lead-states.js";
+import {
+  decodeLeadStatesCursor,
+  encodeLeadStatesCursor,
+  groupLeadStates as group,
+  LeadStatesCursorError,
+  resolveBookingCalls,
+} from "../../src/lib/lead-states-read.js";
+
+// features-service's catalogue as ottawa-v1 ships it (LEAD-STATES-1024): step -> leadState / family / rank.
+const I = (state: string, rank: number): StepLeadState => ({ state, family: "interest", rank });
+const V: StepLeadState = { state: "lead_visited", family: "visit", rank: 1 };
+const CATALOGUE = new Map<string, StepLeadState>([
+  ["conversation", I("lead_interested", 1)],
+  ["form_submitted", I("lead_interested", 1)],
+  ["signup", I("lead_interested", 1)],
+  ["booking_call", I("lead_interested", 1)],
+  ["lead_interested", I("lead_interested", 1)],
+  ["meeting_booked", I("meeting_booked", 2)],
+  ["meeting_attended", I("meeting_attended", 3)],
+  ["paid_client", I("paid_client", 4)],
+  ["purchase", I("paid_client", 4)],
+  ["website_visit", V],
+  ["lead_visited", V],
+]);
+const firstReachedStates = (e: StateEvidence[]) => reach(e, CATALOGUE);
+const groupLeadStates = (rows: Parameters<typeof group>[0]) => group(rows, CATALOGUE);
 
 const ev = (kind: StateEvidence["kind"], at: string | null): StateEvidence => ({ kind, at });
 
@@ -63,6 +88,37 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
 
   it("an unknown evidence kind throws (never dropped)", () => {
     expect(() => groupLeadStates([{ org_id: "o", brand_id: "b", lead_id: "l", kind: "open", at: null }])).toThrow(/unknown evidence kind/);
+  });
+
+  it("a signup, a form or a booking call makes the lead interested (catalogue), never visited", () => {
+    for (const kind of ["signup", "form_submitted", "booking_call"] as const) {
+      const s = firstReachedStates([ev(kind, "2026-10-01T00:00:00.000Z")]);
+      expect(s.lead_interested).toEqual({ reachedAt: "2026-10-01T00:00:00.000Z", basis: kind, impliedBy: null });
+      expect(s.meeting_booked).toBeNull();
+      expect(s.lead_visited).toBeNull();
+    }
+  });
+
+  it("a step the catalogue gives no state reaches nothing; a catalogue missing a state row is refused", () => {
+    const noSignup = new Map(CATALOGUE);
+    noSignup.delete("signup");
+    expect(reach([ev("signup", "2026-10-01T00:00:00.000Z")], noSignup).lead_interested).toBeNull();
+    const noVisit = new Map(CATALOGUE);
+    noVisit.delete("lead_visited");
+    expect(() => reach([], noVisit)).toThrow(LeadStateCatalogueError);
+    expect(() => assertCatalogueCovers(noVisit, new Set(CATALOGUE.keys()))).toThrow(LeadStateCatalogueError);
+    expect(() => assertCatalogueCovers(CATALOGUE, new Set([...CATALOGUE.keys()].filter((k) => k !== "booking_call")))).toThrow(/booking_call/);
+    expect(() => assertCatalogueCovers(CATALOGUE, new Set(CATALOGUE.keys()))).not.toThrow();
+  });
+
+  it("an acted row is a booking call only when its acting campaign places them", async () => {
+    const rows = [
+      { org_id: "o", brand_id: "b", lead_id: "l", kind: "booking_call_candidate:call-camp", at: "2026-10-01 00:00:00+00" },
+      { org_id: "o", brand_id: "b", lead_id: "m", kind: "booking_call_candidate:email-camp", at: "2026-10-01 00:00:00+00" },
+    ];
+    const out = await resolveBookingCalls(rows, async () => new Set(["call-camp"]));
+    expect(out).toEqual([{ ...rows[0], kind: "booking_call" }]);
+    expect(group(out, CATALOGUE)[0].states.lead_interested?.basis).toBe("booking_call");
   });
 
   it("cursor round-trips; a foreign cursor is refused", () => {

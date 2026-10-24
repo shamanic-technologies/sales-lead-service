@@ -10299,13 +10299,15 @@ export const LEAD_STATES_BY_LEAD_MAX_ITEMS = 1000;
 const ReachedStateSchema = z
   .object({
     reachedAt: z.string().nullable().openapi({ description: "First reach (ISO, the prospect's own instant). null = reached, date unknown (a reply saying they were already a customer)." }),
-    basis: z.enum(LEAD_STATE_EVIDENCE_KINDS).openapi({
+    basis: z.enum(LEAD_STATE_EVIDENCE_KINDS as [string, ...string[]]).openapi({
       description:
-        "The evidence that reached it first: positive_reply (reply to our outreach classified positive), positive_message (WhatsApp/LinkedIn " +
-        "message judged interest), form_reply (CRM form after our first email), meeting_booked / meeting_attended / sale (outcome ledger), " +
-        "click (measured click to the brand's site), site_session (the brand's analytics saw a session), stated_visit (visit on the outcome ledger).",
+        "The evidence that reached it first (and the catalogue step it is): positive_reply (reply to our outreach classified positive), " +
+        "positive_message (WhatsApp/LinkedIn message judged interest), form_reply (CRM form after our first email): conversation; signup; " +
+        "form_submitted (ledger or CRM); booking_call (a booking call placed with the person); meeting_booked / meeting_attended / sale " +
+        "(paid_client) on the outcome ledger; click (measured click to the brand's site), site_session (the brand's analytics saw a session), " +
+        "stated_visit (visit on the outcome ledger): website_visit. Which step reaches which state is features-service's catalogue (`leadState`).",
     }),
-    impliedBy: z.enum(LEAD_STATES).nullable().openapi({ description: "The higher interest state whose reach implied this one (same date); null = its own evidence." }),
+    impliedBy: z.string().nullable().openapi({ description: "The higher state of the same family whose reach implied this one (same date); null = its own evidence." }),
   })
   .openapi("LeadReachedState");
 
@@ -10327,7 +10329,7 @@ const leadStatesDescription =
   "3 positive replies = one lead_interested, 12 clicks = one lead_visited). Interest ladder lead_interested < meeting_booked < " +
   "meeting_attended < paid_client: reaching a higher state reaches every lower one at that date (a meeting booked with no positive reply = " +
   "interested at the booking, `impliedBy: meeting_booked`). lead_visited is implied by nothing (a yes never makes a lead visited, a click never " +
-  "makes them interested). Each date is the prospect's own instant (reply, click, booking), never a sync or declaration time. A state never " +
+  "makes them interested). Which catalogue step reaches which state is features-service's step catalogue (`leadState`, read, never re-mapped). Each date is the prospect's own instant (reply, click, booking), never a sync or declaration time. A state never " +
   "reached = null. A lead the org marked not a person is never returned. Every lead with at least one state is answered; one row per " +
   "(org, brand, lead).";
 
@@ -10351,6 +10353,7 @@ registry.registerPath({
     },
     400: { description: "limit missing/out of range, or a cursor this endpoint never issued" },
     500: { description: "Unreadable (never an empty answer)" },
+    502: { description: "features-service catalogue (or campaign-service legs) unreadable or not stating a state row: `error: dependency_unavailable`" },
   },
 });
 
@@ -10365,5 +10368,6 @@ registry.registerPath({
     200: { description: "Every lead x brand of the asked leads holding a state", content: { "application/json": { schema: z.object({ leads: z.array(LeadStatesRowSchema) }) } } },
     400: { description: "Invalid body" },
     500: { description: "Unreadable (never an empty answer)" },
+    502: { description: "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`" },
   },
 });

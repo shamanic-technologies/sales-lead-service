@@ -2,6 +2,13 @@ import { Router } from "express";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { LEAD_STATES_MAX_LIMIT, LeadStatesByLeadRequestSchema } from "../schemas.js";
 import { decodeLeadStatesCursor, LeadStatesCursorError, readLeadStates } from "../lib/lead-states-read.js";
+import { LeadStateCatalogueError } from "../lib/lead-states.js";
+import { CampaignLegsUnavailableError } from "../lib/campaign-leg-client.js";
+
+/** A sibling that says which step reaches which state (or which campaign places booking calls) could not answer. */
+function dependencyDown(error: unknown): boolean {
+  return error instanceof LeadStateCatalogueError || error instanceof CampaignLegsUnavailableError;
+}
 
 const router = Router();
 
@@ -30,6 +37,7 @@ router.get("/internal/lead-states", apiKeyAuth, async (req, res) => {
     return res.json(await readLeadStates({ orgId, after, limit }));
   } catch (error) {
     console.error("[lead-service] lead states read failed:", error);
+    if (dependencyDown(error)) return res.status(502).json({ error: "dependency_unavailable", message: (error as Error).message });
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -43,6 +51,7 @@ router.post("/internal/lead-states/by-lead", apiKeyAuth, async (req, res) => {
     return res.json({ leads });
   } catch (error) {
     console.error("[lead-service] lead states by lead failed:", error);
+    if (dependencyDown(error)) return res.status(502).json({ error: "dependency_unavailable", message: (error as Error).message });
     return res.status(500).json({ error: "Internal server error" });
   }
 });
