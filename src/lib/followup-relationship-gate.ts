@@ -38,8 +38,11 @@ import { toSubject } from "./relationship-subjects.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
 
-/** Policies a claim may state. Only `pure_prospect`: `business_only` holds back every never-judged non-subject forever. */
-export const CLAIM_RELATIONSHIP_POLICIES = ["pure_prospect"] as const;
+/**
+ * Policies a claim may state: `pure_prospect` (leads only) and `current_client` (clients only, CLIENT-CHECKIN-LEAD-1024,
+ * `followup-client-gate.ts`). Never `business_only`: it holds back every never-judged non-subject forever.
+ */
+export const CLAIM_RELATIONSHIP_POLICIES = ["pure_prospect", "current_client"] as const;
 export type ClaimRelationshipPolicy = (typeof CLAIM_RELATIONSHIP_POLICIES)[number];
 
 export function isClaimRelationshipPolicy(v: unknown): v is ClaimRelationshipPolicy {
@@ -147,7 +150,7 @@ function ageOf(at: Date | string | null | undefined): number | null {
   return Number.isNaN(ms) ? 0 : Date.now() - ms;
 }
 
-async function blockOfLead(orgId: string, brandId: string, leadId: string): Promise<RelationshipBlock> {
+export async function blockOfLead(orgId: string, brandId: string, leadId: string): Promise<RelationshipBlock> {
   const rows = (await db.execute(sql`SELECT human_id::text AS h FROM leads WHERE id = ${leadId}::uuid`)) as unknown as Array<{ h: string | null }>;
   const h = rows[0]?.h ?? null;
   if (!h) return EMPTY_RELATIONSHIP;
