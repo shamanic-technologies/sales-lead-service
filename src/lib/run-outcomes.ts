@@ -20,7 +20,9 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *     brand) is a loss: nothing declared, their cost rides the kept ones.
  *   - the same serve CONSUMED the person's `email_checked` when it came with a verification verdict (apollo-service
  *     declares that occurrence on its own verify run once the lead exists: it resolves the id through
- *     `POST /internal/leads/ids/resolve`). Bonus checks, screening judgments and every child run that declares
+ *     `POST /internal/leads/ids/resolve`), and the `lead_identified` crm-service declared when the person came from
+ *     the client's CRM registry (subject = crm's relation key: crm-lead-identified.ts, LEAD-IDENTIFIED-CONSUME-1024).
+ *     Bonus checks, screening judgments and every child run that declares
  *     nothing roll into the lead-serve run's `lead_found`.
  *   - every meeting booked / attended and sale our outreach caused -> `meeting_booked` / `meeting_attended` /
  *     `paid_client` on the brand's recording run of the day for that outcome (`factOutcomeDeclaration`, outcome-fact-declarations.ts).
@@ -38,6 +40,9 @@ import { fetchWithRetry } from "./fetch-retry.js";
  */
 
 export const OUTCOME_SUBJECT_SERVICE = "lead-service" as const;
+/** crm-service's occurrence a find from the client's CRM consumes (crm-lead-identified.ts). */
+export const LEAD_IDENTIFIED_OUTCOME = "lead_identified" as const;
+export const CRM_SUBJECT_SERVICE = "crm-service" as const;
 
 export interface OutcomeItem {
   outcomeKey: string;
@@ -54,13 +59,26 @@ export interface RunOutcomeDeclaration {
 
 const leadSubject = (outcomeKey: string, leadId: string): OutcomeItem => ({ outcomeKey, subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: leadId });
 
-/** A serve that FOUND a person: `lead_found` produced, the `email_checked` it handed out consumed when one was stated. */
-export function leadFoundDeclaration(input: { orgId: string; runId: string; leadId: string; emailChecked: boolean }): RunOutcomeDeclaration {
+/**
+ * A serve that FOUND a person: `lead_found` produced, the `email_checked` it handed out consumed when one was stated,
+ * and the `lead_identified` crm-service produced when the person came from the client's CRM registry (subject = crm's
+ * relation key, crm-lead-identified.ts; null = no crm relation identified them).
+ */
+export function leadFoundDeclaration(input: {
+  orgId: string;
+  runId: string;
+  leadId: string;
+  emailChecked: boolean;
+  crmRelationKey: string | null;
+}): RunOutcomeDeclaration {
+  const consumed: OutcomeItem[] = [];
+  if (input.emailChecked) consumed.push(leadSubject("email_checked", input.leadId));
+  if (input.crmRelationKey) consumed.push({ outcomeKey: LEAD_IDENTIFIED_OUTCOME, subjectService: CRM_SUBJECT_SERVICE, subjectId: input.crmRelationKey });
   return {
     orgId: input.orgId,
     runId: input.runId,
     produced: [leadSubject("lead_found", input.leadId)],
-    consumed: input.emailChecked ? [leadSubject("email_checked", input.leadId)] : [],
+    consumed,
   };
 }
 

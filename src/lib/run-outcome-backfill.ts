@@ -3,6 +3,7 @@ import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
 import { db } from "../db/index.js";
 import { errorMessage } from "./db-error.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { crmIdentifiedRelationKeys } from "./crm-lead-identified.js";
 import { leadFoundDeclaration, type OutcomeItem } from "./run-outcomes.js";
 
 /**
@@ -30,7 +31,9 @@ import { leadFoundDeclaration, type OutcomeItem } from "./run-outcomes.js";
  * those runs' output cannot be read here: not declared by guess.
  *
  * The consumed side is the live rule: the person's `email_checked` when a verification verdict is recorded on their
- * address. Idempotent at runs-service (a replay is `already_recorded`, `redate` moves a live-door declaration back to
+ * address, and crm-service's `lead_identified` (its relation key) when the find came from the client's CRM (an email of
+ * the lead registered from a `crm` serve) and a live crm relation identified them (crm-lead-identified.ts, the live
+ * serve's lookup). Idempotent at runs-service (a replay is `already_recorded`, `redate` moves a live-door declaration back to
  * the run's start, never later); nothing stored here, so a re-run after a failure resumes by replaying.
  */
 
@@ -53,6 +56,11 @@ export interface PastFind {
   orgId: string;
   leadId: string;
   emailChecked: boolean;
+  brandIds: string[];
+  /** An email of the lead was registered from a serve of the client's CRM. */
+  fromCrm: boolean;
+  /** The crm relation whose `lead_identified` the find consumes (attachCrmRelationKeys); null = none. */
+  crmRelationKey?: string | null;
 }
 
 export interface BackfillRun {
@@ -64,21 +72,25 @@ export interface BackfillRun {
 
 /** One declaration per past run: every lead it found (equal shares), the email checks they came with. Pure. */
 export function groupFindsByRun(finds: readonly PastFind[]): BackfillRun[] {
-  const byRun = new Map<string, { orgId: string; leads: Map<string, boolean> }>();
+  const byRun = new Map<string, { orgId: string; leads: Map<string, { emailChecked: boolean; crmRelationKey: string | null }> }>();
   for (const f of finds) {
     const runId = f.runId.toLowerCase();
     let run = byRun.get(runId);
     if (!run) byRun.set(runId, (run = { orgId: f.orgId, leads: new Map() }));
     if (run.orgId !== f.orgId) throw new Error(`run ${runId} names two orgs (${run.orgId}, ${f.orgId})`);
-    run.leads.set(f.leadId, (run.leads.get(f.leadId) ?? false) || f.emailChecked);
+    const prior = run.leads.get(f.leadId);
+    run.leads.set(f.leadId, {
+      emailChecked: (prior?.emailChecked ?? false) || f.emailChecked,
+      crmRelationKey: prior?.crmRelationKey ?? f.crmRelationKey ?? null,
+    });
   }
   return [...byRun.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([runId, run]) => {
       const produced: OutcomeItem[] = [];
       const consumed: OutcomeItem[] = [];
-      for (const [leadId, emailChecked] of [...run.leads.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
-        const d = leadFoundDeclaration({ orgId: run.orgId, runId, leadId, emailChecked });
+      for (const [leadId, lead] of [...run.leads.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+        const d = leadFoundDeclaration({ orgId: run.orgId, runId, leadId, ...lead });
         produced.push(...d.produced);
         consumed.push(...d.consumed);
       }
@@ -127,6 +139,9 @@ export function findingChild(children: readonly ChildRun[], servedAt: string): C
 const notJournalistSql = (alias: string, brands: string) =>
   sql.raw(`NOT EXISTS (SELECT 1 FROM brand_journalists bj WHERE bj.lead_id = ${alias}.lead_id AND bj.journalist
                         AND bj.org_id = ${alias}.org_id AND bj.brand_id = ANY(${brands}))`);
+const fromCrmSql = (alias: string) =>
+  sql.raw(`EXISTS (SELECT 1 FROM lead_contact_methods cm WHERE cm.lead_id = ${alias}.lead_id AND cm.channel = 'email'
+                    AND cm.source = 'crm')`);
 const emailCheckedSql = (alias: string) =>
   sql.raw(`EXISTS (SELECT 1 FROM lead_contact_methods cm WHERE cm.lead_id = ${alias}.lead_id AND cm.channel = 'email'
                     AND cm.verification_verdict IS NOT NULL)`);
@@ -140,7 +155,8 @@ const orgScopeSql = (col: string, scope: BackfillScope) => (scope.orgId === unde
 /** Sources 1 and 2: the find rows whose run ids are still the finding run's. */
 export async function loadDirectFinds(scope: BackfillScope = {}): Promise<PastFind[]> {
   const rows = (await db.execute(sql`
-    SELECT 'direct' AS source, lc.run_id, lc.org_id, lc.lead_id::text AS lead_id, ${emailCheckedSql("lc")} AS email_checked
+    SELECT 'direct' AS source, lc.run_id, lc.org_id, lc.lead_id::text AS lead_id, ${emailCheckedSql("lc")} AS email_checked,
+           lc.brand_ids::text[] AS brand_ids, ${fromCrmSql("lc")} AS from_crm
       FROM leads_campaigns lc
      WHERE lc.status_reason IN ('served', 'source_found') AND ${findDetailsSql("lc.status_details")}
        AND lc.run_id ~* ${UUID_RE_SQL} AND lc.served_at >= ${BACKFILL_SINCE}::timestamptz
@@ -148,7 +164,7 @@ export async function loadDirectFinds(scope: BackfillScope = {}): Promise<PastFi
        AND NOT EXISTS (SELECT 1 FROM lead_campaign_run_repoints p WHERE p.lead_campaign_id = lc.id)
        AND ${notJournalistSql("lc", "lc.brand_ids")} ${orgScopeSql("lc.org_id", scope)}
     UNION ALL
-    SELECT 'archived', s.run_id, s.org_id, s.lead_id::text, ${emailCheckedSql("s")}
+    SELECT 'archived', s.run_id, s.org_id, s.lead_id::text, ${emailCheckedSql("s")}, s.brand_ids::text[], ${fromCrmSql("s")}
       FROM (SELECT q.row_snapshot->>'run_id' AS run_id, q.org_id, q.lead_id, q.brand_ids,
                    q.row_snapshot->>'status_reason' AS status_reason, q.row_snapshot->>'status_details' AS status_details,
                    q.row_snapshot->>'retry_claimed_at' AS retry_claimed_at, (q.row_snapshot->>'served_at')::timestamptz AS served_at
@@ -158,8 +174,16 @@ export async function loadDirectFinds(scope: BackfillScope = {}): Promise<PastFi
        AND s.retry_claimed_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM brand_journalists bj WHERE bj.lead_id = s.lead_id AND bj.journalist
                         AND bj.org_id = s.org_id AND bj.brand_id = ANY(s.brand_ids)) ${orgScopeSql("s.org_id", scope)}
-  `)) as unknown as Array<{ source: FindSource; run_id: string; org_id: string; lead_id: string; email_checked: boolean }>;
-  return rows.map((r) => ({ source: r.source, runId: r.run_id.toLowerCase(), orgId: r.org_id, leadId: r.lead_id, emailChecked: r.email_checked === true }));
+  `)) as unknown as Array<{ source: FindSource; run_id: string; org_id: string; lead_id: string; email_checked: boolean; brand_ids: string[]; from_crm: boolean }>;
+  return rows.map((r) => ({
+    source: r.source,
+    runId: r.run_id.toLowerCase(),
+    orgId: r.org_id,
+    leadId: r.lead_id,
+    emailChecked: r.email_checked === true,
+    brandIds: r.brand_ids ?? [],
+    fromCrm: r.from_crm === true,
+  }));
 }
 
 export interface RepointedFind {
@@ -168,6 +192,8 @@ export interface RepointedFind {
   servedAt: string;
   callerRunId: string;
   emailChecked: boolean;
+  brandIds: string[];
+  fromCrm: boolean;
 }
 
 /**
@@ -177,13 +203,14 @@ export interface RepointedFind {
 export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Promise<RepointedFind[]> {
   const rows = (await db.execute(sql`
     SELECT lc.org_id, lc.lead_id::text AS lead_id,
-           to_char(lc.served_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS served_at, ${emailCheckedSql("lc")} AS email_checked
+           to_char(lc.served_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS served_at, ${emailCheckedSql("lc")} AS email_checked,
+           lc.brand_ids::text[] AS brand_ids, ${fromCrmSql("lc")} AS from_crm
       FROM leads_campaigns lc
      WHERE lc.status_reason IN ('served', 'source_found') AND ${findDetailsSql("lc.status_details")}
        AND lc.served_at >= ${BACKFILL_SINCE}::timestamptz
        AND (lc.retry_claimed_at IS NOT NULL OR EXISTS (SELECT 1 FROM lead_campaign_run_repoints p WHERE p.lead_campaign_id = lc.id))
        AND ${notJournalistSql("lc", "lc.brand_ids")} ${orgScopeSql("lc.org_id", scope)}
-  `)) as unknown as Array<{ org_id: string; lead_id: string; served_at: string; email_checked: boolean }>;
+  `)) as unknown as Array<{ org_id: string; lead_id: string; served_at: string; email_checked: boolean; brand_ids: string[]; from_crm: boolean }>;
   if (rows.length === 0) return [];
   const answers = (await db.execute(sql`
     SELECT i.org_id, lower(i.idempotency_key) AS caller_run_id, i.response->'lead'->'data'->>'leadId' AS lead_id
@@ -205,6 +232,8 @@ export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Pr
       servedAt: r.served_at,
       callerRunId,
       emailChecked: r.email_checked === true,
+      brandIds: r.brand_ids ?? [],
+      fromCrm: r.from_crm === true,
     })),
   );
 }
@@ -249,10 +278,29 @@ export async function resolveRepointedFinds(
   };
   const resolved = await mapLimit(candidates, CHILD_LOOKUP_CONCURRENCY, async (c) => {
     const child = findingChild(await childrenOf(c.orgId, c.callerRunId), c.servedAt);
-    return child ? ({ source: "repointed", runId: child.id.toLowerCase(), orgId: c.orgId, leadId: c.leadId, emailChecked: c.emailChecked } as PastFind) : null;
+    return child
+      ? ({ source: "repointed", runId: child.id.toLowerCase(), orgId: c.orgId, leadId: c.leadId, emailChecked: c.emailChecked, brandIds: c.brandIds, fromCrm: c.fromCrm } as PastFind)
+      : null;
   });
   const finds = resolved.filter((f): f is PastFind => f !== null);
   return { finds, unconfirmed: candidates.length - finds.length };
+}
+
+const RELATION_LOOKUP_CHUNK = 500;
+
+/** Each find from the CRM gets the crm relation its `lead_found` consumes (the live serve's lookup); others get null. */
+export async function attachCrmRelationKeys(
+  finds: readonly PastFind[],
+  lookup: typeof crmIdentifiedRelationKeys = crmIdentifiedRelationKeys,
+): Promise<PastFind[]> {
+  const fromCrm = finds.filter((f) => f.fromCrm);
+  const keys = new Map<PastFind, string | null>();
+  for (let i = 0; i < fromCrm.length; i += RELATION_LOOKUP_CHUNK) {
+    const chunk = fromCrm.slice(i, i + RELATION_LOOKUP_CHUNK);
+    const answers = await lookup(chunk.map((f) => ({ orgId: f.orgId, leadId: f.leadId, brandIds: f.brandIds })));
+    chunk.forEach((f, j) => keys.set(f, answers[j] ?? null));
+  }
+  return finds.map((f) => ({ ...f, crmRelationKey: keys.get(f) ?? null }));
 }
 
 export interface BatchOutcome {
@@ -339,12 +387,12 @@ export interface BackfillReport {
 
 export async function runOutcomeBackfill(
   opts: { dryRun: boolean },
-  deps: { post?: BatchPost; lookup?: typeof listLeadServeChildren; scope?: BackfillScope } = {},
+  deps: { post?: BatchPost; lookup?: typeof listLeadServeChildren; relationLookup?: typeof crmIdentifiedRelationKeys; scope?: BackfillScope } = {},
 ): Promise<BackfillReport> {
   const direct = await loadDirectFinds(deps.scope);
   const repointed = await resolveRepointedFinds(await loadRepointedFindCandidates(deps.scope), deps.lookup);
   // A run named by both a row of its own and a re-pointed find declares each lead once (groupFindsByRun).
-  const finds = [...direct, ...repointed.finds];
+  const finds = await attachCrmRelationKeys([...direct, ...repointed.finds], deps.relationLookup);
   const runs = groupFindsByRun(finds);
   const batches = chunkBackfillRuns(runs);
   const report: BackfillReport = {

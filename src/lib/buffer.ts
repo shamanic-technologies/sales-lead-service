@@ -49,7 +49,7 @@ import type { RecentlyEmailedScope, RecentlyEmailedWindow } from "./recently-ema
 import { assertRecentlyEmailedReadable, leadRecentlyEmailed } from "./recently-emailed.js";
 import { createSourceAudienceJudge } from "./source-stock-belongs.js";
 import { noteLeadFound } from "./outcome-triggers.js";
-import { declareRunOutcomes, leadFoundDeclaration } from "./run-outcomes.js";
+import { CRM_PROVIDER, declareLeadFound } from "./crm-lead-identified.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 import { prepareNamedServe, type NamedLeadRequest } from "./named-lead-serve.js";
 
@@ -518,8 +518,9 @@ export async function pullNext(
     noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, campaignId: params.campaignId, offerId });
     // The serve run PRODUCED this lead_found (and consumed the email check it handed out): stated at runs-service so the
     // run's cost lands on the outcome (run-outcomes.ts, COST-ACCOUNTING-1023-P1). Not awaited, never fails the serve.
+    // A person from the client's CRM also consumes the `lead_identified` crm-service produced (crm-lead-identified.ts).
     if (params.runId) {
-      declareRunOutcomes(leadFoundDeclaration({ orgId: params.orgId, runId: params.runId, leadId, emailChecked: verificationVerdict !== null }));
+      declareLeadFound({ orgId: params.orgId, runId: params.runId, leadId, brandIds: params.brandIds, emailChecked: verificationVerdict !== null, fromCrm: person.provider === CRM_PROVIDER });
     }
 
     // Fresh contacts only: a person the brand emailed inside the window is not handed out. Already bought and filed
