@@ -10153,6 +10153,50 @@ registry.registerPath({
   },
 });
 
+// --- Lead id by email, org-free (LEDGER-HISTORY-1024, src/lib/lead-id-resolve.ts `resolveLeadIdsByEmail`) ---
+export const LEAD_ID_BY_EMAIL_MAX_ITEMS = 1000;
+
+export const LeadIdByEmailRequestSchema = z
+  .object({ emails: z.array(z.string().min(1).max(320)).min(1).max(LEAD_ID_BY_EMAIL_MAX_ITEMS) })
+  .openapi("LeadIdByEmailRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/leads/ids/by-email",
+  summary: "Which lead is each email address, whatever the org (internal, service-auth)",
+  description:
+    "A lead is a human at a company, org-independent, and one registered email belongs to one lead. For a service naming the subject of an " +
+    "outcome occurrence it produced or reused across orgs (an email verification, a newsletter subscriber's check) at runs-service " +
+    "(subjectService `lead-service`, subjectId = leadId). Answers only a lead someone kept (it holds a lead row in any org); nothing is minted. " +
+    "`leadId: null` + `reason`: `not_a_lead` (nobody kept this address) or `ambiguous` (two leads hold it in different case: never a pick). " +
+    "Compared case-folded. Read only, one answer per asked address in the order asked, up to 1000 addresses.",
+  request: { body: { content: { "application/json": { schema: LeadIdByEmailRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "One answer per asked address, same order",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              answers: z.array(
+                z.object({
+                  email: z.string(),
+                  leadId: z.string().nullable(),
+                  reason: z.enum(["not_a_lead", "ambiguous"]).nullable(),
+                }),
+              ),
+            })
+            .openapi("LeadIdByEmailResponse"),
+        },
+      },
+    },
+    400: { description: "Invalid body" },
+    401: { description: "Unauthorized" },
+    413: { description: "Body over the route's 1 MB limit (`error: payload_too_large`): send fewer addresses per call." },
+  },
+});
+
 // ─── Re-resolve one outcome reach set aside before the door (OFFER-FROM-LIVE-CAMPAIGNS-1024) ───
 
 export const OutcomeReachReResolveRequestSchema = z

@@ -168,3 +168,46 @@ export async function resolveLeadIds(items: ResolveItem[]): Promise<ResolveAnswe
   };
   return items.map((item) => pickLead(item, byKey));
 }
+
+/**
+ * WHICH LEAD IS THIS ADDRESS, WHATEVER THE ORG? (`POST /internal/leads/ids/by-email`, LEDGER-HISTORY-1024)
+ *
+ * A lead is a human at a company and is org-independent (a lead row is global; the org lives on its lead rows), and
+ * one registered email belongs to ONE lead (`idx_lcm_channel_value`). So an address names its lead without an org:
+ * apollo-service names the subject of a verification it reuses across orgs, transactional-email-service states that
+ * a newsletter subscriber is the same subject as a lead. Answers only a lead someone KEPT (it holds a `leads_campaigns`
+ * row, any org): an address nobody kept never resolves, nothing is minted. Case-folded; two leads holding the same
+ * address in different case = `ambiguous`, never a pick. Read only.
+ */
+export type ByEmailReason = "not_a_lead" | "ambiguous";
+
+export interface ByEmailAnswer {
+  email: string;
+  leadId: string | null;
+  reason: ByEmailReason | null;
+}
+
+/** Pure: one answer per asked address (in order) off the kept leads each case-folded address names. */
+export function pickLeadsByEmail(asked: readonly string[], leadsByEmail: ReadonlyMap<string, readonly string[]>): ByEmailAnswer[] {
+  return asked.map((email) => {
+    const leads = [...new Set(leadsByEmail.get(email.trim().toLowerCase()) ?? [])];
+    if (leads.length === 1) return { email, leadId: leads[0], reason: null };
+    return { email, leadId: null, reason: leads.length === 0 ? "not_a_lead" : "ambiguous" };
+  });
+}
+
+export async function resolveLeadIdsByEmail(emails: readonly string[]): Promise<ByEmailAnswer[]> {
+  const keys = [...new Set(emails.map((e) => e.trim().toLowerCase()).filter((e) => e.length > 0))];
+  const rows =
+    keys.length === 0
+      ? []
+      : ((await db.execute(sql`
+          SELECT DISTINCT lower(lcm.value) AS k, lcm.lead_id::text AS lead_id
+          FROM lead_contact_methods lcm
+          WHERE lcm.channel = 'email' AND lower(lcm.value) = ANY(${sql.param(keys)}::text[])
+            AND EXISTS (SELECT 1 FROM leads_campaigns lc WHERE lc.lead_id = lcm.lead_id)
+        `)) as unknown as Array<{ k: string; lead_id: string }>);
+  const byEmail = new Map<string, string[]>();
+  for (const r of rows) (byEmail.get(r.k) ?? byEmail.set(r.k, []).get(r.k)!).push(r.lead_id);
+  return pickLeadsByEmail(emails, byEmail);
+}

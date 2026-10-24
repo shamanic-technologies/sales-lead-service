@@ -8,6 +8,7 @@ import type { NextFunction, Request, Response } from "express";
  *
  * - /internal/leads/ids/resolve: 1000 items (orgId, up to 50 brandIds, five identity keys) ~ 0.2-1 KB each.
  * - /orgs/leads/evidence-changed: 1000 addresses of up to 320 chars ~ 330 KB.
+ * - /internal/leads/ids/by-email: 1000 addresses of up to 320 chars ~ 330 KB.
  * - /internal/reply-latency: 100 groups x 500 campaign ids ~ 2 MB.
  */
 export const DEFAULT_JSON_LIMIT = "100kb";
@@ -15,6 +16,7 @@ export const DEFAULT_JSON_LIMIT = "100kb";
 export const ROUTE_JSON_LIMITS: ReadonlyArray<{ path: string; limit: string }> = [
   { path: "/internal/leads/ids/resolve", limit: "10mb" },
   { path: "/orgs/leads/evidence-changed", limit: "1mb" },
+  { path: "/internal/leads/ids/by-email", limit: "1mb" },
   { path: "/internal/reply-latency", limit: "4mb" },
 ];
 
