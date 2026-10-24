@@ -34,7 +34,7 @@ describe("image judgment wire", () => {
   });
 
   it("openai-luna on the platform route: no criteria on the wire, boundaries folded into the instructions", async () => {
-    await judgeImageYesNo({ company: "x" }, "https://r2.example/a.png", questions, "platform", "openai-luna");
+    await judgeImageYesNo({ company: "x" }, "https://r2.example/a.png", questions, { platform: { runId: "11111111-1111-4111-8111-111111111111" } }, "openai-luna");
     expect(sent[0].url).toMatch(/\/internal\/platform-judgments$/);
     const holds = (sent[0].body.questions as Record<string, Record<string, unknown>>).holds;
     expect(holds.criteria).toBeUndefined();
@@ -44,7 +44,7 @@ describe("image judgment wire", () => {
   it("cloudflare-clef judges take criteria like jev (only openai-luna folds them)", async () => {
     for (const judge of ["cloudflare-clef", "cloudflare-clef-flash"] as const) {
       sent.length = 0;
-      await judgeImageYesNo({ company: "x" }, "https://r2.example/a.png", questions, "platform", judge);
+      await judgeImageYesNo({ company: "x" }, "https://r2.example/a.png", questions, { platform: { runId: "11111111-1111-4111-8111-111111111111" } }, judge);
       expect(sent[0].body.judge).toBe(judge);
       expect((sent[0].body.questions as Record<string, unknown>).holds).toEqual({ type: "noul", instructions: "Is there no phone in the header?", criteria: { true: "No phone.", false: "A phone." } });
     }
@@ -58,7 +58,7 @@ describe("image judgment wire", () => {
 
   it("a text judgment sends neither image nor judge (bytes unchanged)", async () => {
     const { judgeYesNo } = await import("../../src/lib/qualification-judge.js");
-    await judgeYesNo("state", { holds: { instructions: "?" } }, "platform");
+    await judgeYesNo("state", { holds: { instructions: "?" } }, { platform: { runId: "11111111-1111-4111-8111-111111111111" } });
     expect(Object.keys(sent[0].body).sort()).toEqual(["questions", "state"]);
   });
 });

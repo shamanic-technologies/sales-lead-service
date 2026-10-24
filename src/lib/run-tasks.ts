@@ -9,6 +9,8 @@
  *     `support` on run create, never after: a run is never an instant unmarked). The function list is runs-service's.
  *   - `spendsNothing`: the run carries no cost of its own nor of a child (what it pays is billed elsewhere), so it
  *     never sits in undeclared spend.
+ *   - `undeclared`: PRODUCTION work that spends and declares no outcome yet (the reason says why): its spend stays
+ *     visible as undeclared, never hidden under a support mark.
  * `createRun` / `createPlatformRun` refuse a task named nowhere here unless the caller states `support` itself: a staff
  * benchmark or probe script (2026-10-21: eight `image-judge-bench-*` runs, $7.78 of judgments stated nothing) is a
  * `staff_experiment` from its first second. A new spending task is added here with its kind, or it cannot open a run.
@@ -33,7 +35,8 @@ export interface RunSupport {
 export type RunTaskKind =
   | { declares: readonly string[] }
   | { support: RunSupport }
-  | { spendsNothing: string };
+  | { spendsNothing: string }
+  | { undeclared: string };
 
 export const RUN_TASKS = {
   "lead-serve": { declares: ["lead_found"] },
@@ -60,7 +63,9 @@ export const RUN_TASKS = {
     },
   },
   "relationship-sweep": {
-    spendsNothing: "Its Jev judgments go through chat-service's platform door with no caller run (billed on chat-service's own runs).",
+    undeclared:
+      "Its Jev judgments (relationship tags, wants business) ride this run (chat-service platform judgments with x-run-id, PLATFORM-CALLER-RUN-1024). " +
+      "Production work, never support; the outcome it feeds (lead identified) is crm-service's to declare, so its spend reads undeclared until one is.",
   },
 } as const satisfies Record<string, RunTaskKind>;
 

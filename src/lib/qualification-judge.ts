@@ -8,6 +8,7 @@
 import { CHAT_SERVICE_API_KEY, CHAT_SERVICE_URL } from "../config.js";
 import { paymentRefusal } from "./credit-errors.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import type { RunSupport } from "./run-tasks.js";
 import { identityHeaders, type SpendIdentity } from "./treg-client.js";
 
 const TIMEOUT_MS = 60_000;
@@ -17,9 +18,23 @@ export const MAX_STATE_CHARS = 100_000;
 
 /**
  * WHO pays: the org whose request asked (its identity headers, `/orgs/judgments`), or the PLATFORM for a
- * background sweep no org request started (`/internal/platform-judgments`: service key only, no org, user or run).
+ * background sweep no org request started (`/internal/platform-judgments`: service key only, no org or user).
+ * A platform call states WHOSE WORK it is (PLATFORM-CALLER-RUN-1024, chat-service's contract): the run of THIS
+ * service doing the work (`x-run-id`: chat-service's platform run becomes its child, the spend rides that run's
+ * outcome), or, only when no run stands behind the call by design, the support function it serves (body `support`).
+ * Never both, never neither; never a run id another service opened (an inbound request's run is not ours).
  */
-export type JudgmentPayer = SpendIdentity | "platform";
+export type PlatformCaller = { runId: string } | { support: RunSupport };
+export type JudgmentPayer = SpendIdentity | { platform: PlatformCaller };
+
+/** The wire half of a platform caller: its run as `x-run-id`, or its support function in the body. */
+export function platformCallerWire(caller: PlatformCaller): { headers: Record<string, string>; body: { support?: RunSupport } } {
+  if ("runId" in caller) {
+    if (!caller.runId) throw new Error("[lead-service] platform judgment: a caller run must be a run id");
+    return { headers: { "x-run-id": caller.runId }, body: {} };
+  }
+  return { headers: {}, body: { support: caller.support } };
+}
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
@@ -67,11 +82,13 @@ async function ask(
   id: JudgmentPayer,
   extra: { imageUrl?: string; judge?: ImageJudge } = {},
 ): Promise<{ answers: Record<string, Record<string, unknown>>; model: string }> {
-  const path = id === "platform" ? "/internal/platform-judgments" : "/orgs/judgments";
+  const platform = "platform" in id ? platformCallerWire(id.platform) : null;
+  const path = platform ? "/internal/platform-judgments" : "/orgs/judgments";
   const res = await fetchWithRetry(`${CHAT_SERVICE_URL}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...(id === "platform" ? {} : identityHeaders(id)) },
+    headers: { "Content-Type": "application/json", "X-API-Key": CHAT_SERVICE_API_KEY, ...(platform ? platform.headers : identityHeaders(id as SpendIdentity)) },
     body: JSON.stringify({
+      ...(platform ? platform.body : {}),
       state: wellFormedState(state),
       questions,
       ...(extra.imageUrl ? { image: { url: extra.imageUrl } } : {}),
