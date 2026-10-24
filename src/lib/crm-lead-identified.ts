@@ -17,7 +17,10 @@ import { declareRunOutcomes, leadFoundDeclaration } from "./run-outcomes.js";
  *   - the serve came from the CRM (live: the served person's provider is `crm`; backfill: an email of the lead was
  *     registered from a `crm` serve), and
  *   - a LIVE professional relation crm-service states for one of the serve's brands, tagged `professional_to_brand`
- *     on its own tags (the relationship subjects' rule), carries one of the lead's registered emails.
+ *     on its own tags with a JUDGED CONVERSATION among the tag's basis (`basis[].kind = 'conversation'`: crm-service's
+ *     own production rule, lib/people/lead-identified.ts; a tag the brand's tools earned, Instantly / GoHighLevel /
+ *     Stripe..., cost nothing and produced no occurrence: consuming it named a subject nobody produced, 292 of 293
+ *     relations in prod 2026-10-24, LEDGER-HISTORY-1024), carries one of the lead's registered emails.
  *   - one relation key = it; several = the one at the lead's company (crm's `companyId` = brand-service id =
  *     `leads.company_id`, '' = unknown on both sides); still not one = none, logged (never a pick).
  * Relation keys are crm-service's: read verbatim, never minted, re-keyed or lower-cased.
@@ -75,7 +78,9 @@ export async function crmIdentifiedRelationKeys(queries: readonly IdentifiedLead
         ON f.org_id = em.org_id AND f.brand_id = ANY(em.brand_ids) AND f.type = 'relation'
        AND f.emails && em.emails
        AND f.payload->>'capacity' = 'professional'
-       AND f.payload->'tags' @> ${JSON.stringify([{ tag: PROFESSIONAL_TO_BRAND }])}::jsonb
+       AND EXISTS (
+             SELECT 1 FROM jsonb_array_elements(f.payload->'tags') t, jsonb_array_elements(coalesce(t->'basis', '[]'::jsonb)) b
+              WHERE t->>'tag' = ${PROFESSIONAL_TO_BRAND} AND b->>'kind' = 'conversation')
        AND jsonb_typeof(f.payload->'relationKey') = 'string'
        AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
   `)) as unknown as Array<{ i: number; lead_company: string; relation_key: string; company_id: string }>;
