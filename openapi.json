@@ -14483,6 +14483,133 @@
         "required": [
           "dryRun"
         ]
+      },
+      "LeadStatesPage": {
+        "type": "object",
+        "properties": {
+          "leads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeadStatesRow"
+            }
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "leads",
+          "nextCursor"
+        ]
+      },
+      "LeadStatesRow": {
+        "type": "object",
+        "properties": {
+          "orgId": {
+            "type": "string"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "leadId": {
+            "type": "string"
+          },
+          "states": {
+            "type": "object",
+            "properties": {
+              "lead_interested": {
+                "$ref": "#/components/schemas/LeadReachedState"
+              },
+              "meeting_booked": {
+                "$ref": "#/components/schemas/LeadReachedState"
+              },
+              "meeting_attended": {
+                "$ref": "#/components/schemas/LeadReachedState"
+              },
+              "paid_client": {
+                "$ref": "#/components/schemas/LeadReachedState"
+              },
+              "lead_visited": {
+                "$ref": "#/components/schemas/LeadReachedState"
+              }
+            },
+            "required": [
+              "lead_interested",
+              "meeting_booked",
+              "meeting_attended",
+              "paid_client",
+              "lead_visited"
+            ]
+          }
+        },
+        "required": [
+          "orgId",
+          "brandId",
+          "leadId",
+          "states"
+        ]
+      },
+      "LeadReachedState": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "reachedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "First reach (ISO, the prospect's own instant). null = reached, date unknown (a reply saying they were already a customer)."
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "positive_reply",
+              "positive_message",
+              "form_reply",
+              "meeting_booked",
+              "meeting_attended",
+              "sale",
+              "click",
+              "site_session",
+              "stated_visit"
+            ],
+            "description": "The evidence that reached it first: positive_reply (reply to our outreach classified positive), positive_message (WhatsApp/LinkedIn message judged interest), form_reply (CRM form after our first email), meeting_booked / meeting_attended / sale (outcome ledger), click (measured click to the brand's site), site_session (the brand's analytics saw a session), stated_visit (visit on the outcome ledger)."
+          },
+          "impliedBy": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "lead_interested",
+              "meeting_booked",
+              "meeting_attended",
+              "paid_client",
+              "lead_visited",
+              null
+            ],
+            "description": "The higher interest state whose reach implied this one (same date); null = its own evidence."
+          }
+        },
+        "required": [
+          "reachedAt",
+          "basis",
+          "impliedBy"
+        ]
+      },
+      "LeadStatesByLeadRequest": {
+        "type": "object",
+        "properties": {
+          "leadIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "leadIds"
+        ]
       }
     },
     "parameters": {},
@@ -25972,6 +26099,126 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/lead-states": {
+      "get": {
+        "summary": "First reach of each state, every lead x brand (internal, service-auth)",
+        "description": "When each lead first reached each STATE at a brand (owner 2026-10-24: a state is reached ONCE per lead x brand, dated at its first reach: 3 positive replies = one lead_interested, 12 clicks = one lead_visited). Interest ladder lead_interested < meeting_booked < meeting_attended < paid_client: reaching a higher state reaches every lower one at that date (a meeting booked with no positive reply = interested at the booking, `impliedBy: meeting_booked`). lead_visited is implied by nothing (a yes never makes a lead visited, a click never makes them interested). Each date is the prospect's own instant (reply, click, booking), never a sync or declaration time. A state never reached = null. A lead the org marked not a person is never returned. Every lead with at least one state is answered; one row per (org, brand, lead). Walked in (org, brand, lead) order: `limit` (1..5000) required, `nextCursor` until null.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "1..5000"
+            },
+            "required": true,
+            "description": "1..5000",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "nextCursor of the previous page"
+            },
+            "required": false,
+            "description": "nextCursor of the previous page",
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Only this org's leads (internal org UUID)"
+            },
+            "required": false,
+            "description": "Only this org's leads (internal org UUID)",
+            "name": "orgId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadStatesPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "limit missing/out of range, or a cursor this endpoint never issued"
+          },
+          "500": {
+            "description": "Unreadable (never an empty answer)"
+          }
+        }
+      }
+    },
+    "/internal/lead-states/by-lead": {
+      "post": {
+        "summary": "First reach of each state for these leads, every brand (internal, service-auth)",
+        "description": "When each lead first reached each STATE at a brand (owner 2026-10-24: a state is reached ONCE per lead x brand, dated at its first reach: 3 positive replies = one lead_interested, 12 clicks = one lead_visited). Interest ladder lead_interested < meeting_booked < meeting_attended < paid_client: reaching a higher state reaches every lower one at that date (a meeting booked with no positive reply = interested at the booking, `impliedBy: meeting_booked`). lead_visited is implied by nothing (a yes never makes a lead visited, a click never makes them interested). Each date is the prospect's own instant (reply, click, booking), never a sync or declaration time. A state never reached = null. A lead the org marked not a person is never returned. Every lead with at least one state is answered; one row per (org, brand, lead). Up to 1000 lead ids; a lead with no state is absent.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadStatesByLeadRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every lead x brand of the asked leads holding a state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "leads": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LeadStatesRow"
+                      }
+                    }
+                  },
+                  "required": [
+                    "leads"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "500": {
+            "description": "Unreadable (never an empty answer)"
           }
         }
       }

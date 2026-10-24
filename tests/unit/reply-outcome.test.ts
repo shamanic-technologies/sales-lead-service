@@ -367,7 +367,11 @@ describe("the reply vocabulary is not copied", () => {
   }
   it("no reply kind is named anywhere in src", () => {
     const kind = /["'](lead_(interested|referral|info_requested|meeting_requested|not_interested|wrong_person|changed_job|opt_out_requested|neutral|off_topic|out_of_office)|auto_reply_received)["']/;
-    const offenders = walk(join(__dirname, "../../src")).filter((p) => kind.test(readFileSync(p, "utf8")));
+    // `lead_interested` is ALSO the catalogue STATE key of the cost ladder (LEAD-STATES-1024, owner 2026-10-24:
+    // "un oui c'est un intérêt"), same spelling, other meaning. Its one home may name it, and nothing else of the list.
+    const stateKeyHome = join(__dirname, "../../src/lib/lead-states.ts");
+    const kindButState = /["'](lead_(referral|info_requested|meeting_requested|not_interested|wrong_person|changed_job|opt_out_requested|neutral|off_topic|out_of_office)|auto_reply_received)["']/;
+    const offenders = walk(join(__dirname, "../../src")).filter((p) => (p === stateKeyHome ? kindButState : kind).test(readFileSync(p, "utf8")));
     expect(offenders).toEqual([]);
   });
 });
