@@ -6638,6 +6638,25 @@
             },
             "description": "More held campaigns, each claimed on its own exact id, tried in order after the path one; the first person claimed wins (followup.campaignId names whose row it is). For a responder whose preceding leg runs on several campaigns at once (cold email and cold WhatsApp opening conversations for one offer)."
           },
+          "person": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "email": {
+                "type": "string",
+                "nullable": true
+              },
+              "phone": {
+                "type": "string",
+                "nullable": true
+              },
+              "leadId": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "description": "(CLAIM-OCCURRENCE-PERSON-1025) The person the run's trigger occurrence names: only THEIR due row is claimable (any identity given matches: lead id, an email contact method case-folded, a phone contact method as E.164). Absent, null or naming nobody usable = the campaign's due rows, oldest first, unchanged. A run answering an occurrence must state it, or a burst of occurrences makes each run claim someone else's row."
+          },
           "relationships": {
             "type": "string",
             "enum": [
@@ -19787,7 +19806,7 @@
             }
           },
           "400": {
-            "description": "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), alsoCampaignIds not an array of ids (code invalid_also_campaign_ids), or relationships not a known policy (code unknown_relationship_policy)"
+            "description": "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), alsoCampaignIds not an array of ids (code invalid_also_campaign_ids), person not an object (code invalid_person), or relationships not a known policy (code unknown_relationship_policy)"
           },
           "401": {
             "description": "Unauthorized"
