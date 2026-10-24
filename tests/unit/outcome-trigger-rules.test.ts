@@ -150,6 +150,22 @@ describe("pickOffers: the offer the event names", () => {
     expect(pickOffers({ stated: null, leadCampaignOffers: [], activeBrandOffers: ["o8", "o9"] })).toMatchObject({ offerIds: [], reason: "offer_unknown" });
     expect(pickOffers({ stated: null, leadCampaignOffers: [], activeBrandOffers: [] })).toMatchObject({ offerIds: [], reason: "offer_unknown" });
   });
+
+  it("OFFER-FROM-LIVE-CAMPAIGNS: a person in no campaign reaches the offers whose live campaign answers the trigger", () => {
+    // An inbound visitor, brand with 2 offers, one live Lead event campaign: that offer, never offer_unknown.
+    expect(pickOffers({ stated: null, leadCampaignOffers: [], liveTriggerOffers: ["o8"], activeBrandOffers: ["o8", "o9"] })).toEqual({
+      offerIds: ["o8"],
+      basis: "live_campaigns",
+    });
+    expect(pickOffers({ stated: null, leadCampaignOffers: [], liveTriggerOffers: ["o9", "o8", "o9"], activeBrandOffers: null })).toEqual({
+      offerIds: ["o8", "o9"],
+      basis: "live_campaigns",
+    });
+    // The person's own campaigns still answer first; nothing live = the only-offer / unknown rules as before.
+    expect(pickOffers({ stated: null, leadCampaignOffers: ["o1"], liveTriggerOffers: ["o8"], activeBrandOffers: null })).toMatchObject({ basis: "lead_campaigns" });
+    expect(pickOffers({ stated: null, leadCampaignOffers: [], liveTriggerOffers: [], activeBrandOffers: ["o9"] })).toEqual({ offerIds: ["o9"], basis: "only_offer" });
+    expect(pickOffers({ stated: null, leadCampaignOffers: [], liveTriggerOffers: [], activeBrandOffers: ["o8", "o9"] })).toMatchObject({ reason: "offer_unknown" });
+  });
 });
 
 describe("the person and the idempotency key", () => {

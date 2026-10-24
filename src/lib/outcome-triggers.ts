@@ -65,6 +65,7 @@ import {
   ledgerSourceRef,
   stepsOfLedgerRow,
   RESTATED_ACTION,
+  UNANSWERED_SKIPS,
   actionAlreadyAnswered,
   type CatalogueOutcomeTrigger,
 } from "./outcome-trigger-rules.js";
@@ -134,15 +135,17 @@ export interface OutcomeReach {
   statedCampaignId: string | null;
 }
 
-/** Reads shared by every reach of one pass: one campaign read per org, one offer read per brand. */
+/** Reads shared by every reach of one pass: one campaign read per org, one offer read per brand (and trigger). */
 interface Lookups {
   orgCampaigns(orgId: string): Promise<Map<string, { legKey: string | null; offerId: string | null }>>;
   activeBrandOffers(orgId: string, brandId: string): Promise<string[]>;
+  liveTriggerOffers(orgId: string, brandId: string, triggerId: string): Promise<string[]>;
 }
 
 function createLookups(): Lookups {
   const campaigns = new Map<string, Promise<Map<string, { legKey: string | null; offerId: string | null }>>>();
   const offers = new Map<string, Promise<string[]>>();
+  const live = new Map<string, Promise<string[]>>();
   return {
     orgCampaigns(orgId) {
       let p = campaigns.get(orgId);
@@ -163,7 +166,38 @@ function createLookups(): Lookups {
       }
       return p;
     },
+    liveTriggerOffers(orgId, brandId, triggerId) {
+      const key = `${orgId}|${brandId}|${triggerId}`;
+      let p = live.get(key);
+      if (!p) {
+        p = fetchLiveTriggerOffers(orgId, brandId, triggerId);
+        live.set(key, p);
+        p.catch(() => live.delete(key));
+      }
+      return p;
+    },
   };
+}
+
+/**
+ * campaign-service's offers of the brand whose ONGOING campaign answers the trigger, directly or through a trigger
+ * made of it (`lead_event`): `GET /internal/brands/{id}/trigger-offers` (OFFER-FROM-LIVE-CAMPAIGNS-1024). Asked only
+ * for a person in no campaign. THROWS when it cannot answer (the reach is retried, never fired on a guess).
+ */
+export async function fetchLiveTriggerOffers(orgId: string, brandId: string, triggerId: string): Promise<string[]> {
+  const url = `${CAMPAIGN_SERVICE_URL}/internal/brands/${encodeURIComponent(brandId)}/trigger-offers?triggerId=${encodeURIComponent(triggerId)}`;
+  const response = await fetchWithRetry(url, {
+    headers: { "x-api-key": CAMPAIGN_SERVICE_API_KEY, "x-org-id": orgId },
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`campaign-service trigger-offers of brand ${brandId} (${triggerId}) failed: ${response.status} ${(await response.text()).slice(0, 300)}`);
+  }
+  const body = (await response.json()) as { offerIds?: unknown };
+  if (!Array.isArray(body.offerIds) || body.offerIds.some((o) => typeof o !== "string")) {
+    throw new Error(`campaign-service trigger-offers of brand ${brandId} answered without an offerIds array`);
+  }
+  return body.offerIds as string[];
 }
 
 /** brand-service's ACTIVE offers of the brand. THROWS when it cannot answer. */
@@ -255,8 +289,11 @@ async function resolveReach(reach: OutcomeReach, lookups: Lookups): Promise<Reso
     leadCampaignOffers = (await campaignsOfLead(reach.orgId, reach.brandId, leadId)).map((id) => campaigns.get(id)?.offerId ?? null);
   }
   const needsBrand = !stated && !leadCampaignOffers.some((o) => o !== null);
+  // A person in no campaign (an inbound visitor): the offers whose live campaign answers the trigger this reach fires.
+  const verdict = needsBrand ? outcomeTriggerFor(reach.step, await loadOutcomeTriggers()) : null;
+  const liveTriggerOffers = verdict?.fire ? await lookups.liveTriggerOffers(reach.orgId, reach.brandId, verdict.triggerId) : null;
   const activeBrandOffers = needsBrand ? await lookups.activeBrandOffers(reach.orgId, reach.brandId) : null;
-  return { ...reach, leadId, email, phone, personKey, offers: pickOffers({ stated, leadCampaignOffers, activeBrandOffers }) };
+  return { ...reach, leadId, email, phone, personKey, offers: pickOffers({ stated, leadCampaignOffers, liveTriggerOffers, activeBrandOffers }) };
 }
 
 // ── the ledger ───────────────────────────────────────────────────────────────────────────────
@@ -645,6 +682,18 @@ interface CrmFactRow {
  * `restated_action`, nothing sent (outcome-trigger-rules.ts RESTATED_ACTION). THROWS on a failed read.
  */
 async function isRestatedAction(f: CrmFactRow, step: string, at: string | null): Promise<boolean> {
+  if (!(await earlierCopyAnswered(f.fact_id, step))) return false;
+  await db.execute(sql`
+    INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, occurred_at, source, status, skip_reason)
+    VALUES (${`crm:${f.fact_id}`}, ${f.org_id}, ${f.brand_id}, '', ${step}, '', ${at}::timestamptz, 'crm_fact', 'skipped', ${RESTATED_ACTION})
+    ON CONFLICT DO NOTHING
+  `);
+  console.log(`[lead-service] outcome ${step} NOT fired (${RESTATED_ACTION}): org=${f.org_id} brand=${f.brand_id} crm:${f.fact_id} re-states an action already answered`);
+  return true;
+}
+
+/** Whether another copy of the CRM fact's action (same source, ref, type, date) already answered its trigger. */
+async function earlierCopyAnswered(factId: string, step: string): Promise<boolean> {
   const earlier = (await db.execute(sql`
     SELECT o.status, o.skip_reason
     FROM crm_facts c1
@@ -653,16 +702,64 @@ async function isRestatedAction(f: CrmFactRow, step: string, at: string | null):
      AND c2.occurred_at IS NOT DISTINCT FROM c1.occurred_at
      AND c2.source = c1.source AND c2.source_ref = c1.source_ref AND c2.fact_id <> c1.fact_id
     JOIN outcome_trigger_fires o ON o.source_ref = 'crm:' || c2.fact_id AND o.step = ${step}
-    WHERE c1.fact_id = ${f.fact_id}
+    WHERE c1.fact_id = ${factId}
   `)) as unknown as Array<{ status: string; skip_reason: string | null }>;
-  if (!actionAlreadyAnswered(earlier.map((r) => ({ status: r.status, skipReason: r.skip_reason })))) return false;
-  await db.execute(sql`
-    INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, occurred_at, source, status, skip_reason)
-    VALUES (${`crm:${f.fact_id}`}, ${f.org_id}, ${f.brand_id}, '', ${step}, '', ${at}::timestamptz, 'crm_fact', 'skipped', ${RESTATED_ACTION})
-    ON CONFLICT DO NOTHING
-  `);
-  console.log(`[lead-service] outcome ${step} NOT fired (${RESTATED_ACTION}): org=${f.org_id} brand=${f.brand_id} crm:${f.fact_id} re-states an action already answered`);
-  return true;
+  return actionAlreadyAnswered(earlier.map((r) => ({ status: r.status, skipReason: r.skip_reason })));
+}
+
+export type ReResolveAnswer =
+  | { status: 200; rows: Array<{ offerId: string; status: string; skipReason: string | null }> }
+  | { status: 404 | 409; reason: "not_found" | "already_answered" | "not_fresh" | "restated_action"; detail: string };
+
+/**
+ * RE-RESOLVE ONE REACH SET ASIDE BEFORE THE DOOR (OFFER-FROM-LIVE-CAMPAIGNS-1024): a record whose person or offer could
+ * not be named (`no_person`, `offer_unknown`, `unresolvable`) never fired; once the answer exists (a live campaign
+ * now answers the trigger), staff re-resolves it through the SAME path a fresh reach takes (resolve, write one row per
+ * offer, ring the door). Refused when any row of the record already answered (409 `already_answered`: once per action),
+ * when the reach is outside the fresh window (409 `not_fresh`: no back-fill), or when another copy of the same CRM
+ * action already answered (409 `restated_action`). Unknown record = 404.
+ */
+export async function reResolveSetAsideReach(sourceRef: string, now: Date = new Date()): Promise<ReResolveAnswer> {
+  const rows = (await db.execute(sql`
+    SELECT org_id, brand_id, offer_id, step, lead_id::text AS lead_id, email, name, phone, occurred_at, source, status, skip_reason
+    FROM outcome_trigger_fires WHERE source_ref = ${sourceRef} ORDER BY created_at
+  `)) as unknown as Array<{
+    org_id: string; brand_id: string; offer_id: string; step: string; lead_id: string | null; email: string | null;
+    name: string | null; phone: string | null; occurred_at: RawTimestamp; source: string; status: string; skip_reason: string | null;
+  }>;
+  if (rows.length === 0) return { status: 404, reason: "not_found", detail: `no outcome reach recorded under ${sourceRef}` };
+  if (rows.some((r) => r.status !== "skipped" || !UNANSWERED_SKIPS.includes(r.skip_reason ?? ""))) {
+    return { status: 409, reason: "already_answered", detail: `${sourceRef} already answered its trigger` };
+  }
+  const first = rows[0];
+  const at = toIsoTimestamp(first.occurred_at);
+  const state = await armedState();
+  if (!isFreshReach(at, state.armedAt, now)) {
+    return { status: 409, reason: "not_fresh", detail: `${sourceRef} happened at ${at ?? "an unknown time"}, outside the fresh window` };
+  }
+  if (sourceRef.startsWith("crm:") && (await earlierCopyAnswered(sourceRef.slice(4), first.step))) {
+    return { status: 409, reason: "restated_action", detail: `another copy of ${sourceRef}'s action already answered` };
+  }
+  const pending = await recordOutcomeReach({
+    orgId: first.org_id,
+    brandId: first.brand_id,
+    step: first.step,
+    source: first.source,
+    sourceRef,
+    occurredAt: at,
+    leadId: first.lead_id,
+    emails: canonicalEmails([first.email]),
+    name: first.name,
+    phone: first.phone,
+    statedOfferId: null,
+    statedCampaignId: null,
+  });
+  await deliverIds(pending);
+  const after = (await db.execute(sql`
+    SELECT offer_id, status, skip_reason FROM outcome_trigger_fires WHERE source_ref = ${sourceRef} ORDER BY created_at
+  `)) as unknown as Array<{ offer_id: string; status: string; skip_reason: string | null }>;
+  console.log(`[lead-service] outcome reach ${sourceRef} re-resolved: ${after.map((r) => `${r.offer_id || "-"}=${r.status}${r.skip_reason ? `/${r.skip_reason}` : ""}`).join(", ")}`);
+  return { status: 200, rows: after.map((r) => ({ offerId: r.offer_id, status: r.status, skipReason: r.skip_reason })) };
 }
 
 /** New CRM facts since the cursor, in copy order. A failure stops at that fact: the cursor never passes it. */
