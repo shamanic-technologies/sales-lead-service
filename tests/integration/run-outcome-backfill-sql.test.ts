@@ -37,9 +37,15 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
   }
 
   /** A crm relation fact as crm-service's feed copies it (crm_registry_facts). Returns its fact id. */
-  async function relation(email: string, relationKey: string, over: { capacity?: string; tags?: string[]; companyId?: string } = {}): Promise<string> {
+  async function relation(
+    email: string,
+    relationKey: string,
+    over: { capacity?: string; tags?: string[]; companyId?: string; basis?: "conversation" | "source" } = {},
+  ): Promise<string> {
     const factId = `itest-${randomUUID()}`;
-    const payload = { relationKey, capacity: over.capacity ?? "professional", tags: (over.tags ?? ["professional_to_brand"]).map((tag) => ({ tag })), companyId: over.companyId ?? null };
+    // crm-service's tag basis: a judged conversation (what it PRODUCES lead_identified on) or a source (the brand's tools).
+    const basis = over.basis === "source" ? [{ kind: "source", ref: "instantly" }] : [{ kind: "conversation", ref: `matrix:${randomUUID()}` }];
+    const payload = { relationKey, capacity: over.capacity ?? "professional", tags: (over.tags ?? ["professional_to_brand"]).map((tag) => ({ tag, basis })), companyId: over.companyId ?? null };
     await db.execute(sql`
       INSERT INTO crm_registry_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, raw)
       VALUES (${factId}, ${String(Math.floor(Math.random() * 1e15) + 9e15)}::bigint, ${orgId}, ${brandId}, ${`person:${randomUUID()}`},
@@ -201,10 +207,16 @@ describe.skipIf(!hasRealDatabase)("run outcome backfill against a real database"
     const otherBrand = await newLead("single2@itest.example", undefined, "crm");
     await relation("single2@itest.example", `rel:${randomUUID()}:pro`);
 
+    // LEDGER-HISTORY-1024: a tag the brand's own tools earned (source basis) is no judgment: crm-service produces no
+    // lead_identified on it, so nothing is consumed (it read as unknown provenance on 292 of 293 such relations).
+    const sourceOnly = await newLead("source@itest.example", undefined, "crm");
+    await relation("source@itest.example", `rel:${randomUUID()}:pro`, { basis: "source" });
+
     const q = (leadId: string, brandIds = [brandId]) => ({ orgId, leadId, brandIds });
-    expect(await crmIdentifiedRelationKeys([q(single), q(tied), q(twoAtCompany), q(withdrawn), q(untagged), q(otherBrand, [randomUUID()])])).toEqual([
+    expect(await crmIdentifiedRelationKeys([q(single), q(tied), q(twoAtCompany), q(withdrawn), q(untagged), q(otherBrand, [randomUUID()]), q(sourceOnly)])).toEqual([
       singleRel,
       tiedOrg,
+      null,
       null,
       null,
       null,
