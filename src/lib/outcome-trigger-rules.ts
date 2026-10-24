@@ -147,22 +147,31 @@ export function outcomeIdempotencyKey(input: { step: string; brandId: string; of
   return `lead-service:outcome:${input.step}:${input.brandId}:${input.offerId}:${person}`;
 }
 
-export type OfferAnswer = { offerIds: string[]; basis: "stated" | "lead_campaigns" | "only_offer" } | { offerIds: []; reason: "offer_unknown"; detail: string };
+export type OfferAnswer =
+  | { offerIds: string[]; basis: "stated" | "lead_campaigns" | "live_campaigns" | "only_offer" }
+  | { offerIds: []; reason: "offer_unknown"; detail: string };
 
 /**
  * The offer(s) a reach is about (campaign-service runs campaigns per (brand, offer), so every event names one).
  * First that answers: the offer the record states (the serve's campaign, the statement's campaign, the acting
  * campaign); the offers of the campaigns the person is a lead of at the brand (one event each: the person is a
- * lead of each); the brand's ONLY active offer. Else `offer_unknown`, never a guess.
+ * lead of each); the brand's offers whose ONGOING campaign answers the trigger (campaign-service
+ * `/internal/brands/{id}/trigger-offers`, OFFER-FROM-LIVE-CAMPAIGNS-1024: an inbound visitor is in no campaign, and
+ * with 2+ offers their event used to die `offer_unknown` before reaching the Lead event campaign); the brand's ONLY
+ * active offer. Else `offer_unknown`, never a guess.
  */
 export function pickOffers(input: {
   stated: string | null;
   leadCampaignOffers: readonly (string | null)[];
+  /** null = not asked (the record or the person's campaigns already answer, or no trigger fires here). */
+  liveTriggerOffers?: readonly string[] | null;
   activeBrandOffers: readonly string[] | null;
 }): OfferAnswer {
   if (input.stated) return { offerIds: [input.stated], basis: "stated" };
   const fromLead = [...new Set(input.leadCampaignOffers.filter((o): o is string => typeof o === "string" && o.length > 0))].sort();
   if (fromLead.length > 0) return { offerIds: fromLead, basis: "lead_campaigns" };
+  const live = [...new Set((input.liveTriggerOffers ?? []).filter((o) => typeof o === "string" && o.length > 0))].sort();
+  if (live.length > 0) return { offerIds: live, basis: "live_campaigns" };
   const active = input.activeBrandOffers ?? [];
   if (active.length === 1) return { offerIds: [active[0]], basis: "only_offer" };
   return {
@@ -170,8 +179,8 @@ export function pickOffers(input: {
     reason: "offer_unknown",
     detail:
       active.length === 0
-        ? "no campaign of the person states an offer and the brand has no active offer"
-        : `no campaign of the person states an offer and the brand has ${active.length} active offers`,
+        ? "no campaign of the person states an offer, no live campaign answers the trigger, and the brand has no active offer"
+        : `no campaign of the person states an offer, no live campaign answers the trigger, and the brand has ${active.length} active offers`,
   };
 }
 
@@ -214,7 +223,7 @@ export function canonicalEmails(emails: readonly (string | null | undefined)[]):
 export const RESTATED_ACTION = "restated_action";
 
 /** Skips decided before the door was asked: the action has not fired yet. */
-const UNANSWERED_SKIPS: readonly string[] = ["no_person", "offer_unknown", "unresolvable"];
+export const UNANSWERED_SKIPS: readonly string[] = ["no_person", "offer_unknown", "unresolvable"];
 
 /** Whether an earlier copy of the same action already answered its trigger (see RESTATED_ACTION). */
 export function actionAlreadyAnswered(earlierCopies: ReadonlyArray<{ status: string; skipReason: string | null }>): boolean {
