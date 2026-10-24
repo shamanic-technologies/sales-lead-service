@@ -25,7 +25,8 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *     Bonus checks, screening judgments and every child run that declares
  *     nothing roll into the lead-serve run's `lead_found`.
  *   - every meeting booked / attended and sale our outreach caused -> `meeting_booked` / `meeting_attended` /
- *     `paid_client` on the brand's recording run of the day for that outcome (`factOutcomeDeclaration`, outcome-fact-declarations.ts).
+ *     `paid_client` on the brand's recording run of the fact's UTC day for that outcome, dated on the instant the fact
+ *     happened (`factOutcomeDeclaration`, outcome-fact-declarations.ts; MEETING-DATED-OCCURRENCES-1024).
  * Not declared, on purpose: qualification previews/samples/suggestions (sample companies that are not leads,
  * onboarding support), relationship sweeps (tags, not catalogue outcomes). No run here judges a positive reply
  * (instantly-service owns reply verdicts; a CRM form is crm-service's fact, no spend), so no `conversation`.
@@ -55,6 +56,13 @@ export interface RunOutcomeDeclaration {
   runId: string;
   produced: OutcomeItem[];
   consumed: OutcomeItem[];
+  /**
+   * When the occurrence HAPPENED (ISO instant), for a fact recorded after the day it happened (a meeting booked in
+   * May, declared in October: MEETING-DATED-OCCURRENCES-1024). runs-service files it on that instant; it accepts a
+   * past instant only on a run with no cost and no child run (our recording runs) declared by its own service.
+   * Absent = on time (the declaration's moment).
+   */
+  occurredAt?: string;
 }
 
 const leadSubject = (outcomeKey: string, leadId: string): OutcomeItem => ({ outcomeKey, subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: leadId });
@@ -104,12 +112,21 @@ export function companyResearchedDeclaration(input: { orgId: string; runId: stri
 export const FACT_OUTCOME_KEYS = ["meeting_booked", "meeting_attended", "paid_client"] as const;
 export type FactOutcomeKey = (typeof FACT_OUTCOME_KEYS)[number];
 
-export function factOutcomeDeclaration(input: { orgId: string; runId: string; leadId: string; outcomeKey: FactOutcomeKey; consumedOutcomeKey: string }): RunOutcomeDeclaration {
+export function factOutcomeDeclaration(input: {
+  orgId: string;
+  runId: string;
+  leadId: string;
+  outcomeKey: FactOutcomeKey;
+  consumedOutcomeKey: string;
+  /** When the fact happened (ISO); null = undated fact, declared on time. */
+  occurredAt?: string | null;
+}): RunOutcomeDeclaration {
   return {
     orgId: input.orgId,
     runId: input.runId,
     produced: [leadSubject(input.outcomeKey, input.leadId)],
     consumed: [leadSubject(input.consumedOutcomeKey, input.leadId)],
+    ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
   };
 }
 
@@ -132,8 +149,9 @@ export async function deliverRunOutcomes(d: RunOutcomeDeclaration): Promise<Deli
   try {
     const response = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/runs/${d.runId}/outcomes`, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-org-id": d.orgId },
-      body: JSON.stringify({ produced: d.produced, consumed: d.consumed }),
+      // x-service-name: runs-service takes a past `occurredAt` only from the run's own service.
+      headers: { "content-type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-org-id": d.orgId, "x-service-name": OUTCOME_SUBJECT_SERVICE },
+      body: JSON.stringify({ produced: d.produced, consumed: d.consumed, ...(d.occurredAt ? { occurredAt: d.occurredAt } : {}) }),
       signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
     });
     if (response.ok) return { kind: "delivered" };
