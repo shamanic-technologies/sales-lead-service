@@ -3,7 +3,9 @@ import { db } from "../db/index.js";
 import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
 import { errorMessage } from "./db-error.js";
 import { createRun, updateRun } from "./runs-client.js";
-import { declareRunOutcomesNow, factOutcomeDeclaration, type FactOutcomeKey } from "./run-outcomes.js";
+import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
+import { fetchWithRetry } from "./fetch-retry.js";
+import { declareRunOutcomesNow, factOutcomeDeclaration, OUTCOME_SUBJECT_SERVICE, type FactOutcomeKey } from "./run-outcomes.js";
 
 /**
  * EVERY MEETING AND SALE OUR OUTREACH CAUSED IS AN OUTCOME OCCURRENCE ON THE LEDGER (COST-ACCOUNTING-1023-P1, second
@@ -27,7 +29,15 @@ import { declareRunOutcomesNow, factOutcomeDeclaration, type FactOutcomeKey } fr
  * A fact our outreach did NOT lead to (`caused_by_outreach` false or null: a "theirs", an undated or never-touched
  * person, a reply-read "already a customer") is no occurrence of ours: nothing declared.
  *
- * The run: one `outcome-recording` run per (org, brand, UTC day, OUTCOME KEY), created and closed `completed` at once,
+ * DATED ON THE DAY IT HAPPENED (MEETING-DATED-OCCURRENCES-1024, owner 2026-10-24: the cost of a meeting OVER TIME is
+ * read on the ledger "as of day D"): each occurrence is declared with `occurredAt` = the fact's own instant
+ * (`conversion_events.received_at`, never after now), on the recording run of the FACT's UTC day. runs-service accepts a
+ * past instant on a run with no cost and no child run, declared by its own service (`x-service-name`); a recording run
+ * is exactly that. An undated fact is declared on time, on today's run. Declarations made before this rule (all on
+ * 2026-10-23 runs) are moved to their instant ONCE by `redateUndatedDeclarations` (runs-service's batch door,
+ * `redate: true`: the SAME occurrence moves earlier, no second one), tracked by `outcome_fact_declarations.dated`.
+ *
+ * The run: one `outcome-recording` run per (org, brand, fact's UTC day, OUTCOME KEY), created and closed `completed` at once,
  * no cost of its own (instantly-service's pattern for Positive reply). It is a production order that states what was
  * reached. A run NEVER produces two different outcome keys (COST-ACCOUNTING-1023-LEAD-FIX): runs-service attributes a
  * run's consumptions to the outcomes THAT RUN produced, split by quantity, so one run producing booked + attended +
@@ -133,8 +143,14 @@ interface PendingFact {
   leadId: string;
   outcomeKey: FactOutcomeKey;
   conversionEventId: string;
+  /** The fact's instant as Postgres prints it (SQL comparisons), and as ISO (runs-service), never after now. */
   at: string | null;
+  occurredAt: string | null;
 }
+
+/** ISO instant of a timestamptz column, capped at now (runs-service refuses a future `occurredAt`). */
+const isoAt = (col: ReturnType<typeof sql.raw>) =>
+  sql`to_char(LEAST(${col}, now()) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
 const OUTCOME_CASE = sql.raw(
   `CASE ${Object.entries(FACT_EVENTS_OF_OUTCOME)
@@ -158,7 +174,8 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
         ${scope ? sql`AND ce.org_id = ${scope.orgId}` : sql.empty()}
       ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, ${OUTCOME_CASE}, ce.received_at ASC NULLS LAST, ce.id
     )
-    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.received_at::text AS at
+    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.received_at::text AS at,
+           ${isoAt(sql.raw("f.received_at"))} AS occurred_at
     FROM facts f
     WHERE NOT EXISTS (
       SELECT 1 FROM outcome_fact_declarations d
@@ -173,6 +190,7 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
     outcomeKey: r.outcome_key as FactOutcomeKey,
     conversionEventId: String(r.conversion_event_id),
     at: r.at ?? null,
+    occurredAt: r.occurred_at ?? null,
   }));
 }
 
@@ -221,7 +239,7 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   let runId: string;
   let consumed: { outcomeKey: string; basis: ConsumedBasis };
   try {
-    runId = await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey);
+    runId = await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date());
     consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
   } catch (err) {
     summary.failed++;
@@ -230,14 +248,14 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   }
   // Claim first: once per (org, brand, lead, outcome), ever.
   const claimed = (await db.execute(sql`
-    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis)
-    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis})
+    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated)
+    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true)
     ON CONFLICT DO NOTHING
     RETURNING 1 AS ok
   `)) as unknown as unknown[];
   if (claimed.length === 0) return;
   const kind = await declareRunOutcomesNow(
-    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey }),
+    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, occurredAt: f.occurredAt }),
   );
   if (kind === "lost") {
     await db.execute(sql`
@@ -252,6 +270,76 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   else summary.refused++;
 }
 
+export interface RedateSummary {
+  read: number;
+  redated: number;
+  alreadyRecorded: number;
+  undated: number;
+  refused: number;
+}
+
+export type RedatePost = (body: unknown) => Promise<{ status: number; text: string }>;
+
+const postRedate: RedatePost = async (body) => {
+  const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/platform-runs/outcomes/batch`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-service-name": OUTCOME_SUBJECT_SERVICE },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: res.status, text: await res.text() };
+};
+
+/**
+ * Declarations made before the dating rule sit on the day they were DECLARED: move each to the instant its fact
+ * happened, once (runs-service batch door, `redate: true`, one run and one instant per call: the same occurrence moves
+ * earlier, a replay writes nothing). Marked `dated` once runs-service took it; an undated fact has nothing to move.
+ * A refusal is logged loud and asked again next pass. 5xx / network = the pass stops (asked again next pass).
+ */
+export async function redateUndatedDeclarations(scope?: { orgId: string }, post: RedatePost = postRedate): Promise<RedateSummary> {
+  const rows = (await db.execute(sql`
+    SELECT d.org_id, d.brand_id, d.lead_id::text AS lead_id, d.outcome_key, d.run_id::text AS run_id, d.consumed_outcome_key,
+           ${isoAt(sql.raw("ce.received_at"))} AS occurred_at
+    FROM outcome_fact_declarations d
+    LEFT JOIN conversion_events ce ON ce.id = d.conversion_event_id
+    WHERE d.dated = false ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
+    ORDER BY d.created_at
+    LIMIT ${SWEEP_BATCH}
+  `)) as unknown as Array<Record<string, string | null>>;
+  const summary: RedateSummary = { read: rows.length, redated: 0, alreadyRecorded: 0, undated: 0, refused: 0 };
+  for (const r of rows) {
+    const markDated = () => db.execute(sql`
+      UPDATE outcome_fact_declarations SET dated = true
+      WHERE org_id = ${r.org_id} AND brand_id = ${r.brand_id} AND lead_id = ${r.lead_id}::uuid AND outcome_key = ${r.outcome_key}
+    `);
+    if (!r.occurred_at) {
+      summary.undated++;
+      await markDated();
+      continue;
+    }
+    const d = factOutcomeDeclaration({
+      orgId: String(r.org_id),
+      runId: String(r.run_id),
+      leadId: String(r.lead_id),
+      outcomeKey: r.outcome_key as FactOutcomeKey,
+      consumedOutcomeKey: String(r.consumed_outcome_key),
+    });
+    const res = await post({ runs: [{ runId: d.runId, occurredAt: r.occurred_at, redate: true, produced: d.produced, consumed: d.consumed }] });
+    if (res.status === 200 || res.status === 201) {
+      const j = JSON.parse(res.text) as { redatedCount?: number; recordedCount?: number; alreadyRecordedCount?: number };
+      if ((j.redatedCount ?? 0) + (j.recordedCount ?? 0) > 0) summary.redated++;
+      else summary.alreadyRecorded++;
+      await markDated();
+      continue;
+    }
+    if (res.status >= 500 || res.status === 401 || res.status === 403) throw new Error(`runs-service redate ${res.status} ${res.text.slice(0, 300)}`);
+    summary.refused++;
+    console.error(`[lead-service] outcome fact NOT re-dated (refused, asked again next pass): org=${r.org_id} run=${r.run_id} lead=${r.lead_id} ${r.outcome_key} at=${r.occurred_at}: ${res.status} ${res.text.slice(0, 300)}`);
+  }
+  if (rows.length > 0) console.log(`[lead-service] outcome fact re-date pass ${JSON.stringify(summary)}`);
+  return summary;
+}
+
 let inFlight: Promise<OutcomeFactSweepSummary> | null = null;
 
 /** One pass. Concurrent calls join it. `scope` is a test hook (the suite's files share one database). */
@@ -262,6 +350,7 @@ export function sweepOutcomeFactDeclarations(scope?: { orgId: string }): Promise
     const summary: OutcomeFactSweepSummary = { read: facts.length, delivered: 0, queued: 0, refused: 0, failed: 0 };
     for (const f of facts) await declareOne(f, summary);
     if (facts.length > 0) console.log(`[lead-service] outcome fact declarations pass ${JSON.stringify(summary)}`);
+    await redateUndatedDeclarations(scope).catch((err) => console.error("[lead-service] outcome fact re-date pass failed:", err));
     return summary;
   })().finally(() => {
     inFlight = null;

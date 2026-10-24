@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 
-const { leadFoundDeclaration, companyResearchedDeclaration, declarationKey, deliverRunOutcomes } = await import("../../src/lib/run-outcomes.js");
+const { leadFoundDeclaration, companyResearchedDeclaration, declarationKey, deliverRunOutcomes, factOutcomeDeclaration } = await import("../../src/lib/run-outcomes.js");
 
 describe("outcome declarations", () => {
   it("a find produces lead_found on the serve run and consumes the email check it handed out", () => {
@@ -59,7 +59,17 @@ describe("delivery to runs-service", () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/v1\/runs\/r\/outcomes$/);
     expect((init.headers as Record<string, string>)["x-org-id"]).toBe("o");
+    expect((init.headers as Record<string, string>)["x-service-name"]).toBe("lead-service");
     expect(JSON.parse(init.body as string)).toEqual({ produced: d.produced, consumed: [] });
+  });
+
+  it("a fact recorded after the day it happened is posted with its occurredAt (MEETING-DATED-OCCURRENCES-1024)", async () => {
+    const fetchMock = vi.fn(async (_u: string, _i: RequestInit) => new Response("{}", { status: 201 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const fact = factOutcomeDeclaration({ orgId: "o", runId: "r", leadId: "L", outcomeKey: "meeting_booked", consumedOutcomeKey: "conversation", occurredAt: "2026-05-20T09:30:00.000Z" });
+    await deliverRunOutcomes(fact);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body as string).occurredAt).toBe("2026-05-20T09:30:00.000Z");
+    expect(factOutcomeDeclaration({ orgId: "o", runId: "r", leadId: "L", outcomeKey: "meeting_booked", consumedOutcomeKey: "conversation", occurredAt: null })).not.toHaveProperty("occurredAt");
   });
 
   it("a replay answered already_recorded (200) is delivered", async () => {
