@@ -71,12 +71,16 @@ import {
   ClaimJudgeBudget,
   ClaimRelationshipUnavailableError,
   NOT_A_LEAD_REASON,
+  PENDING_RETRY_SECONDS,
   RELATIONSHIP_STOP_REASON,
+  blockOfLead,
   gateFollowupCandidate,
   type ClaimPendingReason,
   type ClaimRelationshipPolicy,
 } from "./followup-relationship-gate.js";
 import type { RelationshipTag } from "./relationship-tags.js";
+import { decideClientGate, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
+import { loadOrgMemberKeys } from "./org-members.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { phoneValueSql } from "./e164-phone.js";
 
@@ -198,7 +202,8 @@ export interface RefusedFollowup {
   /** Null for a person known by phone only (`phone` set). */
   email: string | null;
   phone: string | null;
-  reason: typeof NOT_A_LEAD_REASON;
+  /** `not_a_lead` under `pure_prospect`; a `ClientRefusalReason` under `current_client`. */
+  reason: typeof NOT_A_LEAD_REASON | ClientRefusalReason;
   tags: RelationshipTag[];
   unsureTags: RelationshipTag[];
 }
@@ -341,10 +346,12 @@ export async function loadFollowupCandidates(params: {
   /** The campaign that claims (x-campaign-id): only debts that are its to take are read. */
   actingCampaignId: string;
   /**
-   * The claim states a relationship policy: a row a trigger occurrence named (open grant) is then read
-   * whatever the booked-outcome stop says, and the policy decides (OCCURRENCE-POLICY-ADMITS-1019).
+   * The relationship policy the claim states. `pure_prospect`: a row a trigger occurrence named (open grant) is
+   * read whatever the booked-outcome stop says, and the policy decides (OCCURRENCE-POLICY-ADMITS-1019).
+   * `current_client`: the booked-outcome stop does not apply at all (a client has a sale; the policy decides,
+   * CLIENT-CHECKIN-LEAD-1024). Absent: the stop applies unchanged.
    */
-  occurrenceAdmittedByPolicy?: boolean;
+  policy?: ClaimRelationshipPolicy;
   limit?: number;
 }): Promise<FollowupCandidate[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -389,15 +396,19 @@ export async function loadFollowupCandidates(params: {
       AND ${ownedByActingSql(params.actingCampaignId)}
       AND ${notJournalistSql()}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
-      AND (
-        ${params.occurrenceAdmittedByPolicy ? sql`${openOccurrenceSql()} OR ` : sql``}NOT EXISTS (
+      ${
+        params.policy === "current_client"
+          ? sql``
+          : sql`AND (
+        ${params.policy === "pure_prospect" ? sql`${openOccurrenceSql()} OR ` : sql``}NOT EXISTS (
           SELECT 1
           FROM conversion_events ce
           WHERE ce.withdrawn_at IS NULL
             AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
             AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
         )
-      )
+      )`
+      }
     ORDER BY lc.followup_due_at ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -739,7 +750,7 @@ export async function pickFollowupCandidate(params: {
     nowMs,
     responderStartedAtIso,
     actingCampaignId: params.actingCampaignId,
-    occurrenceAdmittedByPolicy: Boolean(params.relationships),
+    policy: params.relationships,
   });
   const report: RelationshipGateReport | undefined = params.relationships
     ? { policy: params.relationships, refused: [], pending: [] }
@@ -798,22 +809,35 @@ export async function pickFollowupCandidate(params: {
   await stopFollowups(optedOutIds, "opted_out", nowMs);
 
   const budget = report ? new ClaimJudgeBudget(params.runId) : null;
+  // The org's members, read once per claim and only under `current_client` (a member is never a client).
+  let memberKeys: Set<string> | undefined;
   try {
     for (const candidate of answerable) {
       if (report && budget) {
-        let verdict: Awaited<ReturnType<typeof gateFollowupCandidate>>;
+        let verdict:
+          | Awaited<ReturnType<typeof gateFollowupCandidate>>
+          | ReturnType<typeof decideClientGate>;
         try {
-          // A sale on the ledger is a customer, whatever the relationship sweep has tagged yet: refused by the policy.
-          verdict = candidate.wonOnLedger
-            ? { kind: "refuse", reason: NOT_A_LEAD_REASON, tags: ["customer"], unsureTags: [] }
-            : await gateFollowupCandidate({
-            orgId: params.orgId,
-            brandId: candidate.brandId,
-            leadId: candidate.leadId,
-            email: candidate.email,
-            phone: candidate.phone,
-            budget,
-          });
+          if (report.policy === "current_client") {
+            const [block, facts] = await Promise.all([
+              blockOfLead(params.orgId, candidate.brandId, candidate.leadId),
+              loadClientFacts({ orgId: params.orgId, brandId: candidate.brandId, leadId: candidate.leadId, leadCampaignId: candidate.id }),
+            ]);
+            memberKeys ??= await loadOrgMemberKeys(params.orgId);
+            verdict = decideClientGate({ block, emails: facts.emails, paid: facts.paid, memberKeys });
+          } else {
+            // A sale on the ledger is a customer, whatever the relationship sweep has tagged yet: refused by the policy.
+            verdict = candidate.wonOnLedger
+              ? { kind: "refuse", reason: NOT_A_LEAD_REASON, tags: ["customer"], unsureTags: [] }
+              : await gateFollowupCandidate({
+              orgId: params.orgId,
+              brandId: candidate.brandId,
+              leadId: candidate.leadId,
+              email: candidate.email,
+              phone: candidate.phone,
+              budget,
+            });
+          }
         } catch (err) {
           throw new ClaimRelationshipUnavailableError(err);
         }
@@ -826,7 +850,7 @@ export async function pickFollowupCandidate(params: {
         };
         if (verdict.kind === "refuse") {
           // Final for this due row: stopped, so the queue never offers it again (a later `scheduled` re-decides).
-          await stopFollowups([candidate.id], RELATIONSHIP_STOP_REASON, nowMs);
+          await stopFollowups([candidate.id], verdict.reason === NOT_A_LEAD_REASON ? RELATIONSHIP_STOP_REASON : `relationship_${verdict.reason}`, nowMs);
           report.refused.push({ ...who, reason: verdict.reason, tags: verdict.tags, unsureTags: verdict.unsureTags });
           console.log(
             `[lead-service] followup refused by relationship policy ${report.policy} campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email ?? `phone:${candidate.phone}`} tags=${verdict.tags.join("+")} unsure=${verdict.unsureTags.join("+")}`,
@@ -834,7 +858,7 @@ export async function pickFollowupCandidate(params: {
           continue;
         }
         if (verdict.kind === "pending") {
-          report.pending.push({ ...who, reason: verdict.reason, retryAfterSeconds: verdict.retryAfterSeconds });
+          report.pending.push({ ...who, reason: verdict.reason, retryAfterSeconds: "retryAfterSeconds" in verdict ? verdict.retryAfterSeconds : PENDING_RETRY_SECONDS[verdict.reason] });
           continue;
         }
       }

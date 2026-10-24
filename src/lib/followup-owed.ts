@@ -24,6 +24,7 @@ import {
   FOLLOWUP_CLAIM_LEASE_MS,
   handedClaimableSql,
   notJournalistSql,
+  openOccurrenceSql,
   ownedByActingSql,
 } from "./followup-queue.js";
 
@@ -103,13 +104,16 @@ export async function readFollowupOwed(params: {
           SELECT 1 FROM lead_contact_methods cm
           WHERE cm.lead_id = lc.lead_id AND cm.channel IN ('email', 'phone')
         )
-        AND NOT EXISTS (
+        -- A row a trigger occurrence named (open grant) is owed whatever the booked stop says: a claim
+        -- stating a policy takes it (OCCURRENCE-POLICY-ADMITS-1019, a client check-in CLIENT-CHECKIN-LEAD-1024),
+        -- and owed may claim nobody, never the reverse.
+        AND (${openOccurrenceSql()} OR NOT EXISTS (
           SELECT 1
           FROM conversion_events ce
           WHERE ce.withdrawn_at IS NULL
             AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
             AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
-        )
+        ))
     )
     SELECT
       campaign_id,
