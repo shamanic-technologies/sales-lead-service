@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  actionAlreadyAnswered,
   OUTCOME_FRESH_WINDOW_MS,
   canonicalEmails,
   eventPerson,
@@ -184,5 +185,19 @@ describe("the person and the idempotency key", () => {
 
   it("canonical addresses: trimmed, lowercased, deduped, order kept", () => {
     expect(canonicalEmails([" A@X.com", null, "b@y.com", "a@x.com", "not-an-address"])).toEqual(["a@x.com", "b@y.com"]);
+  });
+
+  it("MERGE-NO-REFIRE: a re-stated CRM fact is answered once an earlier copy fired or was skipped at the door", () => {
+    expect(actionAlreadyAnswered([])).toBe(false);
+    for (const status of ["pending", "delivered", "refused", "already_fired"]) {
+      expect(actionAlreadyAnswered([{ status, skipReason: null }])).toBe(true);
+    }
+    for (const reason of ["fired_by_another_service", "already_recorded", "no_outcome_trigger", "restated_action"]) {
+      expect(actionAlreadyAnswered([{ status: "skipped", skipReason: reason }])).toBe(true);
+    }
+    // A copy that could not name its person or offer never fired: the first nameable copy may.
+    for (const reason of ["no_person", "offer_unknown", "unresolvable"]) {
+      expect(actionAlreadyAnswered([{ status: "skipped", skipReason: reason }])).toBe(false);
+    }
   });
 });

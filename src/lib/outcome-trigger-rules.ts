@@ -200,3 +200,23 @@ export function canonicalEmails(emails: readonly (string | null | undefined)[]):
   }
   return out;
 }
+
+/**
+ * ONE FIRE PER REAL ACTION, whatever crm-service does to the fact afterwards (MERGE-NO-REFIRE-1024, owner 2026-10-24:
+ * "a merge must never fire a trigger by itself, nor fire the same action twice"). crm-service RE-STATES a live fact
+ * when its person changes (two people merged, a fleet human identified, a CRM contact re-minted): the old copy is
+ * withdrawn and a new fact id carries the SAME source, source ref, type and date under the new person (another
+ * address, another lead). Read as a new record, it would fire again under a person key the once-index never saw.
+ * A re-statement is skipped `restated_action` when an earlier copy of the same action was already answered:
+ * fired, waiting, refused, kept `already_fired`, or skipped at the door. Only an earlier copy that could not NAME
+ * its person or offer (`no_person`, `offer_unknown`, `unresolvable`) never answered: its first nameable copy fires once.
+ */
+export const RESTATED_ACTION = "restated_action";
+
+/** Skips decided before the door was asked: the action has not fired yet. */
+const UNANSWERED_SKIPS: readonly string[] = ["no_person", "offer_unknown", "unresolvable"];
+
+/** Whether an earlier copy of the same action already answered its trigger (see RESTATED_ACTION). */
+export function actionAlreadyAnswered(earlierCopies: ReadonlyArray<{ status: string; skipReason: string | null }>): boolean {
+  return earlierCopies.some((r) => r.status !== "skipped" || !UNANSWERED_SKIPS.includes(r.skipReason ?? ""));
+}
