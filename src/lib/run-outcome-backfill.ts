@@ -369,6 +369,32 @@ export async function loadPastSampleResearch(
   return out;
 }
 
+/**
+ * Past serve runs that FOUND nobody but researched the company of the lead they handed out (LEDGER-HISTORY-1024): before
+ * 2026-10-23 the Bonus checks ran on the serve run itself, so a stock / retry hand-over that paid them produced
+ * `company_researched` (the live rule now puts them on a `company-research` child run). Evidence = a Bonus check applied
+ * BY that run on a lead (`qualification_checks` subject `lead:`) whose company the same run paid new research for (a
+ * charged observation or a verdict it recorded). A must-pass decline (subject `candidate:`) is the find's gate cost:
+ * a run that kept nobody is loss, never declared. A run that found someone produces `lead_found` (one key per run):
+ * left out here by the caller.
+ */
+export async function loadPastHandoverResearch(scope: BackfillScope = {}): Promise<BackfillRun[]> {
+  const rows = (await db.execute(sql`
+    SELECT lower(c.run_id) AS run_id, c.org_id, array_agg(DISTINCT c.domain ORDER BY c.domain) AS domains
+      FROM qualification_checks c
+      JOIN (SELECT lower(run_id) AS run_id, domain FROM qualification_observations WHERE run_id IS NOT NULL AND vendor_cost_micro > 0
+            UNION SELECT lower(run_id), domain FROM qualification_verdicts WHERE run_id IS NOT NULL) d
+        ON d.run_id = lower(c.run_id) AND d.domain = c.domain
+     WHERE c.subject LIKE 'lead:%' AND c.run_id ~* ${UUID_RE_SQL} AND c.domain IS NOT NULL ${orgScopeSql("c.org_id", scope)}
+     GROUP BY 1, 2
+     ORDER BY 1
+  `)) as unknown as Array<{ run_id: string; org_id: string; domains: string[] }>;
+  return rows.map((r) => {
+    const d = companyResearchedDeclaration({ orgId: r.org_id, runId: r.run_id, domains: r.domains });
+    return { runId: r.run_id, orgId: r.org_id, produced: d.produced, consumed: d.consumed };
+  });
+}
+
 export interface BatchOutcome {
   recorded: number;
   alreadyRecorded: number;
@@ -446,6 +472,8 @@ export interface BackfillReport {
   previewResearch: { runs: number; companies: number };
   /** Past sample runs declaring `company_researched`, and the companies they name. */
   sampleResearch: { runs: number; companies: number };
+  /** Past hand-over serve runs (found nobody) declaring the Bonus research they paid. */
+  handoverResearch: { runs: number; companies: number };
   runs: number;
   occurrences: { produced: number; consumed: number };
   batches: number;
@@ -471,7 +499,11 @@ export async function runOutcomeBackfill(
   const finds = await attachCrmRelationKeys([...direct, ...repointed.finds], deps.relationLookup);
   const previews = await loadPastPreviewResearch(deps.scope);
   const samples = await loadPastSampleResearch(deps.scope, deps.listRuns);
-  const runs = [...groupFindsByRun(finds), ...previews, ...samples];
+  const findRuns = groupFindsByRun(finds);
+  // One produced key per run: a run that found someone declares `lead_found`, its research rides it.
+  const taken = new Set([...findRuns, ...previews, ...samples].map((r) => r.runId));
+  const handovers = (await loadPastHandoverResearch(deps.scope)).filter((r) => !taken.has(r.runId));
+  const runs = [...findRuns, ...previews, ...samples, ...handovers];
   const batches = chunkBackfillRuns(runs);
   const report: BackfillReport = {
     dryRun: opts.dryRun,
@@ -484,6 +516,7 @@ export async function runOutcomeBackfill(
     repointedUnconfirmed: repointed.unconfirmed,
     previewResearch: { runs: previews.length, companies: previews.reduce((n, r) => n + r.produced.length, 0) },
     sampleResearch: { runs: samples.length, companies: samples.reduce((n, r) => n + r.produced.length, 0) },
+    handoverResearch: { runs: handovers.length, companies: handovers.reduce((n, r) => n + r.produced.length, 0) },
     runs: runs.length,
     occurrences: { produced: runs.reduce((n, r) => n + r.produced.length, 0), consumed: runs.reduce((n, r) => n + r.consumed.length, 0) },
     batches: batches.length,
