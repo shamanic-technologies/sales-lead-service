@@ -76,3 +76,32 @@ describe("decideClientGate (current_client)", async () => {
     expect(decideClientGate(facts({ block: EMPTY_RELATIONSHIP }))).toEqual({ kind: "pending", reason: "human_unknown" });
   });
 });
+
+describe("decideNeverALead (pure_prospect, LEAD-EVENT-LEADS-ONLY-1024)", async () => {
+  const { decideNeverALead, decideClientGate } = await import("../../src/lib/followup-client-gate.js");
+  const f = (over: Partial<Parameters<typeof decideNeverALead>[0]> = {}) => ({ emails: ["ana@lead.test"], paid: false, memberKeys: new Set<string>(), ...over });
+
+  it("a never-paid outsider goes on to the relationship gate", () => {
+    expect(decideNeverALead(f())).toBeNull();
+  });
+  it("staff and test users are refused staff", () => {
+    expect(decideNeverALead(f({ emails: ["kevin.lourd+probe@gmail.com"] }))).toMatchObject({ reason: "staff" });
+    expect(decideNeverALead(f({ emails: ["x@distribute.you"] }))).toMatchObject({ reason: "staff" });
+  });
+  it("an org member is refused team_member", () => {
+    expect(decideNeverALead(f({ emails: ["bob+x@org.test"], memberKeys: new Set(["bob@org.test"]) }))).toMatchObject({ reason: "team_member" });
+  });
+  it("a payer is refused not_a_lead as a customer", () => {
+    expect(decideNeverALead(f({ paid: true }))).toEqual({ kind: "refuse", reason: "not_a_lead", tags: ["customer"], unsureTags: [] });
+  });
+  it("never both: whoever current_client admits, pure_prospect refuses", () => {
+    for (const paid of [true, false]) {
+      for (const emails of [["ana@lead.test"], ["kevin@pressbeat.io"]]) {
+        const client = decideClientGate({ block: block({}), emails, paid, memberKeys: new Set() });
+        const never = decideNeverALead({ emails, paid, memberKeys: new Set() });
+        if (client.kind === "admit") expect(never?.kind).toBe("refuse");
+        if (never === null) expect(client.kind).not.toBe("admit");
+      }
+    }
+  });
+});

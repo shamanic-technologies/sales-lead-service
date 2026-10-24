@@ -69,6 +69,23 @@ export function decideClientGate(f: ClientGateFacts): ClientGateVerdict {
   return { kind: "admit" };
 }
 
+/**
+ * The other side of the same facts, under `pure_prospect` (LEAD-EVENT-LEADS-ONLY-1024, owner 2026-10-24: « notre unique
+ * campagne réactive dédiée à nos leads (non client, non perso) »): who is NEVER a lead, whatever the relationship sweep
+ * tagged yet. Staff or a test user (`staff`), a member of the org owning the brand (`team_member`), anyone who PAID the
+ * brand on the same predicate `current_client` admits on, or with any sale on the ledger for this row or lead
+ * (`not_a_lead`, tag customer). So a person admitted by one policy is refused by the other: a payer is a client, never
+ * a lead. `null` = none of these: the relationship gate (`decideClaimGate`) decides as before.
+ */
+export function decideNeverALead(f: { emails: readonly string[]; paid: boolean; memberKeys: ReadonlySet<string> }):
+  | { kind: "refuse"; reason: "staff" | "team_member" | "not_a_lead"; tags: RelationshipTag[]; unsureTags: RelationshipTag[] }
+  | null {
+  if (f.emails.some((e) => isStaffEmail(e))) return { kind: "refuse", reason: "staff", tags: [], unsureTags: [] };
+  if (anyMemberAddress(f.emails, f.memberKeys)) return { kind: "refuse", reason: "team_member", tags: [], unsureTags: [] };
+  if (f.paid) return { kind: "refuse", reason: "not_a_lead", tags: ["customer"], unsureTags: [] };
+  return null;
+}
+
 /** The lead's registered addresses and whether the person paid the brand. One statement. */
 export async function loadClientFacts(p: {
   orgId: string;

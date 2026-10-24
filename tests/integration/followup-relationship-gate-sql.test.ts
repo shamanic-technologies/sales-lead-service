@@ -22,6 +22,12 @@ vi.mock("../../src/lib/brand-client.js", async (orig) => ({
 vi.mock("../../src/lib/company-client.js", () => ({
   getCompanies: async () => [],
 }));
+// The org's members (client-service): read under every stated policy since LEAD-EVENT-LEADS-ONLY-1024.
+const memberKeys = new Set<string>();
+vi.mock("../../src/lib/org-members.js", async (orig) => ({
+  ...(await orig<typeof import("../../src/lib/org-members.js")>()),
+  loadOrgMemberKeys: async () => memberKeys,
+}));
 const judgeYesNo = vi.fn();
 vi.mock("../../src/lib/qualification-judge.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/qualification-judge.js")>()),
@@ -125,6 +131,47 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     for (const t of ["conversion_events", "crm_facts", "relationship_subjects", "relationship_judgments", "relationship_evidence", "relationship_statements"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
+  });
+
+  describe("never a lead, whatever the tags (LEAD-EVENT-LEADS-ONLY-1024)", () => {
+    it("a staff or test address is refused staff, row stopped relationship_staff", async () => {
+      const p = await dueLead({ email: `kevin.lourd+${randomUUID().slice(0, 8)}@gmail.com` });
+      const r = await claim("pure_prospect");
+      expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+      expect(r.relationships!.refused).toEqual([
+        { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, phone: null, reason: "staff", tags: [], unsureTags: [] },
+      ]);
+      expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_staff" });
+    });
+
+    it("a member of the org owning the brand is refused team_member", async () => {
+      const email = `member-${randomUUID().slice(0, 8)}@org.test`;
+      memberKeys.add(email);
+      const p = await dueLead({ email });
+      const r = await claim("pure_prospect");
+      expect(r.relationships!.refused[0]).toMatchObject({ leadId: p.leadId, reason: "team_member" });
+      memberKeys.delete(email);
+    });
+
+    it("a person who paid through ANOTHER lead of the same human is refused as a customer (current_client's own predicate)", async () => {
+      const human = randomUUID();
+      const other = await dueLead({ human });
+      const p = await dueLead({ human });
+      await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = NULL WHERE id = ${other.rowId}::uuid`);
+      await db.execute(sql`
+        INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source, value_cents)
+        VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${other.leadId}::uuid, 'crm', 9900)`);
+      const r = await claim("pure_prospect");
+      expect(r.relationships!.refused).toEqual([
+        { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, phone: null, reason: "not_a_lead", tags: ["customer"], unsureTags: [] },
+      ]);
+    });
+
+    it("no policy stated: a staff address is still claimed exactly as before", async () => {
+      const p = await dueLead({ email: `kevin.lourd+${randomUUID().slice(0, 8)}@gmail.com` });
+      const r = await claim();
+      expect(r.claimed?.id).toBe(p.rowId);
+    });
   });
 
   it("hands out a prospect nobody of the org knows outside our outreach", async () => {
