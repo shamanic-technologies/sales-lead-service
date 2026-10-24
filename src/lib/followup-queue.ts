@@ -82,7 +82,7 @@ import type { RelationshipTag } from "./relationship-tags.js";
 import { decideClientGate, decideNeverALead, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
 import { loadOrgMemberKeys } from "./org-members.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
-import { phoneValueSql } from "./e164-phone.js";
+import { canonicalE164, phoneValueSql } from "./e164-phone.js";
 
 /**
  * May the ACTING campaign take this row's current debt? See the module header: own-set = holder only,
@@ -181,6 +181,44 @@ export const FOLLOWUP_WON_OUTCOMES = ["sale", "purchase"] as const;
  */
 export function openOccurrenceSql() {
   return sql`(lc.followup_stated_event_id IS NOT NULL AND lc.followup_stated_closed_at IS NULL)`;
+}
+
+/**
+ * The person a trigger OCCURRENCE names (CLAIM-OCCURRENCE-PERSON-1025): a run answering an occurrence claims THAT
+ * person's row, never the campaign's oldest due one. Without it, a burst of occurrences on one campaign made each run
+ * claim someone else (the oldest due row), end `other_person`, fail, and leave that row leased for an hour, so the
+ * redelivered runs kept missing their own person (Lead Follow-up f1ab54e3, 2026-10-24). Any identity given matches:
+ * the lead id, an email contact method (case-folded), or a phone contact method (E.164 digits).
+ */
+export interface ClaimPerson {
+  email?: string | null;
+  phone?: string | null;
+  leadId?: string | null;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** The usable identities of a claim's person, or null when it names nobody (then the claim is unchanged). */
+export function claimPersonKeys(p: unknown): { email: string | null; phone: string | null; leadId: string | null } | null {
+  if (p === undefined || p === null || typeof p !== "object") return null;
+  const o = p as Record<string, unknown>;
+  const email = typeof o.email === "string" && o.email.trim().includes("@") ? o.email.trim().toLowerCase() : null;
+  const phone = typeof o.phone === "string" ? canonicalE164(o.phone) : null;
+  const leadId = typeof o.leadId === "string" && UUID_RE.test(o.leadId.trim()) ? o.leadId.trim() : null;
+  if (!email && !phone && !leadId) return null;
+  return { email, phone, leadId };
+}
+
+function claimPersonSql(k: NonNullable<ReturnType<typeof claimPersonKeys>>) {
+  const parts = [] as ReturnType<typeof sql>[];
+  if (k.leadId) parts.push(sql`lc.lead_id = ${k.leadId}::uuid`);
+  if (k.email) {
+    parts.push(sql`EXISTS (SELECT 1 FROM lead_contact_methods pcm WHERE pcm.lead_id = lc.lead_id AND pcm.channel = 'email' AND lower(trim(pcm.value)) = ${k.email})`);
+  }
+  if (k.phone) {
+    parts.push(sql`EXISTS (SELECT 1 FROM lead_contact_methods pcp WHERE pcp.lead_id = lc.lead_id AND pcp.channel = 'phone' AND ${phoneValueSql(sql`pcp.value`)} = ${k.phone})`);
+  }
+  return sql`AND (${sql.join(parts, sql` OR `)})`;
 }
 
 /** Why a claim came back with nobody. Named, never a silent empty. */
@@ -352,6 +390,8 @@ export async function loadFollowupCandidates(params: {
    * CLIENT-CHECKIN-LEAD-1024). Absent: the stop applies unchanged.
    */
   policy?: ClaimRelationshipPolicy;
+  /** Only this person's row(s) (CLAIM-OCCURRENCE-PERSON-1025). Absent = the campaign's due rows, oldest first. */
+  person?: ReturnType<typeof claimPersonKeys>;
   limit?: number;
 }): Promise<FollowupCandidate[]> {
   const now = new Date(params.nowMs).toISOString();
@@ -395,6 +435,7 @@ export async function loadFollowupCandidates(params: {
       AND ${handedClaimableSql(params.actingCampaignId)}
       AND ${ownedByActingSql(params.actingCampaignId)}
       AND ${notJournalistSql()}
+      ${params.person ? claimPersonSql(params.person) : sql``}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       ${
         params.policy === "current_client"
@@ -718,6 +759,8 @@ export async function pickFollowupCandidate(params: {
    * Absent = today's claim, unchanged.
    */
   relationships?: ClaimRelationshipPolicy;
+  /** The occurrence's person (CLAIM-OCCURRENCE-PERSON-1025): only their row is claimable. Absent = unchanged. */
+  person?: ReturnType<typeof claimPersonKeys>;
 }): Promise<FollowupClaim> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -751,6 +794,7 @@ export async function pickFollowupCandidate(params: {
     responderStartedAtIso,
     actingCampaignId: params.actingCampaignId,
     policy: params.relationships,
+    person: params.person ?? null,
   });
   const report: RelationshipGateReport | undefined = params.relationships
     ? { policy: params.relationships, refused: [], pending: [] }
