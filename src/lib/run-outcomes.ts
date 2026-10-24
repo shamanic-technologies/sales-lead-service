@@ -24,9 +24,10 @@ import { fetchWithRetry } from "./fetch-retry.js";
  *     the client's CRM registry (subject = crm's relation key: crm-lead-identified.ts, LEAD-IDENTIFIED-CONSUME-1024).
  *     Bonus checks, screening judgments and every child run that declares
  *     nothing roll into the lead-serve run's `lead_found`.
- *   - every meeting booked / attended and sale our outreach caused -> `meeting_booked` / `meeting_attended` /
- *     `paid_client` on the brand's recording run of the fact's UTC day for that outcome, dated on the instant the fact
- *     happened (`factOutcomeDeclaration`, outcome-fact-declarations.ts; MEETING-DATED-OCCURRENCES-1024).
+ *   - every fact past a send our outreach caused (a website visit known only by hand, a signup, a form, a direct
+ *     purchase, a meeting booked / attended, a sale) -> its catalogue outcome on the brand's recording run of the fact's
+ *     UTC day for that outcome, dated on the instant the fact happened (`factOutcomeDeclaration`,
+ *     outcome-fact-declarations.ts; MEETING-DATED-OCCURRENCES-1024, LEDGER-HISTORY-1024).
  * Not declared, on purpose: qualification previews/samples/suggestions (sample companies that are not leads,
  * onboarding support), relationship sweeps (tags, not catalogue outcomes). No run here judges a positive reply
  * (instantly-service owns reply verdicts; a CRM form is crm-service's fact, no spend), so no `conversation`.
@@ -105,11 +106,20 @@ export function companyResearchedDeclaration(input: { orgId: string; runId: stri
 }
 
 /**
- * A fact our outreach caused (outcome-fact-declarations.ts): a meeting booked / attended or a sale of the person,
- * `meeting_booked` / `meeting_attended` / `paid_client` produced on the brand's recording run of the day, consuming
- * the one outcome it came from. Subject = the lead, both ways.
+ * A fact our outreach caused (outcome-fact-declarations.ts): a website visit known by hand, a signup, a form, a direct
+ * purchase, a meeting booked / attended or a sale of the person, produced on the brand's recording run of the day for
+ * that outcome, consuming the one outcome it came from. Subject = the lead, both ways. Keys = features-service
+ * `/public/catalogue/steps` (LEDGER-HISTORY-1024).
  */
-export const FACT_OUTCOME_KEYS = ["meeting_booked", "meeting_attended", "paid_client"] as const;
+export const FACT_OUTCOME_KEYS = [
+  "website_visit",
+  "signup",
+  "form_submitted",
+  "purchase",
+  "meeting_booked",
+  "meeting_attended",
+  "paid_client",
+] as const;
 export type FactOutcomeKey = (typeof FACT_OUTCOME_KEYS)[number];
 
 export function factOutcomeDeclaration(input: {

@@ -43,7 +43,7 @@ export const RUN_TASKS = {
   "company-research": { declares: ["company_researched"] },
   "qualification-sample": { declares: ["company_researched"] },
   "qualification-preview": { declares: ["company_researched"] },
-  "outcome-recording": { declares: ["meeting_booked", "meeting_attended", "paid_client"] },
+  "outcome-recording": { declares: ["website_visit", "signup", "form_submitted", "purchase", "meeting_booked", "meeting_attended", "paid_client"] },
   "qualification-suggestions": {
     support: {
       kind: "product_feature",
