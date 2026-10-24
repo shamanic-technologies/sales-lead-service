@@ -25,6 +25,12 @@ import { companyResearchedDeclaration, leadFoundDeclaration, type OutcomeItem } 
  *      finding run is named by the serve's own idempotent answer (`idempotency_cache`, keyed on the CALLER's run, the
  *      answer naming the lead) AND confirmed by runs-service: the caller run's `lead-serve` child whose window holds the
  *      row's `served_at`. Both or nothing.
+ *   4. `ledger` (LEDGER-HISTORY-1024): a re-pointed find source 3 could not confirm (no cached answer, a caller with
+ *      several serve children). Our row proves the lead was FOUND; the ledger proves BY WHICH RUN: the paid reveal
+ *      (`email_found`, apollo-service's enrichment, declared under this lead id once they were kept) sits on a child of
+ *      one of our `lead-serve` runs of the row's org. A candidate is screened and checked BEFORE the reveal is paid, so
+ *      the run that paid it served them. Serve runs our rows already credit with this lead (its other finds) are set
+ *      aside; exactly ONE left = the finder, else nothing declared, counted. Never a time window.
  * Past qualification PREVIEWS (COST-SUPPORT-1024-LEAD): a preview run paid research on sample companies before the live
  * declaration existed. Its `qualification_previews` row names the run; the companies it paid NEW research for are the
  * domains of the CHARGED observations or the verdicts that run recorded (the live `noteResearch` rule: a charged probe,
@@ -55,7 +61,7 @@ const SERVE_WINDOW_SLACK_MS = 5_000;
 export const findDetailsSql = (col: string) => sql.raw(`(${col} LIKE 'Served via audience %' OR ${col} LIKE 'Lead served, email=%')`);
 const UUID_RE_SQL = sql.raw(`'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'`);
 
-export type FindSource = "direct" | "archived" | "repointed";
+export type FindSource = "direct" | "archived" | "repointed" | "ledger";
 
 export interface PastFind {
   source: FindSource;
@@ -207,7 +213,17 @@ export interface RepointedFind {
  * Source 3's candidates: re-pointed find rows + the caller runs whose idempotent answer named that lead. Two plain reads
  * joined here: one statement joining the cache's JSON on the rows was planned as a nested loop and ran past 10 min in prod.
  */
-export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Promise<RepointedFind[]> {
+export interface RepointedFindRow {
+  orgId: string;
+  leadId: string;
+  servedAt: string;
+  emailChecked: boolean;
+  brandIds: string[];
+  fromCrm: boolean;
+}
+
+/** Every re-pointed find row (sources 3 and 4 read them). */
+export async function loadRepointedFindRows(scope: BackfillScope = {}): Promise<RepointedFindRow[]> {
   const rows = (await db.execute(sql`
     SELECT lc.org_id, lc.lead_id::text AS lead_id,
            to_char(lc.served_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS served_at, ${emailCheckedSql("lc")} AS email_checked,
@@ -218,6 +234,19 @@ export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Pr
        AND (lc.retry_claimed_at IS NOT NULL OR EXISTS (SELECT 1 FROM lead_campaign_run_repoints p WHERE p.lead_campaign_id = lc.id))
        AND ${notJournalistSql("lc", "lc.brand_ids")} ${orgScopeSql("lc.org_id", scope)}
   `)) as unknown as Array<{ org_id: string; lead_id: string; served_at: string; email_checked: boolean; brand_ids: string[]; from_crm: boolean }>;
+  return rows.map((r) => ({
+    orgId: r.org_id,
+    leadId: r.lead_id,
+    servedAt: r.served_at,
+    emailChecked: r.email_checked === true,
+    brandIds: r.brand_ids ?? [],
+    fromCrm: r.from_crm === true,
+  }));
+}
+
+/** Source 3's candidates: each re-pointed find row x every caller run whose idempotent answer named its lead. */
+export async function loadRepointedFindCandidates(scope: BackfillScope = {}, found?: RepointedFindRow[]): Promise<RepointedFind[]> {
+  const rows = found ?? (await loadRepointedFindRows(scope));
   if (rows.length === 0) return [];
   const answers = (await db.execute(sql`
     SELECT i.org_id, lower(i.idempotency_key) AS caller_run_id, i.response->'lead'->'data'->>'leadId' AS lead_id
@@ -232,17 +261,138 @@ export async function loadRepointedFindCandidates(scope: BackfillScope = {}): Pr
     if (list) list.push(a.caller_run_id);
     else callersOf.set(key, [a.caller_run_id]);
   }
-  return rows.flatMap((r) =>
-    (callersOf.get(`${r.org_id} ${r.lead_id}`) ?? []).map((callerRunId) => ({
-      orgId: r.org_id,
-      leadId: r.lead_id,
-      servedAt: r.served_at,
-      callerRunId,
-      emailChecked: r.email_checked === true,
-      brandIds: r.brand_ids ?? [],
-      fromCrm: r.from_crm === true,
-    })),
+  return rows.flatMap((r) => (callersOf.get(`${r.orgId} ${r.leadId}`) ?? []).map((callerRunId) => ({ ...r, callerRunId })));
+}
+
+/** One produced occurrence another service's run declared under a lead id (runs-service occurrence read). */
+export interface LeadOccurrence {
+  leadId: string;
+  outcomeKey: string;
+  runId: string;
+  organizationId: string | null;
+  serviceName: string;
+}
+
+export interface RunHead {
+  id: string;
+  parentRunId: string | null;
+  serviceName: string;
+  taskName: string;
+  organizationId: string | null;
+}
+
+/**
+ * Source 4, pure: per (org, lead) of the re-pointed find rows source 3 did not confirm, the ONE `lead-serve` run of
+ * ours, of that org, that parented the paid reveal (`email_found`) of the lead and that our rows do not already credit
+ * with it (`knownFinds`: `<run> <lead>` of every other source). Not exactly one = none (counted).
+ */
+export const REVEAL_OUTCOME = "email_found";
+
+export function pickLedgerFinds(
+  rows: readonly RepointedFindRow[],
+  occurrences: readonly LeadOccurrence[],
+  runs: ReadonlyMap<string, RunHead>,
+  knownFinds: ReadonlySet<string> = new Set(),
+): { finds: PastFind[]; unconfirmed: number } {
+  const serveRunsOf = new Map<string, Set<string>>();
+  for (const o of occurrences) {
+    if (o.serviceName === "lead-service" || o.outcomeKey !== REVEAL_OUTCOME) continue;
+    const parentId = runs.get(o.runId.toLowerCase())?.parentRunId?.toLowerCase();
+    const parent = parentId ? runs.get(parentId) : undefined;
+    if (!parent || parent.serviceName !== "lead-service" || parent.taskName !== "lead-serve" || !parent.organizationId) continue;
+    if (knownFinds.has(`${parent.id.toLowerCase()} ${o.leadId}`)) continue;
+    const key = `${parent.organizationId} ${o.leadId}`;
+    (serveRunsOf.get(key) ?? serveRunsOf.set(key, new Set()).get(key)!).add(parent.id.toLowerCase());
+  }
+  const finds: PastFind[] = [];
+  let unconfirmed = 0;
+  const seen = new Set<string>();
+  for (const r of rows) {
+    const key = `${r.orgId} ${r.leadId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const serves = [...(serveRunsOf.get(key) ?? [])];
+    if (serves.length !== 1) {
+      unconfirmed++;
+      continue;
+    }
+    finds.push({ source: "ledger", runId: serves[0], orgId: r.orgId, leadId: r.leadId, emailChecked: r.emailChecked, brandIds: r.brandIds, fromCrm: r.fromCrm });
+  }
+  return { finds, unconfirmed };
+}
+
+const OCCURRENCE_PAGE_SUBJECTS = 250;
+
+/** runs-service: every produced occurrence under these lead ids (bounded pages). Throws on any non-2xx. */
+export async function listProducedLeadOccurrences(leadIds: readonly string[]): Promise<LeadOccurrence[]> {
+  const out: LeadOccurrence[] = [];
+  for (let i = 0; i < leadIds.length; i += OCCURRENCE_PAGE_SUBJECTS) {
+    const subjectIds = leadIds.slice(i, i + OCCURRENCE_PAGE_SUBJECTS).join(",");
+    let cursor: string | null = null;
+    do {
+      const qs = new URLSearchParams({
+        subjectService: "lead-service",
+        subjectIds,
+        outcomeKey: REVEAL_OUTCOME,
+        direction: "produced",
+        limit: "1000",
+        ...(cursor ? { cursor } : {}),
+      });
+      const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/internal/outcome-occurrences?${qs}`, {
+        headers: { "x-api-key": RUNS_SERVICE_API_KEY },
+        signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`runs-service GET /internal/outcome-occurrences: ${res.status} ${(await res.text()).slice(0, 300)}`);
+      const body = (await res.json()) as {
+        occurrences: Array<{ runId: string; organizationId: string | null; serviceName: string; subjectId: string; outcomeKey: string }>;
+        nextCursor: string | null;
+      };
+      for (const o of body.occurrences) out.push({ leadId: o.subjectId, outcomeKey: o.outcomeKey, runId: o.runId, organizationId: o.organizationId, serviceName: o.serviceName });
+      cursor = body.nextCursor;
+    } while (cursor);
+  }
+  return out;
+}
+
+/** runs-service: one run's head (parent, service, task, org). Throws on any non-2xx. */
+export async function readRunHead(runId: string, orgId: string | null): Promise<RunHead> {
+  const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/runs/${runId}`, {
+    headers: { "x-api-key": RUNS_SERVICE_API_KEY, ...(orgId ? { "x-org-id": orgId } : {}) },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`runs-service GET /v1/runs/${runId}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  const r = (await res.json()) as { id: string; parentRunId: string | null; serviceName: string; taskName: string; organizationId: string | null };
+  return { id: r.id, parentRunId: r.parentRunId ?? null, serviceName: r.serviceName, taskName: r.taskName, organizationId: r.organizationId ?? null };
+}
+
+export interface LedgerLookups {
+  occurrences: (leadIds: readonly string[]) => Promise<LeadOccurrence[]>;
+  run: (runId: string, orgId: string | null) => Promise<RunHead>;
+}
+
+/** Source 4: the re-pointed finds source 3 left, confirmed by the ledger. */
+export async function resolveFindsByLedger(
+  rows: readonly RepointedFindRow[],
+  knownFinds: ReadonlySet<string>,
+  lookups: LedgerLookups = { occurrences: listProducedLeadOccurrences, run: readRunHead },
+): Promise<{ finds: PastFind[]; unconfirmed: number }> {
+  if (rows.length === 0) return { finds: [], unconfirmed: 0 };
+  const occurrences = (await lookups.occurrences([...new Set(rows.map((r) => r.leadId))])).filter(
+    (o) => o.serviceName !== "lead-service" && o.outcomeKey === REVEAL_OUTCOME,
   );
+  const heads = new Map<string, RunHead>();
+  const childOrg = new Map<string, string | null>();
+  for (const o of occurrences) childOrg.set(o.runId.toLowerCase(), o.organizationId);
+  const children = [...childOrg.keys()];
+  await mapLimit(children, CHILD_LOOKUP_CONCURRENCY, async (id) => {
+    heads.set(id, await lookups.run(id, childOrg.get(id) ?? null));
+  });
+  const parents = [...new Set(children.map((id) => heads.get(id)?.parentRunId?.toLowerCase()).filter((v): v is string => !!v))].filter((id) => !heads.has(id));
+  await mapLimit(parents, CHILD_LOOKUP_CONCURRENCY, async (id) => {
+    const child = children.find((c) => heads.get(c)?.parentRunId?.toLowerCase() === id);
+    heads.set(id, await lookups.run(id, child ? (childOrg.get(child) ?? null) : null));
+  });
+  return pickLedgerFinds(rows, occurrences, heads, knownFinds);
 }
 
 /** runs-service: the `lead-serve` runs of ours a caller run opened. Throws on any non-2xx. */
@@ -468,6 +618,8 @@ export interface BackfillReport {
   since: string;
   finds: Record<FindSource, number>;
   repointedUnconfirmed: number;
+  /** Re-pointed find rows neither source 3 nor the ledger tied to exactly one serve run (per org x lead). */
+  ledgerUnconfirmed: number;
   /** Past preview runs declaring `company_researched`, and the companies they name. */
   previewResearch: { runs: number; companies: number };
   /** Past sample runs declaring `company_researched`, and the companies they name. */
@@ -490,13 +642,22 @@ export async function runOutcomeBackfill(
     lookup?: typeof listLeadServeChildren;
     relationLookup?: typeof crmIdentifiedRelationKeys;
     listRuns?: typeof listOwnRunIdsOfTask;
+    ledgerLookups?: LedgerLookups;
     scope?: BackfillScope;
   } = {},
 ): Promise<BackfillReport> {
   const direct = await loadDirectFinds(deps.scope);
-  const repointed = await resolveRepointedFinds(await loadRepointedFindCandidates(deps.scope), deps.lookup);
+  const repointedRows = await loadRepointedFindRows(deps.scope);
+  const repointed = await resolveRepointedFinds(await loadRepointedFindCandidates(deps.scope, repointedRows), deps.lookup);
+  const confirmed = new Set(repointed.finds.map((f) => `${f.orgId} ${f.leadId}`));
+  const knownFinds = new Set([...direct, ...repointed.finds].map((f) => `${f.runId} ${f.leadId}`));
+  const ledger = await resolveFindsByLedger(
+    repointedRows.filter((r) => !confirmed.has(`${r.orgId} ${r.leadId}`)),
+    knownFinds,
+    deps.ledgerLookups,
+  );
   // A run named by both a row of its own and a re-pointed find declares each lead once (groupFindsByRun).
-  const finds = await attachCrmRelationKeys([...direct, ...repointed.finds], deps.relationLookup);
+  const finds = await attachCrmRelationKeys([...direct, ...repointed.finds, ...ledger.finds], deps.relationLookup);
   const previews = await loadPastPreviewResearch(deps.scope);
   const samples = await loadPastSampleResearch(deps.scope, deps.listRuns);
   const findRuns = groupFindsByRun(finds);
@@ -512,8 +673,10 @@ export async function runOutcomeBackfill(
       direct: direct.filter((f) => f.source === "direct").length,
       archived: direct.filter((f) => f.source === "archived").length,
       repointed: repointed.finds.length,
+      ledger: ledger.finds.length,
     },
     repointedUnconfirmed: repointed.unconfirmed,
+    ledgerUnconfirmed: ledger.unconfirmed,
     previewResearch: { runs: previews.length, companies: previews.reduce((n, r) => n + r.produced.length, 0) },
     sampleResearch: { runs: samples.length, companies: samples.reduce((n, r) => n + r.produced.length, 0) },
     handoverResearch: { runs: handovers.length, companies: handovers.reduce((n, r) => n + r.produced.length, 0) },
