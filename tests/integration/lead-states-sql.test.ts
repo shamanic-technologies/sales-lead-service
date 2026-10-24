@@ -3,7 +3,7 @@
  * (src/lib/lead-states-read.ts), read through GET /internal/lead-states and POST /internal/lead-states/by-lead.
  * Every read is scoped to this file's org: the suite's files share one database.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,18 @@ import { sql } from "drizzle-orm";
 const { db } = await import("../../src/db/index.js");
 const { leads, conversionEvents, crmFacts } = await import("../../src/db/schema.js");
 const routes = (await import("../../src/routes/lead-states.js")).default;
+const { resetLeadStateCatalogueCache } = await import("../../src/lib/lead-states-read.js");
+
+// features-service's step catalogue (LEAD-STATES-1024): which step reaches which state.
+const I = (key: string, leadState: string, leadStateRank: number) => ({ key, leadState, leadStateFamily: "interest", leadStateRank });
+const CATALOGUE_ROWS = [
+  I("conversation", "lead_interested", 1), I("signup", "lead_interested", 1), I("form_submitted", "lead_interested", 1),
+  I("booking_call", "lead_interested", 1), I("lead_interested", "lead_interested", 1), I("meeting_booked", "meeting_booked", 2),
+  I("meeting_attended", "meeting_attended", 3), I("paid_client", "paid_client", 4), I("purchase", "paid_client", 4),
+  { key: "website_visit", leadState: "lead_visited", leadStateFamily: "visit", leadStateRank: 1 },
+  { key: "lead_visited", leadState: "lead_visited", leadStateFamily: "visit", leadStateRank: 1 },
+  { key: "lead_found", leadState: null, leadStateFamily: null, leadStateRank: null },
+];
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -60,6 +72,16 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
   }
 
   beforeAll(async () => {
+    resetLeadStateCatalogueCache();
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/public/catalogue/steps")) return new Response(JSON.stringify({ rows: CATALOGUE_ROWS }), { status: 200 });
+        return realFetch(input, init);
+      }),
+    );
     // The AC lead: three positive replies, a later meeting, and a reply that is NOT positive.
     const ac = await newLead("ac");
     await timeline(ac, "interested", "reply", "2026-10-01T09:00:00Z", "positive");
@@ -106,11 +128,16 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
     await ledger(robot, "meeting_booked", "2026-10-07T10:00:00Z");
     await db.execute(sql`INSERT INTO not_a_person_marks (org_id, lead_id, basis) VALUES (${orgId}, ${robot}::uuid, 'stated')`);
 
+    // A signup on the ledger makes the lead interested (the catalogue says so), never visited.
+    const signedUp = await newLead("signedUp");
+    await ledger(signedUp, "signup", "2026-10-06T10:00:00Z");
+
     // A lead with no state is absent.
     await newLead("nothing");
   });
 
   afterAll(async () => {
+    vi.unstubAllGlobals();
     await db.execute(sql`DELETE FROM not_a_person_marks WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM personal_message_judgments WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM crm_facts WHERE org_id = ${orgId}`);
@@ -166,9 +193,15 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
     const all = await walk(100);
     expect(all.has(L.robot)).toBe(false);
     expect(all.has(L.nothing)).toBe(false);
-    expect([...all.keys()].sort()).toEqual([L.ac, L.booked, L.clicker, L.wa, L.already].sort());
+    expect([...all.keys()].sort()).toEqual([L.ac, L.booked, L.clicker, L.wa, L.already, L.signedUp].sort());
     const paged = await walk(1);
     expect([...paged.keys()].sort()).toEqual([...all.keys()].sort());
+  });
+
+  it("a signup makes the lead interested at the signup, never visited", async () => {
+    const s = (await walk(100)).get(L.signedUp)!;
+    expect(s.lead_interested).toEqual({ reachedAt: "2026-10-06T10:00:00.000Z", basis: "signup", impliedBy: null });
+    expect(s.lead_visited).toBeNull();
   });
 
   it("by-lead answers the same rows for the asked leads only", async () => {

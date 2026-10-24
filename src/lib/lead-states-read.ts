@@ -22,7 +22,21 @@
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
-import { firstReachedStates, LEAD_STATE_EVIDENCE_KINDS, type LeadStateEvidenceKind, type LeadStates, type StateEvidence } from "./lead-states.js";
+import { FEATURES_SERVICE_URL } from "../config.js";
+import { fetchWithRetry } from "./fetch-retry.js";
+import { BOOKING_CALL_LEG_KEY } from "./booking-calls.js";
+import { fetchOrgCampaignLegs } from "./campaign-leg-client.js";
+import {
+  assertCatalogueCovers,
+  firstReachedStates,
+  LEAD_STATE_EVIDENCE_KINDS,
+  LeadStateCatalogueError,
+  type LeadStateCatalogue,
+  type LeadStateEvidenceKind,
+  type LeadStates,
+  type StateEvidence,
+  type StepLeadState,
+} from "./lead-states.js";
 
 export interface LeadStatesRow {
   orgId: string;
@@ -89,6 +103,8 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
       SELECT ce.org_id, ce.brand_id, ce.matched_lead_id,
              CASE ce.event
                WHEN 'positive_reply' THEN CASE WHEN ce.source = 'crm' THEN 'form_reply' ELSE 'positive_reply' END
+               WHEN 'signup' THEN 'signup'
+               WHEN 'form_submission' THEN 'form_submitted'
                WHEN 'meeting_booked' THEN 'meeting_booked'
                WHEN 'meeting_attended' THEN 'meeting_attended'
                WHEN 'website_visit' THEN 'stated_visit'
@@ -96,16 +112,26 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
              END,
              ce.received_at
       FROM conversion_events ce
-      WHERE ce.event IN ('positive_reply', 'meeting_booked', 'meeting_attended', 'sale', 'purchase', 'website_visit')
+      WHERE ce.event IN ('positive_reply', 'signup', 'form_submission', 'meeting_booked', 'meeting_attended', 'sale', 'purchase', 'website_visit')
         AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed' AND ce.matched_lead_id IS NOT NULL
         ${orgFilter(sql`ce.org_id`, q)} ${leadFilter(sql`ce.matched_lead_id`, q)}
+      UNION ALL
+      -- Every acted row of the follow-up ledger, one per brand it names; which acting campaign places booking calls
+      -- is campaign-service's leg, asked in JS (booking_call_candidate rows that are not one are dropped there).
+      SELECT fa.org_id, b.brand_id, fa.lead_id, 'booking_call_candidate:' || fa.acting_campaign_id, fa.occurred_at
+      FROM followup_actions fa
+      CROSS JOIN LATERAL unnest(fa.brand_ids) AS b(brand_id)
+      WHERE fa.action = 'acted' AND fa.acting_campaign_id IS NOT NULL
+        ${orgFilter(sql`fa.org_id`, q)} ${leadFilter(sql`fa.lead_id`, q)}
       UNION ALL
       SELECT t.org_id, t.brand_id, t.lead_id, 'click', t.occurred_at
       FROM lead_timeline_facts t
       WHERE t.label = 'website_visit' AND t.source = 'outreach' AND t.withdrawn_at IS NULL
         ${orgFilter(sql`t.org_id`, q)} ${leadFilter(sql`t.lead_id`, q)}
       UNION ALL
-      SELECT f.org_id, f.brand_id, m.lead_id, 'site_session', f.occurred_at
+      SELECT f.org_id, f.brand_id, m.lead_id,
+             CASE f.type WHEN 'website_visit' THEN 'site_session' ELSE f.type END,
+             f.occurred_at
       FROM crm_facts f
       CROSS JOIN LATERAL unnest(f.emails) AS e(addr)
       JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = lower(trim(e.addr))
@@ -115,7 +141,7 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
         WHERE lc.lead_id = m.lead_id AND lc.org_id = f.org_id AND f.brand_id = ANY(lc.brand_ids)
         LIMIT 1
       ) member ON true
-      WHERE f.type = 'website_visit'
+      WHERE f.type IN ('website_visit', 'signup', 'form_submitted')
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
         ${orgFilter(sql`f.org_id`, q)} ${leadFilter(sql`m.lead_id`, q)}
     ),
@@ -148,13 +174,42 @@ interface RawEvidence {
   at: RawTimestamp;
 }
 
-/** Group evidence rows (ordered by key) into one answer per lead x brand. An unknown kind throws (never dropped). */
-export function groupLeadStates(rows: readonly RawEvidence[]): LeadStatesRow[] {
+const BOOKING_CALL_CANDIDATE = "booking_call_candidate:";
+
+/** Which acting campaigns of each org place booking calls (campaign-service's leg, booking-calls.ts). */
+export type BookingCallCampaigns = (orgId: string) => Promise<ReadonlySet<string>>;
+
+const bookingCallCampaignsOf: BookingCallCampaigns = async (orgId) => {
+  const legs = await fetchOrgCampaignLegs({ orgId });
+  return new Set([...legs].filter(([, leg]) => leg === BOOKING_CALL_LEG_KEY).map(([id]) => id));
+};
+
+/**
+ * Turn the follow-up ledger's acted rows into `booking_call` evidence (only when the acting campaign's leg places
+ * booking calls; campaign-service asked once per org holding such a row; unreachable THROWS, never "no call").
+ */
+export async function resolveBookingCalls(rows: readonly RawEvidence[], campaignsOf: BookingCallCampaigns = bookingCallCampaignsOf): Promise<RawEvidence[]> {
+  const orgs = [...new Set(rows.filter((r) => r.kind.startsWith(BOOKING_CALL_CANDIDATE)).map((r) => String(r.org_id)))];
+  const byOrg = new Map<string, ReadonlySet<string>>();
+  for (const org of orgs) byOrg.set(org, await campaignsOf(org));
+  return rows.flatMap((r) => {
+    if (!r.kind.startsWith(BOOKING_CALL_CANDIDATE)) return [r];
+    return byOrg.get(String(r.org_id))!.has(r.kind.slice(BOOKING_CALL_CANDIDATE.length)) ? [{ ...r, kind: "booking_call" }] : [];
+  });
+}
+
+/**
+ * Group evidence rows (ordered by key) into one answer per lead x brand. An unknown kind throws (never dropped);
+ * a key whose evidence reaches no state (its only acted row was not a booking call) is not answered.
+ */
+export function groupLeadStates(rows: readonly RawEvidence[], catalogue: LeadStateCatalogue): LeadStatesRow[] {
   const out: LeadStatesRow[] = [];
   let key = "";
   let current: { orgId: string; brandId: string; leadId: string; evidence: StateEvidence[] } | null = null;
   const flush = () => {
-    if (current) out.push({ orgId: current.orgId, brandId: current.brandId, leadId: current.leadId, states: firstReachedStates(current.evidence) });
+    if (!current) return;
+    const states = firstReachedStates(current.evidence, catalogue);
+    if (Object.values(states).some((v) => v !== null)) out.push({ orgId: current.orgId, brandId: current.brandId, leadId: current.leadId, states });
   };
   for (const r of rows) {
     if (!(LEAD_STATE_EVIDENCE_KINDS as readonly string[]).includes(r.kind)) throw new Error(`lead-states: unknown evidence kind "${r.kind}"`);
@@ -170,11 +225,47 @@ export function groupLeadStates(rows: readonly RawEvidence[]): LeadStatesRow[] {
   return out;
 }
 
-/** One page of lead x brand states (or every one for `leadIds`). Throws on any database error. */
-export async function readLeadStates(q: LeadStatesQuery): Promise<{ leads: LeadStatesRow[]; nextCursor: string | null }> {
-  const rows = (await db.execute(leadStatesEvidenceSql(q))) as unknown as RawEvidence[];
-  const leads = groupLeadStates(rows);
-  const last = leads[leads.length - 1];
-  const nextCursor = q.limit !== undefined && last && leads.length === q.limit ? encodeLeadStatesCursor(last) : null;
+const CATALOGUE_TTL_MS = 5 * 60_000;
+let catalogueCache: { at: number; value: LeadStateCatalogue } | null = null;
+
+/** Test seam: forget the cached catalogue. */
+export function resetLeadStateCatalogueCache(): void {
+  catalogueCache = null;
+}
+
+/** features-service's step catalogue: each step's lead state (read, never re-mapped). Unreadable or incomplete THROWS. */
+export async function loadLeadStateCatalogue(): Promise<LeadStateCatalogue> {
+  if (catalogueCache && Date.now() - catalogueCache.at < CATALOGUE_TTL_MS) return catalogueCache.value;
+  const response = await fetchWithRetry(`${FEATURES_SERVICE_URL}/public/catalogue/steps`, { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new LeadStateCatalogueError(`features-service /public/catalogue/steps answered ${response.status}`);
+  const body = (await response.json()) as { rows?: Array<{ key: string; leadState?: unknown; leadStateFamily?: unknown; leadStateRank?: unknown }> };
+  if (!Array.isArray(body.rows)) throw new LeadStateCatalogueError("features-service /public/catalogue/steps: no rows");
+  const value = new Map<string, StepLeadState>();
+  for (const r of body.rows) {
+    if (typeof r.leadState === "string" && typeof r.leadStateFamily === "string" && typeof r.leadStateRank === "number") {
+      value.set(r.key, { state: r.leadState, family: r.leadStateFamily, rank: r.leadStateRank });
+    }
+  }
+  assertCatalogueCovers(value, new Set(body.rows.map((r) => r.key)));
+  catalogueCache = { at: Date.now(), value };
+  return value;
+}
+
+export interface LeadStatesDeps {
+  catalogue?: () => Promise<LeadStateCatalogue>;
+  bookingCallCampaigns?: BookingCallCampaigns;
+}
+
+/** One page of lead x brand states (or every one for `leadIds`). Throws on any failure (never an empty answer). */
+export async function readLeadStates(q: LeadStatesQuery, deps: LeadStatesDeps = {}): Promise<{ leads: LeadStatesRow[]; nextCursor: string | null }> {
+  const catalogue = await (deps.catalogue ?? loadLeadStateCatalogue)();
+  const raw = (await db.execute(leadStatesEvidenceSql(q))) as unknown as RawEvidence[];
+  const keys = new Set(raw.map((r) => `${r.org_id}|${r.brand_id}|${r.lead_id}`));
+  const lastRaw = raw[raw.length - 1];
+  const leads = groupLeadStates(await resolveBookingCalls(raw, deps.bookingCallCampaigns), catalogue);
+  const nextCursor =
+    q.limit !== undefined && lastRaw && keys.size === q.limit
+      ? encodeLeadStatesCursor({ orgId: String(lastRaw.org_id), brandId: String(lastRaw.brand_id), leadId: String(lastRaw.lead_id) })
+      : null;
   return { leads, nextCursor };
 }
