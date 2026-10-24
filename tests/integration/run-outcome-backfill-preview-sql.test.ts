@@ -8,8 +8,8 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
-const { qualificationObservations, qualificationVerdicts, qualificationPreviews } = await import("../../src/db/schema.js");
-const { loadPastPreviewResearch, runOutcomeBackfill } = await import("../../src/lib/run-outcome-backfill.js");
+const { qualificationCriteria, qualificationObservations, qualificationVerdicts, qualificationPreviews } = await import("../../src/db/schema.js");
+const { loadPastPreviewResearch, loadPastSampleResearch, runOutcomeBackfill } = await import("../../src/lib/run-outcome-backfill.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -47,6 +47,7 @@ describe.skipIf(!hasRealDatabase)("preview research backfill against a real data
       await db.execute(sql`DELETE FROM qualification_observations WHERE id = ANY(${sql.param(observationIds)}::uuid[])`);
     }
     await db.execute(sql`DELETE FROM qualification_previews WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM qualification_criteria WHERE org_id = ${orgId}`);
   });
 
   it("declares each company a preview run paid new research for, on that run", async () => {
@@ -91,6 +92,22 @@ describe.skipIf(!hasRealDatabase)("preview research backfill against a real data
           },
         ],
       },
+    ]);
+  });
+
+  it("LEDGER-HISTORY-1024: a past SAMPLE run (named by runs-service) declares the companies it paid new research for", async () => {
+    const sample = randomUUID();
+    const otherTask = randomUUID();
+    await db.insert(qualificationCriteria).values({ orgId, brandId: randomUUID(), offerId: randomUUID(), question: "q", probe: {}, mode: "mention" });
+    await observation(dom("s1"), sample, 700);
+    await observation(dom("s2"), sample, 0);
+    await observation(dom("s3"), otherTask, 900);
+    const asked: Array<[string, string]> = [];
+    const listRuns = async (o: string, task: string) => (asked.push([o, task]), [sample.toUpperCase()].map((x) => x.toLowerCase()));
+    const runs = await loadPastSampleResearch({ orgId }, listRuns);
+    expect(asked).toEqual([[orgId, "qualification-sample"]]);
+    expect(runs).toEqual([
+      { runId: sample, orgId, produced: [{ outcomeKey: "company_researched", subjectService: "lead-service", subjectId: dom("s1") }], consumed: [] },
     ]);
   });
 });

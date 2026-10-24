@@ -29,7 +29,9 @@ import { companyResearchedDeclaration, leadFoundDeclaration, type OutcomeItem } 
  * declaration existed. Its `qualification_previews` row names the run; the companies it paid NEW research for are the
  * domains of the CHARGED observations or the verdicts that run recorded (the live `noteResearch` rule: a charged probe,
  * a new judgment). `company_researched` per such domain, the live builder. A preview that
- * reused everything researched nothing new: not declared.
+ * reused everything researched nothing new: not declared. Past qualification SAMPLES (LEDGER-HISTORY-1024): same rule;
+ * a sample keeps no row of its own, so its runs are named by runs-service (the org's `qualification-sample` runs of
+ * ours, for every org holding a criterion) and matched to the observations / verdicts that run recorded.
  * Not a find, never declared: a stock hand-over, a "Lead follow-up due" or contacted-prospects population (they bought
  * nobody), a journalist filed but not kept (a loss, as live), a run that failed or found nobody (its spend stays
  * "produced none": the truth). Before 2026-05-08 lead-service kept no serve rows (the buffer pipeline wrote none), so
@@ -325,6 +327,48 @@ export async function loadPastPreviewResearch(scope: BackfillScope = {}): Promis
   });
 }
 
+/** runs-service: the ids of our runs of one task in one org. Throws on any non-2xx. */
+export async function listOwnRunIdsOfTask(orgId: string, taskName: string): Promise<string[]> {
+  const qs = new URLSearchParams({ serviceName: "lead-service", taskName });
+  const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/runs?${qs}`, {
+    headers: { "x-api-key": RUNS_SERVICE_API_KEY, "x-org-id": orgId },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`runs-service GET /v1/runs?taskName=${taskName}: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  const body = (await res.json()) as { runs: Array<{ id: string }> };
+  return body.runs.map((r) => r.id.toLowerCase());
+}
+
+export const SAMPLE_TASK = "qualification-sample";
+
+/** Past sample runs and the companies each paid NEW research for (same rule as previews). */
+export async function loadPastSampleResearch(
+  scope: BackfillScope = {},
+  listRuns: (orgId: string, taskName: string) => Promise<string[]> = listOwnRunIdsOfTask,
+): Promise<BackfillRun[]> {
+  const orgs = (await db.execute(sql`
+    SELECT DISTINCT org_id FROM qualification_criteria WHERE true ${orgScopeSql("org_id", scope)} ORDER BY org_id
+  `)) as unknown as Array<{ org_id: string }>;
+  const out: BackfillRun[] = [];
+  for (const { org_id: orgId } of orgs) {
+    const runIds = await listRuns(orgId, SAMPLE_TASK);
+    if (runIds.length === 0) continue;
+    const rows = (await db.execute(sql`
+      SELECT lower(d.run_id) AS run_id, array_agg(DISTINCT d.domain ORDER BY d.domain) AS domains
+        FROM (SELECT run_id, domain FROM qualification_observations WHERE run_id IS NOT NULL AND vendor_cost_micro > 0
+              UNION SELECT run_id, domain FROM qualification_verdicts WHERE run_id IS NOT NULL) d
+       WHERE lower(d.run_id) = ANY(${sql.param(runIds)}::text[])
+       GROUP BY 1
+       ORDER BY 1
+    `)) as unknown as Array<{ run_id: string; domains: string[] }>;
+    for (const r of rows) {
+      const d = companyResearchedDeclaration({ orgId, runId: r.run_id, domains: r.domains });
+      out.push({ runId: r.run_id, orgId, produced: d.produced, consumed: d.consumed });
+    }
+  }
+  return out;
+}
+
 export interface BatchOutcome {
   recorded: number;
   alreadyRecorded: number;
@@ -400,6 +444,8 @@ export interface BackfillReport {
   repointedUnconfirmed: number;
   /** Past preview runs declaring `company_researched`, and the companies they name. */
   previewResearch: { runs: number; companies: number };
+  /** Past sample runs declaring `company_researched`, and the companies they name. */
+  sampleResearch: { runs: number; companies: number };
   runs: number;
   occurrences: { produced: number; consumed: number };
   batches: number;
@@ -411,14 +457,21 @@ export interface BackfillReport {
 
 export async function runOutcomeBackfill(
   opts: { dryRun: boolean },
-  deps: { post?: BatchPost; lookup?: typeof listLeadServeChildren; relationLookup?: typeof crmIdentifiedRelationKeys; scope?: BackfillScope } = {},
+  deps: {
+    post?: BatchPost;
+    lookup?: typeof listLeadServeChildren;
+    relationLookup?: typeof crmIdentifiedRelationKeys;
+    listRuns?: typeof listOwnRunIdsOfTask;
+    scope?: BackfillScope;
+  } = {},
 ): Promise<BackfillReport> {
   const direct = await loadDirectFinds(deps.scope);
   const repointed = await resolveRepointedFinds(await loadRepointedFindCandidates(deps.scope), deps.lookup);
   // A run named by both a row of its own and a re-pointed find declares each lead once (groupFindsByRun).
   const finds = await attachCrmRelationKeys([...direct, ...repointed.finds], deps.relationLookup);
   const previews = await loadPastPreviewResearch(deps.scope);
-  const runs = [...groupFindsByRun(finds), ...previews];
+  const samples = await loadPastSampleResearch(deps.scope, deps.listRuns);
+  const runs = [...groupFindsByRun(finds), ...previews, ...samples];
   const batches = chunkBackfillRuns(runs);
   const report: BackfillReport = {
     dryRun: opts.dryRun,
@@ -430,6 +483,7 @@ export async function runOutcomeBackfill(
     },
     repointedUnconfirmed: repointed.unconfirmed,
     previewResearch: { runs: previews.length, companies: previews.reduce((n, r) => n + r.produced.length, 0) },
+    sampleResearch: { runs: samples.length, companies: samples.reduce((n, r) => n + r.produced.length, 0) },
     runs: runs.length,
     occurrences: { produced: runs.reduce((n, r) => n + r.produced.length, 0), consumed: runs.reduce((n, r) => n + r.consumed.length, 0) },
     batches: batches.length,
