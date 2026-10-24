@@ -1,5 +1,6 @@
 import { RUNS_SERVICE_URL, RUNS_SERVICE_API_KEY } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { runSupportFor, type RunSupport } from "./run-tasks.js";
 
 // runs-service sits behind Neon scale-to-zero (DIS-153/155/157): idle compute
 // suspends, and the first call after a suspend can land mid-wake — the resume
@@ -48,7 +49,10 @@ export async function createRun(params: {
   goal?: string;
   brandProfileId?: string;
   audienceId?: string;
+  /** Only for a task run-tasks.ts does not name (a staff benchmark/probe script): its support function. */
+  support?: RunSupport;
 }): Promise<{ id: string }> {
+  const support = runSupportFor(params.taskName, params.support);
   const headers: Record<string, string> = {
     "x-org-id": params.orgId,
   };
@@ -70,6 +74,7 @@ export async function createRun(params: {
       brandId: params.brandId,
       campaignId: params.campaignId,
       workflowSlug: params.workflowSlug,
+      ...(support ? { support } : {}),
     },
     headers,
   }) as Promise<{ id: string }>;
@@ -179,8 +184,9 @@ async function platformRunsRequest<T>(method: string, path: string, body?: unkno
   return (await res.json()) as T;
 }
 
-export async function createPlatformRun(taskName: string): Promise<{ id: string }> {
-  return platformRunsRequest("POST", "/platform-runs", { serviceName: "lead-service", taskName });
+export async function createPlatformRun(taskName: string, stated?: RunSupport): Promise<{ id: string }> {
+  const support = runSupportFor(taskName, stated);
+  return platformRunsRequest("POST", "/platform-runs", { serviceName: "lead-service", taskName, ...(support ? { support } : {}) });
 }
 
 export async function addPlatformRunCosts(
