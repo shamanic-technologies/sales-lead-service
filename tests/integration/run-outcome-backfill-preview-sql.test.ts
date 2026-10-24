@@ -8,8 +8,8 @@ import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
-const { qualificationCriteria, qualificationObservations, qualificationVerdicts, qualificationPreviews } = await import("../../src/db/schema.js");
-const { loadPastPreviewResearch, loadPastSampleResearch, runOutcomeBackfill } = await import("../../src/lib/run-outcome-backfill.js");
+const { qualificationChecks, qualificationCriteria, qualificationObservations, qualificationVerdicts, qualificationPreviews } = await import("../../src/db/schema.js");
+const { loadPastHandoverResearch, loadPastPreviewResearch, loadPastSampleResearch, runOutcomeBackfill } = await import("../../src/lib/run-outcome-backfill.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -48,6 +48,7 @@ describe.skipIf(!hasRealDatabase)("preview research backfill against a real data
     }
     await db.execute(sql`DELETE FROM qualification_previews WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM qualification_criteria WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM qualification_checks WHERE org_id = ${orgId}`);
   });
 
   it("declares each company a preview run paid new research for, on that run", async () => {
@@ -108,6 +109,22 @@ describe.skipIf(!hasRealDatabase)("preview research backfill against a real data
     expect(asked).toEqual([[orgId, "qualification-sample"]]);
     expect(runs).toEqual([
       { runId: sample, orgId, produced: [{ outcomeKey: "company_researched", subjectService: "lead-service", subjectId: dom("s1") }], consumed: [] },
+    ]);
+  });
+
+  it("LEDGER-HISTORY-1024: a past hand-over serve run declares the Bonus research it paid on the handed lead; a must-pass decline is loss", async () => {
+    const handover = randomUUID();
+    const declined = randomUUID();
+    const check = (runId: string, subject: string, domain: string) =>
+      db.insert(qualificationChecks).values({ criterionId: randomUUID(), orgId, brandId: "b", offerId: "o", subject, domain, runId });
+    await observation(dom("h1"), handover, 400);
+    await check(handover, `lead:${randomUUID()}`, dom("h1"));
+    await observation(dom("h2"), handover, 0); // a free reading, no new verdict: nothing new paid
+    await check(handover, `lead:${randomUUID()}`, dom("h2"));
+    await observation(dom("m1"), declined, 800);
+    await check(declined, `candidate:aud:${randomUUID()}`, dom("m1"));
+    expect(await loadPastHandoverResearch({ orgId })).toEqual([
+      { runId: handover, orgId, produced: [{ outcomeKey: "company_researched", subjectService: "lead-service", subjectId: dom("h1") }], consumed: [] },
     ]);
   });
 });
