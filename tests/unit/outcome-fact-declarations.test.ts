@@ -7,18 +7,37 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 
 const { factOutcomeDeclaration, FACT_OUTCOME_KEYS } = await import("../../src/lib/run-outcomes.js");
-const { consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, utcDay } = await import("../../src/lib/outcome-fact-declarations.js");
+const { consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, FACT_SOURCES_OF_OUTCOME, utcDay } = await import("../../src/lib/outcome-fact-declarations.js");
 
-const none = { positiveReply: false, websiteVisit: false, formSubmitted: false, declaredMeetingBooked: false, declaredMeetingAttended: false };
+const none = { positiveReply: false, websiteVisit: false, formSubmitted: false, declaredMeetingBooked: false, declaredMeetingAttended: false, declaredPurchase: false };
 
 describe("fact outcome declarations", () => {
-  it("declares exactly meeting_booked, meeting_attended and paid_client, read off their ledger events", () => {
-    expect([...FACT_OUTCOME_KEYS]).toEqual(["meeting_booked", "meeting_attended", "paid_client"]);
+  it("declares every fact outcome this service records, read off their ledger events (LEDGER-HISTORY-1024)", () => {
+    expect([...FACT_OUTCOME_KEYS]).toEqual(["website_visit", "signup", "form_submitted", "purchase", "meeting_booked", "meeting_attended", "paid_client"]);
     expect(FACT_EVENTS_OF_OUTCOME).toEqual({
+      website_visit: ["website_visit"],
+      signup: ["signup"],
+      form_submitted: ["form_submission"],
+      purchase: ["sale", "purchase"],
       meeting_booked: ["meeting_booked"],
       meeting_attended: ["meeting_attended"],
       paid_client: ["sale", "purchase"],
     });
+    // A Direct purchase is a sale the website tag reported; a stated / CRM / reply sale is Paid client only.
+    expect(FACT_SOURCES_OF_OUTCOME).toEqual({ purchase: ["tracker"] });
+  });
+
+  it("a visit consumes the message our outreach sent; a signup, form or direct purchase the visit, else the positive reply, else the message", () => {
+    expect(consumedOutcomeFor("website_visit", { ...none, positiveReply: true })).toEqual({ outcomeKey: "message_sent", basis: "message_sent" });
+    for (const o of ["signup", "form_submitted", "purchase"] as const) {
+      expect(consumedOutcomeFor(o, { ...none, websiteVisit: true, positiveReply: true })).toEqual({ outcomeKey: "website_visit", basis: "website_visit" });
+      expect(consumedOutcomeFor(o, { ...none, positiveReply: true })).toEqual({ outcomeKey: "conversation", basis: "positive_reply" });
+      expect(consumedOutcomeFor(o, none)).toEqual({ outcomeKey: "message_sent", basis: "message_sent" });
+    }
+  });
+
+  it("a paid client consumes the direct purchase we declared first", () => {
+    expect(consumedOutcomeFor("paid_client", { ...none, declaredPurchase: true, declaredMeetingAttended: true })).toEqual({ outcomeKey: "purchase", basis: "purchase" });
   });
 
   it("produces the outcome and consumes its input, both on the lead", () => {

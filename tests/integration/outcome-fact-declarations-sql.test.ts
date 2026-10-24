@@ -110,7 +110,7 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await fact(visitor, "sale", "2026-10-04T10:00:00Z");
 
     const first = await sweepOutcomeFactDeclarations({ orgId });
-    expect(first).toMatchObject({ read: 4, delivered: 4, queued: 0, refused: 0, failed: 0 });
+    expect(first).toMatchObject({ read: 5, delivered: 5, queued: 0, refused: 0, failed: 0 });
 
     const lead = (s: string) => ({ subjectService: "lead-service", subjectId: s });
     const byLead = (id: string) => declared.filter((d) => d.body.produced[0].subjectId === id).map((d) => d.body);
@@ -120,7 +120,9 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
       { produced: [{ outcomeKey: "meeting_attended", ...lead(ours) }], consumed: [{ outcomeKey: "meeting_booked", ...lead(ours) }], occurredAt: "2026-10-05T10:00:00.000Z" },
       { produced: [{ outcomeKey: "paid_client", ...lead(ours) }], consumed: [{ outcomeKey: "meeting_attended", ...lead(ours) }], occurredAt: "2026-10-09T10:00:00.000Z" },
     ]);
+    // A visit known only by hand is its own occurrence (LEDGER-HISTORY-1024), consuming the message our outreach sent.
     expect(byLead(visitor)).toEqual([
+      { produced: [{ outcomeKey: "website_visit", ...lead(visitor) }], consumed: [{ outcomeKey: "message_sent", ...lead(visitor) }], occurredAt: "2026-10-01T10:00:00.000Z" },
       { produced: [{ outcomeKey: "paid_client", ...lead(visitor) }], consumed: [{ outcomeKey: "website_visit", ...lead(visitor) }], occurredAt: "2026-10-04T10:00:00.000Z" },
     ]);
     // runs-service takes a past instant only from the run's own service.
@@ -131,15 +133,16 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     // key: runs-service splits a run's consumptions over what that run produced, so a shared run would make
     // `meeting_attended` consume itself (COST-ACCOUNTING-1023-LEAD-FIX). Every declaration under the org.
     // One run per (fact's UTC day, outcome key): the two sales of 10-04 and 10-09 sit on two runs.
-    expect(runsCreated).toHaveLength(4);
+    expect(runsCreated).toHaveLength(5);
     expect(new Set(declared.map((d) => d.runId))).toEqual(new Set(runsCreated));
     const keysByRun = new Map<string, Set<string>>();
     for (const d of declared) for (const p of d.body.produced) keysByRun.set(d.runId, (keysByRun.get(d.runId) ?? new Set()).add(p.outcomeKey));
-    expect([...keysByRun.values()].map((k) => [...k].sort()).sort()).toEqual([["meeting_attended"], ["meeting_booked"], ["paid_client"], ["paid_client"]]);
+    expect([...keysByRun.values()].map((k) => [...k].sort()).sort()).toEqual([["meeting_attended"], ["meeting_booked"], ["paid_client"], ["paid_client"], ["website_visit"]]);
     const days = (await db.execute(sql`
       SELECT day::text AS day, outcome_key FROM outcome_recording_runs WHERE org_id = ${orgId} ORDER BY day, outcome_key
     `)) as unknown as Array<{ day: string; outcome_key: string }>;
     expect(days).toEqual([
+      { day: "2026-10-01", outcome_key: "website_visit" },
       { day: "2026-10-02", outcome_key: "meeting_booked" },
       { day: "2026-10-04", outcome_key: "paid_client" },
       { day: "2026-10-05", outcome_key: "meeting_attended" },
@@ -155,7 +158,37 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
 
     const again = await sweepOutcomeFactDeclarations({ orgId });
     expect(again.read).toBe(0);
-    expect(declared).toHaveLength(4);
+    expect(declared).toHaveLength(5);
+  });
+
+  it("LEDGER-HISTORY-1024: a signup, a direct purchase and its paid client are declared; a visit our tracker measured is not", async () => {
+    const before = declared.length;
+    const buyer = await newLead();
+    await fact(buyer, "website_visit", "2026-09-01T08:00:00Z", { source: "manual" });
+    await fact(buyer, "signup", "2026-09-01T09:00:00Z");
+    await fact(buyer, "sale", "2026-09-02T09:00:00Z", { source: "tracker", valueCents: 4900 });
+    const clicked = await newLead();
+    await fact(clicked, "website_visit", "2026-09-01T08:00:00Z", { source: "manual" });
+    await db.execute(sql`
+      INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, occurred_at, label, source, source_ref)
+      VALUES (${`outreach:itest-${randomUUID()}`}, ${orgId}, ${brandId}, ${clicked}::uuid, '2026-09-01T07:59:00Z', 'website_visit', 'outreach', 'itest')
+    `);
+    const theirSignup = await newLead();
+    await fact(theirSignup, "signup", "2026-09-01T09:00:00Z", { causedByOutreach: false });
+
+    const pass = await sweepOutcomeFactDeclarations({ orgId });
+    expect(pass).toMatchObject({ read: 4, delivered: 4, failed: 0 });
+    const mine = declared.slice(before);
+    const subject = { subjectService: "lead-service", subjectId: buyer };
+    expect(mine.map((d) => d.body)).toEqual([
+      { produced: [{ outcomeKey: "website_visit", ...subject }], consumed: [{ outcomeKey: "message_sent", ...subject }], occurredAt: "2026-09-01T08:00:00.000Z" },
+      { produced: [{ outcomeKey: "signup", ...subject }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-01T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "purchase", ...subject }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "paid_client", ...subject }], consumed: [{ outcomeKey: "purchase", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
+    ]);
+    // One recording run per outcome key, never two keys on one run.
+    expect(new Set(mine.map((d) => d.runId)).size).toBe(4);
+    await db.execute(sql`DELETE FROM lead_timeline_facts WHERE org_id = ${orgId}`);
   });
 
   it("a declaration made before the dating rule is moved to its fact's instant once, as the same occurrence", async () => {

@@ -5,24 +5,36 @@ import { errorMessage } from "./db-error.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
-import { declareRunOutcomesNow, factOutcomeDeclaration, OUTCOME_SUBJECT_SERVICE, type FactOutcomeKey } from "./run-outcomes.js";
+import { declareRunOutcomesNow, FACT_OUTCOME_KEYS, factOutcomeDeclaration, OUTCOME_SUBJECT_SERVICE, type FactOutcomeKey } from "./run-outcomes.js";
 
 /**
- * EVERY MEETING AND SALE OUR OUTREACH CAUSED IS AN OUTCOME OCCURRENCE ON THE LEDGER (COST-ACCOUNTING-1023-P1, second
- * pass, owner 2026-10-23).
+ * EVERY FACT OUR OUTREACH CAUSED IS AN OUTCOME OCCURRENCE ON THE LEDGER (COST-ACCOUNTING-1023-P1, second pass, owner
+ * 2026-10-23; widened to every fact this service records by LEDGER-HISTORY-1024, owner 2026-10-24: « Passe tout d'un
+ * coup au même régime: website visits etc »).
  *
  * lead-service records the facts past a conversation (a booked or attended meeting, a sale: stated by a person,
  * evidenced by the brand's CRM, reported by the website tag) in `conversion_events`, and decides WHOSE WIN each was
  * (`caused_by_outreach`, outcome-cause.ts: a person's answer, else the date rule). Each fact that is OURS
  * (`caused_by_outreach = true`, live, attributed to a lead) produces its outcome on runs-service's ledger:
  *
+ *   website_visit (stated by hand)               -> website_visit
+ *   signup                                       -> signup
+ *   form_submission                              -> form_submitted
+ *   sale / purchase the website tag reported     -> purchase (Direct purchase) AND paid_client
  *   meeting_booked / meeting_attended            -> meeting_booked / meeting_attended
  *   sale / purchase                              -> paid_client
  *
+ * A hand-stated visit of a lead whose click OUR tracker measured (a live `website_visit` timeline fact from the
+ * outreach copy) is the same visit: the measuring service's occurrence, never declared here (the rule every visit
+ * count applies: `website_visit` here = visits known only by hand).
+ *
  * subject = the lead (`subjectService: "lead-service"`), as on every run of the fleet. Each CONSUMES the outcome it
- * came from (`consumedOutcomeFor`, pure): a booked meeting the person's `conversation` (a positive reply before it),
- * else their `website_visit`, else their `form_submitted`; attended consumes `meeting_booked`; paid client the last
- * of attended / booked we declared for them, else the same entry outcome. No entry evidence at all = `conversation`
+ * came from (`consumedOutcomeFor`, pure): a website visit the `message_sent` our outreach reached them with (a fact is
+ * ours only after our first touch: outcome-cause.ts); a signup, a form or a direct purchase the person's
+ * `website_visit` before it, else their `conversation`, else the `message_sent`; a booked meeting the person's
+ * `conversation` (a positive reply before it), else their `website_visit`, else their `form_submitted`; attended
+ * consumes `meeting_booked`; paid client the direct purchase we declared, else the last of attended / booked, else
+ * the same entry outcome. No entry evidence at all = `conversation`
  * with basis `no_evidence`: runs-service then counts it as unknown provenance (never $0, never charged), which is the
  * truth (outreach caused it, the step it went through is not seen here).
  *
@@ -64,9 +76,18 @@ const SWEEP_BATCH = 500;
 
 /** The ledger events (conversion_events.event) each fact outcome is read off. */
 export const FACT_EVENTS_OF_OUTCOME: Readonly<Record<FactOutcomeKey, readonly string[]>> = {
+  website_visit: ["website_visit"],
+  signup: ["signup"],
+  form_submitted: ["form_submission"],
+  purchase: ["sale", "purchase"],
   meeting_booked: ["meeting_booked"],
   meeting_attended: ["meeting_attended"],
   paid_client: ["sale", "purchase"],
+};
+
+/** An outcome read off ONE source only (absent = any source): a direct purchase is a sale the website tag reported. */
+export const FACT_SOURCES_OF_OUTCOME: Readonly<Partial<Record<FactOutcomeKey, readonly string[]>>> = {
+  purchase: ["tracker"],
 };
 
 /** What we know the person reached BEFORE the fact (entry evidence) and what we already declared for them. */
@@ -76,9 +97,18 @@ export interface ConsumptionEvidence {
   formSubmitted: boolean;
   declaredMeetingBooked: boolean;
   declaredMeetingAttended: boolean;
+  declaredPurchase: boolean;
 }
 
-export type ConsumedBasis = "positive_reply" | "website_visit" | "form_submitted" | "meeting_booked" | "meeting_attended" | "no_evidence";
+export type ConsumedBasis =
+  | "positive_reply"
+  | "website_visit"
+  | "form_submitted"
+  | "meeting_booked"
+  | "meeting_attended"
+  | "purchase"
+  | "message_sent"
+  | "no_evidence";
 
 /** The one outcome a fact consumed. Pure. */
 export function consumedOutcomeFor(outcome: FactOutcomeKey, e: ConsumptionEvidence): { outcomeKey: string; basis: ConsumedBasis } {
@@ -88,8 +118,16 @@ export function consumedOutcomeFor(outcome: FactOutcomeKey, e: ConsumptionEviden
     if (e.formSubmitted) return { outcomeKey: "form_submitted", basis: "form_submitted" };
     return { outcomeKey: "conversation", basis: "no_evidence" };
   };
+  const sent = (): { outcomeKey: string; basis: ConsumedBasis } => ({ outcomeKey: "message_sent", basis: "message_sent" });
+  if (outcome === "website_visit") return sent();
+  if (outcome === "signup" || outcome === "form_submitted" || outcome === "purchase") {
+    if (e.websiteVisit) return { outcomeKey: "website_visit", basis: "website_visit" };
+    if (e.positiveReply) return { outcomeKey: "conversation", basis: "positive_reply" };
+    return sent();
+  }
   if (outcome === "meeting_booked") return entry();
   if (outcome === "meeting_attended") return { outcomeKey: "meeting_booked", basis: "meeting_booked" };
+  if (e.declaredPurchase) return { outcomeKey: "purchase", basis: "purchase" };
   if (e.declaredMeetingAttended) return { outcomeKey: "meeting_attended", basis: "meeting_attended" };
   if (e.declaredMeetingBooked) return { outcomeKey: "meeting_booked", basis: "meeting_booked" };
   return entry();
@@ -152,27 +190,37 @@ interface PendingFact {
 const isoAt = (col: ReturnType<typeof sql.raw>) =>
   sql`to_char(LEAST(${col}, now()) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
-const OUTCOME_CASE = sql.raw(
-  `CASE ${Object.entries(FACT_EVENTS_OF_OUTCOME)
-    .map(([outcome, events]) => `WHEN ce.event IN (${events.map((e) => `'${e}'`).join(", ")}) THEN '${outcome}'`)
-    .join(" ")} END`,
+/**
+ * (outcome, event, source|null, rank): one ledger event can produce two outcomes (a tracker sale = Direct purchase AND
+ * Paid client). Rank = FACT_OUTCOME_KEYS order, so an outcome is declared before the ones that consume it. Constants only.
+ */
+const OUTCOME_MAP = sql.raw(
+  `(VALUES ${FACT_OUTCOME_KEYS.flatMap((outcome, i) =>
+    FACT_EVENTS_OF_OUTCOME[outcome].flatMap((event) =>
+      (FACT_SOURCES_OF_OUTCOME[outcome] ?? [null]).map((source) => `('${outcome}', '${event}', ${source ? `'${source}'` : "NULL::text"}, ${i + 1})`),
+    ),
+  ).join(", ")}) AS m(outcome_key, event, source, rank)`,
 );
-const FACT_EVENTS = Object.values(FACT_EVENTS_OF_OUTCOME).flat();
-const OUTCOME_RANK = sql.raw(`CASE outcome_key WHEN 'meeting_booked' THEN 1 WHEN 'meeting_attended' THEN 2 ELSE 3 END`);
+const FACT_EVENTS = [...new Set(Object.values(FACT_EVENTS_OF_OUTCOME).flat())];
 
 /** Our facts not declared yet: the earliest live one per (org, brand, lead, outcome), booked before attended before paid. */
 export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_BATCH): Promise<PendingFact[]> {
   const rows = (await db.execute(sql`
     WITH facts AS (
-      SELECT DISTINCT ON (ce.org_id, ce.brand_id, ce.matched_lead_id, ${OUTCOME_CASE})
-             ce.org_id, ce.brand_id, ce.matched_lead_id::text AS lead_id, ${OUTCOME_CASE} AS outcome_key,
+      SELECT DISTINCT ON (ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key)
+             ce.org_id, ce.brand_id, ce.matched_lead_id::text AS lead_id, m.outcome_key, m.rank,
              ce.id::text AS conversion_event_id, ce.received_at
       FROM conversion_events ce
+      JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
       WHERE ce.event = ANY(${sql.param(FACT_EVENTS)}::text[])
         AND ce.caused_by_outreach IS TRUE
         AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed' AND ce.matched_lead_id IS NOT NULL
+        AND NOT (m.outcome_key = 'website_visit' AND EXISTS (
+          SELECT 1 FROM lead_timeline_facts t
+          WHERE t.org_id = ce.org_id AND t.brand_id = ce.brand_id AND t.lead_id = ce.matched_lead_id
+            AND t.label = 'website_visit' AND t.source = 'outreach' AND t.withdrawn_at IS NULL))
         ${scope ? sql`AND ce.org_id = ${scope.orgId}` : sql.empty()}
-      ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, ${OUTCOME_CASE}, ce.received_at ASC NULLS LAST, ce.id
+      ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key, ce.received_at ASC NULLS LAST, ce.id
     )
     SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.received_at::text AS at,
            ${isoAt(sql.raw("f.received_at"))} AS occurred_at
@@ -180,7 +228,7 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
     WHERE NOT EXISTS (
       SELECT 1 FROM outcome_fact_declarations d
       WHERE d.org_id = f.org_id AND d.brand_id = f.brand_id AND d.lead_id = f.lead_id::uuid AND d.outcome_key = f.outcome_key)
-    ORDER BY ${OUTCOME_RANK}, f.received_at ASC NULLS LAST
+    ORDER BY f.rank, f.received_at ASC NULLS LAST
     LIMIT ${limit}
   `)) as unknown as Array<Record<string, string | null>>;
   return rows.map((r) => ({
@@ -215,7 +263,8 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
       (${timeline(sql`t.label = 'website_visit'`)} OR ${ledger(["website_visit"], false)}) AS website_visit,
       (${timeline(sql`t.label = 'form_filled'`)} OR ${ledger(["form_submission"], false)}) AS form_submitted,
       ${declared("meeting_booked")} AS declared_meeting_booked,
-      ${declared("meeting_attended")} AS declared_meeting_attended
+      ${declared("meeting_attended")} AS declared_meeting_attended,
+      ${declared("purchase")} AS declared_purchase
   `)) as unknown as Array<Record<string, boolean>>;
   const r = rows[0];
   return {
@@ -224,6 +273,7 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
     formSubmitted: r.form_submitted === true,
     declaredMeetingBooked: r.declared_meeting_booked === true,
     declaredMeetingAttended: r.declared_meeting_attended === true,
+    declaredPurchase: r.declared_purchase === true,
   };
 }
 
