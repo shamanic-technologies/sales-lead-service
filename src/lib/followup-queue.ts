@@ -79,7 +79,7 @@ import {
   type ClaimRelationshipPolicy,
 } from "./followup-relationship-gate.js";
 import type { RelationshipTag } from "./relationship-tags.js";
-import { decideClientGate, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
+import { decideClientGate, decideNeverALead, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
 import { loadOrgMemberKeys } from "./org-members.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { phoneValueSql } from "./e164-phone.js";
@@ -809,7 +809,7 @@ export async function pickFollowupCandidate(params: {
   await stopFollowups(optedOutIds, "opted_out", nowMs);
 
   const budget = report ? new ClaimJudgeBudget(params.runId) : null;
-  // The org's members, read once per claim and only under `current_client` (a member is never a client).
+  // The org's members, read once per claim under a stated policy (a member is never a client, never a lead).
   let memberKeys: Set<string> | undefined;
   try {
     for (const candidate of answerable) {
@@ -826,9 +826,13 @@ export async function pickFollowupCandidate(params: {
             memberKeys ??= await loadOrgMemberKeys(params.orgId);
             verdict = decideClientGate({ block, emails: facts.emails, paid: facts.paid, memberKeys });
           } else {
-            // A sale on the ledger is a customer, whatever the relationship sweep has tagged yet: refused by the policy.
-            verdict = candidate.wonOnLedger
-              ? { kind: "refuse", reason: NOT_A_LEAD_REASON, tags: ["customer"], unsureTags: [] }
+            // Never a lead, whatever the relationship sweep has tagged yet (LEAD-EVENT-LEADS-ONLY-1024): staff, the org's
+            // team, a payer (the predicate `current_client` admits on, or any sale on the ledger for this row or lead).
+            const facts = await loadClientFacts({ orgId: params.orgId, brandId: candidate.brandId, leadId: candidate.leadId, leadCampaignId: candidate.id });
+            memberKeys ??= await loadOrgMemberKeys(params.orgId);
+            const never = decideNeverALead({ emails: facts.emails, paid: facts.paid || candidate.wonOnLedger, memberKeys });
+            verdict = never
+              ? never
               : await gateFollowupCandidate({
               orgId: params.orgId,
               brandId: candidate.brandId,
