@@ -19,6 +19,7 @@ import {
   lookupFollowupRowByEmail,
   lookupFollowupRowByPhone,
   parseDueDate,
+  claimPersonKeys,
   pickFollowupCandidate,
   readFollowupState,
   withdrawHandover,
@@ -199,6 +200,14 @@ router.post(
       return;
     }
     const policy = isClaimRelationshipPolicy(relationships) ? relationships : undefined;
+
+    // The person the run's trigger occurrence names (CLAIM-OCCURRENCE-PERSON-1025): only their row is claimed.
+    const rawPerson: unknown = req.body?.person;
+    if (rawPerson !== undefined && rawPerson !== null && typeof rawPerson !== "object") {
+      res.status(400).json({ error: "person must be an object {email?, phone?, leadId?}", code: "invalid_person" });
+      return;
+    }
+    const person = claimPersonKeys(rawPerson);
     const report: RelationshipGateReport | undefined = policy ? { policy, refused: [], pending: [] } : undefined;
 
     try {
@@ -223,6 +232,7 @@ router.post(
             audienceId: req.audienceId,
           },
           ...(policy ? { relationships: policy } : {}),
+          ...(person ? { person } : {}),
         });
         if (report && attempt.relationships) {
           report.refused.push(...attempt.relationships.refused);

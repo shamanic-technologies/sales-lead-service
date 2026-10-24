@@ -5922,6 +5922,17 @@ registry.registerPath({
                 description:
                   "More held campaigns, each claimed on its own exact id, tried in order after the path one; the first person claimed wins (followup.campaignId names whose row it is). For a responder whose preceding leg runs on several campaigns at once (cold email and cold WhatsApp opening conversations for one offer).",
               }),
+              person: z
+                .object({
+                  email: z.string().nullish(),
+                  phone: z.string().nullish(),
+                  leadId: z.string().nullish(),
+                })
+                .nullish()
+                .openapi({
+                  description:
+                    "(CLAIM-OCCURRENCE-PERSON-1025) The person the run's trigger occurrence names: only THEIR due row is claimable (any identity given matches: lead id, an email contact method case-folded, a phone contact method as E.164). Absent, null or naming nobody usable = the campaign's due rows, oldest first, unchanged. A run answering an occurrence must state it, or a burst of occurrences makes each run claim someone else's row.",
+                }),
               relationships: z.enum(["pure_prospect", "current_client"]).optional().openapi({
                 description:
                   "The relationship policy of the claiming pipe's strategy. current_client (CLIENT-CHECKIN-LEAD-1024) = clients only: a due person is handed out only if they PAID the brand (a live, attributed sale/purchase at the brand, this lead or another lead of the same human) and are not a personal contact (yes or unsure), not a member of the org owning the brand (nor tagged team), not staff or a test address. Under it the booked-meeting stop does not apply (a client has a sale). Refused = relationships.refused with reason not_a_client | team_member | staff | personal, row stopped (final); a payer with no human id yet = relationships.pending human_unknown, left due. (REPLY-ANY-LEAD-1015) pure_prospect = leads only, the exact complement of current_client on payers (LEAD-EVENT-LEADS-ONLY-1024): never staff or a test address (refused staff), never a member of the org owning the brand (refused team_member), never anyone who PAID the brand on current_client's own predicate or holds any sale on the ledger for the row or lead (refused not_a_lead, tags [customer]); then a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. Absent = unchanged behaviour.",
@@ -5938,7 +5949,7 @@ registry.registerPath({
       description: "The claimed person, or nobody with a named reason",
       content: { "application/json": { schema: FollowupClaimSchema } },
     },
-    400: { description: "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), alsoCampaignIds not an array of ids (code invalid_also_campaign_ids), or relationships not a known policy (code unknown_relationship_policy)" },
+    400: { description: "Missing campaignId or x-org-id, no x-campaign-id (code acting_campaign_required), alsoCampaignIds not an array of ids (code invalid_also_campaign_ids), person not an object (code invalid_person), or relationships not a known policy (code unknown_relationship_policy)" },
     401: { description: "Unauthorized" },
     500: { description: "Internal server error" },
     502: {

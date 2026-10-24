@@ -36,7 +36,7 @@ vi.mock("../../src/lib/qualification-judge.js", async (orig) => ({
 
 const { db } = await import("../../src/db/index.js");
 const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
-const { pickFollowupCandidate, readFollowupState } = await import("../../src/lib/followup-queue.js");
+const { claimPersonKeys, pickFollowupCandidate, readFollowupState } = await import("../../src/lib/followup-queue.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -131,6 +131,40 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     for (const t of ["conversion_events", "crm_facts", "relationship_subjects", "relationship_judgments", "relationship_evidence", "relationship_statements"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
+  });
+
+  describe("the occurrence's person (CLAIM-OCCURRENCE-PERSON-1025)", () => {
+    const claimFor = (person: Record<string, string>, relationships?: "pure_prospect") =>
+      pickFollowupCandidate({
+        orgId,
+        campaignId,
+        runId: randomUUID(),
+        actingCampaignId: acting,
+        context: { orgId },
+        person: claimPersonKeys(person),
+        ...(relationships ? { relationships } : {}),
+      });
+
+    it("claims the named person's row, never the campaign's oldest due one", async () => {
+      const older = await dueLead();
+      await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() - interval '1 hour' WHERE id = ${older.rowId}::uuid`);
+      const named = await dueLead();
+      const r = await claimFor({ email: named.email.toUpperCase() }, "pure_prospect");
+      expect(r.claimed?.id).toBe(named.rowId);
+      // The oldest one was not touched: still claimable by its own run.
+      expect((await claimFor({ email: older.email })).claimed?.id).toBe(older.rowId);
+    });
+
+    it("matches by lead id or phone too; nobody of theirs due = nothing_due, someone else's row left alone", async () => {
+      const other = await dueLead();
+      const byLead = await dueLead();
+      expect((await claimFor({ leadId: byLead.leadId })).claimed?.id).toBe(byLead.rowId);
+      const wa = await duePhoneLead();
+      expect((await claimFor({ phone: "00" + wa.phone.slice(1, 3) + " " + wa.phone.slice(3) })).claimed?.id).toBe(wa.rowId);
+      const none = await claimFor({ email: `${randomUUID()}@nobody.test` });
+      expect(none).toMatchObject({ claimed: null, reason: "nothing_due" });
+      expect((await claim()).claimed?.id).toBe(other.rowId);
+    });
   });
 
   describe("never a lead, whatever the tags (LEAD-EVENT-LEADS-ONLY-1024)", () => {
