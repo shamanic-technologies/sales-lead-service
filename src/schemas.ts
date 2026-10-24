@@ -9,6 +9,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { LEAD_STATE_EVIDENCE_KINDS, LEAD_STATES } from "./lib/lead-states.js";
 import { EMAIL_SEND_WORKFLOW_SOURCES } from "./lib/repoint-causes.js";
 import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
 import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
@@ -10288,5 +10289,81 @@ registry.registerPath({
   parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
   responses: {
     200: { description: "The last job (null = none since boot)", content: { "application/json": { schema: z.object({ job: RunOutcomeBackfillJobSchema.nullable() }) } } },
+  },
+});
+
+// ─── When each lead first reached each state (LEAD-STATES-1024, src/lib/lead-states.ts) ───
+export const LEAD_STATES_MAX_LIMIT = 5000;
+export const LEAD_STATES_BY_LEAD_MAX_ITEMS = 1000;
+
+const ReachedStateSchema = z
+  .object({
+    reachedAt: z.string().nullable().openapi({ description: "First reach (ISO, the prospect's own instant). null = reached, date unknown (a reply saying they were already a customer)." }),
+    basis: z.enum(LEAD_STATE_EVIDENCE_KINDS).openapi({
+      description:
+        "The evidence that reached it first: positive_reply (reply to our outreach classified positive), positive_message (WhatsApp/LinkedIn " +
+        "message judged interest), form_reply (CRM form after our first email), meeting_booked / meeting_attended / sale (outcome ledger), " +
+        "click (measured click to the brand's site), site_session (the brand's analytics saw a session), stated_visit (visit on the outcome ledger).",
+    }),
+    impliedBy: z.enum(LEAD_STATES).nullable().openapi({ description: "The higher interest state whose reach implied this one (same date); null = its own evidence." }),
+  })
+  .openapi("LeadReachedState");
+
+export const LeadStatesRowSchema = z
+  .object({
+    orgId: z.string(),
+    brandId: z.string(),
+    leadId: z.string(),
+    states: z.object(Object.fromEntries(LEAD_STATES.map((s) => [s, ReachedStateSchema.nullable()])) as Record<(typeof LEAD_STATES)[number], z.ZodNullable<typeof ReachedStateSchema>>),
+  })
+  .openapi("LeadStatesRow");
+
+export const LeadStatesByLeadRequestSchema = z
+  .object({ leadIds: z.array(z.string().uuid()).min(1).max(LEAD_STATES_BY_LEAD_MAX_ITEMS) })
+  .openapi("LeadStatesByLeadRequest");
+
+const leadStatesDescription =
+  "When each lead first reached each STATE at a brand (owner 2026-10-24: a state is reached ONCE per lead x brand, dated at its first reach: " +
+  "3 positive replies = one lead_interested, 12 clicks = one lead_visited). Interest ladder lead_interested < meeting_booked < " +
+  "meeting_attended < paid_client: reaching a higher state reaches every lower one at that date (a meeting booked with no positive reply = " +
+  "interested at the booking, `impliedBy: meeting_booked`). lead_visited is implied by nothing (a yes never makes a lead visited, a click never " +
+  "makes them interested). Each date is the prospect's own instant (reply, click, booking), never a sync or declaration time. A state never " +
+  "reached = null. A lead the org marked not a person is never returned. Every lead with at least one state is answered; one row per " +
+  "(org, brand, lead).";
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/lead-states",
+  summary: "First reach of each state, every lead x brand (internal, service-auth)",
+  description: `${leadStatesDescription} Walked in (org, brand, lead) order: \`limit\` (1..${LEAD_STATES_MAX_LIMIT}) required, \`nextCursor\` until null.`,
+  request: {
+    query: z.object({
+      limit: z.string().openapi({ description: `1..${LEAD_STATES_MAX_LIMIT}` }),
+      cursor: z.string().optional().openapi({ description: "nextCursor of the previous page" }),
+      orgId: z.string().optional().openapi({ description: "Only this org's leads (internal org UUID)" }),
+    }),
+  },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: {
+      description: "One page",
+      content: { "application/json": { schema: z.object({ leads: z.array(LeadStatesRowSchema), nextCursor: z.string().nullable() }).openapi("LeadStatesPage") } },
+    },
+    400: { description: "limit missing/out of range, or a cursor this endpoint never issued" },
+    500: { description: "Unreadable (never an empty answer)" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/lead-states/by-lead",
+  summary: "First reach of each state for these leads, every brand (internal, service-auth)",
+  description: `${leadStatesDescription} Up to ${LEAD_STATES_BY_LEAD_MAX_ITEMS} lead ids; a lead with no state is absent.`,
+  request: { body: { content: { "application/json": { schema: LeadStatesByLeadRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: { description: "Every lead x brand of the asked leads holding a state", content: { "application/json": { schema: z.object({ leads: z.array(LeadStatesRowSchema) }) } } },
+    400: { description: "Invalid body" },
+    500: { description: "Unreadable (never an empty answer)" },
   },
 });
