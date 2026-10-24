@@ -106,4 +106,24 @@ describe.skipIf(!hasRealDatabase)("lead id resolve against a real database", () 
   it("refuses an item naming no key", async () => {
     expect((await resolve([{ orgId }])).status).toBe(400);
   });
+
+  it("LEDGER-HISTORY-1024: names the lead of an address whatever the org; never one nobody kept; never a pick", async () => {
+    await db.insert(leadContactMethods).values({ leadId: ids.bo, channel: "email", value: `bo-${tag}@example.com`, source: "itest" });
+    const [x] = await db.insert(leads).values({ firstName: "Twin A" }).returning({ id: leads.id });
+    const [y] = await db.insert(leads).values({ firstName: "Twin B" }).returning({ id: leads.id });
+    await db.insert(leadContactMethods).values({ leadId: x.id, channel: "email", value: `twin-${tag}@example.com`, source: "itest" });
+    await db.insert(leadContactMethods).values({ leadId: y.id, channel: "email", value: `TWIN-${tag}@example.com`, source: "itest" });
+    await db.insert(leadsCampaigns).values({ leadId: x.id, campaignId: `t1-${tag}`, orgId: otherOrgId, brandIds: [otherBrandId], status: "served" });
+    await db.insert(leadsCampaigns).values({ leadId: y.id, campaignId: `t2-${tag}`, orgId, brandIds: [brandId], status: "served" });
+    const emails = [`ana-${tag}@example.com`, `bo-${tag}@example.com`, `nobody-${tag}@example.com`, `twin-${tag}@example.com`];
+    const res = await request(app).post("/internal/leads/ids/by-email").set("x-api-key", process.env.LEAD_SERVICE_API_KEY ?? "test").send({ emails });
+    expect(res.status).toBe(200);
+    expect(res.body.answers).toEqual([
+      { email: emails[0], leadId: ids.ana, reason: null },
+      { email: emails[1], leadId: null, reason: "not_a_lead" },
+      { email: emails[2], leadId: null, reason: "not_a_lead" },
+      { email: emails[3], leadId: null, reason: "ambiguous" },
+    ]);
+    expect((await request(app).post("/internal/leads/ids/by-email").set("x-api-key", process.env.LEAD_SERVICE_API_KEY ?? "test").send({ emails: [] })).status).toBe(400);
+  });
 });

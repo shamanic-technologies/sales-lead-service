@@ -14267,6 +14267,61 @@
           "people"
         ]
       },
+      "LeadIdByEmailResponse": {
+        "type": "object",
+        "properties": {
+          "answers": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "leadId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "reason": {
+                  "type": "string",
+                  "nullable": true,
+                  "enum": [
+                    "not_a_lead",
+                    "ambiguous",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "email",
+                "leadId",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "answers"
+        ]
+      },
+      "LeadIdByEmailRequest": {
+        "type": "object",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 320
+            },
+            "minItems": 1,
+            "maxItems": 1000
+          }
+        },
+        "required": [
+          "emails"
+        ]
+      },
       "OutcomeReachReResolveRequest": {
         "type": "object",
         "properties": {
@@ -25695,6 +25750,53 @@
           },
           "413": {
             "description": "Body over the route's 10 MB limit (`error: payload_too_large`, `limitBytes`, `lengthBytes`): send fewer items per call. The documented 1000-item maximum always fits."
+          }
+        }
+      }
+    },
+    "/internal/leads/ids/by-email": {
+      "post": {
+        "summary": "Which lead is each email address, whatever the org (internal, service-auth)",
+        "description": "A lead is a human at a company, org-independent, and one registered email belongs to one lead. For a service naming the subject of an outcome occurrence it produced or reused across orgs (an email verification, a newsletter subscriber's check) at runs-service (subjectService `lead-service`, subjectId = leadId). Answers only a lead someone kept (it holds a lead row in any org); nothing is minted. `leadId: null` + `reason`: `not_a_lead` (nobody kept this address) or `ambiguous` (two leads hold it in different case: never a pick). Compared case-folded. Read only, one answer per asked address in the order asked, up to 1000 addresses.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadIdByEmailRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "One answer per asked address, same order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadIdByEmailResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "413": {
+            "description": "Body over the route's 1 MB limit (`error: payload_too_large`): send fewer addresses per call."
           }
         }
       }
