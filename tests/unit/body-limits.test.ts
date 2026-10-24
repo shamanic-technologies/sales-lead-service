@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { readFileSync } from "node:fs";
 import { bodyParserErrorHandler, mountJsonParsers } from "../../src/lib/body-limits.js";
-import { LEAD_ID_RESOLVE_MAX_ITEMS } from "../../src/schemas.js";
+import { LEAD_ID_BY_EMAIL_MAX_ITEMS, LEAD_ID_RESOLVE_MAX_ITEMS } from "../../src/schemas.js";
 
 /** LEAD-ID-RESOLVE-413-1024: a documented maximum fits its route's body limit; a body over it is a NAMED 413, never a bare 500. */
 function appEchoing() {
@@ -34,6 +34,12 @@ describe("JSON body limits", () => {
     const res = await request(appEchoing()).post("/internal/leads/ids/resolve").send({ people });
     expect(res.status).toBe(200);
     expect(res.body.bytes).toBeGreaterThan(2_000_000);
+  });
+
+  it("takes the documented maximum of /internal/leads/ids/by-email (1000 addresses of 320 chars)", async () => {
+    const emails = Array.from({ length: LEAD_ID_BY_EMAIL_MAX_ITEMS }, (_, i) => `${String(i).padStart(4, "0")}${"a".repeat(300)}@example.com`.slice(0, 320));
+    const res = await request(appEchoing()).post("/internal/leads/ids/by-email").send({ emails });
+    expect(res.status).toBe(200);
   });
 
   it("takes 500 apollo-service items (the prod batch that 500'd on 2026-10-23)", async () => {
