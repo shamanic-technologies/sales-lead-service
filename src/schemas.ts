@@ -10153,6 +10153,33 @@ registry.registerPath({
   },
 });
 
+// ─── Re-resolve one outcome reach set aside before the door (OFFER-FROM-LIVE-CAMPAIGNS-1024) ───
+
+export const OutcomeReachReResolveRequestSchema = z
+  .object({
+    sourceRef: z.string().min(3).openapi({ description: "The record the reach was read off (`crm:<fact id>`, `ce:<conversion event id>`...), as `outcome_trigger_fires.source_ref` holds it." }),
+  })
+  .openapi("OutcomeReachReResolveRequest");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/outcome-triggers/re-resolve",
+  summary: "Re-resolve one outcome reach set aside before the door (internal, staff)",
+  description:
+    "A reach whose person or offer could not be named (`no_person`, `offer_unknown`, `unresolvable`) never fired its outcome trigger. " +
+    "This re-resolves it through the same path a fresh reach takes (person, offer: the record's, the person's campaigns', the offers whose live campaign answers the trigger, the brand's only offer; then campaign-service's door). " +
+    "409 `already_answered` (a row of the record already answered: once per action), `not_fresh` (outside the 24 h window: no back-fill), `restated_action` (another copy of the same CRM action answered). 404 unknown record.",
+  request: { body: { content: { "application/json": { schema: OutcomeReachReResolveRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: { description: "Re-resolved: every row of the record after the pass", content: { "application/json": { schema: z.object({ sourceRef: z.string(), rows: z.array(z.object({ offerId: z.string(), status: z.string(), skipReason: z.string().nullable() })) }) } } },
+    400: { description: "Invalid body" },
+    404: { description: "No reach recorded under this record" },
+    409: { description: "Already answered, not fresh, or a re-stated action" },
+    502: { description: "A sibling (campaign-service, brand-service, features-service) could not answer" },
+  },
+});
+
 // ─── Backfill of past serve runs' outcomes (COST-BACKFILL-1023-LEAD, src/lib/run-outcome-backfill.ts) ───
 
 export const RunOutcomeBackfillRequestSchema = z

@@ -14267,6 +14267,19 @@
           "people"
         ]
       },
+      "OutcomeReachReResolveRequest": {
+        "type": "object",
+        "properties": {
+          "sourceRef": {
+            "type": "string",
+            "minLength": 3,
+            "description": "The record the reach was read off (`crm:<fact id>`, `ce:<conversion event id>`...), as `outcome_trigger_fires.source_ref` holds it."
+          }
+        },
+        "required": [
+          "sourceRef"
+        ]
+      },
       "RunOutcomeBackfillJob": {
         "type": "object",
         "properties": {
@@ -25682,6 +25695,88 @@
           },
           "413": {
             "description": "Body over the route's 10 MB limit (`error: payload_too_large`, `limitBytes`, `lengthBytes`): send fewer items per call. The documented 1000-item maximum always fits."
+          }
+        }
+      }
+    },
+    "/internal/outcome-triggers/re-resolve": {
+      "post": {
+        "summary": "Re-resolve one outcome reach set aside before the door (internal, staff)",
+        "description": "A reach whose person or offer could not be named (`no_person`, `offer_unknown`, `unresolvable`) never fired its outcome trigger. This re-resolves it through the same path a fresh reach takes (person, offer: the record's, the person's campaigns', the offers whose live campaign answers the trigger, the brand's only offer; then campaign-service's door). 409 `already_answered` (a row of the record already answered: once per action), `not_fresh` (outside the 24 h window: no back-fill), `restated_action` (another copy of the same CRM action answered). 404 unknown record.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OutcomeReachReResolveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Re-resolved: every row of the record after the pass",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "sourceRef": {
+                      "type": "string"
+                    },
+                    "rows": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "offerId": {
+                            "type": "string"
+                          },
+                          "status": {
+                            "type": "string"
+                          },
+                          "skipReason": {
+                            "type": "string",
+                            "nullable": true
+                          }
+                        },
+                        "required": [
+                          "offerId",
+                          "status",
+                          "skipReason"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "sourceRef",
+                    "rows"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "404": {
+            "description": "No reach recorded under this record"
+          },
+          "409": {
+            "description": "Already answered, not fresh, or a re-stated action"
+          },
+          "502": {
+            "description": "A sibling (campaign-service, brand-service, features-service) could not answer"
           }
         }
       }

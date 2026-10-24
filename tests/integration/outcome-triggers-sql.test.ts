@@ -17,7 +17,7 @@ const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, conversionEvents, crmFacts, followupActions, outcomeTriggerFires } = await import(
   "../../src/db/schema.js"
 );
-const { sweepOutcomeTriggers, noteLeadFound, drainOutcomeTriggerFires, resetOutcomeTriggerCatalogue } = await import(
+const { sweepOutcomeTriggers, noteLeadFound, drainOutcomeTriggerFires, resetOutcomeTriggerCatalogue, reResolveSetAsideReach } = await import(
   "../../src/lib/outcome-triggers.js"
 );
 
@@ -59,6 +59,9 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
   /** What campaign-service's for-person read answers (another caller's earlier event of the trigger, or null). */
   let priorAnswer: (url: URL) => Response;
   let priorAsks: URL[];
+  /** campaign-service's offers of the brand whose live campaign answers the asked trigger (OFFER-FROM-LIVE-CAMPAIGNS). */
+  let liveOffers: string[];
+  let liveAsks: URL[];
   const addr = (name: string) => `${name}-${tag}@example.com`;
 
   function stubSiblings(): void {
@@ -69,6 +72,10 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
         const headers = new Headers(init?.headers);
         const org = headers.get("x-org-id");
         if (url.endsWith("/public/channels")) return new Response(JSON.stringify(CATALOGUE), { status: 200 });
+        if (url.includes("/trigger-offers?")) {
+          liveAsks.push(new URL(url));
+          return new Response(JSON.stringify({ triggerId: new URL(url).searchParams.get("triggerId"), offerIds: org === orgId ? liveOffers : [] }), { status: 200 });
+        }
         if (url.includes("/trigger-events/for-person?")) {
           const asked = new URL(url);
           priorAsks.push(asked);
@@ -161,6 +168,8 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     doorAnswer = () => new Response(JSON.stringify({ event: { id: randomUUID() }, replayed: false }), { status: 201 });
     priorAnswer = () => new Response(JSON.stringify({ event: null, idempotencyKey: null }), { status: 200 });
     priorAsks = [];
+    liveOffers = [];
+    liveAsks = [];
     resetOutcomeTriggerCatalogue();
     stubSiblings();
     vi.spyOn(console, "log").mockImplementation(() => {});
@@ -377,6 +386,7 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
         const url = String(input);
         if (url.endsWith("/public/channels")) return new Response(JSON.stringify(CATALOGUE), { status: 200 });
         if (url.endsWith("/campaigns")) return new Response(JSON.stringify({ campaigns: [] }), { status: 200 });
+        if (url.includes("/trigger-offers?")) return new Response(JSON.stringify({ offerIds: [] }), { status: 200 });
         if (url.endsWith("/offers")) {
           return new Response(JSON.stringify({ offers: [{ offerId: randomUUID(), status: "active" }, { offerId: randomUUID(), status: "active" }] }), { status: 200 });
         }
@@ -524,5 +534,64 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     await crmFact("website_visit", addr("named"), { ...visit, emails: [addr("named"), addr("again")] });
     await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
     expect(ours().map((c) => c.body.triggerId)).toEqual(["website_visited"]);
+  });
+
+  /** A brand selling two offers: an inbound visitor is in no campaign of either. */
+  function twoOfferBrand(): { live: string; other: string } {
+    const live = randomUUID();
+    const other = randomUUID();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = String(input);
+        const org = new Headers(init?.headers).get("x-org-id");
+        if (url.endsWith("/public/channels")) return new Response(JSON.stringify(CATALOGUE), { status: 200 });
+        if (url.endsWith("/campaigns")) return new Response(JSON.stringify({ campaigns: [] }), { status: 200 });
+        if (url.includes("/trigger-offers?")) {
+          liveAsks.push(new URL(url));
+          return new Response(JSON.stringify({ offerIds: org === orgId ? liveOffers : [] }), { status: 200 });
+        }
+        if (url.includes("/trigger-events/for-person?")) return priorAnswer(new URL(url));
+        if (url.endsWith("/offers")) {
+          return new Response(JSON.stringify({ offers: [{ offerId: live, status: "active" }, { offerId: other, status: "active" }] }), { status: 200 });
+        }
+        if (url.endsWith("/internal/trigger-events")) {
+          door.push({ orgId: org, body: JSON.parse(String(init?.body)) });
+          return doorAnswer();
+        }
+        return new Response(`unexpected ${url}`, { status: 599 });
+      }),
+    );
+    return { live, other };
+  }
+
+  it("OFFER-FROM-LIVE-CAMPAIGNS: an inbound visitor (no campaign, 2 offers) reaches the offer whose live campaign answers the trigger", async () => {
+    const { live } = twoOfferBrand();
+    liveOffers = [live];
+    await crmFact("website_visit", addr("inbound"));
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours().map((c) => [c.body.triggerId, c.body.offerId, (c.body.person as { email: string }).email])).toEqual([
+      ["website_visited", live, addr("inbound")],
+    ]);
+    expect(liveAsks.map((u) => [u.pathname, u.searchParams.get("triggerId")])).toEqual([[`/internal/brands/${brandId}/trigger-offers`, "website_visited"]]);
+  });
+
+  it("OFFER-FROM-LIVE-CAMPAIGNS: a reach set aside offer_unknown is re-resolved once through the normal path, never twice", async () => {
+    const { live } = twoOfferBrand();
+    await crmFact("website_visit", addr("early"));
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    expect(ours()).toEqual([]);
+    const [aside] = await rowsOf({ step: "website_visit" });
+    expect([aside.status, aside.skipReason]).toEqual(["skipped", "offer_unknown"]);
+
+    // The Lead event campaign is live now: the staff re-resolve fires it once.
+    liveOffers = [live];
+    const first = await reResolveSetAsideReach(aside.sourceRef);
+    expect(first.status).toBe(200);
+    expect(ours().map((c) => [c.body.triggerId, c.body.offerId])).toEqual([["website_visited", live]]);
+    const again = await reResolveSetAsideReach(aside.sourceRef);
+    expect(again).toMatchObject({ status: 409, reason: "already_answered" });
+    expect(ours()).toHaveLength(1);
+    expect(await reResolveSetAsideReach("crm:nothing-here")).toMatchObject({ status: 404 });
   });
 });
