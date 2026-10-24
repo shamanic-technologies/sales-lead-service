@@ -75,7 +75,7 @@ export async function judgeIntent(s: Subject, runId: string): Promise<number> {
   const brand = await brandCard(s.orgId, s.brandId);
   const thread = fitThread(await readThread(s), INTENT_THREAD_BUDGET_CHARS);
   const state = { context: CONTEXT, asOf: new Date().toISOString(), brand, person: { name: s.name, emails: s.emails, channels: s.channels }, thread };
-  const { probabilities, model } = await judgeYesNo(state, { wants_business: WANTS_BUSINESS_QUESTION }, "platform");
+  const { probabilities, model } = await judgeYesNo(state, { wants_business: WANTS_BUSINESS_QUESTION }, { platform: { runId } });
   const p = probabilities.wants_business;
   await db.execute(sql`
     INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, company_key, p_wants_business, thread_seq, thread_scope, inbound_at, model, run_id, judged_at)
