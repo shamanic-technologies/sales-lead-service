@@ -201,19 +201,20 @@ export function judgmentState(s: Pick<Subject, "name" | "emails" | "phones" | "c
 }
 
 /** Jev's answers for one lead, nothing written (the sweep's judgment and the read-only replay share it). */
-export async function askSubject(s: Subject): Promise<{ probabilities: Record<JudgedTag, number>; model: string; cardHash: string }> {
+export async function askSubject(s: Subject, runId: string): Promise<{ probabilities: Record<JudgedTag, number>; model: string; cardHash: string }> {
   const { card, hash } = await brandCardOf(s.orgId, s.brandId);
   // The company crm-service (or the lead's employer) names: a brand-service id or a local organization row.
   const company = s.companyKey ? await companyCard(s.companyKey) : [];
   const thread = fitThread(await readThread(s));
-  // A background sweep: no org request started it, so the platform pays (chat-service platform judgments).
-  const { probabilities, model } = await judgeYesNo(judgmentState(s, card, company[0] ?? null, thread), TAG_QUESTIONS, "platform");
+  // No org request started it, so the platform pays (chat-service platform judgments), on behalf of OUR run doing the
+  // work (the sweep's `relationship-sweep` run, or a follow-up claim's own judgment run): never a support mark.
+  const { probabilities, model } = await judgeYesNo(judgmentState(s, card, company[0] ?? null, thread), TAG_QUESTIONS, { platform: { runId } });
   return { probabilities, model, cardHash: hash };
 }
 
 /** Judge one lead and freeze the answer with the brand card it read. Throws on any failure (nothing written). */
 export async function judgeSubject(s: Subject, runId: string): Promise<Record<JudgedTag, number>> {
-  const { probabilities, model, cardHash } = await askSubject(s);
+  const { probabilities, model, cardHash } = await askSubject(s, runId);
   await db.execute(sql`
     INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, thread_scope, model, run_id, judged_at, context_hash)
     VALUES (${s.orgId}, ${s.brandId}, ${s.humanId}::uuid, ${s.companyKey}, ${JSON.stringify(probabilities)}::jsonb,

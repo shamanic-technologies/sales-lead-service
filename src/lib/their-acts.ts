@@ -20,10 +20,21 @@
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { judgeYesNo, type YesNoQuestion } from "./qualification-judge.js";
+import type { RunSupport } from "./run-tasks.js";
 import type { ObservedSend } from "./lead-followup-date.js";
 
 /** Inbound messages judged per pass, fleet-wide (the platform's judgment credit is shared by every Jev call). */
 export const ACT_JUDGMENTS_PER_TICK = 40;
+
+/**
+ * WHOSE WORK the "a person or a machine?" judgment is (PLATFORM-CALLER-RUN-1024): no run stands behind it by design.
+ * A fleet-wide 2-min pass over every org's inbound messages, judged once per fact; it produces no catalogue outcome
+ * (it only says whether a message counts as an act of theirs), so it is platform LLM support, reported apart.
+ */
+export const AUTOMATED_ACT_SUPPORT: RunSupport = {
+  kind: "platform_llm",
+  reason: "Fleet-wide pass judging once per inbound message whether a person or a machine wrote it, before it counts as an act toward the brand; produces no outcome.",
+};
 /** A message reads as a machine's from this probability up (Jev's "more likely than not"). */
 export const AUTOMATED_MIN_PROBABILITY = 0.5;
 /** What Jev reads of a message: its subject and first words say whether a person wrote it. */
@@ -131,7 +142,7 @@ export async function judgeAutomatedActs(limit = ACT_JUDGMENTS_PER_TICK): Promis
   let judged = 0;
   let automated = 0;
   for (const m of todo) {
-    const { probabilities, model } = await judgeYesNo(automatedState(m), { automated: AUTOMATED_QUESTION }, "platform");
+    const { probabilities, model } = await judgeYesNo(automatedState(m), { automated: AUTOMATED_QUESTION }, { platform: { support: AUTOMATED_ACT_SUPPORT } });
     const p = probabilities.automated;
     const isAutomated = p >= AUTOMATED_MIN_PROBABILITY;
     await db.execute(sql`
