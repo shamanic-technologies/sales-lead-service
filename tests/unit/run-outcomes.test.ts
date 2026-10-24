@@ -10,7 +10,7 @@ const { leadFoundDeclaration, companyResearchedDeclaration, declarationKey, deli
 
 describe("outcome declarations", () => {
   it("a find produces lead_found on the serve run and consumes the email check it handed out", () => {
-    expect(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: true })).toEqual({
+    expect(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: true, crmRelationKey: null })).toEqual({
       orgId: "o",
       runId: "r",
       produced: [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: "L" }],
@@ -18,8 +18,17 @@ describe("outcome declarations", () => {
     });
   });
 
+  it("a find from the client's CRM consumes crm-service's lead_identified on its relation key (LEAD-IDENTIFIED-CONSUME-1024)", () => {
+    expect(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false, crmRelationKey: "rel:p:pro" })).toEqual({
+      orgId: "o",
+      runId: "r",
+      produced: [{ outcomeKey: "lead_found", subjectService: "lead-service", subjectId: "L" }],
+      consumed: [{ outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "rel:p:pro" }],
+    });
+  });
+
   it("a find served with no verification verdict consumes nothing", () => {
-    expect(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false }).consumed).toEqual([]);
+    expect(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false, crmRelationKey: null }).consumed).toEqual([]);
   });
 
   it("a research run produces company_researched per company domain, once each", () => {
@@ -32,15 +41,15 @@ describe("outcome declarations", () => {
   });
 
   it("one outbox key per declaration (a replay never queues twice)", () => {
-    const d = leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: true });
+    const d = leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: true, crmRelationKey: null });
     expect(declarationKey(d)).toBe("r:lead_found:L");
-    expect(declarationKey(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false }))).toBe(declarationKey(d));
+    expect(declarationKey(leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false, crmRelationKey: null }))).toBe(declarationKey(d));
   });
 });
 
 describe("delivery to runs-service", () => {
   afterEach(() => vi.unstubAllGlobals());
-  const d = leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false });
+  const d = leadFoundDeclaration({ orgId: "o", runId: "r", leadId: "L", emailChecked: false, crmRelationKey: null });
   const answer = (status: number, body = "{}") => vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status })));
 
   it("posts the declaration on the run with the run's org", async () => {

@@ -19,9 +19,9 @@ const RUN_B = "bbbbbbbb-0000-4000-8000-000000000002";
 describe("groupFindsByRun", () => {
   it("declares lead_found per lead on its finding run, the email check consumed only when one was recorded", () => {
     const runs = groupFindsByRun([
-      { source: "direct", runId: RUN_B, orgId: "org", leadId: "lead-2", emailChecked: false },
-      { source: "direct", runId: RUN_A.toUpperCase(), orgId: "org", leadId: "lead-1", emailChecked: true },
-      { source: "repointed", runId: RUN_A, orgId: "org", leadId: "lead-1", emailChecked: false },
+      { source: "direct", runId: RUN_B, orgId: "org", leadId: "lead-2", emailChecked: false, brandIds: ["b"], fromCrm: false },
+      { source: "direct", runId: RUN_A.toUpperCase(), orgId: "org", leadId: "lead-1", emailChecked: true, brandIds: ["b"], fromCrm: false },
+      { source: "repointed", runId: RUN_A, orgId: "org", leadId: "lead-1", emailChecked: false, brandIds: ["b"], fromCrm: false },
     ]);
     expect(runs).toEqual([
       {
@@ -34,11 +34,21 @@ describe("groupFindsByRun", () => {
     ]);
   });
 
+  it("a find from the client's CRM also consumes crm-service's lead_identified, keyed on its relation (LEAD-IDENTIFIED-CONSUME-1024)", () => {
+    const [run] = groupFindsByRun([
+      { source: "direct", runId: RUN_A, orgId: "org", leadId: "lead-1", emailChecked: true, brandIds: ["b"], fromCrm: true, crmRelationKey: "rel:p1:org:c1" },
+    ]);
+    expect(run.consumed).toEqual([
+      { outcomeKey: "email_checked", subjectService: "lead-service", subjectId: "lead-1" },
+      { outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "rel:p1:org:c1" },
+    ]);
+  });
+
   it("refuses a run named under two orgs", () => {
     expect(() =>
       groupFindsByRun([
-        { source: "direct", runId: RUN_A, orgId: "org-1", leadId: "l1", emailChecked: false },
-        { source: "archived", runId: RUN_A, orgId: "org-2", leadId: "l2", emailChecked: false },
+        { source: "direct", runId: RUN_A, orgId: "org-1", leadId: "l1", emailChecked: false, brandIds: ["b"], fromCrm: false },
+        { source: "archived", runId: RUN_A, orgId: "org-2", leadId: "l2", emailChecked: false, brandIds: ["b"], fromCrm: false },
       ]),
     ).toThrow(/two orgs/);
   });
@@ -85,12 +95,12 @@ describe("resolveRepointedFinds", () => {
     );
     const out = await resolveRepointedFinds(
       [
-        { orgId: "org", leadId: "lead-1", servedAt: "2026-09-01T10:00:05Z", callerRunId: "caller-find", emailChecked: false },
-        { orgId: "org", leadId: "lead-1", servedAt: "2026-09-01T10:00:05Z", callerRunId: "caller-retry", emailChecked: false },
+        { orgId: "org", leadId: "lead-1", servedAt: "2026-09-01T10:00:05Z", callerRunId: "caller-find", emailChecked: false, brandIds: ["b"], fromCrm: false },
+        { orgId: "org", leadId: "lead-1", servedAt: "2026-09-01T10:00:05Z", callerRunId: "caller-retry", emailChecked: false, brandIds: ["b"], fromCrm: false },
       ],
       lookup,
     );
-    expect(out.finds).toEqual([{ source: "repointed", runId: RUN_A, orgId: "org", leadId: "lead-1", emailChecked: false }]);
+    expect(out.finds).toEqual([{ source: "repointed", runId: RUN_A, orgId: "org", leadId: "lead-1", emailChecked: false, brandIds: ["b"], fromCrm: false }]);
     expect(out.unconfirmed).toBe(1);
   });
 });
