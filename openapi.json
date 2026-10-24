@@ -6431,7 +6431,8 @@
               "policy": {
                 "type": "string",
                 "enum": [
-                  "pure_prospect"
+                  "pure_prospect",
+                  "current_client"
                 ],
                 "description": "The policy the claim stated."
               },
@@ -6464,9 +6465,13 @@
                     "reason": {
                       "type": "string",
                       "enum": [
-                        "not_a_lead"
+                        "not_a_lead",
+                        "not_a_client",
+                        "team_member",
+                        "staff",
+                        "personal"
                       ],
-                      "description": "Forward verbatim. not_a_lead: the brand knows this person as something other than a prospect (tags / unsureTags say what)."
+                      "description": "Forward verbatim. Under pure_prospect: not_a_lead (the brand knows this person as something other than a prospect; tags / unsureTags say what). Under current_client: not_a_client (no live sale/purchase at the brand), team_member (a member of the org owning the brand, or tagged team), staff (a staff or test address), personal (a personal contact, yes or unsure). The row's followup_stopped_reason reads relationship_<reason>."
                     },
                     "tags": {
                       "type": "array",
@@ -6636,9 +6641,10 @@
           "relationships": {
             "type": "string",
             "enum": [
-              "pure_prospect"
+              "pure_prospect",
+              "current_client"
             ],
-            "description": "The relationship policy of the claiming pipe's strategy (REPLY-ANY-LEAD-1015). pure_prospect = leads only: a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. Absent = unchanged behaviour."
+            "description": "The relationship policy of the claiming pipe's strategy. current_client (CLIENT-CHECKIN-LEAD-1024) = clients only: a due person is handed out only if they PAID the brand (a live, attributed sale/purchase at the brand, this lead or another lead of the same human) and are not a personal contact (yes or unsure), not a member of the org owning the brand (nor tagged team), not staff or a test address. Under it the booked-meeting stop does not apply (a client has a sale). Refused = relationships.refused with reason not_a_client | team_member | staff | personal, row stopped (final); a payer with no human id yet = relationships.pending human_unknown, left due. (REPLY-ANY-LEAD-1015) pure_prospect = leads only: a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. Absent = unchanged behaviour."
           }
         }
       },
