@@ -51,8 +51,10 @@ export async function createRun(params: {
   audienceId?: string;
   /** Only for a task run-tasks.ts does not name (a staff benchmark/probe script): its support function. */
   support?: RunSupport;
+  /** The run only redoes what another service already produced: created with the task's `repeat_production` mark. */
+  repeatProduction?: boolean;
 }): Promise<{ id: string }> {
-  const support = runSupportFor(params.taskName, params.support);
+  const support = runSupportFor(params.taskName, params.support, { repeatProduction: params.repeatProduction });
   const headers: Record<string, string> = {
     "x-org-id": params.orgId,
   };

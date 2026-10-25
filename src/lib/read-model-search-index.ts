@@ -27,11 +27,44 @@ const BUILD_LOCK_KEY = "7290519146308441017";
 
 export type SearchIndexOutcome = "present" | "built" | "rebuilt" | "busy";
 
+/** One index built after boot: its name, what it indexes, and the advisory lock key of its build (unique per index). */
+export interface PostBootIndex {
+  name: string;
+  /** `ON <table> ...` (everything after the index name). */
+  on: string;
+  lockKey: string;
+  log: string;
+}
+
+const SEARCH_INDEX: PostBootIndex = {
+  name: SEARCH_INDEX_NAME,
+  on: "ON lead_read_model_rows USING gin (search_text gin_trgm_ops)",
+  lockKey: BUILD_LOCK_KEY,
+  log: "[lead-read-model] search index",
+};
+
+/**
+ * Which relation keys crm-service identified, asked per brand by the relationship sweep every tick
+ * (crm-lead-identified.ts `crmIdentifiedAmong`, LEDGER-RESIDUAL-1025): without it the read scanned every relation fact
+ * of the brand (139,828 on the largest, 26 s). Same reason as the search index to build it here: the table is ~1 GB.
+ */
+export const RELATION_KEY_INDEX: PostBootIndex = {
+  name: "idx_crm_registry_facts_relation_key",
+  on: "ON crm_registry_facts (org_id, brand_id, (payload->>'relationKey')) WHERE type = 'relation'",
+  lockKey: "7290519146308441018",
+  log: "[lead-service] crm relation-key index",
+};
+
 /**
  * Make sure the search index exists and is VALID. Idempotent; safe to call on every boot.
  * Throws on a database error (the caller logs it; a missing index slows search, it breaks nothing).
  */
 export async function ensureReadModelSearchIndex(connectionString: string): Promise<SearchIndexOutcome> {
+  return ensurePostBootIndex(connectionString, SEARCH_INDEX);
+}
+
+/** The same build for any post-boot index (CONCURRENTLY, own connection, advisory lock, INVALID leftover rebuilt). */
+export async function ensurePostBootIndex(connectionString: string, index: PostBootIndex): Promise<SearchIndexOutcome> {
   // Its own single connection: no statement timeout (the pool's 120s would kill the build on the
   // largest table), and never a connection the request or sweep pools are counting on.
   const conn = postgres(connectionString, {
@@ -43,7 +76,7 @@ export async function ensureReadModelSearchIndex(connectionString: string): Prom
   });
   try {
     const [lock] = await conn<Array<{ ok: boolean }>>`
-      SELECT pg_try_advisory_lock(${BUILD_LOCK_KEY}::bigint) AS ok
+      SELECT pg_try_advisory_lock(${index.lockKey}::bigint) AS ok
     `;
     if (!lock.ok) return "busy";
     try {
@@ -51,25 +84,22 @@ export async function ensureReadModelSearchIndex(connectionString: string): Prom
         SELECT i.indisvalid AS valid
         FROM pg_index i
         JOIN pg_class c ON c.oid = i.indexrelid
-        WHERE c.relname = ${SEARCH_INDEX_NAME}
+        WHERE c.relname = ${index.name}
       `;
       if (existing?.valid) return "present";
       if (existing) {
         // Left INVALID by a build that died (we hold the build lock, so nobody is still building it).
-        await conn.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS ${SEARCH_INDEX_NAME}`);
+        await conn.unsafe(`DROP INDEX CONCURRENTLY IF EXISTS ${index.name}`);
       }
       const startedAt = Date.now();
-      await conn.unsafe(
-        `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${SEARCH_INDEX_NAME} ` +
-          `ON lead_read_model_rows USING gin (search_text gin_trgm_ops)`,
-      );
+      await conn.unsafe(`CREATE INDEX CONCURRENTLY IF NOT EXISTS ${index.name} ${index.on}`);
       console.log(
-        `[lead-read-model] search index ${SEARCH_INDEX_NAME} ${existing ? "rebuilt" : "built"} ` +
+        `${index.log} ${index.name} ${existing ? "rebuilt" : "built"} ` +
           `in ${Date.now() - startedAt}ms`,
       );
       return existing ? "rebuilt" : "built";
     } finally {
-      await conn`SELECT pg_advisory_unlock(${BUILD_LOCK_KEY}::bigint)`;
+      await conn`SELECT pg_advisory_unlock(${index.lockKey}::bigint)`;
     }
   } finally {
     await conn.end({ timeout: 5 });

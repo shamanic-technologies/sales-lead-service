@@ -67,6 +67,13 @@ describe("run-tasks registry", () => {
     expect(runSupportFor("qualification-suggestions")?.kind).toBe("product_feature");
     expect(() => runSupportFor("lead-serve", { kind: "staff_experiment", reason: "x" })).toThrow(/registry/);
   });
+
+  it("a repeat run of the relationship sweep carries runs-service's repeat_production mark; no other task has one (LEDGER-RESIDUAL-1025)", () => {
+    expect(runSupportFor("relationship-sweep")).toBeUndefined();
+    expect(runSupportFor("relationship-sweep", undefined, { repeatProduction: true })?.kind).toBe("repeat_production");
+    expect(() => runSupportFor("lead-serve", undefined, { repeatProduction: true })).toThrow(/no repeat_production/);
+    expect(() => runSupportFor("relationship-sweep", { kind: "platform_llm", reason: "x" }, { repeatProduction: true })).toThrow(/never a caller/);
+  });
 });
 
 describe("runs-client marks support at creation", () => {
@@ -97,5 +104,14 @@ describe("runs-client marks support at creation", () => {
     await createPlatformRun("followup-claim-relationship-judgment");
     expect(bodyOf(1).support.kind).toBe("platform_llm");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens a relationship-sweep repeat run WITH the repeat_production mark, a production one without", async () => {
+    fetchSpy.mockResolvedValue({ ok: true, json: () => Promise.resolve({ id: "run-1" }) });
+    const { createRun } = await import("../../src/lib/runs-client.js");
+    await createRun({ orgId: "o", serviceName: "lead-service", taskName: "relationship-sweep", repeatProduction: true });
+    await createRun({ orgId: "o", serviceName: "lead-service", taskName: "relationship-sweep", repeatProduction: false });
+    expect(bodyOf(0).support).toEqual({ kind: "repeat_production", reason: RUN_TASKS["relationship-sweep"].repeat.reason });
+    expect(bodyOf(1)).not.toHaveProperty("support");
   });
 });

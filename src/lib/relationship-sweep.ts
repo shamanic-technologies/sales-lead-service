@@ -21,7 +21,9 @@ import { listScopes, refreshSubjects, type Scope } from "./relationship-subjects
 import { recomputePolicy } from "./relationship-read.js";
 import { refreshUniboxRows } from "./unibox-model.js";
 import { detectHotLeads, type HotLeadPass } from "./hot-lead-triggers.js";
-import { InsufficientCreditError, type SpendIdentity } from "./treg-client.js";
+import { InsufficientCreditError } from "./treg-client.js";
+import { crmIdentifiedAmong, subjectIdentified } from "./crm-lead-identified.js";
+import type { Subject } from "./relationship-subjects.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_DELAY_MS = 150_000;
@@ -53,10 +55,19 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
   tick.withoutHuman = refresh.withoutHuman;
   tick.evidenceWritten = await writeEvidence(scope);
 
-  let run: { id: string } | null = null;
-  const identity = async (): Promise<SpendIdentity> => {
-    if (!run) run = await createRun({ orgId: scope.orgId, brandId: scope.brandId, serviceName: "lead-service", taskName: "relationship-sweep" });
-    return { orgId: scope.orgId, userId: null, runId: run.id, brandId: scope.brandId };
+  // Two runs at most per tick (LEDGER-RESIDUAL-1025, owner 2026-10-25): judgments of relations crm-service already
+  // IDENTIFIED (and declared lead_identified) ride a run created with the `repeat_production` mark (waste, abnormal
+  // loss); every other judgment rides a production run (crm-service's to declare). Decided per subject, never mixed.
+  const runs: { repeat: { id: string } | null; production: { id: string } | null } = { repeat: null, production: null };
+  let identified: ReadonlySet<string> = new Set();
+  const runIdFor = async (s: Subject): Promise<string> => {
+    const repeat = subjectIdentified(s.relationKeys, identified);
+    const slot = repeat ? "repeat" : "production";
+    let run = runs[slot];
+    if (!run) {
+      run = runs[slot] = await createRun({ orgId: scope.orgId, brandId: scope.brandId, serviceName: "lead-service", taskName: "relationship-sweep", repeatProduction: repeat });
+    }
+    return run.id;
   };
   let failed = false;
   try {
@@ -69,14 +80,15 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
       },
     );
     const todo = cardHash === null ? [] : await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK, cardHash);
+    const intentTodo = await intentSubjectsToJudge(scope, opts.intent ?? INTENT_PER_TICK);
+    identified = await crmIdentifiedAmong(scope.orgId, scope.brandId, [...todo, ...intentTodo].flatMap((s) => s.relationKeys));
     if (todo.length > 0) {
-      const id = await identity();
       let next = 0;
       const worker = async () => {
         while (next < todo.length) {
           const s = todo[next++];
           try {
-            await judgeSubject(s, id.runId);
+            await judgeSubject(s, await runIdFor(s));
             tick.judged++;
           } catch (err) {
             if (err instanceof InsufficientCreditError) throw err;
@@ -89,11 +101,10 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
       await Promise.all(Array.from({ length: JUDGE_CONCURRENCY }, worker));
     }
     if (tick.judgeFailed < MAX_JUDGE_FAILURES) {
-      const intentTodo = await intentSubjectsToJudge(scope, opts.intent ?? INTENT_PER_TICK);
       for (const s of intentTodo) {
         if (tick.judgeFailed >= MAX_JUDGE_FAILURES) break;
         try {
-          await judgeIntent(s, (await identity()).runId);
+          await judgeIntent(s, await runIdFor(s));
           tick.intentJudged++;
         } catch (err) {
           if (err instanceof InsufficientCreditError) throw err;
@@ -116,8 +127,9 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
     if (!(err instanceof InsufficientCreditError)) throw err;
     console.warn(`[lead-service] relationship sweep: org ${scope.orgId} spend refused (${tick.error}); skipped this tick`);
   } finally {
-    const r = run as { id: string } | null;
-    if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
+    for (const r of [runs.repeat, runs.production]) {
+      if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
+    }
   }
   return tick;
 }
