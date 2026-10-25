@@ -54,6 +54,8 @@ describe.skipIf(!hasRealDatabase)("lead subject equivalences", () => {
     const strangerA = await lead("2026-01-01T00:00:00Z", randomUUID());
     await lead("2026-01-02T00:00:00Z", randomUUID());
 
+    const humanB = randomUUID();
+    const olderB = await lead("2026-01-15T00:00:00Z", humanB);
     const dry = await stateLeadSubjectEquivalences({ dryRun: true }, async () => {
       throw new Error("a dry run never posts");
     });
@@ -85,6 +87,20 @@ describe.skipIf(!hasRealDatabase)("lead subject equivalences", () => {
     expect(byLead.has(strangerA)).toBe(false);
     const dup = (await db.execute(sql`SELECT survivor_lead_id::text AS s, reason FROM lead_identity_duplicates WHERE lead_id = ${newer}::uuid`)) as unknown as Array<{ s: string; reason: string }>;
     expect(dup).toEqual([{ s: older, reason: "found_twice" }]);
+
+    // Another service made a lead a target (one hop): runs-service refuses it as a source; the same pass flips the
+    // group so the other lead is stated onto it.
+    const subscriberLead = await lead("2026-07-01T00:00:00Z", humanB);
+    const flipped: string[] = [];
+    const flip = await stateLeadSubjectEquivalences({ dryRun: false }, async (body) => {
+      const items = (body as { items: Array<{ subjectId: string; targetId: string }> }).items;
+      const at = items.findIndex((i) => i.subjectId === subscriberLead);
+      if (at >= 0) return { status: 422, text: JSON.stringify({ error: "invalid_equivalences", details: { refusals: [{ index: at, reason: "source_is_a_target" }] } }) };
+      flipped.push(...items.map((i) => `${i.subjectId}>${i.targetId}`));
+      return { status: 200, text: JSON.stringify({ recordedCount: items.length, alreadyRecordedCount: 0 }) };
+    });
+    expect(flipped).toContain(`${olderB}>${subscriberLead}`);
+    expect(flip.refused.map((r) => r.leadId)).toContain(subscriberLead);
 
     const replay = await stateLeadSubjectEquivalences({ dryRun: false }, async (body) => {
       const items = (body as { items: Array<{ subjectId: string }> }).items;

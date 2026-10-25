@@ -14,8 +14,10 @@
  *   - `social_fold`: `lead_identity_folds` (a social engager folded into the lead an email found, social-identity.ts).
  * Two leads human-service calls two humans stay two subjects here, whatever a provider says about them.
  *
- * Every connected group gets ONE target: the lead already stated as a target in it, else its OLDEST living lead
- * (created_at, id; the same "oldest survives" rule as the duplicates). Every other lead of the group is stated once.
+ * Every connected group gets ONE target: the lead already a target in it (ours, or another service's: runs-service
+ * refused it as a source with `source_is_a_target`, e.g. transactional-email-service stated a newsletter subscriber is
+ * that lead, so it can only ever be a target), else its OLDEST living lead (created_at, id; the same "oldest
+ * survives" rule as the duplicates). Every other lead of the group is stated once.
  * A group holding two stated targets, or no living lead, is skipped with its reason (logged), never guessed.
  */
 import { sql } from "drizzle-orm";
@@ -42,6 +44,7 @@ export interface LivingLead {
 export interface StatedRow {
   targetLeadId: string;
   status: "stated" | "refused";
+  refusedReason?: string | null;
 }
 
 export interface PlannedEquivalence {
@@ -111,6 +114,8 @@ export function planEquivalences(
   }
 
   const statedTargets = new Set([...stated.values()].filter((s) => s.status === "stated").map((s) => s.targetLeadId));
+  // A lead runs-service refused as a source because another service made it a target (one hop): it is a target.
+  for (const [leadId, row] of stated) if (row.status === "refused" && row.refusedReason === "source_is_a_target") statedTargets.add(leadId);
   const items: PlannedEquivalence[] = [];
   const skipped: EquivalencePlan["skipped"] = [];
   let alreadyStated = 0;
@@ -200,9 +205,9 @@ async function loadLiving(ids: string[]): Promise<Map<string, LivingLead>> {
 
 async function loadStated(): Promise<Map<string, StatedRow>> {
   const rows = (await db.execute(sql`
-    SELECT lead_id::text AS lead_id, target_lead_id::text AS target, status FROM lead_subject_equivalences
-  `)) as unknown as Array<{ lead_id: string; target: string; status: "stated" | "refused" }>;
-  return new Map(rows.map((r) => [r.lead_id, { targetLeadId: r.target, status: r.status }]));
+    SELECT lead_id::text AS lead_id, target_lead_id::text AS target, status, refused_reason FROM lead_subject_equivalences
+  `)) as unknown as Array<{ lead_id: string; target: string; status: "stated" | "refused"; refused_reason: string | null }>;
+  return new Map(rows.map((r) => [r.lead_id, { targetLeadId: r.target, status: r.status, refusedReason: r.refused_reason }]));
 }
 
 export type EquivalencePost = (body: unknown) => Promise<{ status: number; text: string }>;
@@ -253,7 +258,21 @@ export async function stateLeadSubjectEquivalences(
   opts: { dryRun: boolean },
   post: EquivalencePost = postEquivalences,
 ): Promise<EquivalenceSummary> {
-  const duplicatesRecorded = opts.dryRun ? 0 : await recordFoundTwiceDuplicates();
+  const first = await statePass(opts, post, opts.dryRun ? 0 : await recordFoundTwiceDuplicates());
+  // A `source_is_a_target` refusal turns that lead into its group's target: re-plan once so the group is stated now.
+  if (opts.dryRun || !first.refused.some((r) => r.reason === "source_is_a_target")) return first;
+  const second = await statePass(opts, post, 0);
+  return {
+    ...second,
+    duplicatesRecorded: first.duplicatesRecorded,
+    planned: first.planned + second.planned,
+    recorded: first.recorded + second.recorded,
+    alreadyRecorded: first.alreadyRecorded + second.alreadyRecorded,
+    refused: [...first.refused, ...second.refused],
+  };
+}
+
+async function statePass(opts: { dryRun: boolean }, post: EquivalencePost, duplicatesRecorded: number): Promise<EquivalenceSummary> {
   const edges = await loadIdentityEdges(opts.dryRun);
   const ids = [...new Set(edges.flatMap((e) => [e.fromLeadId, e.toLeadId]))];
   const [living, stated] = await Promise.all([loadLiving(ids), loadStated()]);
