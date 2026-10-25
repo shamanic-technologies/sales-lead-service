@@ -208,6 +208,12 @@ export async function foldSocialLead(fromLeadId: string, intoLeadId: string): Pr
     `;
     await tx`UPDATE leads_campaigns SET lead_id = ${intoLeadId}::uuid, updated_at = now() WHERE lead_id = ${fromLeadId}::uuid`;
     await tx`UPDATE lead_timeline_facts SET lead_id = ${intoLeadId}::uuid, updated_at = now() WHERE lead_id = ${fromLeadId}::uuid`;
+    // The folded id is the same lead as the one it folded into: kept, since the row itself is usually dropped next
+    // (stated at runs-service's ledger by lead-subject-equivalences.ts, LEDGER-RESIDUAL-1025).
+    await tx`
+      INSERT INTO lead_identity_folds (from_lead_id, into_lead_id) VALUES (${fromLeadId}::uuid, ${intoLeadId}::uuid)
+      ON CONFLICT (from_lead_id) DO NOTHING
+    `;
     await tx`
       DELETE FROM leads l WHERE l.id = ${fromLeadId}::uuid
         AND NOT EXISTS (SELECT 1 FROM conversion_events WHERE matched_lead_id = l.id)

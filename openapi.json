@@ -14503,6 +14503,107 @@
           "dryRun"
         ]
       },
+      "LeadSubjectEquivalencesSummary": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean"
+          },
+          "duplicatesRecorded": {
+            "type": "integer",
+            "description": "Leads of one human at one company no merge had recorded, recorded as duplicates now (oldest survives)."
+          },
+          "edges": {
+            "type": "integer"
+          },
+          "groups": {
+            "type": "integer"
+          },
+          "alreadyStated": {
+            "type": "integer"
+          },
+          "planned": {
+            "type": "integer"
+          },
+          "recorded": {
+            "type": "integer"
+          },
+          "alreadyRecorded": {
+            "type": "integer"
+          },
+          "refused": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string"
+                },
+                "targetLeadId": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "leadId",
+                "targetLeadId",
+                "reason"
+              ]
+            }
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "enum": [
+                    "several_stated_targets",
+                    "no_living_lead"
+                  ]
+                }
+              },
+              "required": [
+                "leadIds",
+                "reason"
+              ]
+            }
+          }
+        },
+        "required": [
+          "dryRun",
+          "duplicatesRecorded",
+          "edges",
+          "groups",
+          "alreadyStated",
+          "planned",
+          "recorded",
+          "alreadyRecorded",
+          "refused",
+          "skipped"
+        ]
+      },
+      "LeadSubjectEquivalencesRequest": {
+        "type": "object",
+        "properties": {
+          "dryRun": {
+            "type": "boolean",
+            "description": "true = count what would be stated (found-twice duplicates included, nothing written); false = record and state."
+          }
+        },
+        "required": [
+          "dryRun"
+        ]
+      },
       "LeadStatesPage": {
         "type": "object",
         "properties": {
@@ -26113,6 +26214,50 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/internal/subject-equivalences/state": {
+      "post": {
+        "summary": "State at runs-service which lead rows are the same lead (internal, service-auth)",
+        "description": "lead-service owns the lead subject of runs-service's ledger. Two lead rows our OWN identity records say are one lead (a served row repaired onto the lead owning its email, a recorded duplicate of one human at one company, a social engager folded into an email lead) are stated the same subject through runs-service `POST /v1/platform-runs/subject-equivalences`, each group onto one target (already stated, else its oldest living lead). Never a provider's word. A replay states nothing new. The background thread runs the same pass every 30 min.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadSubjectEquivalencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The pass",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadSubjectEquivalencesSummary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid body"
+          },
+          "502": {
+            "description": "runs-service did not take the statements"
           }
         }
       }
