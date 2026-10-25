@@ -61,4 +61,13 @@ describe("planEquivalences (LEDGER-RESIDUAL-1025)", () => {
     );
     expect(plan.items).toEqual([]);
   });
+
+  it("a lead refused as a source because another service made it a target becomes its group's target (flip)", () => {
+    const plan = planEquivalences(
+      [{ fromLeadId: "older", toLeadId: "newer", basis: "recorded_duplicate" }],
+      living([["older", "1"], ["newer", "2"]]),
+      new Map<string, StatedRow>([["newer", { targetLeadId: "older", status: "refused", refusedReason: "source_is_a_target" }]]),
+    );
+    expect(plan.items).toEqual([{ leadId: "older", targetLeadId: "newer", bases: ["recorded_duplicate"] }]);
+  });
 });
