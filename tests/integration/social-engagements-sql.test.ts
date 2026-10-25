@@ -179,6 +179,9 @@ describe.skipIf(!hasRealDatabase)("social engagers as leads against a real datab
     expect(moved.map((m) => m.id)).toEqual([emailLead.id]);
     const gone = (await sql`SELECT 1 FROM leads WHERE id = ${engagerLead}::uuid`) as unknown as unknown[];
     expect(gone).toHaveLength(0);
+    // The dropped id is kept as the same lead as the email owner (stated at runs-service's ledger, LEDGER-RESIDUAL-1025).
+    const fold = (await sql`SELECT into_lead_id::text AS into FROM lead_identity_folds WHERE from_lead_id = ${engagerLead}::uuid`) as unknown as Array<{ into: string }>;
+    expect(fold).toEqual([{ into: emailLead.id }]);
   });
 
   it("the pull reads social-service's feed and files it; an unreadable feed throws", async () => {

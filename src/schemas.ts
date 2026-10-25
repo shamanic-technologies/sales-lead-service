@@ -10303,6 +10303,47 @@ registry.registerPath({
   },
 });
 
+// ─── Which lead rows are the same lead, stated at runs-service (LEDGER-RESIDUAL-1025, src/lib/lead-subject-equivalences.ts) ───
+export const LeadSubjectEquivalencesRequestSchema = z
+  .object({
+    dryRun: z.boolean().openapi({ description: "true = count what would be stated (found-twice duplicates included, nothing written); false = record and state." }),
+  })
+  .openapi("LeadSubjectEquivalencesRequest");
+
+const LeadSubjectEquivalencesSummarySchema = z
+  .object({
+    dryRun: z.boolean(),
+    duplicatesRecorded: z.number().int().openapi({ description: "Leads of one human at one company no merge had recorded, recorded as duplicates now (oldest survives)." }),
+    edges: z.number().int(),
+    groups: z.number().int(),
+    alreadyStated: z.number().int(),
+    planned: z.number().int(),
+    recorded: z.number().int(),
+    alreadyRecorded: z.number().int(),
+    refused: z.array(z.object({ leadId: z.string(), targetLeadId: z.string(), reason: z.string() })),
+    skipped: z.array(z.object({ leadIds: z.array(z.string()), reason: z.enum(["several_stated_targets", "no_living_lead"]) })),
+  })
+  .openapi("LeadSubjectEquivalencesSummary");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/subject-equivalences/state",
+  summary: "State at runs-service which lead rows are the same lead (internal, service-auth)",
+  description:
+    "lead-service owns the lead subject of runs-service's ledger. Two lead rows our OWN identity records say are one lead (a served row " +
+    "repaired onto the lead owning its email, a recorded duplicate of one human at one company, a social engager folded into an email " +
+    "lead) are stated the same subject through runs-service `POST /v1/platform-runs/subject-equivalences`, each group onto one target " +
+    "(already stated, else its oldest living lead). Never a provider's word. A replay states nothing new. The background thread runs " +
+    "the same pass every 30 min.",
+  request: { body: { content: { "application/json": { schema: LeadSubjectEquivalencesRequestSchema } } } },
+  parameters: [{ in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" }],
+  responses: {
+    200: { description: "The pass", content: { "application/json": { schema: LeadSubjectEquivalencesSummarySchema } } },
+    400: { description: "Invalid body" },
+    502: { description: "runs-service did not take the statements" },
+  },
+});
+
 // ─── When each lead first reached each state (LEAD-STATES-1024, src/lib/lead-states.ts) ───
 export const LEAD_STATES_MAX_LIMIT = 5000;
 export const LEAD_STATES_BY_LEAD_MAX_ITEMS = 1000;
