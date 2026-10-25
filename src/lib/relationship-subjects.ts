@@ -378,7 +378,71 @@ const MESSAGE_TYPES = new Set(["message_in", "message_out"]);
 const MESSAGE_HEAD_CHARS = 500;
 // crm-service also states `group_member` (both are in a group chat, `groupName`) and `group_message` (a word they wrote
 // in it): read as their own kinds, text and group name carried.
-const DETAIL_KEYS = ["subject", "channel", "group", "groupName", "roomName", "amount", "amountCents", "currency", "status", "stage", "formName", "offer", "url", "title", "website", "company"];
+// JEV-WEAK-EVIDENCE-1025: what a VISIT shows (entry page, first URL with its utm source, pages, referrer) and how the
+// brand's own CRM files a contact (`contactType` lead/customer, its lead source) are evidence too. Stripping them left
+// Jev one undated "visited the website" line: a newsletter reader who walked our signup read as "nothing to the brand".
+const DETAIL_KEYS = [
+  "subject", "channel", "group", "groupName", "roomName", "amount", "amountCents", "currency", "status", "stage", "formName", "offer", "url", "title", "website", "company",
+  "entryPath", "firstUrl", "paths", "pageviews", "referrer", "contactType", "leadSource", "origin", "originMedium",
+];
+const DETAIL_VALUE_CHARS = 300;
+/** The newest visits read one by one (dated, with what they show); older ones are counted on the summary line. */
+export const VISIT_LINES = 5;
+
+export interface ThreadFact {
+  type: string;
+  source: string;
+  occurred_at: Date | string | null;
+  payload: Record<string, unknown> | null;
+}
+
+function detailOf(p: Record<string, unknown>): Record<string, unknown> | null {
+  const detail: Record<string, unknown> = {};
+  for (const k of DETAIL_KEYS) {
+    const v = p[k];
+    if (v === undefined || v === null || v === "") continue;
+    detail[k] = typeof v === "string" ? v.slice(0, DETAIL_VALUE_CHARS) : v;
+  }
+  return Object.keys(detail).length > 0 ? detail : null;
+}
+
+/**
+ * PURE: the thread lines Jev reads from the subject's live facts (oldest first) and our outreach labels (oldest first).
+ * Visits: the newest VISIT_LINES each a dated line with what the visit shows, plus one summary line (count, first date).
+ */
+export function threadLinesOf(facts: readonly ThreadFact[], outreach: ReadonlyArray<{ label: string; occurred_at: Date | string | null; source: string }>): ThreadLine[] {
+  const at = (v: Date | string | null) => (v === null ? null : toIsoTimestamp(v));
+  const visits = facts.filter((f) => f.type === "website_visit");
+  let seen = 0;
+  const lines: ThreadLine[] = [];
+  for (const f of facts) {
+    const p = f.payload ?? {};
+    if (f.type === "website_visit") {
+      seen++;
+      if (seen <= visits.length - VISIT_LINES) continue;
+      lines.push({ at: at(f.occurred_at), source: f.source, kind: "visited the brand's website", direction: null, text: null, detail: detailOf(p) });
+      continue;
+    }
+    lines.push({
+      at: at(f.occurred_at),
+      source: f.source,
+      kind: MESSAGE_TYPES.has(f.type) ? "message" : f.type,
+      direction: f.type === "message_in" ? "in" : f.type === "message_out" ? "out" : null,
+      // A relationship shows in how people talk, not in a long email body: the head of each message is enough.
+      text: typeof p.text === "string" ? p.text.slice(0, MESSAGE_HEAD_CHARS) : null,
+      detail: detailOf(p),
+    });
+  }
+  if (visits.length > 0) {
+    const first = visits.find((v) => v.occurred_at !== null);
+    const since = first ? ` since ${at(first.occurred_at)!.slice(0, 10)}` : "";
+    lines.push({ at: null, source: "website", kind: `visited the brand's website ${visits.length} time(s)${since}`, direction: null, text: null, detail: null });
+  }
+  for (const o of outreach) {
+    lines.push({ at: at(o.occurred_at), source: `our_outreach:${o.source}`, kind: o.label, direction: null, text: null, detail: null });
+  }
+  return lines;
+}
 
 /**
  * The leads of a relation: the leads registered on ITS addresses (our outreach wrote to that address, so that thread is
@@ -397,36 +461,12 @@ export async function readThread(s: Subject): Promise<ThreadLine[]> {
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
     ORDER BY f.occurred_at NULLS FIRST, f.seq
-  `)) as unknown as Array<{ type: string; source: string; occurred_at: Date | string | null; payload: Record<string, unknown> }>;
-  const lines: ThreadLine[] = [];
-  let visits = 0;
-  for (const f of facts) {
-    if (f.type === "website_visit") {
-      visits++;
-      continue;
-    }
-    const p = f.payload ?? {};
-    const detail: Record<string, unknown> = {};
-    for (const k of DETAIL_KEYS) if (p[k] !== undefined && p[k] !== null && p[k] !== "") detail[k] = p[k];
-    lines.push({
-      at: f.occurred_at === null ? null : toIsoTimestamp(f.occurred_at),
-      source: f.source,
-      kind: MESSAGE_TYPES.has(f.type) ? "message" : f.type,
-      direction: f.type === "message_in" ? "in" : f.type === "message_out" ? "out" : null,
-      // A relationship shows in how people talk, not in a long email body: the head of each message is enough.
-      text: typeof p.text === "string" ? p.text.slice(0, MESSAGE_HEAD_CHARS) : null,
-      detail: Object.keys(detail).length > 0 ? detail : null,
-    });
-  }
-  if (visits > 0) lines.push({ at: null, source: "website", kind: `visited the brand's website ${visits} time(s)`, direction: null, text: null, detail: null });
+  `)) as unknown as ThreadFact[];
   const outreach = (await db.execute(sql`
     SELECT f.label, f.occurred_at, f.source
     FROM lead_timeline_facts f
     WHERE f.lead_id IN (${relationLeadIdsSql(s)}) AND f.org_id = ${s.orgId} AND f.brand_id = ${s.brandId} AND f.withdrawn_at IS NULL
     ORDER BY f.occurred_at DESC NULLS LAST LIMIT 60
   `)) as unknown as Array<{ label: string; occurred_at: Date | string | null; source: string }>;
-  for (const o of outreach.reverse()) {
-    lines.push({ at: o.occurred_at === null ? null : toIsoTimestamp(o.occurred_at), source: `our_outreach:${o.source}`, kind: o.label, direction: null, text: null, detail: null });
-  }
-  return lines;
+  return threadLinesOf(facts, outreach.reverse());
 }

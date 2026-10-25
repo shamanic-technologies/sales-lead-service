@@ -22,9 +22,11 @@ const CONTEXT =
   "brand's cold outreach sent them. Messages with direction `out` were written by the brand's own people (often " +
   "the founder, who also uses the same phone and mailbox for private life); `in` were written by the person. " +
   "A group fact means they are both members of that group chat. Say how likely each relationship is. Several " +
-  "can be true at once (a friend who is also a customer). Judge from what the thread shows; a thread that shows " +
-  "nothing about a relationship means it is unlikely, not impossible. `brand.offers` lists what the brand sells, as " +
-  "the brand itself stated each offer (its name and what it offers).";
+  "can be true at once (a friend who is also a customer). Judge from what the thread shows. A `visited the brand's " +
+  "website` line is the person's own visit (entry page, first URL whose `utm_source` names the brand email or " +
+  "campaign that brought them, pages seen); `added_to_crm` is the brand's own CRM filing them (`contactType` is how " +
+  "the brand classes them). `brand.offers` lists what the brand sells, as the brand itself stated each offer (its " +
+  "name and what it offers).";
 
 /** Tags Jev judges. `personal` is crm-service's connection tag, read as evidence, never judged here (PROFESSIONAL-LEADS-1017). */
 export type JudgedTag = Exclude<RelationshipTag, "personal">;
@@ -35,14 +37,20 @@ export const TAG_QUESTIONS: Record<JudgedTag, YesNoQuestion> = {
     whenTrue: "They paid the brand, hold a subscription, or the thread says they bought.",
     whenFalse: "No payment, purchase or client relationship with the brand is shown.",
   },
+  // JEV-WEAK-EVIDENCE-1025 (owner: a person who acts toward the brand is a lead unless proven otherwise): coming
+  // toward the brand IS the prospect signal; only a thread showing another relationship, or offers that cannot be for
+  // them, says no. A thin thread is never read as a no.
   prospect: {
     instructions:
-      "Is this person a prospect of the brand: someone who might buy one of the brand's offers (`brand.offers`): signed " +
-      "up, asked about one of them, was offered one, or was contacted to sell one to them? What is traded must be what " +
-      "the brand sells. A paying customer can also still be a prospect for more.",
-    whenTrue: "They are someone the brand sells one of its offers to, or could.",
+      "Is this person a prospect of the brand: someone who might buy one of the brand's offers (`brand.offers`)? A " +
+      "business's prospects are the people who come toward it: they visited its website, read its content, clicked its " +
+      "emails, signed up or started to, filled a form, booked, asked about an offer, or the brand's own CRM files them " +
+      "as a lead. People the brand offered one of its offers to, or contacted to sell one, are prospects too. What is " +
+      "traded must be what the brand sells (a talk about another company's offer is not). A paying customer can also " +
+      "still be a prospect for more.",
+    whenTrue: "They came toward the brand, or the brand sells or could sell them one of its offers, and the thread shows nothing that rules it out.",
     whenFalse:
-      "Nothing ties them to buying one of the brand's offers (pure friend, supplier, team, investor, a journalist pitched for press...).",
+      "The thread shows they are something else to the brand and nothing more (pure friend, supplier, team, investor, a journalist pitched for press...), or that the brand's offers cannot be for them.",
   },
   team: {
     instructions: "Does this person work on the brand: employee, co-founder, contractor, freelancer or intern working for the brand?",
@@ -136,6 +144,14 @@ export function brandCardHash(card: BrandCard): string {
   return createHash("sha256").update(JSON.stringify({ name: card.name, domain: card.domain, offers })).digest("hex").slice(0, 16);
 }
 
+/**
+ * When the judge last changed what it is asked or shown so that a "not a lead" answer may move (JEV-WEAK-EVIDENCE-1025:
+ * visits and CRM filings shown with what they say, prospect asked as "came toward the brand"). A judgment older than
+ * this that left the person NOWHERE (prospect, customer and every other tag under the no edge) is asked again; one
+ * that placed them as a lead or as something else is not (re-asking would spend the fleet's shared credit for nothing).
+ */
+export const JUDGE_CHANGED_AT = "2026-10-25T11:50:00Z";
+
 /** The brand as Jev reads it, for the org owning its configuration. Fails loud (no judgment on half a card). */
 export async function brandCardOf(orgId: string, brandId: string): Promise<{ card: BrandCard; hash: string }> {
   const key = `${orgId}|${brandId}`;
@@ -167,9 +183,10 @@ async function companyCard(key: string): Promise<Array<{ name: string | null; do
 }
 
 /**
- * Leads to judge: never judged, thread moved, or read under another brand card while it made them a lead (prospect or
+ * Leads to judge: never judged, thread moved, read under another brand card while it made them a lead (prospect or
  * customer at the unsure edge or above: a card change can only take such a person OUT; re-asking everyone would spend
- * the fleet's shared judgment credit on people no offer text can move).
+ * the fleet's shared judgment credit on people no offer text can move), or judged before JUDGE_CHANGED_AT while it
+ * placed them nowhere (every tag under the no edge: the old judge read a thin thread as "nothing to the brand").
  */
 export async function subjectsToJudge(scope: Scope, limit: number, cardHash: string): Promise<Subject[]> {
   const rows = (await db.execute(sql`
@@ -179,7 +196,9 @@ export async function subjectsToJudge(scope: Scope, limit: number, cardHash: str
       -- A judgment that read the whole human's thread is not this relation's when the human holds another (PERSON-RELATIONS-1017).
       AND (j.human_id IS NULL OR j.thread_seq < s.thread_seq OR (s.shares_human AND j.thread_scope <> 'relation')
         OR (j.context_hash IS DISTINCT FROM ${cardHash}
-          AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO})))
+          AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO}))
+        OR (j.judged_at < ${JUDGE_CHANGED_AT}::timestamptz
+          AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(j.probabilities) e(k, v) WHERE e.k <> 'personal' AND e.v::float8 >= ${JUDGED_NO})))
       AND s.has_direct
     -- People a source states as prospect / customer (the ones campaigns write to) and people we talk with, first.
     ORDER BY (s.has_messages OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id

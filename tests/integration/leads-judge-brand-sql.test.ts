@@ -13,6 +13,7 @@ vi.mock("../../src/lib/company-client.js", () => ({ getCompanies: async () => []
 const { db } = await import("../../src/db/index.js");
 const { connectionTag } = await import("../helpers/crm-registry.js");
 const { reconcileUniboxLeads, uniboxIntakeCampaignId } = await import("../../src/lib/unibox-leads.js");
+const { subjectsToJudge, JUDGE_CHANGED_AT } = await import("../../src/lib/relationship-judge.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -80,5 +81,29 @@ describe.skipIf(!hasRealDatabase)("a Unibox lead whose verdict flips (LEADS-JUDG
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ${p.humanId}::uuid`);
     expect((await reconcileUniboxLeads({ orgId, brandId })).filedOut).toBe(1);
     expect(await statusOf(p.rowId)).toEqual({ status: "skipped", status_reason: "not_brand_lead" });
+  });
+
+  it("JEV-WEAK-EVIDENCE-1025: an old verdict that placed the person NOWHERE is asked again; a lead or someone placed elsewhere is not", async () => {
+    const before = new Date(Date.parse(JUDGE_CHANGED_AT) - 86_400_000).toISOString();
+    const after = new Date(Date.parse(JUDGE_CHANGED_AT) + 60_000).toISOString();
+    const people: Record<string, { p: Record<string, number>; at: string }> = {
+      nowhere_old: { p: { prospect: 0.32, customer: 0.06, other_professional: 0.09, personal: 0.9 }, at: before },
+      nowhere_new: { p: { prospect: 0.32, customer: 0.06, other_professional: 0.09 }, at: after },
+      partner_old: { p: { prospect: 0.25, customer: 0.14, partner: 0.75 }, at: before },
+      lead_old: { p: { prospect: 0.86, customer: 0.06 }, at: before },
+    };
+    const ids: Record<string, string> = {};
+    for (const [name, j] of Object.entries(people)) {
+      ids[name] = randomUUID();
+      await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, has_direct, thread_seq) VALUES (${orgId}, ${brandId}, ${ids[name]}::uuid, '', true, 5)`);
+      await db.execute(sql`
+        INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id, context_hash, judged_at)
+        VALUES (${orgId}, ${brandId}, ${ids[name]}::uuid, '', ${JSON.stringify(j.p)}::jsonb, 5, 'jev', 'run', 'card', ${j.at}::timestamptz)`);
+    }
+    const todo = (await subjectsToJudge({ orgId, brandId }, 50, "card")).map((x) => x.humanId);
+    expect(todo).toContain(ids.nowhere_old);
+    expect(todo).not.toContain(ids.nowhere_new);
+    expect(todo).not.toContain(ids.partner_old);
+    expect(todo).not.toContain(ids.lead_old);
   });
 });
