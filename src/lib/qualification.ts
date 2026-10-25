@@ -39,7 +39,7 @@ import { complete, stripDashes } from "./chat-complete-client.js";
 import { storeImage } from "./image-store-client.js";
 import type { OrganizationView } from "./lead-shape.js";
 import { priceCentsPerUnit } from "./price-client.js";
-import { IMAGE_JUDGE_INPUT_TOKENS, JUDGE_INPUT_COST_NAMES, MAX_STATE_CHARS, SCREENSHOT_JUDGE, judgeImageYesNo, judgeYesNo } from "./qualification-judge.js";
+import { IMAGE_JUDGE_INPUT_TOKENS, JUDGE_INPUT_COST_NAMES, MAX_STATE_CHARS, SCREENSHOT_JUDGE, judgeImageYesNo, judgeYesNo, withFittingText } from "./qualification-judge.js";
 import {
   BUILTIN_PROBES,
   MissingCompanyFactError,
@@ -349,14 +349,14 @@ async function judgeText(key: string, criterion: { question: string; probe: Prob
   if (observation.status !== "ok" || !observation.content) {
     row = { criterionKey: key, domain: subject.domain, observationId: observation.id, verdict: "unavailable", reason: `probe_failed: ${observation.reason ?? "no content"}`, runId: deps.identity.runId };
   } else {
-    const state = {
+    const stateOf = (text: string) => ({
       company: { name: subject.companyName, domain: subject.domain },
       source: probeLabel(criterion.probe),
       observedAt: observation.observedAt,
-      observation: observation.content,
-    };
-    const { probabilities, model } = await judgeYesNo(
-      state,
+      observation: text,
+    });
+    const { probabilities, model } = await withFittingText(observation.content, (text) => judgeYesNo(
+      stateOf(text),
       {
         answerable: {
           instructions: `Is this observation a usable reading of the company's ${probeLabel(criterion.probe).toLowerCase()}?`,
@@ -371,7 +371,7 @@ async function judgeText(key: string, criterion: { question: string; probe: Prob
         },
       },
       deps.identity,
-    );
+    ));
     if (probabilities.answerable < YES_THRESHOLD) {
       row = { criterionKey: key, domain: subject.domain, observationId: observation.id, verdict: "unavailable", yesProbability: probabilities.holds, reason: `observation_cannot_answer: P(answerable)=${probabilities.answerable.toFixed(3)}`, judgmentModel: model, runId: deps.identity.runId };
     } else {
