@@ -22,7 +22,7 @@ const limit = Number(limitArg ?? 200);
 const rows = (await db.execute(sql`
   SELECT s.*, j.probabilities AS old_probabilities,
     EXISTS (SELECT 1 FROM crm_facts f WHERE f.org_id = s.org_id AND f.brand_id = s.brand_id AND f.contact_point = ANY(s.contact_points)
-      AND f.type IN ('message_in', 'website_visit', 'signup', 'form_submitted', 'meeting_booked', 'payment', 'sale')
+      AND f.type IN ('message_in', 'website_visit', 'product_event', 'signup', 'form_submitted', 'meeting_booked', 'payment', 'sale')
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)) AS acted
   FROM relationship_subjects s
   JOIN relationship_judgments j USING (org_id, brand_id, human_id, company_key)
