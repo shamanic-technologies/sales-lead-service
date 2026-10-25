@@ -123,3 +123,30 @@ export function declareLeadFound(input: { orgId: string; runId: string; leadId: 
     declareRunOutcomes(leadFoundDeclaration({ orgId: input.orgId, runId: input.runId, leadId: input.leadId, emailChecked: input.emailChecked, crmRelationKey }));
   })();
 }
+
+/**
+ * Which of these crm relation keys crm-service has IDENTIFIED as a lead of the brand (LEDGER-RESIDUAL-1025): a relation
+ * fact of (org, brand) tagged `professional_to_brand` with a judged conversation among the tag's basis, the same rule
+ * crm-service declares `lead_identified` on (see the module comment). A withdrawn fact still counts: the occurrence
+ * crm-service declared stays on the ledger. The relationship sweep reads it to say whether its run only REDOES that
+ * judgment (owner 2026-10-25: re-asking Jev about an identified relation is waste, `repeat_production`).
+ */
+export async function crmIdentifiedAmong(orgId: string, brandId: string, relationKeys: readonly string[]): Promise<Set<string>> {
+  const keys = [...new Set(relationKeys)];
+  if (keys.length === 0) return new Set();
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT f.payload->>'relationKey' AS relation_key
+      FROM crm_registry_facts f
+     WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId} AND f.type = 'relation'
+       AND f.payload->>'relationKey' = ANY(${sql.param(keys)}::text[])
+       AND EXISTS (
+             SELECT 1 FROM jsonb_array_elements(f.payload->'tags') t, jsonb_array_elements(coalesce(t->'basis', '[]'::jsonb)) b
+              WHERE t->>'tag' = ${PROFESSIONAL_TO_BRAND} AND b->>'kind' = 'conversation')
+  `)) as unknown as Array<{ relation_key: string }>;
+  return new Set(rows.map((r) => r.relation_key));
+}
+
+/** PURE: a subject (one relation of crm, or several folded) was identified when any of its relation keys was. */
+export function subjectIdentified(subjectRelationKeys: readonly string[], identified: ReadonlySet<string>): boolean {
+  return subjectRelationKeys.some((k) => identified.has(k));
+}

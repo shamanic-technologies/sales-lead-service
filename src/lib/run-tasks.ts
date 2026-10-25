@@ -11,6 +11,10 @@
  *     never sits in undeclared spend.
  *   - `undeclared`: PRODUCTION work that spends and declares no outcome yet (the reason says why): its spend stays
  *     visible as undeclared, never hidden under a support mark.
+ *   - `repeat` (beside `undeclared`): the same task, when its run only REDOES what another service already produced, is
+ *     created with runs-service's mark `repeat_production` (owner 2026-10-25, LEDGER-RESIDUAL-1025): WASTE booked as
+ *     ABNORMAL loss, never support, in no unit cost, never a second producer. The caller decides per run
+ *     (`repeatProduction: true`) from positive evidence that the work was already produced; nothing else states it.
  * `createRun` / `createPlatformRun` refuse a task named nowhere here unless the caller states `support` itself: a staff
  * benchmark or probe script (2026-10-21: eight `image-judge-bench-*` runs, $7.78 of judgments stated nothing) is a
  * `staff_experiment` from its first second. A new spending task is added here with its kind, or it cannot open a run.
@@ -32,11 +36,19 @@ export interface RunSupport {
   reason: string;
 }
 
+/** runs-service's mark for work its owner states REDID an occurrence another service already produced (abnormal loss). */
+export const REPEAT_PRODUCTION = "repeat_production" as const;
+/** What a run is created with on runs-service's `support` field: a support function, or the repeat-production mark. */
+export interface RunMark {
+  kind: SupportFunction | typeof REPEAT_PRODUCTION;
+  reason: string;
+}
+
 export type RunTaskKind =
   | { declares: readonly string[] }
   | { support: RunSupport }
   | { spendsNothing: string }
-  | { undeclared: string };
+  | { undeclared: string; repeat?: { kind: typeof REPEAT_PRODUCTION; reason: string } };
 
 export const RUN_TASKS = {
   "lead-serve": { declares: ["lead_found"] },
@@ -65,7 +77,14 @@ export const RUN_TASKS = {
   "relationship-sweep": {
     undeclared:
       "Its Jev judgments (relationship tags, wants business) ride this run (chat-service platform judgments with x-run-id, PLATFORM-CALLER-RUN-1024). " +
-      "Production work, never support; the outcome it feeds (lead identified) is crm-service's to declare, so its spend reads undeclared until one is.",
+      "Judging a relation crm-service has NOT identified yet is production, never support: the outcome it feeds (lead identified) is crm-service's " +
+      "to declare, so that run's spend reads undeclared until one is. Never a second producer of lead identified here.",
+    repeat: {
+      kind: REPEAT_PRODUCTION,
+      reason:
+        "Re-asks Jev about relations crm-service already judged a lead of the brand and declared as lead_identified (owner 2026-10-25: waste, " +
+        "abnormal loss, never support, never a second producer). The sweep opens this run only for relations crm-service identified.",
+    },
   },
 } as const satisfies Record<string, RunTaskKind>;
 
@@ -73,10 +92,16 @@ export type RunTaskName = keyof typeof RUN_TASKS;
 
 /**
  * The `support` a run of this task is created with: the registry's, else the caller's own. Throws on a task the
- * registry does not name when the caller states nothing (never an unclassified run).
+ * registry does not name when the caller states nothing (never an unclassified run). `repeatProduction` = the run
+ * only redoes what another service produced: the task's registered `repeat` mark (a task with none refuses).
  */
-export function runSupportFor(taskName: string, stated?: RunSupport): RunSupport | undefined {
+export function runSupportFor(taskName: string, stated?: RunSupport, opts: { repeatProduction?: boolean } = {}): RunMark | undefined {
   const entry = (RUN_TASKS as Record<string, RunTaskKind>)[taskName];
+  if (opts.repeatProduction) {
+    if (!entry || !("repeat" in entry) || !entry.repeat) throw new Error(`[lead-service] run task "${taskName}" registers no repeat_production mark (src/lib/run-tasks.ts)`);
+    if (stated) throw new Error(`[lead-service] run task "${taskName}": a repeat run carries the registry's mark, never a caller's support`);
+    return entry.repeat;
+  }
   if (!entry) {
     if (stated) return stated;
     throw new Error(
