@@ -10,6 +10,7 @@ import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
 const { crmIdentifiedAmong } = await import("../../src/lib/crm-lead-identified.js");
+const { ensurePostBootIndex, RELATION_KEY_INDEX } = await import("../../src/lib/read-model-search-index.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -39,5 +40,14 @@ describe.skipIf(!hasRealDatabase)("crmIdentifiedAmong (LEDGER-RESIDUAL-1025)", (
     const got = await crmIdentifiedAmong(orgId, brandId, ["rel:judged", "rel:source-only", "rel:not-to", "rel:other-brand", "rel:unknown"]);
     expect([...got]).toEqual(["rel:judged"]);
     expect([...(await crmIdentifiedAmong(orgId, brandId, []))]).toEqual([]);
+  });
+
+  it("its index is built after boot, valid, and a second boot finds it present", async () => {
+    const url = process.env.LEAD_SERVICE_DATABASE_URL!;
+    expect(["built", "present"]).toContain(await ensurePostBootIndex(url, RELATION_KEY_INDEX));
+    expect(await ensurePostBootIndex(url, RELATION_KEY_INDEX)).toBe("present");
+    const [idx] = (await db.execute(sql`
+      SELECT i.indisvalid AS valid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = ${RELATION_KEY_INDEX.name}`)) as unknown as Array<{ valid: boolean }>;
+    expect(idx.valid).toBe(true);
   });
 });

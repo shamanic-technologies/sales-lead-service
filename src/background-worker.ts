@@ -37,7 +37,7 @@ import { startStaffIdentityMarksWorker } from "./lib/not-a-person.js";
 import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
 import { startLeadSubjectEquivalencesWorker } from "./lib/lead-subject-equivalences.js";
 import { fileUniboxLeads, reconcileUniboxLeads } from "./lib/unibox-leads.js";
-import { ensureReadModelSearchIndex } from "./lib/read-model-search-index.js";
+import { ensurePostBootIndex, ensureReadModelSearchIndex, RELATION_KEY_INDEX } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -116,6 +116,10 @@ startLeadFollowupDatesWorker(async () => {
 // (read-model-search-index.ts, DASH-LATENCY-1014). Until it exists a search is slow, not wrong.
 ensureReadModelSearchIndex(connectionString).catch((error: unknown) => {
   console.error("[lead-read-model] could not build the search index; searches stay unindexed:", error);
+});
+// The relationship sweep's "which relations did crm-service identify?" read (LEDGER-RESIDUAL-1025): slow, not wrong, until built.
+ensurePostBootIndex(connectionString, RELATION_KEY_INDEX).catch((error: unknown) => {
+  console.error("[lead-service] could not build the crm relation-key index; the sweep's identified read stays unindexed:", error);
 });
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
