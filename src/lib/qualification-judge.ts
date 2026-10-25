@@ -36,6 +36,30 @@ export function platformCallerWire(caller: PlatformCaller): { headers: Record<st
   return { headers: {}, body: { support: caller.support } };
 }
 
+/**
+ * Jev refuses a state over its token limit (`max_tokens_exceeded`, 400, not retryable). MAX_STATE_CHARS guesses ~4 chars
+ * a token; dense text breaks the guess (a Meta ads JSON, a Japanese jobs page at 92k chars: 2026-10-25, the onboarding's
+ * sample checks and live buffer/next both failed on them). The judgment is asked again on the first half of the text
+ * until it fits, rather than the check failing.
+ */
+export function isStateTooLong(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("max_tokens_exceeded");
+}
+
+export async function withFittingText<T>(text: string, attempt: (text: string) => Promise<T>, maxShrinks = 4): Promise<T> {
+  let current = text;
+  for (let shrinks = 0; ; shrinks++) {
+    try {
+      return await attempt(current);
+    } catch (err) {
+      if (!isStateTooLong(err) || shrinks >= maxShrinks || current.length < 2_000) throw err;
+      const next = current.slice(0, Math.floor(current.length / 2));
+      console.warn(`[lead-service] judgment state too long at ${current.length} chars, asking again on ${next.length}`);
+      current = next;
+    }
+  }
+}
+
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 /**
