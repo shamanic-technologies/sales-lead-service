@@ -388,6 +388,15 @@ const DETAIL_KEYS = [
 const DETAIL_VALUE_CHARS = 300;
 /** The newest visits read one by one (dated, with what they show); older ones are counted on the summary line. */
 export const VISIT_LINES = 5;
+/**
+ * ONBOARDING-EVENTS-TO-LEADS-1025: crm-service's `product_event` = a named event the brand's own product fired for the
+ * person (a step of their signup walk, a setting they chose: "Get started website submitted · website: acme.com"),
+ * their act toward the brand. The newest ones are read one by one, dated, in crm's own words; older ones are counted,
+ * so a product firing an event per page never pushes the person's messages out of Jev's budget.
+ */
+export const PRODUCT_EVENT_TYPE = "product_event";
+export const PRODUCT_EVENT_LINES = 20;
+const PRODUCT_EVENT_TEXT_CHARS = 300;
 
 export interface ThreadFact {
   type: string;
@@ -409,11 +418,14 @@ function detailOf(p: Record<string, unknown>): Record<string, unknown> | null {
 /**
  * PURE: the thread lines Jev reads from the subject's live facts (oldest first) and our outreach labels (oldest first).
  * Visits: the newest VISIT_LINES each a dated line with what the visit shows, plus one summary line (count, first date).
+ * Product events: the newest PRODUCT_EVENT_LINES each a dated line in crm's words, older ones counted on one line.
  */
 export function threadLinesOf(facts: readonly ThreadFact[], outreach: ReadonlyArray<{ label: string; occurred_at: Date | string | null; source: string }>): ThreadLine[] {
   const at = (v: Date | string | null) => (v === null ? null : toIsoTimestamp(v));
   const visits = facts.filter((f) => f.type === "website_visit");
+  const productEvents = facts.filter((f) => f.type === PRODUCT_EVENT_TYPE);
   let seen = 0;
+  let seenEvents = 0;
   const lines: ThreadLine[] = [];
   for (const f of facts) {
     const p = f.payload ?? {};
@@ -421,6 +433,20 @@ export function threadLinesOf(facts: readonly ThreadFact[], outreach: ReadonlyAr
       seen++;
       if (seen <= visits.length - VISIT_LINES) continue;
       lines.push({ at: at(f.occurred_at), source: f.source, kind: "visited the brand's website", direction: null, text: null, detail: detailOf(p) });
+      continue;
+    }
+    if (f.type === PRODUCT_EVENT_TYPE) {
+      seenEvents++;
+      if (seenEvents <= productEvents.length - PRODUCT_EVENT_LINES) continue;
+      const said = typeof p.text === "string" && p.text ? p.text : typeof p.event === "string" ? p.event : null;
+      lines.push({
+        at: at(f.occurred_at),
+        source: f.source,
+        kind: "did in the brand's product",
+        direction: null,
+        text: said ? said.slice(0, PRODUCT_EVENT_TEXT_CHARS) : null,
+        detail: null,
+      });
       continue;
     }
     lines.push({
@@ -437,6 +463,11 @@ export function threadLinesOf(facts: readonly ThreadFact[], outreach: ReadonlyAr
     const first = visits.find((v) => v.occurred_at !== null);
     const since = first ? ` since ${at(first.occurred_at)!.slice(0, 10)}` : "";
     lines.push({ at: null, source: "website", kind: `visited the brand's website ${visits.length} time(s)${since}`, direction: null, text: null, detail: null });
+  }
+  if (productEvents.length > PRODUCT_EVENT_LINES) {
+    const first = productEvents.find((v) => v.occurred_at !== null);
+    const since = first ? ` since ${at(first.occurred_at)!.slice(0, 10)}` : "";
+    lines.push({ at: null, source: "product", kind: `fired ${productEvents.length} event(s) in the brand's product${since}`, direction: null, text: null, detail: null });
   }
   for (const o of outreach) {
     lines.push({ at: at(o.occurred_at), source: `our_outreach:${o.source}`, kind: o.label, direction: null, text: null, detail: null });

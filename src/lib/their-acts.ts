@@ -12,8 +12,8 @@
  *      about the brand (a live `connection_tag` with that conversation as basis, none of them `professional_to_brand`);
  *   2. a PERSON wrote it: every inbound message (`message_in`) is judged once by Jev, "a person or a machine?"
  *      (`crm_act_judgments`, platform-billed, `ACT_JUDGMENTS_PER_TICK`); unjudged = not counted yet (fail closed: a
- *      serve waits a tick, it never writes to a machine's sender). Other acts (a signup, a form, a payment, a visit)
- *      are the person's by their type.
+ *      serve waits a tick, it never writes to a machine's sender). Other acts (a signup, a form, a payment, a visit, a
+ *      `product_event` their use of the brand's product fired) are the person's by their type.
  * Both can change after the act landed (crm-service re-judges a conversation, a relation is withdrawn), so the store
  * keeps every act (`lead_crm_acts`) and `refreshActedAt` re-derives the last counted one on every pass.
  */
