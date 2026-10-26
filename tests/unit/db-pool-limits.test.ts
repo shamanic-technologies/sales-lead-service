@@ -44,6 +44,7 @@ describe("database pool limits", () => {
     expect(db.POOL_OPTIONS.connection).toEqual({
       statement_timeout: 120_000,
       idle_in_transaction_session_timeout: 120_000,
+      jit: "off",
     });
   });
 

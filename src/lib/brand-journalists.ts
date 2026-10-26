@@ -143,10 +143,17 @@ export async function refreshBrandJournalists(scope?: { orgId: string; brandId: 
       WHERE (j.probabilities->>${JOURNALIST_TAG})::float8 >= ${JUDGED_YES} ${inScope("j.org_id", "j.brand_id")}
     ), spoken AS (
       -- Every lead of theirs (the human itself, or an atomic human the org folded into it) worked at the brand.
+      -- The human's ids are listed first, then joined on the leads index (BOX-OVERLOAD-1026): an OR join on leads ran
+      -- a seq scan of leads per spoken human with a correlated org_human_aliases scan per (human, lead) pair, ~240k
+      -- subplan scans per refresh, the service's largest Postgres cost.
       SELECT DISTINCT sh.org_id, sh.brand_id, l.id AS lead_id
       FROM spoken_humans sh
-      JOIN leads l ON l.human_id = sh.human_id
-        OR l.human_id IN (SELECT o.atomic_human_id FROM org_human_aliases o WHERE o.org_id = sh.org_id AND o.human_id = sh.human_id)
+      CROSS JOIN LATERAL (
+        SELECT sh.human_id AS hid
+        UNION
+        SELECT o.atomic_human_id FROM org_human_aliases o WHERE o.org_id = sh.org_id AND o.human_id = sh.human_id
+      ) hs
+      JOIN leads l ON l.human_id = hs.hid
       WHERE EXISTS (SELECT 1 FROM leads_campaigns x WHERE x.lead_id = l.id AND x.org_id = sh.org_id AND sh.brand_id = ANY(x.brand_ids))
     ), candidates AS (
       SELECT org_id, brand_id, lead_id FROM pitched UNION SELECT org_id, brand_id, lead_id FROM spoken

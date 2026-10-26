@@ -22,6 +22,7 @@ const { db } = await import("../../src/db/index.js");
 const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
 const fd = await import("../../src/lib/lead-followup-date.js");
 const { refreshActedAt } = await import("../../src/lib/their-acts.js");
+const { listScopes } = await import("../../src/lib/relationship-subjects.js");
 const { claimStockedLead } = await import("../../src/lib/source-stock.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -364,6 +365,23 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await judgedHuman(written);
     await refreshActedAt({ orgId, brandId });
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
+    // The worker's fleet pass (BOX-OVERLOAD-1026) walks the scopes one by one and lands on the same answer.
+    await db.execute(sql`UPDATE lead_followup_dates SET last_action_at = NULL WHERE org_id = ${orgId} AND brand_id = ${brandId}`);
+    await refreshActedAt(null);
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
+    // The relationship sweep's scope list (a skip scan) is the DISTINCT it replaced, in the same order.
+    await db.execute(sql`
+      INSERT INTO crm_registry_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, raw)
+      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`itest:${randomUUID()}`}, '{}', '{}', 'relation', 'none', 'crm', ${randomUUID()},
+        ${JSON.stringify({ relationKey: randomUUID() })}::jsonb, '{}'::jsonb)`);
+    const distinct = (await db.execute(sql`
+      SELECT DISTINCT org_id, brand_id FROM crm_registry_facts WHERE type = 'relation' ORDER BY org_id, brand_id
+    `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    expect(await listScopes()).toEqual(
+      distinct.filter((r) => UUID.test(r.org_id) && UUID.test(r.brand_id)).map((r) => ({ orgId: r.org_id, brandId: r.brand_id })),
+    );
+    expect((await listScopes()).some((x) => x.orgId === orgId && x.brandId === brandId)).toBe(true);
     expect((await serveDue())?.leadId).toBe(emailedOnly.leadId);
     // The never-contacted one: an open, an auto-reply and an Instantly-reported click prove nothing (machines).
     const machine = async (label: string, sourceRef: string) =>

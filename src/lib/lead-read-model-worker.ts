@@ -40,6 +40,14 @@ const FIRST_SWEEP_DELAY_MS = 20_000;
 const KEEP_WARM_MS = 7 * 24 * 60 * 60_000;
 /** A model (other than an active brand's) is refreshed by this worker only if read this recently. */
 export const REFRESH_IF_READ_WITHIN_MS = 60 * 60_000;
+/**
+ * An active brand's model nobody read within `REFRESH_IF_READ_WITHIN_MS` is refreshed only once its evidence is this
+ * old (BOX-OVERLOAD-1026): every 3 min for every active brand, read or not, was the service's largest share of the
+ * shared Postgres (a whole-population walk + gateway round per brand). 30 min keeps it well inside
+ * `READ_MODEL_SERVE_WITHOUT_WAIT_MS` (1 h), so the first read still answers at once, and that read's catch-up applies
+ * every statement first; the worker then refreshes it on the 3-min cadence while it is read.
+ */
+export const IDLE_PINNED_REFRESH_AFTER_MS = 30 * 60_000;
 /** A brand that served anybody within this window gets its brand model pre-built. */
 const ACTIVE_BRAND_WINDOW_DAYS = 30;
 /** How often the active-brand list is re-read. */
@@ -74,6 +82,7 @@ interface LiveModel {
   scope_key: string;
   scope: ReadModelScope;
   last_read_at: Date | string;
+  evidence_at: Date | string | null;
 }
 
 /**
@@ -82,15 +91,22 @@ interface LiveModel {
  * retired once unread for `KEEP_WARM_MS`, and otherwise left alone (a read refreshes it first).
  */
 export function planSweep(
-  live: ReadonlyArray<{ scope_key: string; scope: ReadModelScope; last_read_at: Date | string }>,
+  live: ReadonlyArray<{ scope_key: string; scope: ReadModelScope; last_read_at: Date | string; evidence_at?: Date | string | null }>,
   pinned: ReadonlyMap<string, ReadModelScope>,
   now: number,
 ): { refresh: Map<string, ReadModelScope>; retire: string[] } {
   const refresh = new Map<string, ReadModelScope>(pinned);
   const retire: string[] = [];
   for (const model of live) {
-    if (pinned.has(model.scope_key)) continue;
     const readAt = new Date(model.last_read_at).getTime();
+    if (pinned.has(model.scope_key)) {
+      // An idle active-brand model: left alone until its evidence is IDLE_PINNED_REFRESH_AFTER_MS old.
+      const evidenceAt = model.evidence_at == null ? null : new Date(model.evidence_at).getTime();
+      if (readAt < now - REFRESH_IF_READ_WITHIN_MS && evidenceAt !== null && evidenceAt >= now - IDLE_PINNED_REFRESH_AFTER_MS) {
+        refresh.delete(model.scope_key);
+      }
+      continue;
+    }
     if (readAt < now - KEEP_WARM_MS) retire.push(model.scope_key);
     else if (readAt >= now - REFRESH_IF_READ_WITHIN_MS) refresh.set(model.scope_key, model.scope);
   }
@@ -104,7 +120,7 @@ export async function sweepReadModels(): Promise<void> {
   sweeping = true;
   try {
     const live = await sql<LiveModel[]>`
-      SELECT scope_key, scope, last_read_at FROM lead_read_models WHERE scope_key IS NOT NULL
+      SELECT scope_key, scope, last_read_at, evidence_at FROM lead_read_models WHERE scope_key IS NOT NULL
     `;
     const pinned = new Map<string, ReadModelScope>();
     for (const scope of await activeBrandModelScopes()) pinned.set(readModelKey(scope), scope);

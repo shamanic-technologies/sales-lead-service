@@ -426,14 +426,14 @@ const appliedChanges = new Map<string, Set<string>>();
 export async function catchUpFeed(feed: ChangeFeed): Promise<number> {
   const xmin = await currentXmin();
   const seen = appliedChanges.get(feed.id) ?? new Set<string>();
-  const changes = (
-    await sql<RawChange[]>`
+  const window = await sql<RawChange[]>`
       SELECT seq::text AS seq, lead_id::text AS lead_id, email, kind, created_at
       FROM lead_read_changes
       WHERE org_id = ${feed.orgId} AND txid >= ${feed.appliedXmin}::xid8
         AND kind IN ('lead', 'evidence')
-    `
-  ).filter((change) => !seen.has(change.seq));
+      ORDER BY seq
+    `;
+  const changes = window.filter((change) => !seen.has(change.seq));
   let changed = 0;
   if (changes.length > 0) {
     const leadIds = new Set<string>();
@@ -455,9 +455,10 @@ export async function catchUpFeed(feed: ChangeFeed): Promise<number> {
       for (const row of affected) leadIds.add(row.lead_id);
     }
     if (leadIds.size > 0) changed = await recomputeLeads(feed, [...leadIds], changedAt);
-    if (seen.size > MAX_REMEMBERED_CHANGES) seen.clear();
-    for (const change of changes) seen.add(change.seq);
-    appliedChanges.set(feed.id, seen);
+    // Bounded by the window (BOX-OVERLOAD-1026), like the read model's catch-up: only the window's seqs are kept.
+    const keep = window.length > MAX_REMEMBERED_CHANGES ? window.slice(window.length - MAX_REMEMBERED_CHANGES) : window;
+    if (appliedChanges.size > 2_000 && !appliedChanges.has(feed.id)) appliedChanges.clear();
+    appliedChanges.set(feed.id, new Set(keep.map((c) => c.seq)));
   }
   await sql`
     UPDATE lead_change_feeds SET applied_xmin = ${xmin}::xid8

@@ -13,8 +13,10 @@ import app from "./app.js";
 import { PULL_NEXT_TIMEOUT_MS } from "./config.js";
 import { markBootFailed, markBootReady } from "./lib/boot-state.js";
 import { enableCrossThreadLocks } from "./lib/scope-lock.js";
+import { startMemoryReport } from "./lib/memory-report.js";
 
 const { name, port, lockPoolMax } = workerData as { name: string; port: number; lockPoolMax: number };
+startMemoryReport(name);
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");

@@ -69,7 +69,7 @@ describe("platform caller on the wire", () => {
 
 describe("each call site's choice", () => {
   it("person-or-machine pass (their-acts): support platform_llm, no run", async () => {
-    dbRows.push([{ fact_id: "f1", subject: "Hi", text: "Hello", channel: "email", source: "gmail" }]);
+    dbRows.push([{ org_id: "o1", brand_id: "b1" }], [{ fact_id: "f1", subject: "Hi", text: "Hello", channel: "email", source: "gmail", at: "2026-10-26 10:00:00+00" }]);
     await judgeAutomatedActs(1);
     expect(sent).toHaveLength(1);
     expect(sent[0].headers["x-run-id"]).toBeUndefined();

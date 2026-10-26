@@ -147,4 +147,19 @@ describe.skipIf(!hasRealDatabase)("brand journalists", () => {
     const row = (await db.execute(sql`SELECT basis, press_only FROM brand_journalists WHERE lead_id = ${people.pat.leadId}::uuid`)) as unknown as Array<{ basis: string; press_only: boolean }>;
     expect(row[0]).toEqual({ basis: "judgment", press_only: false });
   });
+
+  it("a judgment on the human an org folded atomic humans into reaches their leads too (BOX-OVERLOAD-1026 join)", async () => {
+    const canonical = randomUUID();
+    const sam = await person("Sam", [{ slug: "sales-cold-email-outreach" }]);
+    await db.execute(sql`
+      INSERT INTO org_human_aliases (org_id, atomic_human_id, human_id) VALUES (${orgId}, ${sam.human}::uuid, ${canonical}::uuid)
+    `);
+    await db.execute(sql`
+      INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id, judged_at)
+      VALUES (${orgId}, ${brandId}, ${canonical}::uuid, '', ${JSON.stringify({ journalist: 0.9 })}::jsonb, 0, 'itest', 'itest-run', now())
+    `);
+    await refreshBrandJournalists({ orgId, brandId });
+    expect(await leadIsJournalist(sam.leadId, orgId, [brandId])).toBe(true);
+    await db.execute(sql`DELETE FROM org_human_aliases WHERE org_id = ${orgId}`);
+  });
 });

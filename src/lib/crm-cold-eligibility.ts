@@ -112,12 +112,29 @@ export async function loadCrmColdEligibility(
   return value;
 }
 
-/** The orgs whose CRM was ever paired against this brand's leads. */
-export async function crmPairedOrgs(brandId: string): Promise<string[]> {
+const pairedOrgsMemo = new Map<string, { at: number; orgs: string[] }>();
+/** A brand's paired orgs move when a CRM is first connected: asked again after this long. */
+export const PAIRED_ORGS_TTL_MS = 5 * 60_000;
+
+/** Test seam. */
+export function clearCrmPairedOrgsMemo(): void {
+  pairedOrgsMemo.clear();
+}
+
+/**
+ * The orgs whose CRM was ever paired against this brand's leads. Asked on every standing read; held 5 min per thread
+ * (BOX-OVERLOAD-1026: unindexed by brand, each call scanned the whole fact copy).
+ */
+export async function crmPairedOrgs(brandId: string, now: number = Date.now()): Promise<string[]> {
+  const held = pairedOrgsMemo.get(brandId);
+  if (held && now - held.at < PAIRED_ORGS_TTL_MS) return held.orgs;
   const rows = (await db.execute(sql`
     SELECT DISTINCT org_id FROM crm_facts WHERE brand_id = ${brandId}
   `)) as unknown as Array<{ org_id: string }>;
-  return rows.map((r) => r.org_id);
+  const orgs = rows.map((r) => r.org_id);
+  if (pairedOrgsMemo.size > 10_000) pairedOrgsMemo.clear();
+  pairedOrgsMemo.set(brandId, { at: now, orgs });
+  return orgs;
 }
 
 /**

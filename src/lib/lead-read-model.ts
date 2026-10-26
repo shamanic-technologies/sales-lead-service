@@ -701,7 +701,7 @@ interface RawChange {
 async function catchUp(model: ReadModel): Promise<number> {
   const xmin = await currentXmin();
   const seen = appliedChanges.get(model.id) ?? new Set<string>();
-  const changes = await unseenChanges(model, seen);
+  const { changes, window } = await unseenChanges(model, seen);
   if (changes.length > 0) {
     const leadIds = new Set<string>();
     const changedAt = new Map<string, Date>();
@@ -726,24 +726,32 @@ async function catchUp(model: ReadModel): Promise<number> {
     // Remembered so the re-read window (see above) does not recompute the same people on every
     // read: `applied_xmin` can only advance as far as the oldest transaction still open anywhere
     // on the server, which another database's long transaction can hold back.
-    if (seen.size > MAX_REMEMBERED_CHANGES) seen.clear();
-    for (const change of changes) seen.add(change.seq);
-    appliedChanges.set(model.id, seen);
+    // BOUNDED by the window (BOX-OVERLOAD-1026): every change of the window is applied now, and a seq that left the
+    // window (`applied_xmin` moved past it) is never read again, so only the window's seqs are kept. Accumulating every
+    // seq ever applied per model (cleared only past 20k) grew the thread's heap with uptime.
+    if (appliedChanges.size > MAX_REMEMBERED_MODELS && !appliedChanges.has(model.id)) appliedChanges.clear();
+    appliedChanges.set(model.id, rememberWindow(window));
   }
   await advanceAppliedXmin(model, xmin);
   return changes.length;
 }
 
-/** The changes at or after the model's `applied_xmin` this thread has not applied yet. */
-async function unseenChanges(model: ReadModel, seen: ReadonlySet<string>): Promise<RawChange[]> {
-  return (
-    await sql<RawChange[]>`
+/** The seqs remembered after a catch-up: exactly the window's, capped (a capped set only re-applies, never skips). */
+export function rememberWindow(window: ReadonlyArray<{ seq: string }>): Set<string> {
+  const keep = window.length > MAX_REMEMBERED_CHANGES ? window.slice(window.length - MAX_REMEMBERED_CHANGES) : window;
+  return new Set(keep.map((c) => c.seq));
+}
+
+/** The changes at or after the model's `applied_xmin` (`window`) and those this thread has not applied yet. */
+async function unseenChanges(model: ReadModel, seen: ReadonlySet<string>): Promise<{ changes: RawChange[]; window: RawChange[] }> {
+  const window = await sql<RawChange[]>`
       SELECT seq::text AS seq, lead_id::text AS lead_id, email, kind, created_at
       FROM lead_read_changes
       WHERE org_id = ${model.orgId} AND txid >= ${model.appliedXmin}::xid8
         AND kind IN ('statement', 'evidence')
-    `
-  ).filter((change) => !seen.has(change.seq));
+      ORDER BY seq
+    `;
+  return { changes: window.filter((change) => !seen.has(change.seq)), window };
 }
 
 /**
@@ -766,7 +774,7 @@ async function advanceAppliedXmin(model: ReadModel, xmin: string): Promise<void>
  */
 async function catchUpModel(model: ReadModel): Promise<void> {
   const xmin = await currentXmin();
-  const pending = await unseenChanges(model, appliedChanges.get(model.id) ?? new Set<string>());
+  const { changes: pending } = await unseenChanges(model, appliedChanges.get(model.id) ?? new Set<string>());
   if (pending.length === 0) {
     await advanceAppliedXmin(model, xmin);
     return;
@@ -777,6 +785,8 @@ async function catchUpModel(model: ReadModel): Promise<void> {
 /** Change seqs each model has already applied, within its re-read window. In-process only. */
 const appliedChanges = new Map<string, Set<string>>();
 const MAX_REMEMBERED_CHANGES = 20_000;
+/** Models remembered per thread: a retired model's set is never read again; clearing only re-applies (same answers). */
+const MAX_REMEMBERED_MODELS = 2_000;
 
 /**
  * Per-scope serialization, held across the request thread and the background thread (see

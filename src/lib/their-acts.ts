@@ -107,23 +107,63 @@ function toBrandPointsCte(scope: ActScope | null): SQL {
     )`;
 }
 
-/** The inbound messages that would count but nobody judged yet, newest first. */
-async function messagesToJudge(limit: number): Promise<Array<{ fact_id: string; subject: string | null; text: string | null; channel: string | null; source: string }>> {
+type MessageToJudge = { fact_id: string; subject: string | null; text: string | null; channel: string | null; source: string; at: Date | string };
+
+/**
+ * The (org, brand) scopes holding an inbound message nobody judged yet. `lead_crm_acts` is small and keyed on the
+ * scope, so this is the cheap question asked before any CTE runs (BOX-OVERLOAD-1026: unscoped, the CTEs scanned every
+ * subject and the whole ~1 GB `crm_registry_facts` on every 2-min pass, judged message or not).
+ */
+async function scopesWithUnjudgedMessages(): Promise<ActScope[]> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT a.org_id, a.brand_id FROM lead_crm_acts a
+    WHERE a.type = 'message_in'
+      AND NOT EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id)
+      AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
+  `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+  return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
+}
+
+/** The scopes whose `last_action_at` may move: every scope holding an act, or a date carrying one (a scope can lose its last act). */
+export async function actScopes(): Promise<ActScope[]> {
+  const rows = (await db.execute(sql`
+    SELECT org_id, brand_id FROM lead_crm_acts GROUP BY org_id, brand_id
+    UNION
+    SELECT org_id, brand_id FROM lead_followup_dates WHERE last_action_at IS NOT NULL GROUP BY org_id, brand_id
+  `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+  return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
+}
+
+/** One scope's inbound messages that would count but nobody judged yet, newest first. */
+async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<MessageToJudge[]> {
   return (await db.execute(sql`
-    WITH ${toBrandPointsCte(null)},
+    WITH ${toBrandPointsCte(scope)},
     todo AS (
       SELECT DISTINCT a.fact_id, max(a.at) AS at FROM lead_crm_acts a
       JOIN to_brand_points p ON p.org_id = a.org_id AND p.brand_id = a.brand_id AND p.cp = a.contact_point
-      WHERE a.type = 'message_in'
+      WHERE a.type = 'message_in' AND ${scoped(sql`a`, scope)}
         AND NOT EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id)
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
       GROUP BY a.fact_id
       ORDER BY at DESC
       LIMIT ${limit}
     )
-    SELECT f.fact_id, f.payload->>'subject' AS subject, f.payload->>'text' AS text, f.payload->>'channel' AS channel, f.source
+    SELECT f.fact_id, f.payload->>'subject' AS subject, f.payload->>'text' AS text, f.payload->>'channel' AS channel, f.source, todo.at
     FROM todo JOIN crm_facts f ON f.fact_id = todo.fact_id
-  `)) as unknown as Array<{ fact_id: string; subject: string | null; text: string | null; channel: string | null; source: string }>;
+  `)) as unknown as MessageToJudge[];
+}
+
+/** The fleet's inbound messages that would count but nobody judged yet, newest first: the same set as one fleet-wide
+ * statement (each scope's newest `limit`, then the newest `limit` of those), asked only of scopes holding one. */
+async function messagesToJudge(limit: number): Promise<MessageToJudge[]> {
+  const all: MessageToJudge[] = [];
+  for (const scope of await scopesWithUnjudgedMessages()) all.push(...(await messagesToJudgeIn(scope, limit)));
+  const ms = (at: Date | string) => new Date(at).getTime();
+  const seen = new Set<string>();
+  return all
+    .sort((a, b) => ms(b.at) - ms(a.at))
+    .filter((m) => (seen.has(m.fact_id) ? false : (seen.add(m.fact_id), true)))
+    .slice(0, limit);
 }
 
 /** PURE: what Jev reads to say "a person or a machine?". */
@@ -174,8 +214,17 @@ export function countedActsSql(scope: ActScope | null): SQL {
     )`;
 }
 
-/** Re-derive `last_action_at` for every lead date of the scope (all, unscoped) from the acts that count now. */
+/**
+ * Re-derive `last_action_at` for every lead date of the scope (all, unscoped) from the acts that count now. Unscoped
+ * walks the scopes one by one (`actScopes`, BOX-OVERLOAD-1026): the same rows move as one fleet statement, but each
+ * statement reads its brand through the (org, brand) indexes instead of scanning every subject and registry fact.
+ */
 export async function refreshActedAt(scope: ActScope | null): Promise<{ changed: number }> {
+  if (scope === null) {
+    let changed = 0;
+    for (const s of await actScopes()) changed += (await refreshActedAt(s)).changed;
+    return { changed };
+  }
   const rows = (await db.execute(sql`
     ${countedActsSql(scope)},
     target AS (

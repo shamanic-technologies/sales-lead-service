@@ -32,6 +32,7 @@ import { registerProviders } from "./lib/register-providers.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { isInteractiveRead } from "./request-routing.js";
 import { forward } from "./thread-forward.js";
+import { startMemoryReport } from "./lib/memory-report.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const EXT = extname(__filename);
@@ -217,6 +218,7 @@ async function boot(): Promise<void> {
 }
 
 if (process.env.NODE_ENV !== "test") {
+  startMemoryReport("main");
   const server = router.listen(publicPort, "::", () => {
     console.log(`[lead-service] running on port ${PORT}`);
   });

@@ -56,6 +56,70 @@ export const RELATION_KEY_INDEX: PostBootIndex = {
 };
 
 /**
+ * The indexes the background sweeps' and standing reads' hottest statements need (BOX-OVERLOAD-1026, ranked by sampling
+ * prod `pg_stat_activity` and `pg_stat_user_tables` deltas). Built one after the other after boot, like the two above:
+ * several tables are hundreds of MB, and a plain `CREATE INDEX` in a migration would lock their writers.
+ */
+export const LOAD_INDEXES: readonly PostBootIndex[] = [
+  {
+    // brand-journalists `spoken` and the relationship read's merge lookup: "the atomic humans an org folded into H".
+    name: "idx_org_human_aliases_human",
+    on: "ON org_human_aliases (org_id, human_id)",
+    lockKey: "7290519146308441019",
+    log: "[lead-service] load index",
+  },
+  {
+    // brand-journalists `pitched`: the rows of press channels, fleet-wide every 5 min (was a full scan).
+    name: "idx_lc_feature_slug",
+    on: "ON leads_campaigns (feature_slug)",
+    lockKey: "7290519146308441020",
+    log: "[lead-service] load index",
+  },
+  {
+    // The follow-up dates intake between two full passes: rows filed since the last pass.
+    name: "idx_lc_created_at",
+    on: "ON leads_campaigns (created_at)",
+    lockKey: "7290519146308441021",
+    log: "[lead-service] load index",
+  },
+  {
+    // Identity sweep pass 1, every minute: employers never resolved (was a full scan of ~540 MB).
+    name: "idx_organizations_company_unresolved",
+    on: "ON organizations (id) WHERE company_resolved_at IS NULL",
+    lockKey: "7290519146308441022",
+    log: "[lead-service] load index",
+  },
+  {
+    // Identity sweep pass 2, every minute: resolved employers whose row changed since its facts were written.
+    name: "idx_organizations_facts_unpushed",
+    on: "ON organizations (id) WHERE company_id IS NOT NULL AND (company_facts_pushed_at IS NULL OR updated_at > company_facts_pushed_at)",
+    lockKey: "7290519146308441023",
+    log: "[lead-service] load index",
+  },
+  {
+    // crm-cold-eligibility `crmPairedOrgs`: the orgs of one brand's CRM facts (every other index leads with org).
+    name: "idx_crm_facts_brand_org",
+    on: "ON crm_facts (brand_id, org_id)",
+    lockKey: "7290519146308441024",
+    log: "[lead-service] load index",
+  },
+  {
+    // relationship-read: a human's connection tags (the org-only prefix scanned every registry fact of the org).
+    name: "idx_crm_registry_facts_tag_human",
+    on: "ON crm_registry_facts (org_id, (raw->>'humanId')) WHERE type = 'connection_tag'",
+    lockKey: "7290519146308441025",
+    log: "[lead-service] load index",
+  },
+  {
+    // their-acts `actScopes`: the scopes whose dates carry an act.
+    name: "idx_lfd_last_action_scope",
+    on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
+    lockKey: "7290519146308441026",
+    log: "[lead-service] load index",
+  },
+];
+
+/**
  * Make sure the search index exists and is VALID. Idempotent; safe to call on every boot.
  * Throws on a database error (the caller logs it; a missing index slows search, it breaks nothing).
  */

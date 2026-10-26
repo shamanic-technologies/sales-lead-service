@@ -37,7 +37,8 @@ import { startStaffIdentityMarksWorker } from "./lib/not-a-person.js";
 import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
 import { startLeadSubjectEquivalencesWorker } from "./lib/lead-subject-equivalences.js";
 import { fileUniboxLeads, reconcileUniboxLeads } from "./lib/unibox-leads.js";
-import { ensurePostBootIndex, ensureReadModelSearchIndex, RELATION_KEY_INDEX } from "./lib/read-model-search-index.js";
+import { startMemoryReport } from "./lib/memory-report.js";
+import { ensurePostBootIndex, ensureReadModelSearchIndex, LOAD_INDEXES, RELATION_KEY_INDEX } from "./lib/read-model-search-index.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 if (!connectionString) throw new Error("LEAD_SERVICE_DATABASE_URL is not set");
@@ -121,6 +122,16 @@ ensureReadModelSearchIndex(connectionString).catch((error: unknown) => {
 ensurePostBootIndex(connectionString, RELATION_KEY_INDEX).catch((error: unknown) => {
   console.error("[lead-service] could not build the crm relation-key index; the sweep's identified read stays unindexed:", error);
 });
+// The sweeps' and standing reads' load indexes (BOX-OVERLOAD-1026), one at a time: slow, not wrong, until built.
+void (async () => {
+  for (const index of LOAD_INDEXES) {
+    await ensurePostBootIndex(connectionString, index).catch((error: unknown) => {
+      console.error(`[lead-service] could not build ${index.name}; its reads stay unindexed:`, error);
+    });
+  }
+})();
+
+startMemoryReport("background");
 
 // The sweeps' intervals are unref'd (they must never hold the request process open), so this one
 // keeps the thread alive.
