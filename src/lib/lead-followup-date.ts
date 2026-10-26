@@ -76,13 +76,20 @@ export interface BrandScope {
  * the send feeds were first walked gets its past sends applied right away, so a person the Unibox already talked to
  * is not due today for nothing.
  */
-export async function ensureLeadFollowupDates(scope: BrandScope | null = null): Promise<{ inserted: number }> {
+export async function ensureLeadFollowupDates(
+  scope: BrandScope | null = null,
+  opts: { createdSince?: Date } = {},
+): Promise<{ inserted: number }> {
+  // `createdSince` (BOX-OVERLOAD-1026): the worker's passes between two full ones only look at rows filed since its
+  // last pass (with a margin), instead of probing every one of ~400k rows for a date every 2 min.
+  const since = opts.createdSince ? opts.createdSince.toISOString() : null;
   const inserted = (await db.execute(sql`
     INSERT INTO lead_followup_dates (org_id, brand_id, lead_id, next_followup_at, basis, reason)
     SELECT DISTINCT lc.org_id, b, lc.lead_id, now(), 'default', 'Every lead carries a date: nothing sent or stated yet'
     FROM leads_campaigns lc CROSS JOIN LATERAL unnest(lc.brand_ids) AS b
     WHERE lc.org_id IS NOT NULL AND b IS NOT NULL AND b <> ''
       AND (${scope?.orgId ?? null}::text IS NULL OR (lc.org_id = ${scope?.orgId ?? null} AND b = ${scope?.brandId ?? null}))
+      AND (${since}::timestamptz IS NULL OR lc.created_at >= ${since}::timestamptz)
       AND NOT EXISTS (SELECT 1 FROM lead_followup_dates d WHERE d.org_id = lc.org_id AND d.brand_id = b AND d.lead_id = lc.lead_id)
     ON CONFLICT (org_id, brand_id, lead_id) DO NOTHING
     RETURNING org_id, brand_id, lead_id::text AS lead_id
@@ -855,13 +862,30 @@ export async function dueVerdict(
 
 let sweeping = false;
 
+/** Every row is re-checked for a date this often (a brand transfer re-points rows without filing new ones). */
+export const FULL_ENSURE_EVERY_MS = 60 * 60_000;
+/** An incremental pass re-reads rows filed this long before the previous pass began (a transaction committing late). */
+export const ENSURE_OVERLAP_MS = 15 * 60_000;
+
+/** PURE: which rows the next intake pass reads: all (`undefined`) when no full pass ran within the hour, else those filed since. */
+export function ensureWindow(now: number, lastFullAt: number | null, lastPassAt: number | null): Date | undefined {
+  if (lastFullAt === null || lastPassAt === null || now - lastFullAt >= FULL_ENSURE_EVERY_MS) return undefined;
+  return new Date(lastPassAt - ENSURE_OVERLAP_MS);
+}
+
 export function startLeadFollowupDatesWorker(beforeDates: () => Promise<unknown>): void {
+  let lastFullAt: number | null = null;
+  let lastPassAt: number | null = null;
   const tick = async () => {
     if (sweeping) return;
     sweeping = true;
     try {
       await beforeDates().catch((err: unknown) => console.error("[lead-service] lead follow-up dates: intake before dating failed:", err));
-      const ensured = await ensureLeadFollowupDates();
+      const startedAt = Date.now();
+      const createdSince = ensureWindow(startedAt, lastFullAt, lastPassAt);
+      const ensured = await ensureLeadFollowupDates(null, { createdSince });
+      if (!createdSince) lastFullAt = startedAt;
+      lastPassAt = startedAt;
       const synced = await syncSendFeeds();
       // Which acts of theirs count (LEADS-JUDGE-BRAND-1021): judge the new messages "a person or a machine?", then
       // re-derive every lead's last act from what counts now. A judgment failure leaves those messages uncounted.

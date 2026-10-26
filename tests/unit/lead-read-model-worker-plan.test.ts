@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ReadModelScope } from "../../src/lib/lead-read-model.js";
 
-const { planSweep, REFRESH_IF_READ_WITHIN_MS } = await import(
+const { planSweep, REFRESH_IF_READ_WITHIN_MS, IDLE_PINNED_REFRESH_AFTER_MS } = await import(
   "../../src/lib/lead-read-model-worker.js"
 );
 
@@ -32,6 +32,27 @@ describe("planSweep (DB-LOAD-1014)", () => {
     ]);
     const { refresh, retire } = planSweep([model("brand-a", 8 * 24 * 60)], pinned, NOW);
     expect([...refresh.keys()].sort()).toEqual(["brand-a", "brand-b"]);
+    expect(retire).toEqual([]);
+  });
+
+  it("refreshes an IDLE pinned model only once its evidence is 30 min old; a read one keeps the 3-min cadence (BOX-OVERLOAD-1026)", () => {
+    const pinned = new Map([
+      ["idle-fresh", scope("idle-fresh")],
+      ["idle-old", scope("idle-old")],
+      ["read-fresh", scope("read-fresh")],
+      ["not-built", scope("not-built")],
+    ]);
+    const at = (minutesAgo: number) => new Date(NOW - minutesAgo * MIN).toISOString();
+    const { refresh, retire } = planSweep(
+      [
+        { ...model("idle-fresh", 3 * 60), evidence_at: at(IDLE_PINNED_REFRESH_AFTER_MS / MIN - 1) },
+        { ...model("idle-old", 3 * 60), evidence_at: at(IDLE_PINNED_REFRESH_AFTER_MS / MIN + 1) },
+        { ...model("read-fresh", 5), evidence_at: at(4) },
+      ],
+      pinned,
+      NOW,
+    );
+    expect([...refresh.keys()].sort()).toEqual(["idle-old", "not-built", "read-fresh"]);
     expect(retire).toEqual([]);
   });
 });

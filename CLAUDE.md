@@ -147,6 +147,16 @@ Drizzle snapshots (`drizzle/meta/*_snapshot.json`) stop at `0007`; `0008`+ are h
 - **Do NOT tune postgres.js connection options for cold starts**: `connect_timeout` already defaults 30, `idle_timeout` defaults null (setting it closes warm connections; brand-service#389 reverted it). Only `net.setDefaultAutoSelectFamilyAttemptTimeout(5_000)` in `src/db/index.ts` is kept.
 - **A test that `vi.mock`s `src/db/index.js` MUST `vi.resetModules()` between cases** (else the registry leaks into later files in the worker; `stats-persona-attribution.test.ts` hung because `health.test.ts` ran first). Import the boot-state singleton through the same fresh registry (`tests/unit/health.test.ts`).
 
+## The shared box pays for every sweep: measure, then do LESS work (BOX-OVERLOAD-1026)
+
+- **Rank by sampling, not by guess**: `pg_stat_activity` every 3 s (active rows per query md5) + `pg_stat_user_tables` deltas (`seq_scan`, `seq_tup_read`) over the same window, from the box's psql (no probe container, no fleet compute). 2026-10-26 top items: brand-journalists' OR join (680k seq scans of `org_human_aliases` in 11 min), unscoped their-acts CTEs + org-wide connection-tag reads (88M `crm_registry_facts` tuples), identity sweep full scans of `organizations`, `listScopes` parallel scan, JIT compiles.
+- **A fleet-wide sweep statement walks the SCOPES** (`refreshActedAt(null)`, `judgeAutomatedActs`): each scoped statement rides the (org, brand) indexes; never one unscoped CTE over every subject / registry fact. A list of scopes is a skip scan (`listScopes`), never `DISTINCT` over a 1 GB table.
+- **Indexes on tables of 100 MB+ are built after boot** (`LOAD_INDEXES` in `read-model-search-index.ts`, one at a time, `CREATE INDEX CONCURRENTLY`); a new one gets its own lock key.
+- **Sessions run with `jit=off`** (`src/db/index.ts`): with `prepare: false` every brand-wide statement recompiled; JIT never changes a result.
+- **An idle active-brand read model refreshes every 30 min, a read one every 3 min** (`IDLE_PINNED_REFRESH_AFTER_MS`): inside the 1 h serve-without-wait bound, so no read waits.
+- **In-process memo sets are bounded by what can still be read**: the read model's / change feed's applied-change sets keep only the current window's seqs. Each thread logs `[memory] thread=… heapUsedMb=… rssMb=…` every 10 min: compare across uptime before calling it a leak.
+- **Bounded `GET /orgs/leads` pages are gzipped** (as `view=compact`): a 30-person `include=campaigns` page is ~290 KB raw (~10 KB/person, half of it the cards' `campaignIds` families), ~32 KB on the wire.
+
 ## A database connection is never held by a caller who left
 
 - **Pool ceiling and hold times are stated in `src/db/index.ts`, never inherited** (postgres.js default `max: 10` WAS the 2026-09-07 outage: ten whole-population reads took every connection, `/health` 503 for 11.5h, manual restart). `POOL_MAX` (20), `STATEMENT_TIMEOUT_MS`, `IDLE_IN_TRANSACTION_TIMEOUT_MS`: env-overridable, an unreadable override THROWS. They ride the startup packet (session-scoped); never a server-wide `statement_timeout` (shared Postgres).

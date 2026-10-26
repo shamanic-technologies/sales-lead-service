@@ -303,7 +303,13 @@ describe("GET /orgs/leads?view=compact", () => {
     expect(res.body.leads).toHaveLength(4);
   });
 
-  it("leaves view=basic's encoding untouched", async () => {
+  it("gzips a bounded view=basic page for a caller that accepts it (BOX-OVERLOAD-1026)", async () => {
+    const res = await get(`?brandId=${BRAND}&view=basic&limit=2`).set("accept-encoding", "gzip");
+    expect(res.status).toBe(200);
+    expect(res.headers["content-encoding"]).toBe("gzip");
+  });
+
+  it("leaves the unbounded view=basic walk's encoding untouched", async () => {
     const res = await get(`?brandId=${BRAND}&view=basic`).set("accept-encoding", "gzip");
     expect(res.status).toBe(200);
     expect(res.headers["content-encoding"]).toBeUndefined();
