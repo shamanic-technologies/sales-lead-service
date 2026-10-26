@@ -804,13 +804,16 @@ async function resolveLeadReadScope(
 }
 
 /**
- * `view=compact` is gzipped when the caller accepts it (Node's `fetch` asks for it and decodes it
- * transparently). Scoped to that view ONLY: every other response of this route keeps its exact
- * encoding, so no existing consumer — including any proxy that copies headers onto a body it has
- * already decoded — sees a byte change. The JSON is highly repetitive (the same keys on every row),
- * so this is the larger half of what makes a whole-brand walk light on the wire.
+ * `view=compact` and every BOUNDED JSON page (`limit` named, not `format=csv`: the dashboard's own reads) are gzipped
+ * when the caller accepts it (Node's `fetch` asks for it and decodes it transparently). The JSON is highly repetitive
+ * (the same keys and campaign ids on every row): a 30-person `include=campaigns` page is ~290 KB raw, ~10 KB per
+ * person (BOX-OVERLOAD-1026), and several times smaller gzipped. The unbounded walks and the CSV keep their exact
+ * encoding; no proxy in front of this route copies `content-encoding` onto a decoded body (api-service forwards
+ * `content-type` only).
  */
-const compactCompression = compression({ filter: (req) => req.query.view === "compact" });
+const compactCompression = compression({
+  filter: (req) => req.query.view === "compact" || (typeof req.query.limit === "string" && req.query.format !== "csv"),
+});
 
 router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;

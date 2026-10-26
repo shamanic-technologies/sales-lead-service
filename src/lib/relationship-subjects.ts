@@ -33,8 +33,19 @@ export interface Scope {
 
 /** Every (org, brand) crm-service states a relation for. */
 export async function listScopes(): Promise<Scope[]> {
+  // A skip scan over the relation-key index (BOX-OVERLOAD-1026): one index probe per brand instead of a parallel scan of
+  // the whole ~1 GB registry every 5 min. Same set, same order as `SELECT DISTINCT ... ORDER BY org_id, brand_id`.
   const rows = (await db.execute(sql`
-    SELECT DISTINCT org_id, brand_id FROM crm_registry_facts WHERE type = 'relation' ORDER BY org_id, brand_id
+    WITH RECURSIVE s AS (
+      (SELECT org_id, brand_id FROM crm_registry_facts WHERE type = 'relation' ORDER BY org_id, brand_id LIMIT 1)
+      UNION ALL
+      SELECT n.org_id, n.brand_id FROM s CROSS JOIN LATERAL (
+        SELECT f.org_id, f.brand_id FROM crm_registry_facts f
+        WHERE f.type = 'relation' AND (f.org_id, f.brand_id) > (s.org_id, s.brand_id)
+        ORDER BY f.org_id, f.brand_id LIMIT 1
+      ) n
+    )
+    SELECT org_id, brand_id FROM s
   `)) as unknown as Array<{ org_id: string; brand_id: string }>;
   return rows.filter((r) => UUID_RE.test(r.org_id) && UUID_RE.test(r.brand_id)).map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
 }

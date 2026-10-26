@@ -64,6 +64,10 @@ export const POOL_OPTIONS = {
   connection: {
     statement_timeout: STATEMENT_TIMEOUT_MS,
     idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    // No JIT for this service's sessions (BOX-OVERLOAD-1026). With `prepare: false` every execution of a plan past
+    // `jit_above_cost` (100k: the sweeps' and Leads reads' brand-wide statements) compiled 30+ functions anew, CPU the
+    // shared box paid on every 15 s - 5 min tick. JIT never changes a result; session-scoped like the two timeouts.
+    jit: "off",
   },
 } as const;
 
