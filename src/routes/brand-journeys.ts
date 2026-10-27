@@ -6,6 +6,7 @@ import { fetchOrgCampaignOffers } from "../lib/campaign-leg-client.js";
 import { loadOutreachFeedState } from "../lib/outreach-fact-feed.js";
 import { ResponseWriter } from "../lib/stream-writer.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
+import { cachedJourneys, journeysCacheKey, journeysSnapshotXmin, rememberJourneys } from "../lib/brand-journeys-cache.js";
 
 const router = Router();
 
@@ -54,27 +55,46 @@ router.get(
     const writer = new ResponseWriter(res);
     const client = watchClient(req, res);
     let streamingStarted = false;
+    // The exact bytes written, kept to answer the next identical read while nothing it read has moved
+    // (brand-journeys-cache.ts, BOX-DB-LOAD-1027-LEAD-2).
+    const parts: string[] = [];
+    const emit = async (text: string) => {
+      parts.push(text);
+      await writer.write(text);
+    };
     const open = async () => {
       if (streamingStarted) return;
       res.setHeader("Content-Type", "application/json");
-      await writer.write(`{"brandId":${JSON.stringify(brandId)},"journeys":[`);
+      await emit(`{"brandId":${JSON.stringify(brandId)},"journeys":[`);
       streamingStarted = true;
     };
     try {
+      const cacheKey = journeysCacheKey(orgId, brandId, offers);
+      const held = await cachedJourneys(cacheKey);
+      if (held !== null) {
+        res.setHeader("Content-Type", "application/json");
+        streamingStarted = true;
+        await writer.write(held);
+        await writer.end();
+        return;
+      }
+      // Taken BEFORE the read: a write still open now carries a txid at or above it.
+      const xmin = await journeysSnapshotXmin();
       let count = 0;
       let factCount = 0;
       for await (const chunk of streamBrandJourneys(orgId, brandId, offers, CHUNK_SIZE)) {
         client.stopIfGone(count);
         await open();
         for (const journey of chunk) {
-          await writer.write((count === 0 ? "" : ",") + JSON.stringify(journey));
+          await emit((count === 0 ? "" : ",") + JSON.stringify(journey));
           count += 1;
           factCount += journey.facts.length;
         }
       }
       await open();
-      await writer.write(`],"count":${count},"factCount":${factCount}}`);
+      await emit(`],"count":${count},"factCount":${factCount}}`);
       await writer.end();
+      rememberJourneys(cacheKey, orgId, xmin, parts.join(""));
     } catch (error) {
       if (isClientGone(error)) {
         console.warn(`[lead-service] timeline-journeys read abandoned by the caller: ${error.message}`);

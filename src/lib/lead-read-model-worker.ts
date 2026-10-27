@@ -154,6 +154,10 @@ export async function sweepReadModels(): Promise<void> {
     await sql`
       DELETE FROM lead_read_changes WHERE created_at < now() - ${CHANGE_LOG_RETENTION}::interval
     `;
+    // The timeline-journeys cache's change log (brand-journeys-cache.ts): a held answer never outlives an hour.
+    await sql`
+      DELETE FROM journey_input_changes WHERE created_at < now() - ${CHANGE_LOG_RETENTION}::interval
+    `;
   } finally {
     sweeping = false;
   }
