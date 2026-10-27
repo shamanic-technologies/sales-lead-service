@@ -10436,3 +10436,60 @@ registry.registerPath({
     502: { description: "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`" },
   },
 });
+
+// CLIENT-SENTIMENT-1027: every message a client of a brand wrote it, with its Client Sentiment verdict (src/lib/client-sentiment.ts).
+const ClientSentimentEnum = z.enum(["positive", "neutral", "negative"]);
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/client-sentiment",
+  summary: "Client Sentiment of every message a client wrote the brand (CLIENT-SENTIMENT-1027)",
+  description:
+    "A CLIENT = a relationship subject of the brand whose decided `customer` tag is yes (a person's word > a source's evidence such as a payment or won sale > Jev's thread judgment), not `team`, no staff or own-org member address. Every message they wrote the brand on any channel crm-service mirrors (Gmail, WhatsApp, LinkedIn...) is judged ONCE by Jev positive / neutral / negative in the background (history since inception included) and never re-asked; reading never judges. Only messages of a relation that is a client NOW are counted. `unjudged` > 0 = counts not final yet; `judgedThrough` = the newest message instant up to which every client message is judged (null = none). `verdicts` lists judged messages oldest first (filter with `sentiment`, the counts and days stay whole); one message = one `messageId` (crm-service's fact id). `days` = per UTC day of the message.",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    query: z.object({
+      since: z.string().optional().openapi({ description: "ISO instant: only messages at or after it" }),
+      sentiment: ClientSentimentEnum.optional().openapi({ description: "Only list verdicts of this sentiment" }),
+    }),
+  },
+  parameters: relationshipHeaders(false),
+  responses: {
+    200: {
+      description: "The brand's client messages and their verdicts",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              messages: z.number().int().openapi({ description: "Live client messages (judged + unjudged)." }),
+              judged: z.number().int(),
+              unjudged: z.number().int().openapi({ description: "Client messages not judged yet (the background pass fills them)." }),
+              judgedThrough: z.string().nullable(),
+              counts: z.object({ positive: z.number().int(), neutral: z.number().int(), negative: z.number().int() }),
+              days: z.array(
+                z.object({ day: z.string().openapi({ description: "YYYY-MM-DD (UTC)" }), positive: z.number().int(), neutral: z.number().int(), negative: z.number().int(), unjudged: z.number().int() }),
+              ),
+              verdicts: z.array(
+                z.object({
+                  messageId: z.string().openapi({ description: "crm-service people fact id of the message" }),
+                  occurredAt: z.string().nullable(),
+                  channel: z.string().openapi({ description: "crm-service's channel of the message (e.g. email, whatsapp, linkedin), else its source" }),
+                  sentiment: ClientSentimentEnum,
+                  confidence: z.number(),
+                  model: z.string().openapi({ description: "Jev release that judged it" }),
+                  judgedAt: z.string(),
+                  humanId: z.string(),
+                  companyKey: z.string().openapi({ description: "The relation's company key ('' = company unknown)" }),
+                  leadIds: z.array(z.string()).openapi({ description: "The brand's lead rows the message counts for, oldest first; empty = the client is no lead row" }),
+                }),
+              ),
+            })
+            .openapi("ClientSentimentRead"),
+        },
+      },
+    },
+    400: { description: "Invalid brandId, since or sentiment" },
+    500: { description: "Unreadable (never an empty answer)" },
+    502: { description: "client-service member list unreadable: `error: dependency_unavailable`" },
+  },
+});

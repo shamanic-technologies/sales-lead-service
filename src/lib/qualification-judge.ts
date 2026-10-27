@@ -194,7 +194,7 @@ function readProbabilities<K extends string>(answers: Record<string, Record<stri
 export async function judgeChoice(
   state: unknown,
   q: { instructions: string; options: Record<string, string> },
-  id: SpendIdentity,
+  id: JudgmentPayer,
 ): Promise<{ choice: string; confidence: number; model: string }> {
   const { answers, model } = await ask(state, { answer: { type: "choice", instructions: q.instructions, criteria: q.options } }, id);
   const answer = answers.answer;
