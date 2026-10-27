@@ -73,7 +73,7 @@ import {
   NOT_A_LEAD_REASON,
   PENDING_RETRY_SECONDS,
   RELATIONSHIP_STOP_REASON,
-  blockOfLead,
+  blockOfLeadEveryRelation,
   gateFollowupCandidate,
   type ClaimPendingReason,
   type ClaimRelationshipPolicy,
@@ -864,7 +864,7 @@ export async function pickFollowupCandidate(params: {
         try {
           if (report.policy === "current_client") {
             const [block, facts] = await Promise.all([
-              blockOfLead(params.orgId, candidate.brandId, candidate.leadId),
+              blockOfLeadEveryRelation(params.orgId, candidate.brandId, candidate.leadId),
               loadClientFacts({ orgId: params.orgId, brandId: candidate.brandId, leadId: candidate.leadId, leadCampaignId: candidate.id }),
             ]);
             memberKeys ??= await loadOrgMemberKeys(params.orgId);
