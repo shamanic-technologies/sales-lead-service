@@ -7,11 +7,23 @@ import request from "supertest";
 describe("GET /internal/brands/:brandId/timeline-journeys", () => {
   beforeEach(() => {
     vi.resetModules();
+    held.clear();
+    moved = false;
   });
+
+  /** The cache, faked: a Map, every held answer valid until `moved` is set. */
+  const held = new Map<string, string>();
+  let moved = false;
 
   async function appWith(opts: { gen?: () => AsyncGenerator<unknown[]>; caughtUp?: boolean; offersFail?: boolean }) {
     vi.doMock("../../src/lib/brand-journeys.js", () => ({
       streamBrandJourneys: opts.gen ?? (async function* () {}),
+    }));
+    vi.doMock("../../src/lib/brand-journeys-cache.js", () => ({
+      journeysCacheKey: (o: string, b: string) => `${o}|${b}`,
+      journeysSnapshotXmin: async () => "1",
+      cachedJourneys: async (key: string) => (moved ? null : held.get(key) ?? null),
+      rememberJourneys: (key: string, _o: string, _x: string, body: string) => void held.set(key, body),
     }));
     vi.doMock("../../src/lib/outreach-fact-feed.js", () => ({
       loadOutreachFeedState: async () => ({ cursor: "1", caughtUp: opts.caughtUp ?? true }),
@@ -78,5 +90,34 @@ describe("GET /internal/brands/:brandId/timeline-journeys", () => {
       },
     });
     await expect(get(app)).rejects.toThrow();
+  });
+
+  it("answers an identical read from the held bytes while nothing moved, and reads again once something did", async () => {
+    let reads = 0;
+    const gen = async function* () {
+      reads += 1;
+      yield [{ leadId: `l${reads}`, facts: [{ id: "f1" }], acts: [] }];
+    };
+    const first = await get(await appWith({ gen }));
+    const second = await get(await appWith({ gen }));
+    expect(reads).toBe(1);
+    expect(second.status).toBe(200);
+    expect(second.headers["content-type"]).toBe(first.headers["content-type"]);
+    expect(second.text).toBe(first.text);
+    moved = true;
+    const third = await get(await appWith({ gen }));
+    expect(reads).toBe(2);
+    expect(third.body.journeys[0].leadId).toBe("l2");
+  });
+
+  it("never holds a body that broke mid-stream", async () => {
+    const app = await appWith({
+      gen: async function* () {
+        yield [{ leadId: "l1", facts: [], acts: [] }];
+        throw new Error("db down");
+      },
+    });
+    await expect(get(app)).rejects.toThrow();
+    expect(held.size).toBe(0);
   });
 });
