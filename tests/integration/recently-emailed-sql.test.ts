@@ -70,6 +70,12 @@ describe.skipIf(!hasRealDatabase)("fresh contacts only: who the brand emailed in
     await fact({ type: "email_sent", email: `second-${u}@itest.example`, brandIds: [otherBrandId, brandId], daysAgo: 30 });
 
     await seedLead("neverEmailed", [`never-${u}@itest.example`]);
+
+    // FRESH-2-MONTHS-1027: inside 3 months, either side of 2 months.
+    await seedLead("emailed70DaysAgo", [`seventy-${u}@itest.example`]);
+    await fact({ type: "email_sent", email: `seventy-${u}@itest.example`, brandIds: [brandId], daysAgo: 70 });
+    await seedLead("emailed40DaysAgo", [`forty-${u}@itest.example`]);
+    await fact({ type: "email_sent", email: `forty-${u}@itest.example`, brandIds: [brandId], daysAgo: 40 });
   });
 
   afterAll(async () => {
@@ -91,7 +97,22 @@ describe.skipIf(!hasRealDatabase)("fresh contacts only: who the brand emailed in
       onlyOpened: false,
       secondAddressEmailed: true,
       neverEmailed: false,
+      emailed70DaysAgo: true,
+      emailed40DaysAgo: true,
     });
+  });
+
+  it("the 2-month window hands out a person last emailed 70 days ago and refuses one emailed 40 days ago", async () => {
+    const twoMonths = { window: "2_months" as const, brandIds: [brandId] };
+    expect(await leadRecentlyEmailed(leadIds.emailed70DaysAgo, twoMonths)).toBe(false);
+    expect(await leadRecentlyEmailed(leadIds.emailed40DaysAgo, twoMonths)).toBe(true);
+    expect(await leadRecentlyEmailed(leadIds.emailedLastWeek, twoMonths)).toBe(true);
+    expect(await leadRecentlyEmailed(leadIds.emailedFourMonthsAgo, twoMonths)).toBe(false);
+
+    const asked = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), limit: 50, recentlyEmailed: twoMonths });
+    const ids = new Set(asked.map((c) => c.leadId));
+    expect(ids.has(leadIds.emailed70DaysAgo)).toBe(true);
+    expect(ids.has(leadIds.emailed40DaysAgo)).toBe(false);
   });
 
   it("a pool asked with the window skips them without touching their rows; a pool not asked hands everyone out", async () => {

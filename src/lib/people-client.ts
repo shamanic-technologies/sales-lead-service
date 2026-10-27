@@ -2,6 +2,7 @@ import { messageOf } from "./db-error.js";
 import { HUMAN_SERVICE_URL, HUMAN_SERVICE_API_KEY } from "../config.js";
 import type { EmailPolicy } from "./email-policy.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
+import type { RecentlyEmailedWindow } from "./recently-emailed-sql.js";
 import { isCreditInsufficientError } from "./credit-errors.js";
 
 /**
@@ -244,6 +245,12 @@ export interface ServiceContext {
    * Absent = no key on the wire.
    */
   stepFilter?: StepFilter;
+  /**
+   * The serve's re-contact window (FRESH-2-MONTHS-1027, `excludeEmailedWithin` on buffer/next), sent VERBATIM as
+   * `excludeEmailedWithin` on serve-next, candidates/next and reveal: human-service's per-brand suppression holds a person
+   * for that window (absent = its 3 months). Absent = no key on the wire.
+   */
+  excludeEmailedWithin?: RecentlyEmailedWindow;
 }
 
 /**
@@ -252,13 +259,14 @@ export interface ServiceContext {
  */
 export type StepFilter = Record<string, unknown>;
 
-/** The serve body: what the pipe states (`reachableBy`, `acceptedEmails`, `relationships`, `stepFilter`), else `{}` (today's bytes). */
+/** The serve body: what the pipe states (`reachableBy`, `acceptedEmails`, `relationships`, `stepFilter`, `excludeEmailedWithin`), else `{}` (today's bytes). */
 export function serveBody(ctx: ServiceContext): Record<string, unknown> {
   return {
     ...(ctx.reachableBy && ctx.reachableBy.length > 0 ? { reachableBy: [...ctx.reachableBy] } : {}),
     ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
     ...(ctx.relationships ? { relationships: ctx.relationships } : {}),
     ...(ctx.stepFilter ? { stepFilter: ctx.stepFilter } : {}),
+    ...(ctx.excludeEmailedWithin ? { excludeEmailedWithin: ctx.excludeEmailedWithin } : {}),
   };
 }
 
@@ -454,7 +462,16 @@ export interface RevealResult {
 export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext, timeoutMs?: number): Promise<RevealResult> {
   return callHuman<RevealResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/reveal`,
-    { method: "POST", body: { basis, ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}) }, ctx, timeoutMs },
+    {
+      method: "POST",
+      body: {
+        basis,
+        ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}),
+        ...(ctx.excludeEmailedWithin ? { excludeEmailedWithin: ctx.excludeEmailedWithin } : {}),
+      },
+      ctx,
+      timeoutMs,
+    },
   );
 }
 
