@@ -134,6 +134,56 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
 
     // A lead with no state is absent.
     await newLead("nothing");
+
+    // OUR-FACTORY-OUTCOMES-1027: a client's CRM form from 2024, our first email in 2026, a positive reply after it,
+    // a 2024 CRM meeting judged theirs and a 2026 CRM meeting judged ours by the ledger's rule.
+    const docd = await newLead("docd", `docd-${tag}@example.com`);
+    await db.insert(crmFacts).values({
+      factId: randomUUID(),
+      seq: BigInt(Math.floor(Math.random() * 1e15)),
+      orgId,
+      brandId,
+      personKey: `email:docd-${tag}@example.com`,
+      emails: [`docd-${tag}@example.com`],
+      phones: [],
+      type: "form_submitted",
+      occurredAt: new Date("2024-08-24T10:00:00Z"),
+      dateBasis: "occurred_at",
+      source: "gohighlevel",
+      sourceRef: `ref-${randomUUID()}`,
+      payload: {},
+      raw: { itest: true },
+    });
+    await timeline(docd, "initial_email", "outreach", "2026-02-01T09:00:00Z");
+    await timeline(docd, "interested", "reply", "2026-03-01T09:00:00Z", "positive");
+    await ledger(docd, "meeting_booked", "2024-08-28T10:00:00Z", {
+      causedByOutreach: false,
+      crmEvidence: { rule: { reason: "before_first_delivery", causedByOutreach: false, firstDeliveredAt: "2026-02-01T09:00:00Z" } },
+    });
+    await ledger(docd, "meeting_attended", "2026-03-10T10:00:00Z", {
+      causedByOutreach: true,
+      crmEvidence: { rule: { reason: "after_first_delivery", causedByOutreach: true, firstDeliveredAt: "2026-02-01T09:00:00Z" } },
+    });
+
+    // A WhatsApp pipe's send (no email) is a first touch too: a site session after it is ours.
+    const waTouched = await newLead("waTouched", `watouched-${tag}@example.com`);
+    await db.execute(sql`UPDATE leads_campaigns SET channel_sent_at = '2026-09-02T00:00:00Z' WHERE lead_id = ${waTouched}::uuid`);
+    await db.insert(crmFacts).values({
+      factId: randomUUID(),
+      seq: BigInt(Math.floor(Math.random() * 1e15)),
+      orgId,
+      brandId,
+      personKey: `email:watouched-${tag}@example.com`,
+      emails: [`watouched-${tag}@example.com`],
+      phones: [],
+      type: "website_visit",
+      occurredAt: new Date("2026-09-03T08:00:00Z"),
+      dateBasis: "occurred_at",
+      source: "posthog",
+      sourceRef: `ref-${randomUUID()}`,
+      payload: {},
+      raw: { itest: true },
+    });
   });
 
   afterAll(async () => {
@@ -163,8 +213,8 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
 
   it("3 positive replies then a meeting = one interested at the FIRST reply, one meeting booked", async () => {
     const s = (await walk(100)).get(L.ac)!;
-    expect(s.lead_interested).toEqual({ reachedAt: "2026-10-01T09:00:00.000Z", basis: "positive_reply", impliedBy: null });
-    expect(s.meeting_booked).toEqual({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: null });
+    expect(s.lead_interested).toMatchObject({ reachedAt: "2026-10-01T09:00:00.000Z", basis: "positive_reply", impliedBy: null });
+    expect(s.meeting_booked).toMatchObject({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: null });
     expect(s.meeting_attended).toBeNull();
     expect(s.paid_client).toBeNull();
     expect(s.lead_visited).toBeNull();
@@ -172,35 +222,48 @@ describe.skipIf(!hasRealDatabase)("lead states against a real database", () => {
 
   it("a booking with no reply is interested at the booking; a withdrawn sale is no state", async () => {
     const s = (await walk(100)).get(L.booked)!;
-    expect(s.lead_interested).toEqual({ reachedAt: "2026-10-07T10:00:00.000Z", basis: "meeting_booked", impliedBy: "meeting_booked" });
+    expect(s.lead_interested).toMatchObject({ reachedAt: "2026-10-07T10:00:00.000Z", basis: "meeting_booked", impliedBy: "meeting_booked" });
     expect(s.paid_client).toBeNull();
   });
 
   it("twelve clicks and a site session = ONE visit at the earliest; a click never makes them interested", async () => {
     const s = (await walk(100)).get(L.clicker)!;
-    expect(s.lead_visited).toEqual({ reachedAt: "2026-10-09T08:00:00.000Z", basis: "site_session", impliedBy: null });
+    expect(s.lead_visited).toMatchObject({ reachedAt: "2026-10-09T08:00:00.000Z", basis: "site_session", impliedBy: null });
     expect(s.lead_interested).toBeNull();
   });
 
   it("a personal message judged interest; an undated 'already a customer' reaches the ladder with no date", async () => {
     const m = await walk(100);
-    expect(m.get(L.wa)!.lead_interested).toEqual({ reachedAt: "2026-10-04T12:00:00.000Z", basis: "positive_message", impliedBy: null });
-    expect(m.get(L.already)!.paid_client).toEqual({ reachedAt: null, basis: "sale", impliedBy: null });
-    expect(m.get(L.already)!.lead_interested).toEqual({ reachedAt: null, basis: "sale", impliedBy: "paid_client" });
+    expect(m.get(L.wa)!.lead_interested).toMatchObject({ reachedAt: "2026-10-04T12:00:00.000Z", basis: "positive_message", impliedBy: null });
+    expect(m.get(L.already)!.paid_client).toMatchObject({ reachedAt: null, basis: "sale", impliedBy: null });
+    expect(m.get(L.already)!.lead_interested).toMatchObject({ reachedAt: null, basis: "sale", impliedBy: "paid_client" });
   });
 
   it("not-a-person and state-less leads are absent; a page of 1 walks the same set", async () => {
     const all = await walk(100);
     expect(all.has(L.robot)).toBe(false);
     expect(all.has(L.nothing)).toBe(false);
-    expect([...all.keys()].sort()).toEqual([L.ac, L.booked, L.clicker, L.wa, L.already, L.signedUp].sort());
+    expect([...all.keys()].sort()).toEqual([L.ac, L.booked, L.clicker, L.wa, L.already, L.signedUp, L.docd, L.waTouched].sort());
     const paged = await walk(1);
     expect([...paged.keys()].sort()).toEqual([...all.keys()].sort());
   });
 
+  it("whose win: a 2024 CRM form before our first email stays theirs; the ledger's stored cause rides each state (OUR-FACTORY-OUTCOMES-1027)", async () => {
+    const m = await walk(100);
+    const d = m.get(L.docd)!;
+    expect(d.lead_interested).toMatchObject({ reachedAt: "2024-08-24T10:00:00.000Z", basis: "form_submitted", causedByOutreach: false, causeReason: "before_first_delivery" });
+    expect(d.meeting_booked).toMatchObject({ basis: "meeting_booked", causedByOutreach: false, causeReason: "before_first_delivery" });
+    expect(d.meeting_attended).toMatchObject({ causedByOutreach: true, causeReason: "after_first_delivery" });
+    // Ours by construction; a ledger row the sweep never judged; a site session after a WhatsApp pipe's send.
+    expect(m.get(L.ac)!.lead_interested).toMatchObject({ causedByOutreach: true, causeReason: "our_outreach" });
+    expect(m.get(L.booked)!.meeting_booked).toMatchObject({ causedByOutreach: null, causeReason: "not_judged_yet" });
+    expect(m.get(L.waTouched)!.lead_visited).toMatchObject({ basis: "site_session", causedByOutreach: true, causeReason: "after_first_delivery" });
+    expect(m.get(L.clicker)!.lead_visited).toMatchObject({ basis: "site_session", causedByOutreach: null, causeReason: "never_delivered" });
+  });
+
   it("a signup makes the lead interested at the signup, never visited", async () => {
     const s = (await walk(100)).get(L.signedUp)!;
-    expect(s.lead_interested).toEqual({ reachedAt: "2026-10-06T10:00:00.000Z", basis: "signup", impliedBy: null });
+    expect(s.lead_interested).toMatchObject({ reachedAt: "2026-10-06T10:00:00.000Z", basis: "signup", impliedBy: null });
     expect(s.lead_visited).toBeNull();
   });
 
