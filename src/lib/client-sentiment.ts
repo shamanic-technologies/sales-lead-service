@@ -258,14 +258,19 @@ export async function relationLeads(scope: Scope, clients: readonly ClientRelati
         ${sql.param(clients.map((c) => JSON.stringify(c.emails.map((e) => e.toLowerCase()))))}::text[],
         ${sql.param(clients.map((c) => JSON.stringify(c.phones)))}::text[]
       ) AS r(key, emails, phones)
+    ),
+    -- Two indexed lookups (email lower(value), phone exact value); one OR join scanned the whole table (5.8 s in prod).
+    hits AS (
+      SELECT rel.key, m.lead_id FROM rel CROSS JOIN LATERAL jsonb_array_elements_text(rel.emails::jsonb) AS e(v)
+        JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = e.v
+      UNION
+      SELECT rel.key, m.lead_id FROM rel CROSS JOIN LATERAL jsonb_array_elements_text(rel.phones::jsonb) AS p(v)
+        JOIN lead_contact_methods m ON m.channel = 'phone' AND m.value = p.v
     )
-    SELECT rel.key, array_agg(l.id::text ORDER BY l.created_at, l.id) AS lead_ids
-    FROM rel
-    JOIN lead_contact_methods m ON (m.channel = 'email' AND lower(m.value) IN (SELECT jsonb_array_elements_text(rel.emails::jsonb)))
-                                OR (m.channel = 'phone' AND m.value IN (SELECT jsonb_array_elements_text(rel.phones::jsonb)))
-    JOIN leads l ON l.id = m.lead_id
+    SELECT hits.key, array_agg(l.id::text ORDER BY l.created_at, l.id) AS lead_ids
+    FROM hits JOIN leads l ON l.id = hits.lead_id
     WHERE EXISTS (SELECT 1 FROM lead_followup_dates d WHERE d.lead_id = l.id AND d.org_id = ${scope.orgId} AND d.brand_id = ${scope.brandId})
-    GROUP BY rel.key
+    GROUP BY hits.key
   `)) as unknown as Array<{ key: string; lead_ids: string[] }>;
   for (const r of rows) out.set(r.key, Array.from(new Set(r.lead_ids)));
   return out;
