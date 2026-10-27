@@ -31,6 +31,7 @@ import { subjectKey } from "./relationship-subjects.js";
 import { JUDGED_YES } from "./relationship-tags.js";
 import type { RunSupport } from "./run-tasks.js";
 import { isStaffEmail } from "./staff-identity.js";
+import { upsertTimelineFacts, type TimelineFactRow } from "./timeline-facts.js";
 
 export const CLIENT_SENTIMENTS = ["positive", "neutral", "negative"] as const;
 export type ClientSentiment = (typeof CLIENT_SENTIMENTS)[number];
@@ -83,6 +84,8 @@ export interface ClientRelation {
   humanId: string;
   companyKey: string;
   contactPoints: string[];
+  emails: string[];
+  phones: string[];
 }
 
 type Ts = Date | string;
@@ -115,7 +118,7 @@ export function isClientRelation(
  */
 export async function clientRelations(scope: Scope): Promise<ClientRelation[]> {
   const candidates = (await db.execute(sql`
-    SELECT s.human_id::text AS human_id, s.company_key, s.emails, s.contact_points FROM relationship_subjects s
+    SELECT s.human_id::text AS human_id, s.company_key, s.emails, s.phones, s.contact_points FROM relationship_subjects s
     WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
       AND (
         EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
@@ -125,7 +128,7 @@ export async function clientRelations(scope: Scope): Promise<ClientRelation[]> {
         OR EXISTS (SELECT 1 FROM relationship_judgments j WHERE j.org_id = s.org_id AND j.brand_id = s.brand_id
                 AND j.human_id = s.human_id AND j.company_key = s.company_key AND (j.probabilities->>'customer')::float >= ${JUDGED_YES})
       )
-  `)) as unknown as Array<{ human_id: string; company_key: string; emails: string[]; contact_points: string[] }>;
+  `)) as unknown as Array<{ human_id: string; company_key: string; emails: string[]; phones: string[]; contact_points: string[] }>;
   if (candidates.length === 0) return [];
   const [blocks, members] = await Promise.all([
     loadRelationshipsAt(scope.orgId, scope.brandId, candidates.map((c) => ({ humanId: c.human_id, companyKey: c.company_key }))),
@@ -133,7 +136,7 @@ export async function clientRelations(scope: Scope): Promise<ClientRelation[]> {
   ]);
   return candidates
     .filter((c) => isClientRelation(blocks.get(subjectKey(c.human_id, c.company_key)), c.emails ?? [], members))
-    .map((c) => ({ humanId: c.human_id, companyKey: c.company_key, contactPoints: c.contact_points ?? [] }))
+    .map((c) => ({ humanId: c.human_id, companyKey: c.company_key, contactPoints: c.contact_points ?? [], emails: c.emails ?? [], phones: c.phones ?? [] }))
     .filter((c) => c.contactPoints.length > 0);
 }
 
@@ -240,6 +243,113 @@ export async function judgeClientSentimentOnce(limit = SENTIMENT_PER_TICK): Prom
   return { judged, positive };
 }
 
+/**
+ * The brand's lead rows of each client relation, keyed `subjectKey`: leads registered on the relation's OWN emails or
+ * phones (never the human's other relations) that hold a follow-up date at the brand (every lead of a brand does),
+ * oldest first.
+ */
+export async function relationLeads(scope: Scope, clients: readonly ClientRelation[]): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (clients.length === 0) return out;
+  const rows = (await db.execute(sql`
+    WITH rel AS (
+      SELECT * FROM unnest(
+        ${sql.param(clients.map((c) => subjectKey(c.humanId, c.companyKey)))}::text[],
+        ${sql.param(clients.map((c) => JSON.stringify(c.emails.map((e) => e.toLowerCase()))))}::text[],
+        ${sql.param(clients.map((c) => JSON.stringify(c.phones)))}::text[]
+      ) AS r(key, emails, phones)
+    ),
+    -- Two indexed lookups (email lower(value), phone exact value); one OR join scanned the whole table (5.8 s in prod).
+    hits AS (
+      SELECT rel.key, m.lead_id FROM rel CROSS JOIN LATERAL jsonb_array_elements_text(rel.emails::jsonb) AS e(v)
+        JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = e.v
+      UNION
+      SELECT rel.key, m.lead_id FROM rel CROSS JOIN LATERAL jsonb_array_elements_text(rel.phones::jsonb) AS p(v)
+        JOIN lead_contact_methods m ON m.channel = 'phone' AND m.value = p.v
+    )
+    SELECT hits.key, array_agg(l.id::text ORDER BY l.created_at, l.id) AS lead_ids
+    FROM hits JOIN leads l ON l.id = hits.lead_id
+    WHERE EXISTS (SELECT 1 FROM lead_followup_dates d WHERE d.lead_id = l.id AND d.org_id = ${scope.orgId} AND d.brand_id = ${scope.brandId})
+    GROUP BY hits.key
+  `)) as unknown as Array<{ key: string; lead_ids: string[] }>;
+  for (const r of rows) out.set(r.key, Array.from(new Set(r.lead_ids)));
+  return out;
+}
+
+/** The timeline label of a positive client message: the catalogue step key features-service counts ("Client Satisfied"). */
+export const CLIENT_SATISFIED_LABEL = "client_satisfied" as const;
+
+/** PURE: one timeline row per positive verdict x lead row of its writer. */
+export function clientSatisfiedRows(scope: Scope, verdicts: readonly ClientMessageVerdict[]): TimelineFactRow[] {
+  const rows: TimelineFactRow[] = [];
+  for (const v of verdicts) {
+    if (v.sentiment !== "positive") continue;
+    for (const leadId of v.leadIds) {
+      rows.push({
+        id: `${CLIENT_SATISFIED_LABEL}:${v.messageId}:${leadId}`,
+        org_id: scope.orgId,
+        brand_id: scope.brandId,
+        offer_id: null,
+        lead_id: leadId,
+        campaign_id: null,
+        occurred_at: v.occurredAt,
+        label: CLIENT_SATISFIED_LABEL,
+        source: "client_message",
+        source_ref: v.messageId,
+        attributable: null,
+        attribution_basis: null,
+        url: null,
+        detail: { channel: v.channel, confidence: v.confidence, model: v.model },
+        withdrawn_at: null,
+      });
+    }
+  }
+  return rows;
+}
+
+/**
+ * Write the brand's `client_satisfied` timeline facts from the verdicts as they read NOW (idempotent), and withdraw
+ * every earlier one no longer backed (the writer stopped being a client, the message was withdrawn).
+ */
+export async function syncClientSatisfiedFacts(scope: Scope): Promise<{ facts: number; written: number; withdrawn: number }> {
+  const read = await readClientSentiment(scope, { sentiment: "positive" });
+  const rows = clientSatisfiedRows(scope, read.verdicts);
+  const written = await upsertTimelineFacts(rows);
+  const stale = (await db.execute(sql`
+    UPDATE lead_timeline_facts SET withdrawn_at = now(), updated_at = now()
+    WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND label = ${CLIENT_SATISFIED_LABEL} AND withdrawn_at IS NULL
+      AND id <> ALL(${sql.param(rows.map((r) => r.id))}::text[])
+    RETURNING 1
+  `)) as unknown as unknown[];
+  return { facts: rows.length, written, withdrawn: stale.length };
+}
+
+/** Every scope to keep in step: the client scopes, and any scope still holding a live `client_satisfied` fact. */
+async function factScopes(): Promise<Scope[]> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT org_id, brand_id FROM lead_timeline_facts WHERE label = ${CLIENT_SATISFIED_LABEL} AND withdrawn_at IS NULL
+  `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+  const all = new Map<string, Scope>();
+  for (const s of [...(await clientScopes()), ...rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }))]) all.set(`${s.orgId}|${s.brandId}`, s);
+  return [...all.values()];
+}
+
+/** One pass over every scope's facts; a scope that fails is logged and keeps its facts as they were. */
+export async function syncAllClientSatisfiedFacts(): Promise<{ written: number; withdrawn: number }> {
+  let written = 0;
+  let withdrawn = 0;
+  for (const scope of await factScopes()) {
+    try {
+      const r = await syncClientSatisfiedFacts(scope);
+      written += r.written;
+      withdrawn += r.withdrawn;
+    } catch (err) {
+      console.error(`[lead-service] client satisfied facts: sync failed for org ${scope.orgId} brand ${scope.brandId}, its facts stay as they were:`, err);
+    }
+  }
+  return { written, withdrawn };
+}
+
 export function startClientSentimentWorker(): void {
   let running = false;
   const tick = async () => {
@@ -247,7 +357,10 @@ export function startClientSentimentWorker(): void {
     running = true;
     try {
       const r = await judgeClientSentimentOnce();
-      if (r.judged > 0) console.log(`[lead-service] client sentiment: judged=${r.judged} positive=${r.positive}`);
+      const f = await syncAllClientSatisfiedFacts();
+      if (r.judged > 0 || f.written > 0 || f.withdrawn > 0) {
+        console.log(`[lead-service] client sentiment: judged=${r.judged} positive=${r.positive} factsWritten=${f.written} factsWithdrawn=${f.withdrawn}`);
+      }
     } catch (err) {
       console.error("[lead-service] client sentiment pass failed:", err);
     } finally {
@@ -269,7 +382,7 @@ export interface ClientMessageVerdict {
   judgedAt: string;
   humanId: string;
   companyKey: string;
-  /** The brand's lead rows the message counts for (lead-service ids), oldest first; empty = the client is no lead row. */
+  /** The brand's lead rows of the writer's relation (registered on its emails or phones, dated at the brand), oldest first; empty = no lead row. */
   leadIds: string[];
 }
 
@@ -330,9 +443,7 @@ export async function readClientSentiment(
   if (points.length === 0) return empty;
   const rows = (await db.execute(sql`
     SELECT f.fact_id, f.contact_point, f.source, f.payload->>'channel' AS channel, f.occurred_at AS at,
-           j.sentiment, j.confidence, j.model, j.judged_at,
-           COALESCE((SELECT array_agg(a.lead_id::text ORDER BY l.created_at, a.lead_id) FROM lead_crm_acts a JOIN leads l ON l.id = a.lead_id
-                     WHERE a.fact_id = f.fact_id AND a.org_id = f.org_id AND a.brand_id = f.brand_id), '{}') AS lead_ids
+           j.sentiment, j.confidence, j.model, j.judged_at
     FROM crm_facts f
     LEFT JOIN client_sentiment_judgments j ON j.fact_id = f.fact_id
     WHERE ${clientMessagesWhere(scope, points)}
@@ -348,8 +459,8 @@ export async function readClientSentiment(
     confidence: number | null;
     model: string | null;
     judged_at: Ts | null;
-    lead_ids: string[];
   }>;
+  const leadsOf = await relationLeads(scope, clients);
   const ownerOf = new Map<string, ClientRelation>();
   for (const c of clients) for (const p of c.contactPoints) if (!ownerOf.has(p)) ownerOf.set(p, c);
   const out: ClientSentimentRead = { ...empty, counts: { positive: 0, neutral: 0, negative: 0 }, days: [], verdicts: [] };
@@ -378,7 +489,7 @@ export async function readClientSentiment(
       judgedAt: toIsoTimestamp(r.judged_at!)!,
       humanId: owner.humanId,
       companyKey: owner.companyKey,
-      leadIds: r.lead_ids ?? [],
+      leadIds: leadsOf.get(subjectKey(owner.humanId, owner.companyKey)) ?? [],
     });
   }
   out.days = [...days.values()].sort((a, b) => (a.day < b.day ? -1 : 1));
