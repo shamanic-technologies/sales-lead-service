@@ -7528,7 +7528,8 @@
               "meeting_booked",
               "meeting_attended",
               "paid_client",
-              "industry_update_video"
+              "industry_update_video",
+              "client_satisfied"
             ],
             "description": "What this fact IS, independent of the campaign and the channel it came by. Sends (initial_email, followup, bounced), reactions (opened, website_visit, link_click, unsubscribed, tagged_as_spam), answers (interested, not_interested, question, hand_over = a referral or another proposal, wrong_contact, opt_out, auto_reply = a machine answered, reply = judged but placed nowhere else) and progress (signup, form_filled, meeting_booked, meeting_attended, paid_client). A person stating a step will never happen is not_interested.",
             "example": "not_interested"
@@ -7543,7 +7544,8 @@
               "crm",
               "reply_statement",
               "never",
-              "social"
+              "social",
+              "client_message"
             ],
             "description": "reply: a reply and the verdict the outreach provider holds for it. tracker: the brand's website tag. manual: a person stated it. crm: the customer's own CRM. reply_statement: read off the prospect's reply (\"already a client\"). never: a person stated a step will never happen."
           },
