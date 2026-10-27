@@ -105,12 +105,13 @@ describe("readClientSentiment", () => {
   it("counts judged and unjudged per day, lists verdicts, never judges", async () => {
     blocks.set(`${H}|`, { tags: ["customer"] });
     dbRows.push(
-      [{ human_id: H, company_key: "", emails: ["c@x.test"], contact_points: ["cp1"] }],
+      [{ human_id: H, company_key: "", emails: ["c@x.test"], phones: [], contact_points: ["cp1"] }],
       [
-        { fact_id: "f1", contact_point: "cp1", source: "matrix", channel: "whatsapp", at: "2026-10-26 10:00:00+00", sentiment: "positive", confidence: 0.9, model: "jev-1.13.0", judged_at: "2026-10-27 10:00:00+00", lead_ids: ["L1"] },
-        { fact_id: "f2", contact_point: "cp1", source: "gmail", channel: null, at: "2026-10-26 12:00:00+00", sentiment: "negative", confidence: 0.8, model: "jev-1.13.0", judged_at: "2026-10-27 10:00:00+00", lead_ids: [] },
-        { fact_id: "f3", contact_point: "cp1", source: "matrix", channel: "whatsapp", at: "2026-10-27 09:00:00+00", sentiment: null, confidence: null, model: null, judged_at: null, lead_ids: [] },
+        { fact_id: "f1", contact_point: "cp1", source: "matrix", channel: "whatsapp", at: "2026-10-26 10:00:00+00", sentiment: "positive", confidence: 0.9, model: "jev-1.13.0", judged_at: "2026-10-27 10:00:00+00" },
+        { fact_id: "f2", contact_point: "cp1", source: "gmail", channel: null, at: "2026-10-26 12:00:00+00", sentiment: "negative", confidence: 0.8, model: "jev-1.13.0", judged_at: "2026-10-27 10:00:00+00" },
+        { fact_id: "f3", contact_point: "cp1", source: "matrix", channel: "whatsapp", at: "2026-10-27 09:00:00+00", sentiment: null, confidence: null, model: null, judged_at: null },
       ],
+      [{ key: `${H}|`, lead_ids: ["L1", "L1"] }],
     );
     const r = await cs.readClientSentiment(SCOPE, { sentiment: "positive" });
     expect(sent).toHaveLength(0);
@@ -130,5 +131,28 @@ describe("readClientSentiment", () => {
     dbRows.push([]);
     const r = await cs.readClientSentiment(SCOPE);
     expect(r).toMatchObject({ messages: 0, judged: 0, unjudged: 0, judgedThrough: null, verdicts: [] });
+  });
+});
+
+describe("clientSatisfiedRows", () => {
+  const v = (over: Partial<import("../../src/lib/client-sentiment.js").ClientMessageVerdict>) => ({
+    messageId: "f1",
+    occurredAt: "2026-10-26T10:00:00.000Z",
+    channel: "whatsapp",
+    sentiment: "positive" as const,
+    confidence: 0.9,
+    model: "jev-1.13.0",
+    judgedAt: "2026-10-27T10:00:00.000Z",
+    humanId: H,
+    companyKey: "",
+    leadIds: ["L1", "L2"],
+    ...over,
+  });
+  it("one client_satisfied fact per positive message x lead row, at the message time, keyed on the message", () => {
+    const rows = cs.clientSatisfiedRows(SCOPE, [v({}), v({ messageId: "f2", sentiment: "neutral" }), v({ messageId: "f3", leadIds: [] })]);
+    expect(rows.map((r) => [r.id, r.lead_id, r.label, r.source, r.source_ref, r.occurred_at, r.campaign_id])).toEqual([
+      ["client_satisfied:f1:L1", "L1", "client_satisfied", "client_message", "f1", "2026-10-26T10:00:00.000Z", null],
+      ["client_satisfied:f1:L2", "L2", "client_satisfied", "client_message", "f1", "2026-10-26T10:00:00.000Z", null],
+    ]);
   });
 });

@@ -72,6 +72,9 @@ export const TIMELINE_ITEM_LABELS = [
   // How the person reacted to a social post of ours (social-service names the step the post is: its
   // label IS the funnel step key, e.g. the daily industry update video).
   "industry_update_video",
+  // How a CLIENT feels: a message a client wrote the brand that Jev judged positive (client-sentiment.ts). The label
+  // IS the catalogue step key ("Client Satisfied"): one fact per message.
+  "client_satisfied",
 ] as const;
 export type TimelineItemLabel = (typeof TIMELINE_ITEM_LABELS)[number];
 
@@ -80,6 +83,8 @@ export const TIMELINE_SOURCES = [
   "outreach", "reply", "tracker", "manual", "crm", "reply_statement", "never",
   /** social-service: a like, comment, repost or quote of one of our posts. */
   "social",
+  /** client-sentiment.ts: a message a client wrote the brand (crm-service's people fact feed), with Jev's verdict. */
+  "client_message",
 ] as const;
 export type TimelineSource = (typeof TIMELINE_SOURCES)[number];
 
