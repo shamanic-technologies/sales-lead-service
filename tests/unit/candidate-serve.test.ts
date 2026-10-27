@@ -37,8 +37,8 @@ vi.mock("../../src/db/index.js", () => ({
   },
 }));
 
-const { serveThroughCandidates, decisionBasis, screenSnapshot, SCREEN_QUESTION } = await import("../../src/lib/candidate-serve.js");
-const { CandidatesUnsupportedError } = await import("../../src/lib/people-client.js");
+const { serveThroughCandidates, decisionBasis, screenSnapshot, SCREEN_QUESTION, CANDIDATE_CALL_TIMEOUT_MS } = await import("../../src/lib/candidate-serve.js");
+const { CandidatesUnsupportedError, HumanServiceStalledError } = await import("../../src/lib/people-client.js");
 
 const ctx = { orgId: "org-1", userId: "user-1", runId: "run-1", brandId: "brand-1", campaignId: "camp-1" };
 const target = { text: "Chiropractors in Ohio", field: "target_text" };
@@ -65,6 +65,42 @@ beforeEach(() => {
 });
 
 describe("serveThroughCandidates", () => {
+  // DOCDINNERS-SERVE-TIMEOUT-1027: a reveal that never answered held the run for the caller's whole 5 minutes.
+  it("bounds every candidate call on its own, and never spends past the caller's walk deadline", async () => {
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target: null });
+    revealCandidate.mockResolvedValueOnce({ status: "served", person, replayed: false });
+    await serveThroughCandidates("aud-1", ctx, "offer-a");
+    expect(nextCandidate).toHaveBeenCalledWith("aud-1", ctx, CANDIDATE_CALL_TIMEOUT_MS);
+    expect(revealCandidate).toHaveBeenCalledWith("aud-1", "c1", expect.any(String), ctx, CANDIDATE_CALL_TIMEOUT_MS);
+    expect(CANDIDATE_CALL_TIMEOUT_MS).toBeLessThan(300_000);
+
+    nextCandidate.mockClear();
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a", undefined, Date.now() - 1)).toEqual({ status: "pending", person: null });
+    expect(nextCandidate).not.toHaveBeenCalled();
+  });
+
+  it("a reveal that never answers declines that candidate and reveals the next one, so the audience is not blocked by it", async () => {
+    nextCandidate
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("stuck"), target: null })
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("c2"), target: null });
+    revealCandidate
+      .mockRejectedValueOnce(new HumanServiceStalledError("/orgs/audiences/aud-1/candidates/stuck/reveal", CANDIDATE_CALL_TIMEOUT_MS))
+      .mockResolvedValueOnce({ status: "served", person, replayed: false });
+    declineCandidate.mockResolvedValueOnce(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual(expect.objectContaining({ status: "served", person }));
+    expect(declineCandidate).toHaveBeenCalledWith("aud-1", "stuck", expect.stringMatching(/^reveal_stalled after 90000ms/), expect.any(String), ctx, CANDIDATE_CALL_TIMEOUT_MS);
+  });
+
+  it("a stalled reveal whose decline fails too hands the stall to the caller", async () => {
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("stuck"), target: null });
+    revealCandidate.mockRejectedValueOnce(new HumanServiceStalledError("/reveal", CANDIDATE_CALL_TIMEOUT_MS));
+    declineCandidate.mockRejectedValueOnce(new Error("decline 500"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(serveThroughCandidates("aud-1", ctx, "offer-a")).rejects.toBeInstanceOf(HumanServiceStalledError);
+  });
+
   it("an audience not served through candidates hands back to serve-next", async () => {
     nextCandidate.mockRejectedValue(new CandidatesUnsupportedError("422"));
     expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toBeNull();
@@ -94,8 +130,8 @@ describe("serveThroughCandidates", () => {
     expect(state).toEqual({ targetAudience: target.text, candidate: screenSnapshot(cand("c0")) });
     expect(questions).toEqual({ answer: { instructions: SCREEN_QUESTION } });
     expect((state as { candidate: { company: Record<string, unknown> } }).candidate.company.domain).toBeUndefined();
-    expect(declineCandidate).toHaveBeenCalledWith("aud-1", "c0", expect.stringMatching(/^screen_rejected P\(yes\)=0\.200/), decisionBasis([]), ctx);
-    expect(revealCandidate).toHaveBeenCalledWith("aud-1", "c1", decisionBasis([]), ctx);
+    expect(declineCandidate).toHaveBeenCalledWith("aud-1", "c0", expect.stringMatching(/^screen_rejected P\(yes\)=0\.200/), decisionBasis([]), ctx, CANDIDATE_CALL_TIMEOUT_MS);
+    expect(revealCandidate).toHaveBeenCalledWith("aud-1", "c1", decisionBasis([]), ctx, CANDIDATE_CALL_TIMEOUT_MS);
     expect(inserted.map((v) => (v as { verdict: string }).verdict)).toEqual(["reject", "pass"]);
   });
 
@@ -129,7 +165,7 @@ describe("serveThroughCandidates", () => {
     expect(r?.status).toBe("served");
     const basis = decisionBasis([mustPass as never]);
     expect(basis).not.toBe(decisionBasis([]));
-    expect(declineCandidate).toHaveBeenCalledWith("aud-1", "c0", "criterion_failed:crit-1", basis, ctx);
+    expect(declineCandidate).toHaveBeenCalledWith("aud-1", "c0", "criterion_failed:crit-1", basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
     // c1: the check could not answer -> revealed (not_served), c2: no domain -> not checked, revealed.
     expect(revealCandidate.mock.calls.map((c) => c[1])).toEqual(["c1", "c2"]);
     expect(mustPassCriteria).toHaveBeenCalledWith("org-1", "brand-1", "offer-a");

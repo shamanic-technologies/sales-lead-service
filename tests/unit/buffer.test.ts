@@ -9,6 +9,7 @@ vi.mock("../../src/lib/serve-identity.js", () => ({ resolveServedIdentity: vi.fn
 
 vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
+  HumanServiceStalledError: class HumanServiceStalledError extends Error {},
 }));
 
 const getCurrentGoal = vi.fn();

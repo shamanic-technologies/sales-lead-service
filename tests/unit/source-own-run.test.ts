@@ -6,13 +6,16 @@ import type { Person } from "../../src/lib/people-client.js";
 const serveNext = vi.fn();
 // The candidate path (qualify before paying) has its own suite: tests/unit/candidate-serve.test.ts.
 // Here every audience answers "not served through candidates", so pullNext uses serve-next.
-vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: vi.fn(async () => null) }));
+const serveThroughCandidates = vi.fn(async (..._a: unknown[]): Promise<unknown> => null);
+vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: (...a: unknown[]) => serveThroughCandidates(...a) }));
 vi.mock("../../src/lib/brand-journalists.js", () => ({ leadIsJournalist: vi.fn(async () => false) }));
 vi.mock("../../src/lib/serve-identity.js", () => ({ resolveServedIdentity: vi.fn(async () => null) }));
 
+const { HumanServiceStalledError } = vi.hoisted(() => ({ HumanServiceStalledError: class HumanServiceStalledError extends Error {} }));
 vi.mock("../../src/lib/people-client.js", () => ({
   serveNext: (...args: unknown[]) => serveNext(...args),
   isAudienceNotServeableError: (e: unknown) => e instanceof Error && e.message === "not serveable",
+  HumanServiceStalledError,
 }));
 
 const claimStockedLead = vi.fn();
@@ -101,7 +104,8 @@ vi.mock("../../src/db/schema.js", () => ({
   leadsCampaigns: { id: "leads_campaigns.id" },
 }));
 
-import { pullNext } from "../../src/lib/buffer.js";
+import { FIND_SERVE_NEXT_TIMEOUT_MS, FIND_WALK_BUDGET_MS, pullNext } from "../../src/lib/buffer.js";
+const CANDIDATE_CALL_TIMEOUT_MS = 90_000;
 import { isAudienceExhaustedReason } from "../../src/lib/serve-reasons.js";
 
 const person: Person = {
@@ -181,8 +185,8 @@ describe("pullNext find mode (a source unit's own run)", () => {
 
     expect(result.found).toBe(true);
     expect(result.lead?.audienceId).toBe("aud-2");
-    expect(serveNext).toHaveBeenNthCalledWith(1, "aud-1", expect.objectContaining({ audienceId: "aud-1", campaignId: UNIT, featureSlug: "sourcing-apollo-cold-filters" }));
-    expect(serveNext).toHaveBeenNthCalledWith(2, "aud-2", expect.objectContaining({ audienceId: "aud-2", campaignId: UNIT }));
+    expect(serveNext).toHaveBeenNthCalledWith(1, "aud-1", expect.objectContaining({ audienceId: "aud-1", campaignId: UNIT, featureSlug: "sourcing-apollo-cold-filters" }), FIND_SERVE_NEXT_TIMEOUT_MS);
+    expect(serveNext).toHaveBeenNthCalledWith(2, "aud-2", expect.objectContaining({ audienceId: "aud-2", campaignId: UNIT }), FIND_SERVE_NEXT_TIMEOUT_MS);
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({ campaignId: UNIT, status: "served", statusReason: "source_found", audienceId: "aud-2", featureSlug: "sourcing-apollo-cold-filters" }),
     );
@@ -247,10 +251,61 @@ describe("pullNext find mode (a source unit's own run)", () => {
     expect(result.lead?.audienceId).toBe("aud-2");
   });
 
-  it("an unfinished look stops the walk: serve_timed_out", async () => {
-    serveNext.mockResolvedValueOnce({ status: "pending" });
+  it("an unfinished look moves the walk to the next audience; nobody served = serve_timed_out, never exhaustion", async () => {
+    serveNext.mockResolvedValueOnce({ status: "pending" }).mockResolvedValueOnce({ status: "served", person });
+    const served = await pullNext(findParams(["aud-1", "aud-2"]));
+    expect(served.found).toBe(true);
+    expect(served.lead?.audienceId).toBe("aud-2");
+
+    serveNext.mockReset();
+    serveNext.mockResolvedValueOnce({ status: "pending" }).mockResolvedValueOnce({ status: "exhausted" });
     await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "serve_timed_out" });
+    // The pending audience is not recorded as having answered nobody.
+    expect(recordEmptyAnswer).toHaveBeenCalledTimes(1);
+    expect(recordEmptyAnswer).toHaveBeenCalledWith(expect.objectContaining({ audienceId: "aud-2", reason: "exhausted" }));
+  });
+
+  // DOCDINNERS-SERVE-TIMEOUT-1027: one reveal never answered, the caller left after 300s, nothing was recorded, and
+  // every next run asked the same audience first again (39 runs in a row, zero leads).
+  it("an audience whose human-service call never answers is recorded `stalled` and the walk serves from the next audience in the same run", async () => {
+    serveThroughCandidates.mockRejectedValueOnce(new HumanServiceStalledError("human-service did not answer reveal within 90000ms"));
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+
+    const result = await pullNext(findParams(["aud-stuck", "aud-2"]));
+
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-2");
+    expect(recordEmptyAnswer).toHaveBeenCalledWith(expect.objectContaining({ sourceCampaignId: UNIT, audienceId: "aud-stuck", reason: "stalled" }));
+    // Every candidate call of the walk is bounded by the walk's own deadline, well inside the caller's 5 minutes.
+    const walkDeadline = serveThroughCandidates.mock.calls[0][4] as number;
+    expect(walkDeadline - Date.now()).toBeLessThanOrEqual(FIND_WALK_BUDGET_MS);
+    expect(serveNext).toHaveBeenCalledWith("aud-2", expect.anything(), FIND_SERVE_NEXT_TIMEOUT_MS);
+    expect(FIND_WALK_BUDGET_MS + Math.max(CANDIDATE_CALL_TIMEOUT_MS, FIND_SERVE_NEXT_TIMEOUT_MS)).toBeLessThan(300_000);
+  });
+
+  it("every audience stalled = serve_timed_out (never exhaustion), each one recorded so the next run starts elsewhere", async () => {
+    serveThroughCandidates.mockRejectedValue(new HumanServiceStalledError("never answered"));
+    await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "serve_timed_out" });
+    expect(recordEmptyAnswer).toHaveBeenCalledTimes(2);
+    serveThroughCandidates.mockReset();
+    serveThroughCandidates.mockResolvedValue(null);
+  });
+
+  it("past the walk budget no new audience is started: serve_timed_out, the audiences not asked stay unrecorded", async () => {
+    const realNow = Date.now;
+    let now = realNow();
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    serveNext.mockImplementationOnce(async () => {
+      now += FIND_WALK_BUDGET_MS + 1;
+      return { status: "exhausted" };
+    });
+    try {
+      await expect(pullNext(findParams(["aud-1", "aud-2", "aud-3"]))).resolves.toEqual({ found: false, reason: "serve_timed_out" });
+    } finally {
+      vi.mocked(Date.now).mockRestore();
+    }
     expect(serveNext).toHaveBeenCalledTimes(1);
+    expect(recordEmptyAnswer).toHaveBeenCalledTimes(1);
   });
 
   it("no audience of this source: no_audience, nothing bought", async () => {
