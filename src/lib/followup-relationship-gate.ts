@@ -16,6 +16,10 @@
  *  - refuse:  a tag other than prospect is yes OR unsure (`not_a_lead`). FINAL for that due row: the row is
  *             stopped (`followup_stopped_reason = relationship_not_a_lead`) so the queue never offers it again;
  *             a later `scheduled` (they write again) re-enters it and the claim decides again.
+ *    A human with several relations at the brand (PERSON-RELATIONS-1017: a gmail address and a work address are
+ *    two Unibox rows) is refused when ANY relation holds such a tag (DOCDINNERS-RELATIONSHIP-PENDING-1028): the
+ *    per-human block shows the latest-active relation's tags while its policy is AND-ed over every relation, so
+ *    reading the tags of one relation alone left a client (customer on their other relation) "pending" forever.
  *  - pending: we cannot say yet, so nobody is answered AND nothing is settled; the row stays due and the next
  *             claim asks again. Never "treat as a lead": no human id yet (`human_unknown`), a CRM fact names the
  *             address but crm-service has not tagged the person yet (`relationship_not_built`; tagged and not
@@ -33,7 +37,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { closePlatformRun, createPlatformRun } from "./runs-client.js";
 import { judgeSubject } from "./relationship-judge.js";
-import { EMPTY_RELATIONSHIP, loadRelationships, recomputePolicy, type RelationshipBlock } from "./relationship-read.js";
+import { EMPTY_RELATIONSHIP, loadRelationships, loadRelationshipsAt, recomputePolicy, type RelationshipBlock } from "./relationship-read.js";
 import { toSubject } from "./relationship-subjects.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
@@ -88,16 +92,19 @@ function pending(reason: ClaimPendingReason): Extract<ClaimGateVerdict, { kind: 
 
 /**
  * The verdict for one due person under `pure_prospect`. `knownToCrm` = a live CRM fact of the brand carries the
- * claim's address (only asked when the person is not a subject yet).
+ * claim's address (only asked when the person is not a subject yet). `relations` = the block of EACH relation of the
+ * human at the brand (`loadRelationshipsAt`), read alongside the per-human `block`: a tag or an unjudged subject on
+ * any of them decides, exactly as the AND-ed policy does.
  */
-export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean): ClaimGateVerdict {
+export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean, relations: readonly RelationshipBlock[] = []): ClaimGateVerdict {
   if (!block.humanId) return pending("human_unknown");
-  const tags = block.tags.filter((t) => PURE_PROSPECT_EXCLUDED.includes(t));
-  const unsureTags = block.unsureTags.filter((t) => PURE_PROSPECT_EXCLUDED.includes(t));
-  // A tag stated, evidenced or judged (sure or not) that is not prospect: whatever else is unknown, not a lead.
+  const all = [block, ...relations];
+  const tags = excludedIn(all.flatMap((b) => b.tags));
+  const unsureTags = excludedIn(all.flatMap((b) => b.unsureTags)).filter((t) => !tags.includes(t));
+  // A tag stated, evidenced or judged (sure or not) that is not prospect, on any relation: whatever else is unknown, not a lead.
   if (tags.length > 0 || unsureTags.length > 0) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
   // The judge (reading the brand's offers) or crm-service says they are not the brand's lead (LEADS-JUDGE-BRAND-1021).
-  if (block.notBrandLead) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
+  if (all.some((b) => b.notBrandLead)) return { kind: "refuse", reason: NOT_A_LEAD_REASON, tags, unsureTags };
   if (block.policies.pure_prospect) {
     // A non-subject is a pure prospect by definition, unless a source of the org knows them: then crm-service's
     // connection tags decide (PROFESSIONAL-LEADS-1017). Not tagged yet = "we do not know", never "a stranger";
@@ -108,8 +115,23 @@ export function decideClaimGate(block: RelationshipBlock, knownToCrm: boolean): 
     }
     return { kind: "admit" };
   }
-  if (block.subject && block.judgedAt === null) return { kind: "judge" };
+  if (all.some((b) => b.subject && b.judgedAt === null)) return { kind: "judge" };
   return pending("same_person_question_open");
+}
+
+function excludedIn(tags: readonly RelationshipTag[]): RelationshipTag[] {
+  return PURE_PROSPECT_EXCLUDED.filter((t) => tags.includes(t));
+}
+
+/** The block of each relation (human x company) of this human at the brand; none when they are no subject. */
+async function relationBlocksOf(orgId: string, brandId: string, block: RelationshipBlock): Promise<RelationshipBlock[]> {
+  if (!block.subject || !block.humanId) return [];
+  const rows = (await db.execute(sql`
+    SELECT company_key FROM relationship_subjects WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ${block.humanId}::uuid
+  `)) as unknown as Array<{ company_key: string }>;
+  if (rows.length < 2) return [];
+  const keys = rows.map((r) => ({ humanId: block.humanId!, companyKey: r.company_key }));
+  return Array.from((await loadRelationshipsAt(orgId, brandId, keys)).values());
 }
 
 /**
@@ -155,6 +177,21 @@ export async function blockOfLead(orgId: string, brandId: string, leadId: string
   const h = rows[0]?.h ?? null;
   if (!h) return EMPTY_RELATIONSHIP;
   return (await loadRelationships(orgId, brandId, [h])).get(h) ?? { ...EMPTY_RELATIONSHIP, humanId: h };
+}
+
+/**
+ * The per-human block with the tags of EVERY relation of the human at the brand (a sure tag on one relation wins over
+ * the same tag unsure on another): what a claim gate reading tags off the block must see (`current_client`'s team and
+ * personal refusals), since the block alone shows the latest-active relation's tags (DOCDINNERS-RELATIONSHIP-PENDING-1028).
+ */
+export async function blockOfLeadEveryRelation(orgId: string, brandId: string, leadId: string): Promise<RelationshipBlock> {
+  const block = await blockOfLead(orgId, brandId, leadId);
+  const relations = await relationBlocksOf(orgId, brandId, block);
+  if (relations.length === 0) return block;
+  const all = [block, ...relations];
+  const tags = Array.from(new Set(all.flatMap((b) => b.tags)));
+  const unsureTags = Array.from(new Set(all.flatMap((b) => b.unsureTags))).filter((t) => !tags.includes(t));
+  return { ...block, tags, unsureTags };
 }
 
 /** Judges what one claim may still afford, and the platform run they hang from (opened on first use). */
@@ -212,13 +249,17 @@ export async function gateFollowupCandidate(p: {
   let block = await blockOfLead(p.orgId, p.brandId, p.leadId);
   const needsCrm = block.humanId !== null && !block.subject;
   const age = needsCrm ? await crmFactAge(p.orgId, p.brandId, p.email, p.phone ?? null) : null;
-  let verdict = decideClaimGate(block, age !== null);
+  let verdict = decideClaimGate(block, age !== null, await relationBlocksOf(p.orgId, p.brandId, block));
   if (verdict.kind === "judge") {
     const judged = await judgeOnDemand(p.orgId, p.brandId, block.humanId!, p.budget);
     if (!judged) return pending("relationship_not_judged");
     block = await blockOfLead(p.orgId, p.brandId, p.leadId);
-    verdict = decideClaimGate(block, age !== null);
+    verdict = decideClaimGate(block, age !== null, await relationBlocksOf(p.orgId, p.brandId, block));
     if (verdict.kind === "judge") return pending("relationship_not_judged");
+  }
+  if (verdict.kind === "pending" && verdict.reason === "same_person_question_open") {
+    // Every way the AND-ed policy can refuse is read above; reaching here means a new one was added without its verdict.
+    console.error(`[lead-service] followup claim: lead ${p.leadId} (human ${block.humanId}) held by pure_prospect with no tag, verdict or unjudged relation to explain it`);
   }
   if (verdict.kind === "pending" && verdict.reason === "relationship_not_built" && age !== null && age > NOT_BUILT_LOUD_AFTER_MS) {
     console.error(

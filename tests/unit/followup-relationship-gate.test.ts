@@ -36,11 +36,45 @@ describe("decideClaimGate (pure_prospect)", () => {
     expect(decideClaimGate(block({ subject: true, judgedAt: null }), false)).toEqual({ kind: "judge" });
   });
 
-  it("a judged subject with no excluded tag held back by the policy = an open same-person question", () => {
+  it("a judged subject with no excluded tag on any relation, held back by the policy, stays pending (logged loud)", () => {
     expect(decideClaimGate(block({ subject: true, judgedAt: "2026-10-15T00:00:00Z" }), false)).toMatchObject({
       kind: "pending",
       reason: "same_person_question_open",
     });
+  });
+
+  // DOCDINNERS-RELATIONSHIP-PENDING-1028: dev@ at a client writes from their work address (relation at the company,
+  // judged prospect unsure) and is a customer on their gmail relation; the per-human block shows the work relation's
+  // tags and the AND-ed policy false. Before: pending forever, the occurrence dropped after 6 redeliveries.
+  it("a customer on ANY relation refuses final, even when the latest-active relation shows no excluded tag", () => {
+    const judged = "2026-10-27T17:18:54Z";
+    const work = block({ subject: true, judgedAt: judged, unsureTags: ["prospect"], policies: { business_only: true, pure_prospect: true } });
+    const gmail = block({ subject: true, judgedAt: judged, tags: ["customer"], unsureTags: ["prospect"], policies: { business_only: true, pure_prospect: false } });
+    const perHuman = { ...work, policies: { business_only: true, pure_prospect: false } };
+    expect(decideClaimGate(perHuman, false, [work, gmail])).toEqual({ kind: "refuse", reason: "not_a_lead", tags: ["customer"], unsureTags: [] });
+  });
+
+  it("a sure tag on one relation and the same tag unsure on another is listed once, as sure", () => {
+    const a = block({ subject: true, judgedAt: "x", tags: ["customer"] });
+    const b = block({ subject: true, judgedAt: "x", unsureTags: ["customer", "partner"] });
+    expect(decideClaimGate({ ...a, policies: { business_only: false, pure_prospect: false } }, false, [a, b])).toEqual({
+      kind: "refuse",
+      reason: "not_a_lead",
+      tags: ["customer"],
+      unsureTags: ["partner"],
+    });
+  });
+
+  it("an unjudged OTHER relation asks for a judgment, never an open question", () => {
+    const latest = block({ subject: true, judgedAt: "2026-10-27T00:00:00Z" });
+    const other = block({ subject: true, judgedAt: null });
+    expect(decideClaimGate(latest, false, [latest, other])).toEqual({ kind: "judge" });
+  });
+
+  it("a not-the-brand's-lead verdict on another relation refuses", () => {
+    const latest = block({ subject: true, judgedAt: "x" });
+    const other = block({ subject: true, judgedAt: "x", notBrandLead: "judged_not_a_lead" });
+    expect(decideClaimGate(latest, false, [latest, other])).toMatchObject({ kind: "refuse", reason: "not_a_lead" });
   });
 });
 
