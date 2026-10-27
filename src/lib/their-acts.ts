@@ -86,6 +86,10 @@ const scoped = (alias: SQL, scope: ActScope | null): SQL =>
  * The subjects' points are unnested once (a per-act `= ANY(contact_points)` scans every subject). Each list is
  * MATERIALIZED: inlined, the planner estimated one row and re-ran the not-this-brand aggregation over every crm tag
  * for each act (the fleet pass hit the statement timeout every 2 min in prod; materialized: 0.95 s).
+ * A materialized CTE is still ESTIMATED at one row, so membership is a hashed `NOT IN` / `IN`, never a join the planner
+ * turns into a nested loop rescanning the CTE per row (BOX-DB-LOAD-1027: 11.8k points x 468 conversations, 14.6 s a
+ * pass on the largest scope). The `@>` pre-filter keeps only tags with a conversation basis (2.2k of 181k), read
+ * through the post-boot partial index `idx_crm_registry_facts_conversation_tags`; the lateral still decides.
  */
 function toBrandPointsCte(scope: ActScope | null): SQL {
   return sql`
@@ -96,14 +100,17 @@ function toBrandPointsCte(scope: ActScope | null): SQL {
     not_brand_conversations AS MATERIALIZED (
       SELECT r.org_id, r.brand_id, b->>'ref' AS cp
       FROM crm_registry_facts r CROSS JOIN LATERAL jsonb_array_elements(COALESCE(r.payload->'basis', '[]'::jsonb)) AS b
-      WHERE r.type = 'connection_tag' AND b->>'kind' = 'conversation' AND ${scoped(sql`r`, scope)}
+      WHERE r.type = 'connection_tag' AND r.payload->'basis' @> '[{"kind": "conversation"}]'
+        AND b->>'kind' = 'conversation' AND ${scoped(sql`r`, scope)}
         AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = r.fact_id)
       GROUP BY 1, 2, 3
       HAVING bool_and(r.payload->>'tag' IS DISTINCT FROM 'professional_to_brand')
     ),
     to_brand_points AS MATERIALIZED (
       SELECT p.org_id, p.brand_id, p.cp FROM subject_points p
-      WHERE NOT EXISTS (SELECT 1 FROM not_brand_conversations n WHERE n.org_id = p.org_id AND n.brand_id = p.brand_id AND n.cp = p.cp)
+      WHERE (p.org_id, p.brand_id, p.cp) NOT IN (
+        SELECT n.org_id, n.brand_id, n.cp FROM not_brand_conversations n WHERE n.cp IS NOT NULL
+      )
     )`;
 }
 
@@ -140,8 +147,8 @@ async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<Messag
     WITH ${toBrandPointsCte(scope)},
     todo AS (
       SELECT DISTINCT a.fact_id, max(a.at) AS at FROM lead_crm_acts a
-      JOIN to_brand_points p ON p.org_id = a.org_id AND p.brand_id = a.brand_id AND p.cp = a.contact_point
       WHERE a.type = 'message_in' AND ${scoped(sql`a`, scope)}
+        AND (a.org_id, a.brand_id, a.contact_point) IN (SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p)
         AND NOT EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id)
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
       GROUP BY a.fact_id
@@ -206,8 +213,8 @@ export function countedActsSql(scope: ActScope | null): SQL {
     counted_acts AS (
       SELECT a.org_id, a.brand_id, a.lead_id, max(a.at) AS at
       FROM lead_crm_acts a
-      JOIN to_brand_points p ON p.org_id = a.org_id AND p.brand_id = a.brand_id AND p.cp = a.contact_point
       WHERE ${scoped(sql`a`, scope)}
+        AND (a.org_id, a.brand_id, a.contact_point) IN (SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p)
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
         AND (a.type <> 'message_in' OR EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id AND NOT j.automated))
       GROUP BY a.org_id, a.brand_id, a.lead_id
