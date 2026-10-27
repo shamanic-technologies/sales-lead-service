@@ -15,6 +15,10 @@ vi.mock("../../src/lib/campaign-client.js", () => ({
   fetchCampaign: async (id: string) => ({ id, createdAt: "2020-01-01T00:00:00.000Z" }),
 }));
 const memberKeys = new Set<string>();
+// A relation at a company names it through brand-service (relationship-read): no company known here.
+vi.mock("../../src/lib/company-client.js", () => ({
+  getCompanies: async () => [],
+}));
 vi.mock("../../src/lib/org-members.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/org-members.js")>()),
   loadOrgMemberKeys: async () => memberKeys,
@@ -82,6 +86,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under relationships: current_clien
     await db.execute(sql`DELETE FROM lead_contact_methods WHERE lead_id = ANY(${sql.param(createdLeads)}::uuid[])`);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
     await clearRegistry(orgId);
+    for (const t of ["relationship_subjects", "relationship_judgments"]) await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
   });
 
   it("hands out a paying customer (the booked stop does not hide a client) and refuses a prospect and a team member with a sale", async () => {
@@ -140,6 +145,25 @@ describe.skipIf(!hasRealDatabase)("claim-next under relationships: current_clien
         [friend.leadId, "personal", ["personal"]],
       ]),
     );
+  });
+
+  // DOCDINNERS-RELATIONSHIP-PENDING-1028: the per-human block shows the latest-active relation's tags; a team verdict on
+  // the human's OTHER relation must refuse the check-in too.
+  it("refuses a payer who is team on another relation than their latest-active one", async () => {
+    const p = await dueLead();
+    await sale(p.leadId);
+    const low = { customer: 0.8, prospect: 0.1, team: 0.05, investor: 0.05, advisor: 0.05, supplier: 0.05, partner: 0.05, other_professional: 0.05, journalist: 0.05 };
+    for (const [key, team, inbound] of [["", 0.8, sql`now() - interval '1 day'`], [randomUUID(), 0.05, sql`now()`]] as const) {
+      await db.execute(sql`
+        INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, thread_seq, has_messages, has_direct, last_inbound_at)
+        VALUES (${orgId}, ${brandId}, ${p.human}::uuid, ${key}, 'itest', ${sql.param([p.email])}::text[], 1, true, true, ${inbound})`);
+      await db.execute(sql`
+        INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id)
+        VALUES (${orgId}, ${brandId}, ${p.human}::uuid, ${key}, ${JSON.stringify({ ...low, team })}::jsonb, 1, 'jev-test', 'run')`);
+    }
+    const r = await claim("current_client");
+    expect(r.claimed).toBeNull();
+    expect(r.relationships!.refused).toEqual([expect.objectContaining({ leadId: p.leadId, reason: "team_member", tags: ["team"] })]);
   });
 
   it("a paying customer with no human yet is pending, the row stays due", async () => {

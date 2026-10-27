@@ -223,6 +223,32 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     expect(r.claimed?.id).toBe(p.rowId);
   });
 
+  // DOCDINNERS-RELATIONSHIP-PENDING-1028 (prod 2026-10-27): a client's person writes from their work address. Their work
+  // relation (latest active) reads prospect unsure, their gmail relation customer: the AND-ed policy refused them while
+  // the claim read only the work relation's tags, so they sat "pending" through every redelivery. Now: refused, final.
+  it("refuses, final, a person who is a customer on ANOTHER relation than their latest-active one", async () => {
+    const p = await dueLead();
+    const company = randomUUID();
+    await subject(p.human!, [`${randomUUID()}@gmail.test`]);
+    await judged(p.human!, { ...LOW, customer: 0.64, prospect: 0.47 });
+    await db.execute(sql`
+      INSERT INTO relationship_subjects (org_id, brand_id, human_id, company_key, name, emails, thread_seq, has_messages, has_direct, last_inbound_at)
+      VALUES (${orgId}, ${brandId}, ${p.human}::uuid, ${company}, 'itest', ${sql.param([p.email])}::text[], 2, true, true, now())
+    `);
+    await db.execute(sql`
+      INSERT INTO relationship_judgments (org_id, brand_id, human_id, company_key, probabilities, thread_seq, model, run_id)
+      VALUES (${orgId}, ${brandId}, ${p.human}::uuid, ${company}, ${JSON.stringify({ ...LOW, customer: 0.2, prospect: 0.4, partner: 0.35 })}::jsonb, 2, 'jev-test', 'run')
+    `);
+    const r = await claim("pure_prospect");
+    expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+    expect(r.relationships!.pending).toEqual([]);
+    expect(r.relationships!.refused).toEqual([
+      { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email, phone: null, reason: "not_a_lead", tags: ["customer"], unsureTags: [] },
+    ]);
+    expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_not_a_lead" });
+    expect(judgeYesNo).not.toHaveBeenCalled();
+  });
+
   it("refuses a personal contact by name (crm-service's tag), stops the row, and never offers it again", async () => {
     const p = await dueLead();
     await subject(p.human!, [p.email]);
