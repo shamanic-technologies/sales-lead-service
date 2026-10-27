@@ -28,11 +28,13 @@ import { BOOKING_CALL_LEG_KEY } from "./booking-calls.js";
 import { fetchOrgCampaignLegs } from "./campaign-leg-client.js";
 import {
   assertCatalogueCovers,
+  evidenceCause,
   firstReachedStates,
   LEAD_STATE_EVIDENCE_KINDS,
   LeadStateCatalogueError,
   type LeadStateCatalogue,
   type LeadStateEvidenceKind,
+  type LedgerCause,
   type LeadStates,
   type StateEvidence,
   type StepLeadState,
@@ -90,12 +92,13 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
   const limit = q.limit !== undefined ? sql`LIMIT ${q.limit}` : sql.empty();
   return sql`
     WITH ev AS (
-      SELECT t.org_id, t.brand_id, t.lead_id, 'positive_reply'::text AS kind, t.occurred_at AS at
+      SELECT t.org_id, t.brand_id, t.lead_id, 'positive_reply'::text AS kind, t.occurred_at AS at,
+             false AS ledger, NULL::boolean AS caused, false AS stated, NULL::boolean AS rule_caused, NULL::text AS rule_reason
       FROM lead_timeline_facts t
       WHERE t.source = 'reply' AND t.withdrawn_at IS NULL AND t.detail->>'classification' = 'positive'
         ${orgFilter(sql`t.org_id`, q)} ${leadFilter(sql`t.lead_id`, q)}
       UNION ALL
-      SELECT j.org_id, j.brand_id, j.lead_id, 'positive_message', j.occurred_at
+      SELECT j.org_id, j.brand_id, j.lead_id, 'positive_message', j.occurred_at, false, NULL::boolean, false, NULL::boolean, NULL::text
       FROM personal_message_judgments j
       WHERE j.verdict = 'waits_interest'
         ${orgFilter(sql`j.org_id`, q)} ${leadFilter(sql`j.lead_id`, q)}
@@ -110,7 +113,10 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
                WHEN 'website_visit' THEN 'stated_visit'
                ELSE 'sale'
              END,
-             ce.received_at
+             ce.received_at,
+             true, ce.caused_by_outreach, ce.stated_caused_by_outreach IS NOT NULL,
+             (COALESCE(ce.crm_evidence->'rule', ce.cause_rule)->>'causedByOutreach')::boolean,
+             COALESCE(ce.crm_evidence->'rule', ce.cause_rule)->>'reason'
       FROM conversion_events ce
       WHERE ce.event IN ('positive_reply', 'signup', 'form_submission', 'meeting_booked', 'meeting_attended', 'sale', 'purchase', 'website_visit')
         AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed' AND ce.matched_lead_id IS NOT NULL
@@ -118,20 +124,20 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
       UNION ALL
       -- Every acted row of the follow-up ledger, one per brand it names; which acting campaign places booking calls
       -- is campaign-service's leg, asked in JS (booking_call_candidate rows that are not one are dropped there).
-      SELECT fa.org_id, b.brand_id, fa.lead_id, 'booking_call_candidate:' || fa.acting_campaign_id, fa.occurred_at
+      SELECT fa.org_id, b.brand_id, fa.lead_id, 'booking_call_candidate:' || fa.acting_campaign_id, fa.occurred_at, false, NULL::boolean, false, NULL::boolean, NULL::text
       FROM followup_actions fa
       CROSS JOIN LATERAL unnest(fa.brand_ids) AS b(brand_id)
       WHERE fa.action = 'acted' AND fa.acting_campaign_id IS NOT NULL
         ${orgFilter(sql`fa.org_id`, q)} ${leadFilter(sql`fa.lead_id`, q)}
       UNION ALL
-      SELECT t.org_id, t.brand_id, t.lead_id, 'click', t.occurred_at
+      SELECT t.org_id, t.brand_id, t.lead_id, 'click', t.occurred_at, false, NULL::boolean, false, NULL::boolean, NULL::text
       FROM lead_timeline_facts t
       WHERE t.label = 'website_visit' AND t.source = 'outreach' AND t.withdrawn_at IS NULL
         ${orgFilter(sql`t.org_id`, q)} ${leadFilter(sql`t.lead_id`, q)}
       UNION ALL
       SELECT f.org_id, f.brand_id, m.lead_id,
              CASE f.type WHEN 'website_visit' THEN 'site_session' ELSE f.type END,
-             f.occurred_at
+             f.occurred_at, false, NULL::boolean, false, NULL::boolean, NULL::text
       FROM crm_facts f
       CROSS JOIN LATERAL unnest(f.emails) AS e(addr)
       JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = lower(trim(e.addr))
@@ -146,12 +152,18 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
         ${orgFilter(sql`f.org_id`, q)} ${leadFilter(sql`m.lead_id`, q)}
     ),
     agg AS (
-      SELECT ev.org_id, ev.brand_id, ev.lead_id, ev.kind, min(ev.at) AS at
+      -- One row per evidence kind AND source (a CRM-fact signup and a ledger signup are judged apart); the ledger's
+      -- cause fields are the EARLIEST row's (the one whose instant is served).
+      SELECT ev.org_id, ev.brand_id, ev.lead_id, ev.kind, ev.ledger, min(ev.at) AS at,
+             (array_agg(ev.caused ORDER BY ev.at ASC NULLS LAST))[1] AS caused,
+             (array_agg(ev.stated ORDER BY ev.at ASC NULLS LAST))[1] AS stated,
+             (array_agg(ev.rule_caused ORDER BY ev.at ASC NULLS LAST))[1] AS rule_caused,
+             (array_agg(ev.rule_reason ORDER BY ev.at ASC NULLS LAST))[1] AS rule_reason
       FROM ev
       WHERE NOT EXISTS (
         SELECT 1 FROM not_a_person_marks npm
         WHERE npm.org_id = ev.org_id AND npm.lead_id = ev.lead_id AND npm.withdrawn_at IS NULL)
-      GROUP BY 1, 2, 3, 4
+      GROUP BY 1, 2, 3, 4, 5
     ),
     keys AS (
       SELECT DISTINCT a.org_id, a.brand_id, a.lead_id
@@ -160,8 +172,24 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
       ORDER BY a.org_id, a.brand_id, a.lead_id
       ${limit}
     )
-    SELECT a.org_id, a.brand_id, a.lead_id::text AS lead_id, a.kind, a.at
+    SELECT a.org_id, a.brand_id, a.lead_id::text AS lead_id, a.kind, a.at,
+           a.ledger, a.caused, a.stated, a.rule_caused, a.rule_reason, touch.at AS first_touch_at
     FROM agg a JOIN keys k ON k.org_id = a.org_id AND k.brand_id = a.brand_id AND k.lead_id = a.lead_id
+    -- Our first touch of the lead at (org, brand), any pipe: an email of ours on the outreach timeline, a non-email
+    -- pipe's send, an act of our follow-up worker (never a person's hand-typed Unibox message).
+    CROSS JOIN LATERAL (
+      SELECT min(x.at) AS at FROM (
+        SELECT min(t.occurred_at) AS at FROM lead_timeline_facts t
+        WHERE t.org_id = k.org_id AND t.brand_id = k.brand_id AND t.lead_id = k.lead_id
+          AND t.label IN ('initial_email', 'followup') AND t.withdrawn_at IS NULL
+        UNION ALL
+        SELECT min(lc.channel_sent_at) FROM leads_campaigns lc
+        WHERE lc.lead_id = k.lead_id AND lc.org_id = k.org_id AND k.brand_id = ANY(lc.brand_ids)
+        UNION ALL
+        SELECT min(fa.occurred_at) FROM followup_actions fa
+        WHERE fa.lead_id = k.lead_id AND fa.org_id = k.org_id AND fa.action = 'acted' AND k.brand_id = ANY(fa.brand_ids)
+      ) x
+    ) touch
     ORDER BY a.org_id, a.brand_id, a.lead_id
   `;
 }
@@ -172,6 +200,14 @@ interface RawEvidence {
   lead_id: string;
   kind: string;
   at: RawTimestamp;
+  /** true = an outcome-ledger row, whose stored cause is served (absent = false). */
+  ledger?: boolean;
+  caused?: boolean | null;
+  stated?: boolean;
+  rule_caused?: boolean | null;
+  rule_reason?: string | null;
+  /** Our first touch of the lead at (org, brand), any pipe; null/absent = never touched. */
+  first_touch_at?: RawTimestamp;
 }
 
 const BOOKING_CALL_CANDIDATE = "booking_call_candidate:";
@@ -219,7 +255,13 @@ export function groupLeadStates(rows: readonly RawEvidence[], catalogue: LeadSta
       key = k;
       current = { orgId: String(r.org_id), brandId: String(r.brand_id), leadId: String(r.lead_id), evidence: [] };
     }
-    current!.evidence.push({ kind: r.kind as LeadStateEvidenceKind, at: r.at === null ? null : toIsoTimestamp(r.at) });
+    const kind = r.kind as LeadStateEvidenceKind;
+    const at = r.at === null ? null : toIsoTimestamp(r.at);
+    const ledger: LedgerCause | null = r.ledger
+      ? { causedByOutreach: r.caused ?? null, stated: r.stated === true, ruleCausedByOutreach: r.rule_caused ?? null, ruleReason: r.rule_reason ?? null }
+      : null;
+    const firstTouchAt = r.first_touch_at == null ? null : toIsoTimestamp(r.first_touch_at);
+    current!.evidence.push({ kind, at, cause: evidenceCause({ kind, at, ledger, firstTouchAt }) });
   }
   flush();
   return out;

@@ -9,7 +9,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
-import { LEAD_STATE_EVIDENCE_KINDS, LEAD_STATES } from "./lib/lead-states.js";
+import { CAUSE_REASONS, LEAD_STATE_EVIDENCE_KINDS, LEAD_STATES } from "./lib/lead-states.js";
 import { EMAIL_SEND_WORKFLOW_SOURCES } from "./lib/repoint-causes.js";
 import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
 import { NOT_KEPT_REASONS, SOURCE_GAP_REASONS } from "./lib/source-people.js";
@@ -10360,6 +10360,19 @@ const ReachedStateSchema = z
         "stated_visit (visit on the outcome ledger): website_visit. Which step reaches which state is features-service's catalogue (`leadState`).",
     }),
     impliedBy: z.string().nullable().openapi({ description: "The higher state of the same family whose reach implied this one (same date); null = its own evidence." }),
+    causedByOutreach: z.boolean().nullable().openapi({
+      description:
+        "Whose win the FIRST reach was (OUR-FACTORY-OUTCOMES-1027): true = our outreach produced it, false = another factory (the client's CRM, team, " +
+        "site, before our first touch), null = nobody can say (never touched, undated): no proof our factory produced it. An implied state takes the " +
+        "cause of the reach that implied it. A lead already interested before our first touch stays false even when they also reply later.",
+    }),
+    causeReason: z.enum(CAUSE_REASONS).openapi({
+      description:
+        "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); " +
+        "stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / " +
+        "before_first_delivery / never_delivered / event_undated (the ledger's date rule against our first touch of the lead at the brand, any pipe: " +
+        "stored by the ledger for its rows, applied here to every other fact).",
+    }),
   })
   .openapi("LeadReachedState");
 

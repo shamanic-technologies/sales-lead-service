@@ -19,7 +19,23 @@
  * module only says which catalogue STEP each piece of evidence is (a positive reply is a `conversation`, a click a
  * `website_visit`...). A step the catalogue gives no state reaches nothing; evidence of a step the catalogue does not
  * list throws (never dropped). The events are read at their REAL instant (`lead-states-read.ts`).
+ *
+ * WHOSE WIN each state was (OUR-FACTORY-OUTCOMES-1027): runs-service prices a state from the states OUR factory
+ * produced, so each served state carries `causedByOutreach` + `causeReason`, decided on the evidence of its FIRST
+ * reach (an implied state takes the cause of the reach that implied it), one rule, no per-source branch:
+ *   - an outcome-ledger row: its stored effective answer (a person's word outranks the date rule; outcome-cause.ts and
+ *     the CRM sync write it), `causeReason` = the rule's reason when the stored answer is the rule's, `stated` when a
+ *     person answered, `recorded` when its writer stored another answer, `not_judged_yet` before the cause sweep ran;
+ *   - evidence our outreach is itself (a positive reply to our email, a click of our link, a booking call we placed):
+ *     true, `our_outreach`;
+ *   - every other fact (a site session, a CRM signup/form, a personal-channel message): the SAME date rule as the
+ *     ledger (`crmCauseRule`) against our first touch of the lead at (org, brand) on any pipe (first email of ours on
+ *     the outreach timeline, a non-email pipe's send, an act of our follow-up worker).
+ * A lead interested BEFORE our first touch stays theirs even if they also reply later: the state existed before our
+ * factory worked on them (opening stock). `null` = nobody can say ours (never touched, undated): no proof of production.
  */
+import { crmCauseRule, type CrmCauseRuleReason } from "./crm-evidence.js";
+
 
 /** The states served, one key each (the catalogue's state rows). */
 export const INTEREST_LADDER = ["lead_interested", "meeting_booked", "meeting_attended", "paid_client"] as const;
@@ -79,10 +95,63 @@ export function assertCatalogueCovers(catalogue: LeadStateCatalogue, listedSteps
   }
 }
 
-/** The earliest instant of one evidence kind for one lead x brand (ISO), or null when every instance is undated. */
+/** Why a state is (or is not) ours. The date rule's reasons are the ledger's own (`crmCauseRule`). */
+export const CAUSE_REASONS = [
+  "our_outreach",
+  "stated",
+  "recorded",
+  "not_judged_yet",
+  "after_first_delivery",
+  "before_first_delivery",
+  "never_delivered",
+  "event_undated",
+] as const;
+export type CauseReason = (typeof CAUSE_REASONS)[number];
+
+export interface EvidenceCause {
+  causedByOutreach: boolean | null;
+  causeReason: CauseReason;
+}
+
+/** Evidence our outreach IS (it cannot exist without our send/act), when it does not come from the outcome ledger. */
+const OUR_OUTREACH_KINDS: ReadonlySet<LeadStateEvidenceKind> = new Set(["positive_reply", "click", "booking_call"]);
+
+/** The ledger row's cause as stored (effective answer, a person's statement, the rule's own answer and reason). */
+export interface LedgerCause {
+  causedByOutreach: boolean | null;
+  stated: boolean;
+  ruleCausedByOutreach: boolean | null;
+  ruleReason: string | null;
+}
+
+const RULE_REASONS: ReadonlySet<string> = new Set<CrmCauseRuleReason>(["after_first_delivery", "before_first_delivery", "never_delivered", "event_undated"]);
+
+/** Whose win one piece of evidence was. Pure. */
+export function evidenceCause(input: {
+  kind: LeadStateEvidenceKind;
+  at: string | null;
+  ledger: LedgerCause | null;
+  firstTouchAt: string | null;
+}): EvidenceCause {
+  const { ledger } = input;
+  if (ledger) {
+    if (ledger.stated) return { causedByOutreach: ledger.causedByOutreach, causeReason: "stated" };
+    if (ledger.ruleReason !== null && RULE_REASONS.has(ledger.ruleReason) && ledger.ruleCausedByOutreach === ledger.causedByOutreach) {
+      return { causedByOutreach: ledger.causedByOutreach, causeReason: ledger.ruleReason as CrmCauseRuleReason };
+    }
+    if (ledger.causedByOutreach === null && ledger.ruleReason === null) return { causedByOutreach: null, causeReason: "not_judged_yet" };
+    return { causedByOutreach: ledger.causedByOutreach, causeReason: "recorded" };
+  }
+  if (OUR_OUTREACH_KINDS.has(input.kind)) return { causedByOutreach: true, causeReason: "our_outreach" };
+  const rule = crmCauseRule(input.at, input.firstTouchAt);
+  return { causedByOutreach: rule.causedByOutreach, causeReason: rule.reason };
+}
+
+/** The earliest instant of one evidence kind (from one source) for one lead x brand, and whose win that first one was. */
 export interface StateEvidence {
   kind: LeadStateEvidenceKind;
   at: string | null;
+  cause: EvidenceCause;
 }
 
 export interface ReachedState {
@@ -92,6 +161,9 @@ export interface ReachedState {
   basis: LeadStateEvidenceKind;
   /** The higher state whose reach implied this one (same family), null when the state's own evidence reached it. */
   impliedBy: string | null;
+  /** Whose win the first reach was: true = our outreach, false = another factory (before our first touch), null = nobody can say. */
+  causedByOutreach: boolean | null;
+  causeReason: CauseReason;
 }
 
 export type LeadStates = Record<LeadState, ReachedState | null>;
@@ -123,7 +195,13 @@ export function firstReachedStates(evidence: readonly StateEvidence[], catalogue
       return LEAD_STATE_EVIDENCE_KINDS.indexOf(a.kind) - LEAD_STATE_EVIDENCE_KINDS.indexOf(b.kind);
     });
     const w = pool[0];
-    out[state] = { reachedAt: w.at, basis: w.kind, impliedBy: w.s.state === state ? null : w.s.state };
+    out[state] = {
+      reachedAt: w.at,
+      basis: w.kind,
+      impliedBy: w.s.state === state ? null : w.s.state,
+      causedByOutreach: w.cause.causedByOutreach,
+      causeReason: w.cause.causeReason,
+    };
   }
   return out;
 }

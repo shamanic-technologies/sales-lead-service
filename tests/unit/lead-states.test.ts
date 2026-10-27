@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertCatalogueCovers, firstReachedStates as reach, LeadStateCatalogueError, type StateEvidence, type StepLeadState } from "../../src/lib/lead-states.js";
+import { assertCatalogueCovers, evidenceCause, firstReachedStates as reach, LeadStateCatalogueError, type StateEvidence, type StepLeadState } from "../../src/lib/lead-states.js";
 import {
   decodeLeadStatesCursor,
   encodeLeadStatesCursor,
@@ -27,7 +27,8 @@ const CATALOGUE = new Map<string, StepLeadState>([
 const firstReachedStates = (e: StateEvidence[]) => reach(e, CATALOGUE);
 const groupLeadStates = (rows: Parameters<typeof group>[0]) => group(rows, CATALOGUE);
 
-const ev = (kind: StateEvidence["kind"], at: string | null): StateEvidence => ({ kind, at });
+const OURS = { causedByOutreach: true, causeReason: "our_outreach" } as const;
+const ev = (kind: StateEvidence["kind"], at: string | null, cause: StateEvidence["cause"] = OURS): StateEvidence => ({ kind, at, cause });
 
 describe("first reach of each lead state (LEAD-STATES-1024)", () => {
   it("3 positive replies and a later meeting = ONE interested at the first reply, ONE meeting booked", () => {
@@ -37,8 +38,8 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
       { org_id: "o", brand_id: "b", lead_id: "l", kind: "meeting_booked", at: "2026-10-05 10:00:00+00" },
     ];
     const [lead] = groupLeadStates(rows);
-    expect(lead.states.lead_interested).toEqual({ reachedAt: "2026-10-01T09:00:00.000Z", basis: "positive_reply", impliedBy: null });
-    expect(lead.states.meeting_booked).toEqual({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: null });
+    expect(lead.states.lead_interested).toMatchObject({ reachedAt: "2026-10-01T09:00:00.000Z", basis: "positive_reply", impliedBy: null });
+    expect(lead.states.meeting_booked).toMatchObject({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: null });
     expect(lead.states.meeting_attended).toBeNull();
     expect(lead.states.paid_client).toBeNull();
     expect(lead.states.lead_visited).toBeNull();
@@ -46,7 +47,7 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
 
   it("a meeting booked with no positive reply makes the lead interested AT the booking", () => {
     const s = firstReachedStates([ev("meeting_booked", "2026-10-05T10:00:00.000Z")]);
-    expect(s.lead_interested).toEqual({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: "meeting_booked" });
+    expect(s.lead_interested).toMatchObject({ reachedAt: "2026-10-05T10:00:00.000Z", basis: "meeting_booked", impliedBy: "meeting_booked" });
     expect(s.meeting_booked?.impliedBy).toBeNull();
   });
 
@@ -64,11 +65,11 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
 
   it("visited = the earliest of click, site session, stated visit", () => {
     const s = firstReachedStates([ev("click", "2026-10-03T00:00:00.000Z"), ev("site_session", "2026-10-01T00:00:00.000Z")]);
-    expect(s.lead_visited).toEqual({ reachedAt: "2026-10-01T00:00:00.000Z", basis: "site_session", impliedBy: null });
+    expect(s.lead_visited).toMatchObject({ reachedAt: "2026-10-01T00:00:00.000Z", basis: "site_session", impliedBy: null });
   });
 
   it("an undated reach counts as reached with no date; a dated one wins", () => {
-    expect(firstReachedStates([ev("sale", null)]).lead_interested).toEqual({ reachedAt: null, basis: "sale", impliedBy: "paid_client" });
+    expect(firstReachedStates([ev("sale", null)]).lead_interested).toMatchObject({ reachedAt: null, basis: "sale", impliedBy: "paid_client" });
     expect(firstReachedStates([ev("sale", null), ev("positive_reply", "2026-10-01T00:00:00.000Z")]).lead_interested).toMatchObject({
       reachedAt: "2026-10-01T00:00:00.000Z",
       basis: "positive_reply",
@@ -93,7 +94,7 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
   it("a signup, a form or a booking call makes the lead interested (catalogue), never visited", () => {
     for (const kind of ["signup", "form_submitted", "booking_call"] as const) {
       const s = firstReachedStates([ev(kind, "2026-10-01T00:00:00.000Z")]);
-      expect(s.lead_interested).toEqual({ reachedAt: "2026-10-01T00:00:00.000Z", basis: kind, impliedBy: null });
+      expect(s.lead_interested).toMatchObject({ reachedAt: "2026-10-01T00:00:00.000Z", basis: kind, impliedBy: null });
       expect(s.meeting_booked).toBeNull();
       expect(s.lead_visited).toBeNull();
     }
@@ -125,5 +126,54 @@ describe("first reach of each lead state (LEAD-STATES-1024)", () => {
     const k = { orgId: "o", brandId: "b", leadId: "l" };
     expect(decodeLeadStatesCursor(encodeLeadStatesCursor(k))).toEqual(k);
     expect(() => decodeLeadStatesCursor("abc")).toThrow(LeadStatesCursorError);
+  });
+});
+
+describe("whose win each state was (OUR-FACTORY-OUTCOMES-1027)", () => {
+  const row = (kind: string, at: string | null, extra: Record<string, unknown> = {}) => ({ org_id: "o", brand_id: "b", lead_id: "l", kind, at, ...extra });
+  const TOUCH = "2026-02-01 00:00:00+00";
+
+  it("a Doc Dinners CRM form from 2024 (before our first email in 2026) = interested, NOT ours; a later positive reply does not make it ours", () => {
+    const [lead] = groupLeadStates([
+      row("form_submitted", "2024-08-24 10:00:00+00", { first_touch_at: TOUCH }),
+      row("positive_reply", "2026-03-01 10:00:00+00", { first_touch_at: TOUCH }),
+    ]);
+    expect(lead.states.lead_interested).toMatchObject({ basis: "form_submitted", causedByOutreach: false, causeReason: "before_first_delivery" });
+  });
+
+  it("a positive reply to our email, a click of our link, a booking call we placed = ours", () => {
+    for (const kind of ["positive_reply", "click", "booking_call"] as const) {
+      expect(evidenceCause({ kind, at: "2026-03-01T00:00:00.000Z", ledger: null, firstTouchAt: null })).toEqual({ causedByOutreach: true, causeReason: "our_outreach" });
+    }
+  });
+
+  it("a CRM fact goes through the ledger's date rule against our first touch (after = ours, never touched / undated = null)", () => {
+    const c = (at: string | null, firstTouchAt: string | null) => evidenceCause({ kind: "signup", at, ledger: null, firstTouchAt });
+    expect(c("2026-03-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z")).toEqual({ causedByOutreach: true, causeReason: "after_first_delivery" });
+    expect(c("2026-02-01T00:00:00.000Z", "2026-02-01T00:00:00.000Z")).toEqual({ causedByOutreach: false, causeReason: "before_first_delivery" });
+    expect(c("2026-03-01T00:00:00.000Z", null)).toEqual({ causedByOutreach: null, causeReason: "never_delivered" });
+    expect(c(null, "2026-02-01T00:00:00.000Z")).toEqual({ causedByOutreach: null, causeReason: "event_undated" });
+    expect(evidenceCause({ kind: "positive_message", at: "2026-01-01T00:00:00.000Z", ledger: null, firstTouchAt: "2026-02-01T00:00:00.000Z" }).causedByOutreach).toBe(false);
+  });
+
+  it("a ledger row serves its STORED answer: a person's word, the rule's reason, or `recorded` when its writer stored another answer", () => {
+    const l = (causedByOutreach: boolean | null, stated: boolean, ruleCausedByOutreach: boolean | null, ruleReason: string | null) =>
+      evidenceCause({ kind: "meeting_booked", at: "2024-08-24T00:00:00.000Z", ledger: { causedByOutreach, stated, ruleCausedByOutreach, ruleReason }, firstTouchAt: "2026-02-01T00:00:00.000Z" });
+    expect(l(true, true, false, "before_first_delivery")).toEqual({ causedByOutreach: true, causeReason: "stated" });
+    expect(l(null, false, null, "never_delivered")).toEqual({ causedByOutreach: null, causeReason: "never_delivered" });
+    expect(l(false, false, true, "after_first_delivery")).toEqual({ causedByOutreach: false, causeReason: "recorded" });
+    expect(l(false, false, null, null)).toEqual({ causedByOutreach: false, causeReason: "recorded" });
+    expect(l(null, false, null, null)).toEqual({ causedByOutreach: null, causeReason: "not_judged_yet" });
+  });
+
+  it("an implied state takes the cause of the reach that implied it; a later state reached after our touch is ours", () => {
+    const [lead] = groupLeadStates([
+      row("meeting_booked", "2024-08-24 10:00:00+00", { ledger: true, caused: false, stated: false, rule_caused: false, rule_reason: "before_first_delivery", first_touch_at: TOUCH }),
+      row("sale", "2026-05-29 10:00:00+00", { ledger: true, caused: true, stated: false, rule_caused: true, rule_reason: "after_first_delivery", first_touch_at: TOUCH }),
+    ]);
+    expect(lead.states.lead_interested).toMatchObject({ impliedBy: "meeting_booked", causedByOutreach: false });
+    expect(lead.states.meeting_booked).toMatchObject({ causedByOutreach: false, causeReason: "before_first_delivery" });
+    expect(lead.states.meeting_attended).toMatchObject({ impliedBy: "paid_client", causedByOutreach: true });
+    expect(lead.states.paid_client).toMatchObject({ causedByOutreach: true, causeReason: "after_first_delivery" });
   });
 });

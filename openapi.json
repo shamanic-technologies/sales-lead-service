@@ -14701,12 +14701,33 @@
             "type": "string",
             "nullable": true,
             "description": "The higher state of the same family whose reach implied this one (same date); null = its own evidence."
+          },
+          "causedByOutreach": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "Whose win the FIRST reach was (OUR-FACTORY-OUTCOMES-1027): true = our outreach produced it, false = another factory (the client's CRM, team, site, before our first touch), null = nobody can say (never touched, undated): no proof our factory produced it. An implied state takes the cause of the reach that implied it. A lead already interested before our first touch stays false even when they also reply later."
+          },
+          "causeReason": {
+            "type": "string",
+            "enum": [
+              "our_outreach",
+              "stated",
+              "recorded",
+              "not_judged_yet",
+              "after_first_delivery",
+              "before_first_delivery",
+              "never_delivered",
+              "event_undated"
+            ],
+            "description": "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / before_first_delivery / never_delivered / event_undated (the ledger's date rule against our first touch of the lead at the brand, any pipe: stored by the ledger for its rows, applied here to every other fact)."
           }
         },
         "required": [
           "reachedAt",
           "basis",
-          "impliedBy"
+          "impliedBy",
+          "causedByOutreach",
+          "causeReason"
         ]
       },
       "LeadStatesByLeadRequest": {
