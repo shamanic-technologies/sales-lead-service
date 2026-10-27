@@ -6,7 +6,7 @@ import { leadIsJournalist } from "./brand-journalists.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
-import { serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
+import { HumanServiceStalledError, serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
 import { serveThroughCandidates } from "./candidate-serve.js";
@@ -156,6 +156,17 @@ export const FRESH_SERVE_ATTEMPTS = 5;
 /** A fresh serve that bought someone it cannot hand out keeps them filed and buys the next. */
 const BUY_NEXT_REASONS: ReadonlySet<string> = new Set([RECENTLY_EMAILED_REASON, JOURNALIST_REASON]);
 
+/**
+ * A source unit's walk ANSWERS inside its caller's 5 minutes (DOCDINNERS-SERVE-TIMEOUT-1027). No new audience is
+ * started past this much time since the serve began; each human-service call is bounded on its own (candidate calls
+ * by CANDIDATE_CALL_TIMEOUT_MS, serve-next by FIND_SERVE_NEXT_TIMEOUT_MS), so the last one started still ends before
+ * the caller leaves. Doc Dinners' Lead Sourcing timed out 39 runs in a row: one reveal hung 300s on the audience the
+ * walk asked first, nothing was recorded, and the next run asked it first again.
+ */
+export const FIND_WALK_BUDGET_MS = 150_000;
+/** Above human-service's own 120s serve-next walk budget: a serve-next that outlives it hung. */
+export const FIND_SERVE_NEXT_TIMEOUT_MS = 130_000;
+
 interface PullNextResult {
   found: boolean;
   /**
@@ -227,6 +238,7 @@ export async function pullNext(
   signal?: AbortSignal,
 ): Promise<PullNextResult> {
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+  const startedAt = Date.now();
   const mode: PullNextMode = params.mode ?? { kind: "serve" };
   // A source unit's own run: stores what it finds under itself, contacts nobody (no retry/released pool, no Bonus).
   const finding = mode.kind === "find" || mode.kind === "find_contacted";
@@ -798,31 +810,63 @@ export async function pullNext(
   // answered nobody left is it `audience_exhausted`; an unfinished look or an audience that cannot be walked yet
   // says so instead.
   if (mode.kind === "find") {
+    const walkDeadline = startedAt + FIND_WALK_BUDGET_MS;
     let notServeable = 0;
     let noRecentPosts = 0;
+    // Audiences whose look did not finish (human-service `pending`, or a call that never answered): not exhaustion.
+    let unfinished = 0;
+    let stalled = 0;
     let recentlyEmailedHits = 0;
-    for (const candidateAudienceId of mode.audienceIds) {
+    let asked = 0;
+    const answer = (result: PullNextResult): PullNextResult => {
+      console.log(
+        `[lead-service] pullNext find answered campaign=${params.campaignId} found=${result.found}${result.found ? "" : ` reason=${result.reason}`} audiencesAsked=${asked}/${mode.audienceIds.length} stalled=${stalled} elapsedMs=${Date.now() - startedAt}`,
+      );
+      return result;
+    };
+    walk: for (const candidateAudienceId of mode.audienceIds) {
+      // Out of walk time: answer now; the audiences not asked are asked first next run (never recorded, never skipped).
+      if (Date.now() >= walkDeadline) {
+        unfinished++;
+        break;
+      }
+      asked++;
       const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
       const walked = { sourceCampaignId: params.campaignId, audienceId: candidateAudienceId, acceptedEmails: params.acceptedEmails };
       // The same audience is asked again only after a person emailed recently (fresh contacts only).
       for (;;) {
-        if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+        if (signal?.aborted) return answer({ found: false, reason: SERVE_TIMED_OUT_REASON });
         let served: Awaited<ReturnType<typeof serveNext>>;
         try {
-          served = (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal)) ?? (await serveNext(candidateAudienceId, audienceCtx));
+          served =
+            (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal, walkDeadline)) ??
+            (await serveNext(candidateAudienceId, audienceCtx, FIND_SERVE_NEXT_TIMEOUT_MS));
         } catch (err) {
           if (isAudienceNotServeableError(err)) {
             notServeable++;
             await recordEmptyAnswer({ ...walked, reason: "not_serveable" });
             break;
           }
+          if (err instanceof HumanServiceStalledError) {
+            // human-service never answered for this audience: recorded so the next run asks every other audience
+            // first (an ORDER, never a skip), and this run goes on to the next audience.
+            stalled++;
+            unfinished++;
+            console.error(
+              `[lead-service] pullNext source campaign=${params.campaignId} audienceId=${candidateAudienceId} stalled: ${err.message}; asking the next audience`,
+            );
+            await recordEmptyAnswer({ ...walked, reason: "stalled" });
+            continue walk;
+          }
           throw err;
         }
         if (served.status === "pending") {
+          // An unfinished look at this audience (its progress is kept at human-service): the walk goes on.
           console.log(
-            `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${candidateAudienceId} serveNext=pending`,
+            `[lead-service] pullNext source campaign=${params.campaignId} audienceId=${candidateAudienceId} serveNext=pending: asking the next audience`,
           );
-          return { found: false, reason: SERVE_TIMED_OUT_REASON };
+          unfinished++;
+          continue walk;
         }
         if (isNoRecentPostsAnswer(served)) {
           noRecentPosts++;
@@ -835,18 +879,25 @@ export async function pullNext(
         }
         await clearEmptyAnswer(walked);
         const result = await recordServed(served, candidateAudienceId);
-        if (result.found || !BUY_NEXT_REASONS.has(result.reason!)) return result;
-        if (++recentlyEmailedHits >= FRESH_SERVE_ATTEMPTS) return result;
+        if (result.found || !BUY_NEXT_REASONS.has(result.reason!)) return answer(result);
+        if (++recentlyEmailedHits >= FRESH_SERVE_ATTEMPTS) return answer(result);
       }
     }
-    // An audience with nothing to read (competitor pages posted nothing) means the walk did NOT find everyone gone:
-    // it wins over the rest. Then an audience that could not be walked; only a full walk-out is exhaustion.
+    // A look that did not finish (out of time, pending, a call that never answered) is never exhaustion. Then an
+    // audience with nothing to read (competitor pages posted nothing): the walk did NOT find everyone gone. Then an
+    // audience that could not be walked; only a full walk-out is exhaustion.
     const reason =
-      noRecentPosts > 0 ? NO_RECENT_POSTS_REASON : notServeable > 0 ? AUDIENCE_NOT_SERVEABLE_REASON : AUDIENCE_EXHAUSTED_REASON;
+      unfinished > 0
+        ? SERVE_TIMED_OUT_REASON
+        : noRecentPosts > 0
+          ? NO_RECENT_POSTS_REASON
+          : notServeable > 0
+            ? AUDIENCE_NOT_SERVEABLE_REASON
+            : AUDIENCE_EXHAUSTED_REASON;
     console.log(
-      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable} noRecentPosts=${noRecentPosts}`,
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable} noRecentPosts=${noRecentPosts} unfinished=${unfinished}`,
     );
-    return { found: false, reason };
+    return answer({ found: false, reason });
   }
 
   // The named audience does not feed this pipe (its origin): no fresh serve, the reason says why.
@@ -880,7 +931,15 @@ export async function pullNext(
   }
 
   async function serveFresh(): Promise<PullNextResult> {
-    const served = (await serveThroughCandidates(servedAudienceId, ctx, offerId, signal)) ?? (await serveNext(servedAudienceId, ctx));
+    let served: Awaited<ReturnType<typeof serveNext>>;
+    try {
+      served = (await serveThroughCandidates(servedAudienceId, ctx, offerId, signal)) ?? (await serveNext(servedAudienceId, ctx));
+    } catch (err) {
+      if (!(err instanceof HumanServiceStalledError)) throw err;
+      // human-service never answered: an unfinished look, never exhaustion; the next run asks again.
+      console.error(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId}: ${err.message}`);
+      return { found: false, reason: SERVE_TIMED_OUT_REASON };
+    }
 
     // human-service bounds each serve-next call: when its budget runs out mid-walk it
     // answers `pending` with no person, and the next call resumes the walk. That is an
