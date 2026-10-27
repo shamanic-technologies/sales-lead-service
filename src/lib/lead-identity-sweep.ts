@@ -44,7 +44,10 @@ export const COMPANY_FACTS_SOURCE = "lead-service";
 const LEAD_BATCH = Math.max(1, Number(process.env.LEAD_IDENTITY_BATCH) || 400);
 const HUMAN_RESOLVE_CONCURRENCY = Math.max(1, Number(process.env.LEAD_IDENTITY_CONCURRENCY) || 8);
 const BUSY_TICK_MS = 2_000;
-const IDLE_TICK_MS = 60_000;
+// A pass that found nothing waits 10 min (BOX-DB-LOAD-1027): an idle pass still walks every never-resolved employer
+// (~180k, 4-18 s) and leads x organizations (~6 s), and in prod every pass of 3 h found nothing. The serve resolves its
+// lead inline; this sweep only finishes what an outage left, so a 10-min wait changes no answer, only when it lands.
+const IDLE_TICK_MS = 10 * 60_000;
 const FIRST_SWEEP_DELAY_MS = 90_000;
 
 /** The current-employer winner the list reads (basic-leads.ts): enriched first, newest row, stable id. */
