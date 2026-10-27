@@ -14747,6 +14747,153 @@
         "required": [
           "leadIds"
         ]
+      },
+      "ClientSentimentRead": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "integer",
+            "description": "Live client messages (judged + unjudged)."
+          },
+          "judged": {
+            "type": "integer"
+          },
+          "unjudged": {
+            "type": "integer",
+            "description": "Client messages not judged yet (the background pass fills them)."
+          },
+          "judgedThrough": {
+            "type": "string",
+            "nullable": true
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "positive": {
+                "type": "integer"
+              },
+              "neutral": {
+                "type": "integer"
+              },
+              "negative": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "positive",
+              "neutral",
+              "negative"
+            ]
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "day": {
+                  "type": "string",
+                  "description": "YYYY-MM-DD (UTC)"
+                },
+                "positive": {
+                  "type": "integer"
+                },
+                "neutral": {
+                  "type": "integer"
+                },
+                "negative": {
+                  "type": "integer"
+                },
+                "unjudged": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "day",
+                "positive",
+                "neutral",
+                "negative",
+                "unjudged"
+              ]
+            }
+          },
+          "verdicts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "messageId": {
+                  "type": "string",
+                  "description": "crm-service people fact id of the message"
+                },
+                "occurredAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "channel": {
+                  "type": "string",
+                  "description": "crm-service's channel of the message (e.g. email, whatsapp, linkedin), else its source"
+                },
+                "sentiment": {
+                  "type": "string",
+                  "enum": [
+                    "positive",
+                    "neutral",
+                    "negative"
+                  ]
+                },
+                "confidence": {
+                  "type": "number"
+                },
+                "model": {
+                  "type": "string",
+                  "description": "Jev release that judged it"
+                },
+                "judgedAt": {
+                  "type": "string"
+                },
+                "humanId": {
+                  "type": "string"
+                },
+                "companyKey": {
+                  "type": "string",
+                  "description": "The relation's company key ('' = company unknown)"
+                },
+                "leadIds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "The brand's lead rows the message counts for, oldest first; empty = the client is no lead row"
+                }
+              },
+              "required": [
+                "messageId",
+                "occurredAt",
+                "channel",
+                "sentiment",
+                "confidence",
+                "model",
+                "judgedAt",
+                "humanId",
+                "companyKey",
+                "leadIds"
+              ]
+            }
+          }
+        },
+        "required": [
+          "brandId",
+          "messages",
+          "judged",
+          "unjudged",
+          "judgedThrough",
+          "counts",
+          "days",
+          "verdicts"
+        ]
       }
     },
     "parameters": {},
@@ -26406,6 +26553,85 @@
           },
           "502": {
             "description": "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/client-sentiment": {
+      "get": {
+        "summary": "Client Sentiment of every message a client wrote the brand (CLIENT-SENTIMENT-1027)",
+        "description": "A CLIENT = a relationship subject of the brand whose decided `customer` tag is yes (a person's word > a source's evidence such as a payment or won sale > Jev's thread judgment), not `team`, no staff or own-org member address. Every message they wrote the brand on any channel crm-service mirrors (Gmail, WhatsApp, LinkedIn...) is judged ONCE by Jev positive / neutral / negative in the background (history since inception included) and never re-asked; reading never judges. Only messages of a relation that is a client NOW are counted. `unjudged` > 0 = counts not final yet; `judgedThrough` = the newest message instant up to which every client message is judged (null = none). `verdicts` lists judged messages oldest first (filter with `sentiment`, the counts and days stay whole); one message = one `messageId` (crm-service's fact id). `days` = per UTC day of the message.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal org UUID"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO instant: only messages at or after it"
+            },
+            "required": false,
+            "description": "ISO instant: only messages at or after it",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "positive",
+                "neutral",
+                "negative"
+              ],
+              "description": "Only list verdicts of this sentiment"
+            },
+            "required": false,
+            "description": "Only list verdicts of this sentiment",
+            "name": "sentiment",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The brand's client messages and their verdicts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientSentimentRead"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid brandId, since or sentiment"
+          },
+          "500": {
+            "description": "Unreadable (never an empty answer)"
+          },
+          "502": {
+            "description": "client-service member list unreadable: `error: dependency_unavailable`"
           }
         }
       }

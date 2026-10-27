@@ -42,6 +42,7 @@ import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
 import candidateScreeningsRoutes from "./routes/candidate-screenings.js";
 import leadIdResolveRoutes from "./routes/lead-id-resolve.js";
 import leadStatesRoutes from "./routes/lead-states.js";
+import clientSentimentRoutes from "./routes/client-sentiment.js";
 import runOutcomeBackfillRoutes from "./routes/run-outcome-backfill.js";
 import leadSubjectEquivalencesRoutes from "./routes/lead-subject-equivalences.js";
 import outcomeTriggerReResolveRoutes from "./routes/outcome-trigger-reresolve.js";
@@ -121,6 +122,8 @@ app.use(sourceLeadsFoundRoutes);
 app.use(candidateScreeningsRoutes);
 app.use(leadIdResolveRoutes);
 app.use(leadStatesRoutes);
+// CLIENT-SENTIMENT-1027: every client message of a brand and its Client Sentiment verdict.
+app.use(clientSentimentRoutes);
 app.use(runOutcomeBackfillRoutes);
 app.use(leadSubjectEquivalencesRoutes);
 app.use(outcomeTriggerReResolveRoutes);

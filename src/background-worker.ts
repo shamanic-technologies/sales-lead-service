@@ -31,6 +31,7 @@ import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
+import { startClientSentimentWorker } from "./lib/client-sentiment.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
 import { startStaffIdentityMarksWorker } from "./lib/not-a-person.js";
@@ -90,6 +91,8 @@ startLeadTimezoneWorker();
 // Who each person is to each brand: leads from the CRM feed, Jev's tags on the whole thread, suggested
 // merges, unknown companies looked up (relationship-sweep.ts, RELATIONSHIP-TAGS-1014).
 startRelationshipSweepWorker();
+// Every message a client of a brand writes it is judged once positive / neutral / negative (client-sentiment.ts, CLIENT-SENTIMENT-1027).
+startClientSentimentWorker();
 // Every served row of a non-email pipe carries what its sender (crm-service) states it sent, live or stopped
 // campaign alike (channel-send-reconcile.ts, WA-SENDS-BATCH-1014).
 startChannelSendReconcileWorker();

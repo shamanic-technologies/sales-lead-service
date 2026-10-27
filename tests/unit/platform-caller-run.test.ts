@@ -97,6 +97,7 @@ describe("each call site's choice", () => {
       "lib/relationship-judge.ts": "runId",
       "lib/relationship-intent-judge.ts": "runId",
       "lib/their-acts.ts": "support",
+      "lib/client-sentiment.ts": "support",
     });
   });
 });
