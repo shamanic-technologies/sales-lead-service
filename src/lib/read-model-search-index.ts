@@ -119,6 +119,37 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // The serve's employer upsert (leads-registry.ts `upsertOrganizationFromPerson`): the organization of an exact
+    // domain. Only `lower(primary_domain)` was indexed, so each serve seq-scanned the ~450 MB table (5.4 s on average
+    // in prod, inside a serve's 5-minute budget; BOX-DB-LOAD-1027-LEAD-2).
+    name: "idx_organizations_primary_domain",
+    on: "ON organizations (primary_domain)",
+    lockKey: "7290519146308441030",
+    log: "[lead-service] load index",
+  },
+  {
+    // Same upsert without a domain, and every PAST employer of a served person (`findOrCreateOrganizationByName`).
+    name: "idx_organizations_name",
+    on: "ON organizations (name)",
+    lockKey: "7290519146308441031",
+    log: "[lead-service] load index",
+  },
+  {
+    // Unibox list/counts (unibox-model.ts): `max(updated_at)` of a brand's rows, asked on every Unibox count and page
+    // read (~250 ms each: a seq scan of the ~100 MB table, one brand holds half of it; BOX-DB-LOAD-1027-LEAD-2).
+    name: "idx_unibox_rows_updated",
+    on: "ON unibox_rows (org_id, brand_id, updated_at)",
+    lockKey: "7290519146308441028",
+    log: "[lead-service] load index",
+  },
+  {
+    // Unibox Lifecycle filter: `count(*)` of a brand's rows on some rungs (the Deals board's columns), same seq scan.
+    name: "idx_unibox_rows_lifecycle",
+    on: "ON unibox_rows (org_id, brand_id, lifecycle_key)",
+    lockKey: "7290519146308441029",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
