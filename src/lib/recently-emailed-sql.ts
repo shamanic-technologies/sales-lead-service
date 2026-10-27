@@ -14,11 +14,17 @@ import { sql, type SQL } from "drizzle-orm";
  * A person skipped is never consumed here: the pools filter them in SQL (they stay where they are), and a person a
  * FRESH serve bought anyway stays filed under the asking campaign (its paid pool, or the source's stock) for a later
  * serve once the window lapses or for a pipe that does not ask.
+ *
+ * Two windows, two tactics (FRESH-2-MONTHS-1027, owner 2026-10-27: a client whose market is used up writes again to
+ * people it emailed more than 2 months ago who never acted): `3_months` ("Fresh contacts only") and `2_months`. Which one
+ * a serve states is its workflow's word (the strategy of the sourcing pipe), never a brand or campaign rule here. The
+ * window also rides to human-service on every serve call (people-client `serveBody`), whose per-brand suppression
+ * holds a person for the same window.
  */
-export const RECENTLY_EMAILED_WINDOWS = ["3_months"] as const;
+export const RECENTLY_EMAILED_WINDOWS = ["3_months", "2_months"] as const;
 export type RecentlyEmailedWindow = (typeof RECENTLY_EMAILED_WINDOWS)[number];
 
-const WINDOW_INTERVAL: Record<RecentlyEmailedWindow, string> = { "3_months": "3 months" };
+const WINDOW_INTERVAL: Record<RecentlyEmailedWindow, string> = { "3_months": "3 months", "2_months": "2 months" };
 
 /** The window the serve asked for and the brand(s) the serve is made for. */
 export interface RecentlyEmailedScope {

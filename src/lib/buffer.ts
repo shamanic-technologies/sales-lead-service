@@ -280,6 +280,7 @@ export async function pullNext(
     ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
     ...(params.relationships ? { relationships: params.relationships } : {}),
     ...(params.stepFilter ? { stepFilter: params.stepFilter } : {}),
+    ...(params.excludeEmailedWithin ? { excludeEmailedWithin: params.excludeEmailedWithin } : {}),
   };
   // What the pools filter on: the pipe's own word, else, for a pipe serving a source's stock, the person as the source
   // found them (CATCHALL-SOURCE-OWNS-1014: which emails a source keeps is the source pipe's strategy; a pipe stating
