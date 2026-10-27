@@ -111,6 +111,14 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // their-acts `not_brand_conversations`: connection tags with a conversation basis (2.2k of 181k), every 2-min
+    // pass per scope (was a parallel seq scan of ~800 MB on the largest scope, BOX-DB-LOAD-1027).
+    name: "idx_crm_registry_facts_conversation_tags",
+    on: `ON crm_registry_facts (org_id, brand_id) WHERE type = 'connection_tag' AND payload->'basis' @> '[{"kind": "conversation"}]'`,
+    lockKey: "7290519146308441027",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",

@@ -179,15 +179,18 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
       SELECT key AS campaign_id, value #>> '{}' AS offer_id FROM jsonb_each(${offersJson(offers)}::jsonb)
     ),
     -- Each fact's outreach transport, off the current outreach fact of its subject (the timeline row's id).
+    -- One pass over the org's outreach facts hashed by subject (an org is ~one brand), never one index probe
+    -- per timeline row (BOX-DB-LOAD-1027: 66k probes of 0.2 ms on the largest brand). Only the columns read.
     f AS (
-      SELECT t.*, o.type AS outreach_type, o.raw->>'transport' AS transport
+      SELECT t.id, t.lead_id, t.offer_id, t.campaign_id, t.occurred_at, t.label, t.source, t.attributable,
+        t.attribution_basis, t.url, t.detail->'valueCents' AS value_cents, o.type AS outreach_type, o.transport
       FROM lead_timeline_facts t
-      LEFT JOIN LATERAL (
-        SELECT x.type, x.raw FROM outreach_facts x
-        WHERE t.source IN ('outreach', 'reply') AND x.subject_key = t.id AND x.org_id = t.org_id AND x.type <> 'withdrawn'
-        ORDER BY x.seq DESC
-        LIMIT 1
-      ) o ON true
+      LEFT JOIN (
+        SELECT DISTINCT ON (x.subject_key) x.subject_key, x.type, x.raw->>'transport' AS transport
+        FROM outreach_facts x
+        WHERE x.org_id = ${orgId} AND x.type <> 'withdrawn'
+        ORDER BY x.subject_key, x.seq DESC
+      ) o ON t.source IN ('outreach', 'reply') AND o.subject_key = t.id
       WHERE t.org_id = ${orgId} AND t.brand_id = ${brandId} AND t.withdrawn_at IS NULL
     ),
     facts AS (
@@ -195,7 +198,7 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
         jsonb_agg(jsonb_build_object(
           'id', id, 'label', label, 'source', source, 'occurredAt', occurred_at,
           'campaignId', campaign_id, 'attributable', attributable, 'attributionBasis', attribution_basis,
-          'valueCents', detail->'valueCents', 'url', url, 'transport', transport,
+          'valueCents', value_cents, 'url', url, 'transport', transport,
           'screened', CASE WHEN outreach_type = 'link_clicked' THEN transport IS NOT DISTINCT FROM 'smtp' END
         ) ORDER BY occurred_at ASC NULLS LAST, id ASC) AS facts
       FROM f WHERE attribution_basis IS DISTINCT FROM 'our_email'
@@ -223,21 +226,23 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
       ) g
       GROUP BY lead_id, offer_id
     ),
-    -- Each send credited to the run holding the person's row of its campaign when it went out.
-    sends AS (
-      SELECT f.lead_id, f.offer_id, f.campaign_id, f.occurred_at, f.transport,
-        CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.workflow_slug ELSE lc.workflow_slug END AS workflow_slug,
-        CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.cause ELSE 'serve' END AS workflow_source
+    -- Each send credited to the run holding the person's row of its campaign when it went out: the latest
+    -- re-point at or before the send, hash-joined (the re-point table is small; a probe per send was not).
+    sends_rows AS (
+      SELECT f.id, f.lead_id, f.offer_id, f.campaign_id, f.occurred_at, f.transport,
+        lc.id AS lc_id, lc.workflow_slug AS lc_workflow_slug
       FROM f
       LEFT JOIN leads_campaigns lc
         ON lc.lead_id = f.lead_id AND lc.campaign_id = f.campaign_id AND lc.org_id = ${orgId}
-      LEFT JOIN LATERAL (
-        SELECT r.workflow_slug, r.cause FROM lead_campaign_run_repoints r
-        WHERE r.lead_campaign_id = lc.id AND r.repointed_at <= f.occurred_at
-        ORDER BY r.repointed_at DESC, r.id DESC
-        LIMIT 1
-      ) rp ON true
       WHERE f.attribution_basis = 'our_email' AND f.label IN ('initial_email', 'followup') -- EMAIL_SEND_LABELS
+    ),
+    sends AS (
+      SELECT DISTINCT ON (s.id) s.lead_id, s.offer_id, s.campaign_id, s.occurred_at, s.transport,
+        CASE WHEN s.lc_id IS NULL THEN NULL WHEN r.cause IS NOT NULL THEN r.workflow_slug ELSE s.lc_workflow_slug END AS workflow_slug,
+        CASE WHEN s.lc_id IS NULL THEN NULL WHEN r.cause IS NOT NULL THEN r.cause ELSE 'serve' END AS workflow_source
+      FROM sends_rows s
+      LEFT JOIN lead_campaign_run_repoints r ON r.lead_campaign_id = s.lc_id AND r.repointed_at <= s.occurred_at
+      ORDER BY s.id, r.repointed_at DESC, r.id DESC
     ),
     email_sends AS (
       SELECT lead_id, offer_id,
