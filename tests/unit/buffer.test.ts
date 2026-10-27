@@ -868,6 +868,20 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     expect(buildFullLead).not.toHaveBeenCalled();
   });
 
+  it("the window rides to human-service on the serve, 2 months as stated, nothing when not stated (FRESH-2-MONTHS-1027)", async () => {
+    served("lead-fresh", "fresh@x.com");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-fresh" });
+    await pullNext({ ...baseParams, excludeEmailedWithin: "2_months" });
+    expect(serveNext.mock.calls[0][1]).toEqual(expect.objectContaining({ excludeEmailedWithin: "2_months" }));
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ recentlyEmailed: { window: "2_months", brandIds: ["brand-1"] } }));
+
+    serveNext.mockClear();
+    served("lead-other", "other@x.com");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-other" });
+    await pullNext({ ...baseParams });
+    expect(serveNext.mock.calls[0][1]).not.toHaveProperty("excludeEmailedWithin");
+  });
+
   it("a copy of the sender's facts that never caught up fails the serve before anything is bought", async () => {
     assertRecentlyEmailedReadable.mockRejectedValueOnce(new Error("not caught up"));
     await expect(pullNext({ ...baseParams, excludeEmailedWithin: "3_months" })).rejects.toThrow("not caught up");
