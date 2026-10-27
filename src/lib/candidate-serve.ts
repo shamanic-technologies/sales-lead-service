@@ -28,6 +28,7 @@ import type { OrganizationView } from "./lead-shape.js";
 import {
   CandidatesUnsupportedError,
   declineCandidate,
+  HumanServiceStalledError,
   nextCandidate,
   revealCandidate,
   type Candidate,
@@ -43,6 +44,14 @@ export const SCREEN_PROMPT_VERSION = "lead-v1";
 export const SCREEN_QUESTION = "Does this candidate belong to the target audience the client described?";
 /** Inside the route's own timeout, like serve-next's 120s walk budget. */
 export const CANDIDATE_BUDGET_MS = 110_000;
+/**
+ * The longest ONE candidate call (next, reveal, decline) may take (DOCDINNERS-SERVE-TIMEOUT-1027). A reveal answers in
+ * seconds; one that hung until the caller's 5 minutes ran out took the whole run with it, run after run, on the same
+ * candidate. Past this the call is `HumanServiceStalledError`: the caller moves on, nothing is read as exhaustion.
+ */
+export const CANDIDATE_CALL_TIMEOUT_MS = 90_000;
+/** Decline reason of a candidate whose reveal never answered. */
+export const REVEAL_STALLED_REASON = "reveal_stalled";
 
 export function targetHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
@@ -202,7 +211,14 @@ async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[
  * serve this audience through candidates (the caller uses serve-next). `offerId` is the
  * campaign's offer: its must-pass checks apply (null only when the campaign could not say it).
  */
-export async function serveThroughCandidates(audienceId: string, ctx: ServiceContext, offerId: string | null, signal?: AbortSignal): Promise<ServeNextResult | null> {
+export async function serveThroughCandidates(
+  audienceId: string,
+  ctx: ServiceContext,
+  offerId: string | null,
+  signal?: AbortSignal,
+  /** When the caller's own walk stops starting new work (ms since epoch); the budget never runs past it. */
+  walkDeadline?: number,
+): Promise<ServeNextResult | null> {
   if (!ctx.runId) throw new Error("[lead-service] serving through candidates needs the serve's run id");
   const identity: SpendIdentity = {
     orgId: ctx.orgId,
@@ -213,14 +229,14 @@ export async function serveThroughCandidates(audienceId: string, ctx: ServiceCon
     workflowSlug: ctx.workflowSlug ?? null,
     featureSlug: ctx.featureSlug ?? null,
   };
-  const deadline = Date.now() + CANDIDATE_BUDGET_MS;
+  const deadline = Math.min(Date.now() + CANDIDATE_BUDGET_MS, walkDeadline ?? Number.POSITIVE_INFINITY);
   let mustPass: QualificationCriterionRow[] | null = null;
   const meter = new TregMeter(identity);
 
   while (Date.now() < deadline && !signal?.aborted) {
     let next;
     try {
-      next = await nextCandidate(audienceId, ctx);
+      next = await nextCandidate(audienceId, ctx, CANDIDATE_CALL_TIMEOUT_MS);
     } catch (error) {
       if (error instanceof CandidatesUnsupportedError) return null;
       throw error;
@@ -239,16 +255,32 @@ export async function serveThroughCandidates(audienceId: string, ctx: ServiceCon
 
     const screened = await screen(candidate, next.target, ctx, identity);
     if (!screened.pass) {
-      await declineCandidate(audienceId, candidate.candidateId, `screen_rejected ${screened.reason}`, basis, ctx);
+      await declineCandidate(audienceId, candidate.candidateId, `screen_rejected ${screened.reason}`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
       continue;
     }
     const failed = await failedMustPass(candidate, mustPass, meter, identity);
     if (failed) {
-      await declineCandidate(audienceId, candidate.candidateId, failed, basis, ctx);
+      await declineCandidate(audienceId, candidate.candidateId, failed, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
       continue;
     }
 
-    const revealed = await revealCandidate(audienceId, candidate.candidateId, basis, ctx);
+    let revealed;
+    try {
+      revealed = await revealCandidate(audienceId, candidate.candidateId, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
+    } catch (error) {
+      if (!(error instanceof HumanServiceStalledError)) throw error;
+      // The reveal never answered (DOCDINNERS-SERVE-TIMEOUT-1027: the same candidate hung every run, so its audience
+      // never served anyone again). That candidate is declined, so the audience hands out the next one; a decline that
+      // fails too leaves the stall to the caller, which moves on to another audience.
+      console.error(`[lead-service] candidate ${candidate.candidateId} audience=${audienceId}: ${error.message}; declining it`);
+      try {
+        await declineCandidate(audienceId, candidate.candidateId, `${REVEAL_STALLED_REASON} after ${error.timeoutMs}ms`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
+      } catch (declineError) {
+        console.error(`[lead-service] candidate ${candidate.candidateId} audience=${audienceId}: decline after a stalled reveal failed:`, declineError);
+        throw error;
+      }
+      continue;
+    }
     if (revealed.status === "served" && revealed.person) {
       return { status: "served", person: revealed.person, personId: revealed.personId, emailVerdict: revealed.emailVerdict };
     }

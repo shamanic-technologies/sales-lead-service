@@ -18,7 +18,8 @@ import { DEFAULT_EMAIL_POLICY, type EmailPolicy } from "./email-policy.js";
  * may hold catch-all people (already revealed and paid for) for a pipe that accepts them.
  */
 
-export type EmptyAnswer = "exhausted" | "no_recent_posts" | "not_serveable";
+/** `stalled` = human-service never answered a call for this audience (DOCDINNERS-SERVE-TIMEOUT-1027): ordered last like a dry one. */
+export type EmptyAnswer = "exhausted" | "no_recent_posts" | "not_serveable" | "stalled";
 
 /** When each audience last answered nobody to this source under this policy (ms since epoch). */
 export async function loadEmptyAnswers(sourceCampaignId: string, acceptedEmails: EmailPolicy | null | undefined): Promise<Map<string, number>> {

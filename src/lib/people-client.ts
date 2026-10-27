@@ -292,18 +292,42 @@ function buildHeaders(ctx: ServiceContext): Record<string, string> {
   return headers;
 }
 
+/** How long a human-service call may take when its caller states nothing. */
+export const HUMAN_CALL_TIMEOUT_MS = 300_000;
+
+/**
+ * human-service did not answer within the call's own time (DOCDINNERS-SERVE-TIMEOUT-1027): the request hung, nothing
+ * came back. Not an answer about anybody's population: the caller decides what an unanswered look means.
+ */
+export class HumanServiceStalledError extends Error {
+  readonly path: string;
+  readonly timeoutMs: number;
+  constructor(path: string, timeoutMs: number) {
+    super(`human-service did not answer ${path} within ${timeoutMs}ms`);
+    this.name = "HumanServiceStalledError";
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 async function callHuman<T>(
   path: string,
-  options: { method?: string; body?: unknown; ctx: ServiceContext },
+  options: { method?: string; body?: unknown; ctx: ServiceContext; timeoutMs?: number },
 ): Promise<T> {
-  const { method = "GET", body, ctx } = options;
+  const { method = "GET", body, ctx, timeoutMs = HUMAN_CALL_TIMEOUT_MS } = options;
 
-  const response = await fetch(`${HUMAN_SERVICE_URL}${path}`, {
-    method,
-    headers: buildHeaders(ctx),
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(300_000),
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${HUMAN_SERVICE_URL}${path}`, {
+      method,
+      headers: buildHeaders(ctx),
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") throw new HumanServiceStalledError(path, timeoutMs);
+    throw error;
+  }
 
   if (!response.ok) {
     const error = await response.text();
@@ -349,10 +373,10 @@ export interface ServeNextResult {
   emailVerdict?: unknown;
 }
 
-export async function serveNext(audienceId: string, ctx: ServiceContext): Promise<ServeNextResult> {
+export async function serveNext(audienceId: string, ctx: ServiceContext, timeoutMs?: number): Promise<ServeNextResult> {
   return callHuman<ServeNextResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/serve-next`,
-    { method: "POST", body: serveBody(ctx), ctx },
+    { method: "POST", body: serveBody(ctx), ctx, timeoutMs },
   );
 }
 
@@ -409,9 +433,9 @@ export class CandidatesUnsupportedError extends Error {
   }
 }
 
-export async function nextCandidate(audienceId: string, ctx: ServiceContext): Promise<NextCandidateResult> {
+export async function nextCandidate(audienceId: string, ctx: ServiceContext, timeoutMs?: number): Promise<NextCandidateResult> {
   try {
-    return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: serveBody(ctx), ctx });
+    return await callHuman<NextCandidateResult>(`/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/next`, { method: "POST", body: serveBody(ctx), ctx, timeoutMs });
   } catch (error) {
     if (error instanceof PeopleServiceError && error.status === 422) throw new CandidatesUnsupportedError(messageOf(error));
     throw error;
@@ -427,16 +451,16 @@ export interface RevealResult {
   replayed: boolean;
 }
 
-export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext): Promise<RevealResult> {
+export async function revealCandidate(audienceId: string, candidateId: string, basis: string, ctx: ServiceContext, timeoutMs?: number): Promise<RevealResult> {
   return callHuman<RevealResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/reveal`,
-    { method: "POST", body: { basis, ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}) }, ctx },
+    { method: "POST", body: { basis, ...(ctx.acceptedEmails ? { acceptedEmails: ctx.acceptedEmails } : {}) }, ctx, timeoutMs },
   );
 }
 
-export async function declineCandidate(audienceId: string, candidateId: string, reason: string, basis: string, ctx: ServiceContext): Promise<void> {
+export async function declineCandidate(audienceId: string, candidateId: string, reason: string, basis: string, ctx: ServiceContext, timeoutMs?: number): Promise<void> {
   await callHuman<{ declined: boolean }>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/candidates/${encodeURIComponent(candidateId)}/decline`,
-    { method: "POST", body: { reason, basis }, ctx },
+    { method: "POST", body: { reason, basis }, ctx, timeoutMs },
   );
 }

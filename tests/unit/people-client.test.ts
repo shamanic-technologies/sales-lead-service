@@ -6,6 +6,8 @@ import {
   isStepFilterRefusal,
   isPeopleCreditInsufficientError,
   isAudienceNotServeableError,
+  HumanServiceStalledError,
+  revealCandidate,
   type Person,
 } from "../../src/lib/people-client.js";
 
@@ -195,5 +197,27 @@ describe("people-client stepFilter", () => {
     expect(isStepFilterRefusal(err, undefined)).toBe(false);
     expect(isStepFilterRefusal(new PeopleServiceError(502, "down"), { reached: ["x"] })).toBe(false);
     expect(isStepFilterRefusal(new Error("boom"), { reached: ["x"] })).toBe(false);
+  });
+});
+
+// DOCDINNERS-SERVE-TIMEOUT-1027: a call human-service never answers ends at the caller's stated time as a NAMED error.
+describe("a human-service call that never answers", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("ends at its own timeout as HumanServiceStalledError, never a bare DOMException after 300s", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+          }),
+      ),
+    );
+    const started = Date.now();
+    const call = revealCandidate("aud-1", "cand-1", "basis", ctx, 50);
+    await expect(call).rejects.toBeInstanceOf(HumanServiceStalledError);
+    await expect(call).rejects.toThrow(/did not answer .*candidates\/cand-1\/reveal within 50ms/);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 });
