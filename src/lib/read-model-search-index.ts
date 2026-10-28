@@ -150,6 +150,36 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // "Is this address one of the brand's CRM facts?" (crm-fact-contact.ts, functions of migration 0131): the readers
+    // walked every fact of the brand (116k on the largest, 8.5 s mean at daytime; BOX-LOAD-1028-LEAD-DAY).
+    name: "idx_crm_facts_emails_norm",
+    on: "ON crm_facts USING gin (crm_fact_emails_norm(emails))",
+    lockKey: "7290519146308441032",
+    log: "[lead-service] load index",
+  },
+  {
+    // Same for a person known by phone.
+    name: "idx_crm_facts_phones_norm",
+    on: "ON crm_facts USING gin (crm_fact_phones_norm(phones))",
+    lockKey: "7290519146308441033",
+    log: "[lead-service] load index",
+  },
+  {
+    // Identity sweep pass 5 (`adoptResolvedCompanies`): leads still without a company whose employer row has one. It
+    // seq-scanned the ~450 MB organizations table on every tick (25 s at daytime) to find nothing; these two small
+    // partial indexes answer it alone (BOX-LOAD-1028-LEAD-DAY).
+    name: "idx_leads_org_company_pending",
+    on: "ON leads (organization_id) WHERE company_id IS NULL AND organization_id IS NOT NULL",
+    lockKey: "7290519146308441034",
+    log: "[lead-service] load index",
+  },
+  {
+    name: "idx_organizations_id_company",
+    on: "ON organizations (id) INCLUDE (company_id) WHERE company_id IS NOT NULL",
+    lockKey: "7290519146308441035",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
