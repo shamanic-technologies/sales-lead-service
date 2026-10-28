@@ -56,6 +56,8 @@ const BRAND_SCALAR_TABLES = [
   "hot_lead_states",
   "hot_lead_fires",
   "outcome_fact_declarations",
+  "post_touch_declarations",
+  "post_touch_skips",
 ] as const;
 const BRAND_ARRAY_TABLES = ["leads_campaigns", "followup_actions", "requeued_serves", "outreach_facts"] as const;
 
@@ -230,6 +232,11 @@ describe.skipIf(!hasRealDatabase)("brand transfer against a real database", () =
     await db.execute(sql`
       INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis)
       VALUES (${org}, ${brand}, ${leadId}::uuid, 'paid_client', ${randomUUID()}::uuid, ${randomUUID()}::uuid, 'conversation', 'no_evidence')`);
+    await db.execute(sql`
+      INSERT INTO post_touch_declarations (org_id, brand_id, lead_id, post_subject_service, post_subject_id, visit_fact_id, visited_at, run_id, status)
+      VALUES (${org}, ${brand}, ${leadId}::uuid, 'meta-service', ${randomUUID()}, ${randomUUID()}, now(), ${randomUUID()}::uuid, 'delivered')`);
+    await db.execute(sql`
+      INSERT INTO post_touch_skips (visit_fact_id, org_id, brand_id, reason, lead_ids) VALUES (${randomUUID()}, ${org}, ${brand}, 'ambiguous_lead', '{}')`);
     await db.execute(sql`
       INSERT INTO relationship_intent_judgments (org_id, brand_id, human_id, p_wants_business, thread_seq, model, run_id)
       VALUES (${org}, ${brand}, ${human}::uuid, 0.9, 1, 'jev-test', 'run')`);

@@ -49,6 +49,13 @@ crm-service owns what a stage/status MEANS and states each as a dated funnel FAC
 5. **Nothing deleted, a failed read sets nothing aside**: stale evidence is `withdrawn_at` at the END of the pass after every sibling read answered (crm-service/email-gateway failure throws first, so a brand is never emptied by a sibling outage).
 6. History serves CRM evidence as `type: "conversion"`, `observedBy: "crm"`. Producer note: crm-service records opportunity history only for records that CHANGE on a sync; a connection predating its history table needed a one-time `POST /internal/gohighlevel/rebuild`.
 
+## A visit through one of our posts' links is that post's (`post-touch.ts`, migration 0132; FACTORY-P2-CONTENT-OUTCOMES, owner 2026-10-28)
+
+- **Contract**: a post's link carries `dy_post=<subjectService>:<subjectId>` = the subject of the publisher's `post_published` occurrence (e.g. `meta-service:<publication id>`; colon may be `%3A`; subjectService `^[a-z][a-z0-9-]*$`, subjectId 1..256 chars). Anything else is no post touch (`parsePostTouch`, pure). Generic: never a per-platform rule.
+- **Post touch** = a live `crm_facts` `website_visit` whose `payload.firstUrl` carries a valid param, resolved to the brand's lead by a case-folded email exactly as brand-signups.ts (several leads = `post_touch_skips` with the why; none yet = asked again next pass).
+- **Declared** ONCE per (org, brand, lead, post) (`post_touch_declarations` = the claim) on a spend-free `post-touch-visit` run of its own: produced `website_visit` (the lead), consumed `post_published` (the param's subject verbatim), `occurredAt` = the earliest such visit. A refusal = `refused` + error, loud, never re-sent; a transient failure keeps `claimed` and reuses its run.
+- **Downstream reads only DECLARED touches** (`delivered`/`queued`): the earliest is our FIRST TOUCH (`withFirstChannelSends` folds it, so outcome-cause AND crm-evidence-sync see it; lead-states-read unions it), a later signup/form/purchase consumes that `website_visit` (`loadConsumptionEvidence`), and no hand-stated `website_visit` is declared beside it. Unscoped sweep waits for the post-boot partial index `idx_crm_facts_post_visits` (its predicate = the read's, verbatim).
+
 ## Lead history: `GET /orgs/leads/{id}/history` (`lead-history.ts` pure, `routes/lead-history.ts` IO)
 
 One ordered answer to "what happened to this person" (previously assembled in the browser from six services). This service holds a lead as a PERSON, so assembly lives here; consumers render without merging.

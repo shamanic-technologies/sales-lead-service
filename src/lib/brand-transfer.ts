@@ -232,6 +232,10 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       // Which outcome facts of the brand's people were declared to the cost ledger (COST-ACCOUNTING-1023-P1): once per
       // person and outcome, so it moves with them. Their recording runs (outcome_recording_runs) stay: a run is its org's.
       { table: "outcome_fact_declarations", touchesUpdatedAt: false },
+      // Which visits through our posts' links were declared (FACTORY-P2-CONTENT-OUTCOMES, post-touch.ts): once per person
+      // and post, so they move with them (their spend-free runs stay: a run is its org's); the unsettled visits too.
+      { table: "post_touch_declarations", touchesUpdatedAt: true },
+      { table: "post_touch_skips", touchesUpdatedAt: false },
     ];
     // A declaration the target already holds for the same person and outcome is the target's: drop the source copy.
     await tx.execute(sql`
@@ -239,6 +243,15 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
       WHERE ${brandScalarPending}
         AND EXISTS (SELECT 1 FROM outcome_fact_declarations t
                     WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id AND t.outcome_key = s.outcome_key
+                      AND (t.org_id, t.brand_id) IS DISTINCT FROM (s.org_id, s.brand_id))
+    `);
+    // Same for a post touch the target already holds for the same person and post.
+    await tx.execute(sql`
+      DELETE FROM post_touch_declarations s
+      WHERE ${brandScalarPending}
+        AND EXISTS (SELECT 1 FROM post_touch_declarations t
+                    WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id
+                      AND t.post_subject_service = s.post_subject_service AND t.post_subject_id = s.post_subject_id
                       AND (t.org_id, t.brand_id) IS DISTINCT FROM (s.org_id, s.brand_id))
     `);
     // A date the target already holds for the same lead is the target's own: drop the source copy.
