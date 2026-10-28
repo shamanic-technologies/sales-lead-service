@@ -1226,7 +1226,8 @@ export const runOutcomeOutbox = pgTable(
 /**
  * Every outcome reach this service recorded for a person and what its OUTCOME TRIGGER did at campaign-service
  * (migration 0094, EVERY-OUTCOME-FIRES-1015; src/lib/outcome-triggers.ts). ONCE per (org, brand, offer, step,
- * person) while a fire is live (`pending`/`delivered`/`refused`); one row per (source record, offer).
+ * person) while a fire is live (`pending`/`delivered`/`refused`); one row per (source record, offer). An act of theirs
+ * (step `act:<type>`, migration 0130) fires once per FACT instead.
  */
 export const outcomeTriggerFires = pgTable(
   "outcome_trigger_fires",
@@ -1258,12 +1259,17 @@ export const outcomeTriggerFires = pgTable(
     nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    /** An act's (`act:<type>` step, migration 0130) item for the workflow: kind, text, source, fact id, detail. */
+    item: jsonb("item"),
   },
   (table) => [
     uniqueIndex("idx_otf_source_offer").on(table.sourceRef, table.offerId),
-    uniqueIndex("idx_otf_person_once")
+    uniqueIndex("idx_otf_person_once_outcomes")
       .on(table.orgId, table.brandId, table.offerId, table.step, table.personKey)
-      .where(sql`status IN ('pending', 'delivered', 'refused')`),
+      .where(sql`status IN ('pending', 'delivered', 'refused') AND step NOT LIKE 'act:%'`),
+    index("idx_otf_act_recent")
+      .on(table.orgId, table.brandId, table.offerId, table.step, table.personKey, table.occurredAt)
+      .where(sql`step LIKE 'act:%'`),
     index("idx_otf_due").on(table.nextAttemptAt).where(sql`status = 'pending'`),
   ],
 );

@@ -10,6 +10,7 @@ import { journalistClause, journalistScopeOf, type JournalistScope } from "./bra
 import { loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { judgeAutomatedActs, recordTheirActs, refreshActedAt } from "./their-acts.js";
+import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
 
 /**
  * EVERY LEAD CARRIES A NEXT FOLLOW-UP DATE (LEAD-FOLLOWUP-DATE-1016, owner 2026-10-16: "Dans lead service, il faut
@@ -301,19 +302,7 @@ export async function applySends(sends: readonly ObservedSend[]): Promise<number
  *     `last_action_at` (it moves no date).
  * A person we only sent to, or never contacted, is cold: "Lead follow-up due" never serves them until they act.
  */
-export const CRM_NOT_THEIR_ACT = [
-  "message_out",
-  "withdrawn",
-  "person_merged",
-  "person_split",
-  "added_to_crm",
-  "group_member",
-  "deal_status_changed",
-  // A CRM stage / tag saying they are no longer a client (crm-service v0.73.0): bookkeeping, not an act of theirs.
-  "former_client",
-  "disqualified",
-  "meeting_not_held",
-] as const;
+export { CRM_NOT_THEIR_ACT };
 
 /**
  * Record every act of theirs read off the Unibox facts (`lead_crm_acts`, one row per fact x lead). Which of them COUNT
