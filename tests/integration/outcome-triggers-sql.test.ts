@@ -648,4 +648,85 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     ]);
     expect(await rowsOf({ step: "act:message_in" })).toEqual([]);
   });
+
+  describe("MEETING-ATTENDED-SOURCE-1028: a booked meeting whose time passed was held", () => {
+    const HOUR = 60 * 60_000;
+    /** A booking with a meeting time, as crm-service states a calendar appointment. */
+    async function booking(email: string, ref: string, startsAt: Date, endsAt: Date | null, over: Partial<typeof crmFacts.$inferInsert> = {}) {
+      await crmFact("meeting_booked", email, {
+        source: "gohighlevel",
+        sourceRef: ref,
+        dateBasis: "booked_at",
+        payload: { via: "appointment", startsAt: startsAt.toISOString(), ...(endsAt ? { endsAt: endsAt.toISOString() } : {}) },
+        ...over,
+      });
+    }
+    const attended = () => ours().filter((c) => c.body.triggerId === "meeting_attended");
+
+    it("fires ONE meeting_attended once the meeting ended (+ grace), never twice, never before", async () => {
+      const leadId = await seedLead("held");
+      const start = new Date(Date.now() + 30 * 60_000);
+      const end = new Date(start.getTime() + HOUR);
+      await booking(addr("held"), `appt-${tag}`, start, end);
+
+      // Before the end (+ grace): nothing.
+      await sweepOutcomeTriggers(new Date(end.getTime() + 30 * 60_000), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(0);
+
+      const later = new Date(end.getTime() + 2 * HOUR);
+      await sweepOutcomeTriggers(later, { orgIds: [orgId] });
+      expect(attended()).toHaveLength(1);
+      expect(attended()[0].body).toMatchObject({ brandId, offerId, leadId, person: { email: addr("held") } });
+      const rows = await rowsOf({ step: "meeting_attended" });
+      expect(rows.map((r) => [r.status, r.source, r.sourceRef])).toEqual([["delivered", "meeting_held", `held:${brandId}:gohighlevel:appt-${tag}`]]);
+      expect(new Date(rows[0].occurredAt!).toISOString()).toBe(end.toISOString());
+
+      // Idempotent: another pass, and a re-stated copy of the same booking, fire nothing more.
+      await booking(addr("held"), `appt-${tag}`, start, end);
+      await sweepOutcomeTriggers(new Date(later.getTime() + 60_000), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(1);
+    });
+
+    it("no stated end = one hour after the start", async () => {
+      await seedLead("noend");
+      const start = new Date(Date.now() + 10 * 60_000);
+      await booking(addr("noend"), `noend-${tag}`, start, null);
+      await sweepOutcomeTriggers(new Date(start.getTime() + 1.5 * HOUR), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(0);
+      await sweepOutcomeTriggers(new Date(start.getTime() + 2.5 * HOUR), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(1);
+      const [row] = await rowsOf({ step: "meeting_attended" });
+      expect(new Date(row.occurredAt!).toISOString()).toBe(new Date(start.getTime() + HOUR).toISOString());
+    });
+
+    it("a cancelled, a no-show, a withdrawn, a future or a timeless booking fires nothing", async () => {
+      for (const n of ["cancel", "noshow", "gone", "future", "stage"]) await seedLead(n);
+      const start = new Date(Date.now() + 10 * 60_000);
+      const end = new Date(start.getTime() + HOUR);
+      await booking(addr("cancel"), `c-${tag}`, start, end);
+      await crmFact("meeting_not_held", addr("cancel"), { source: "gohighlevel", sourceRef: `c-${tag}`, payload: { reason: "cancelled" } });
+      await booking(addr("noshow"), `n-${tag}`, start, end);
+      await crmFact("meeting_not_held", addr("noshow"), { source: "gohighlevel", sourceRef: `n-${tag}`, payload: { reason: "noshow" } });
+      const goneId = randomUUID();
+      await booking(addr("gone"), `g-${tag}`, start, end, { factId: goneId });
+      await crmFact("withdrawn", addr("gone"), { withdrawnOf: goneId });
+      await booking(addr("future"), `f-${tag}`, new Date(start.getTime() + 48 * HOUR), null);
+      await crmFact("meeting_booked", addr("stage"), { source: "gohighlevel", sourceRef: `s-${tag}`, payload: { via: "stage_entry", startsAt: null } });
+
+      await sweepOutcomeTriggers(new Date(end.getTime() + 3 * HOUR), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(0);
+      expect(await rowsOf({ step: "meeting_attended" })).toEqual([]);
+    });
+
+    it("an explicit 'showed' fact fires as itself; the held pass does not fire the same meeting again", async () => {
+      await seedLead("showed");
+      const start = new Date(Date.now() + 10 * 60_000);
+      const end = new Date(start.getTime() + HOUR);
+      await booking(addr("showed"), `sh-${tag}`, start, end);
+      await crmFact("meeting_attended", addr("showed"), { source: "gohighlevel", sourceRef: `sh-${tag}`, occurredAt: start, payload: { appointmentStatus: "showed" } });
+      await sweepOutcomeTriggers(new Date(end.getTime() + 3 * HOUR), { orgIds: [orgId] });
+      expect(attended()).toHaveLength(1);
+      expect((await rowsOf({ step: "meeting_attended" })).map((r) => r.source)).toEqual(["crm_fact"]);
+    });
+  });
 });

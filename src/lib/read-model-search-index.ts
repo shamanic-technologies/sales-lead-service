@@ -97,6 +97,13 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // meeting-held-read: every booked meeting and what settled it, fleet-wide every 30 s (was a scan of ~1 GB).
+    name: "idx_crm_facts_meetings",
+    on: "ON crm_facts (source, source_ref) WHERE type IN ('meeting_booked', 'meeting_not_held', 'meeting_attended')",
+    lockKey: "7290519146308441036",
+    log: "[lead-service] load index",
+  },
+  {
     // crm-cold-eligibility `crmPairedOrgs`: the orgs of one brand's CRM facts (every other index leads with org).
     name: "idx_crm_facts_brand_org",
     on: "ON crm_facts (brand_id, org_id)",
