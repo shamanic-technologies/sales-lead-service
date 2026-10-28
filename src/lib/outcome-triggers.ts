@@ -48,6 +48,8 @@ import { BOOKING_CALL_LEG_KEY } from "./booking-calls.js";
 import { fetchOrgCampaignFacts } from "./campaign-leg-client.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { rowReaches } from "./step-reached.js";
+import { HELD_GRACE_MS, MEETING_HELD_STEP, heldMeetingSourceRef } from "./meeting-held.js";
+import { readHeldMeetings } from "./meeting-held-read.js";
 import {
   BOOKING_CALL_STEP,
   CRM_FACT_REACH_TYPES,
@@ -1085,6 +1087,67 @@ async function sweepBookingCalls(state: SweepState, now: Date, lookups: Lookups,
   return reaches;
 }
 
+/** A booked meeting is read back this long before the fresh window by its start: it is held at its end, later. */
+const HELD_MEETING_START_LOOKBACK_MS = 24 * 60 * 60_000;
+
+/**
+ * Booked meetings whose time has passed with no cancel / no-show (meeting-held.ts): Meeting attended, once per
+ * meeting. Read whole each pass (a meeting becomes held by time passing, not by a new fact: no cursor); a meeting
+ * already read is skipped by its record.
+ */
+async function sweepHeldMeetings(state: SweepState, now: Date, lookups: Lookups, pending: string[], scope: OutcomeSweepScope | null): Promise<number> {
+  const since = freshSince(state.armedAt, now);
+  const held = await readHeldMeetings({
+    where: scope ? sql`f.org_id = ANY(${sql.param([...scope.orgIds])}::text[])` : sql`true`,
+    startsFrom: new Date(since.getTime() - HELD_MEETING_START_LOOKBACK_MS),
+    startsTo: new Date(now.getTime() - HELD_GRACE_MS),
+    now,
+  });
+  const fresh = held
+    .filter((m) => isFreshReach(m.heldAt, state.armedAt, now))
+    .map((m) => ({ ...m, ref: heldMeetingSourceRef(m.brandId, m.source, m.sourceRef), emails: canonicalEmails(m.emails) }))
+    .filter((m) => m.emails.length > 0);
+  if (fresh.length === 0) return 0;
+  const alreadyRead = new Set(
+    ((await db.execute(sql`
+      SELECT DISTINCT source_ref FROM outcome_trigger_fires WHERE source_ref = ANY(${sql.param(fresh.map((m) => m.ref))}::text[])
+    `)) as unknown as Array<{ source_ref: string }>).map((r) => r.source_ref),
+  );
+  let reaches = 0;
+  let failed: unknown = null;
+  for (const m of fresh) {
+    if (alreadyRead.has(m.ref)) continue;
+    // One meeting failing never holds the others: it is read again next pass (nothing was written for it).
+    try {
+      pending.push(
+        ...(await recordSwept(
+          {
+            orgId: m.orgId,
+            brandId: m.brandId,
+            step: MEETING_HELD_STEP,
+            source: "meeting_held",
+            sourceRef: m.ref,
+            occurredAt: m.heldAt,
+            leadId: null,
+            emails: m.emails,
+            name: m.name,
+            phone: m.phones.map((p) => p.trim()).find(Boolean) ?? null,
+            statedOfferId: null,
+            statedCampaignId: null,
+          },
+          lookups,
+          now,
+        )),
+      );
+      reaches++;
+    } catch (err) {
+      failed ??= err;
+    }
+  }
+  if (failed) throw failed;
+  return reaches;
+}
+
 let sweeping = false;
 
 /**
@@ -1094,9 +1157,9 @@ let sweeping = false;
 export async function sweepOutcomeTriggers(
   now: Date = new Date(),
   scope: OutcomeSweepScope | null = null,
-): Promise<{ crmFacts: number; ledger: number; bookingCalls: number; drained: Record<DeliveryResult, number> }> {
+): Promise<{ crmFacts: number; ledger: number; bookingCalls: number; heldMeetings: number; drained: Record<DeliveryResult, number> }> {
   const empty = { delivered: 0, skipped: 0, refused: 0, retry: 0 };
-  if (sweeping) return { crmFacts: 0, ledger: 0, bookingCalls: 0, drained: empty };
+  if (sweeping) return { crmFacts: 0, ledger: 0, bookingCalls: 0, heldMeetings: 0, drained: empty };
   sweeping = true;
   try {
     const state = await armedState();
@@ -1113,15 +1176,16 @@ export async function sweepOutcomeTriggers(
     const crmFacts = await run("crm facts", () => sweepCrmFacts(state, now, lookups, pending, scope));
     const ledger = await run("outcome ledger", () => sweepLedger(state, now, lookups, pending, scope));
     const bookingCalls = await run("booking calls", () => sweepBookingCalls(state, now, lookups, pending, scope));
+    const heldMeetings = await run("held meetings", () => sweepHeldMeetings(state, now, lookups, pending, scope));
     await deliverIds(pending);
     const drained = await drainOutcomeTriggerFires(scope);
-    if (crmFacts + ledger + bookingCalls + drained.delivered + drained.retry + drained.refused > 0) {
+    if (crmFacts + ledger + bookingCalls + heldMeetings + drained.delivered + drained.retry + drained.refused > 0) {
       console.log(
-        `[lead-service] outcome trigger sweep: reaches crm=${crmFacts} ledger=${ledger} booking_calls=${bookingCalls}; ` +
+        `[lead-service] outcome trigger sweep: reaches crm=${crmFacts} ledger=${ledger} booking_calls=${bookingCalls} held_meetings=${heldMeetings}; ` +
           `redelivered=${drained.delivered} retry=${drained.retry} refused=${drained.refused}`,
       );
     }
-    return { crmFacts, ledger, bookingCalls, drained };
+    return { crmFacts, ledger, bookingCalls, heldMeetings, drained };
   } finally {
     sweeping = false;
   }

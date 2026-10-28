@@ -18,6 +18,11 @@ import {
   type ReachedPerson,
 } from "./step-reached.js";
 import { crmFactHasEmail } from "./crm-fact-contact.js";
+import { HELD_GRACE_MS, MEETING_HELD_STEP } from "./meeting-held.js";
+import { readHeldMeetings } from "./meeting-held-read.js";
+
+/** A held meeting is read back this long before the window by its start (it is held at its end, later). */
+const HELD_MEETING_START_LOOKBACK_MS = 24 * 60 * 60_000;
 
 export type StepReachedQuery =
   | { orgId: string; brandId: string; step: string; since: string; email?: undefined }
@@ -116,7 +121,26 @@ export async function readStepReached(q: StepReachedQuery): Promise<ReachedPerso
       ${email === null ? sql`` : sql`AND ${email} = ANY(r.emails)`}
   `)) as unknown as RawReachRow[];
 
-  const people = groupReachedPeople([...crmRows, ...ledgerRows].map(toReachRow), email);
+  // A booked meeting whose time passed with no cancel / no-show was held (meeting-held.ts): the same reach the
+  // outcome trigger fires on.
+  const heldRows: ReachRow[] = [];
+  if (q.step === MEETING_HELD_STEP) {
+    const now = new Date();
+    const since = q.since === undefined ? null : Date.parse(q.since);
+    const scope = sql`f.org_id = ${q.orgId} AND f.brand_id = ${q.brandId}`;
+    const held = await readHeldMeetings({
+      where: email === null ? scope : sql`${scope} AND ${crmFactHasEmail("f", email)}`,
+      startsFrom: since === null ? new Date(0) : new Date(since - HELD_MEETING_START_LOOKBACK_MS),
+      startsTo: new Date(now.getTime() - HELD_GRACE_MS),
+      now,
+    });
+    for (const m of held) {
+      if (since !== null && Date.parse(m.heldAt) < since) continue;
+      heldRows.push({ emails: m.emails, name: m.name, phones: m.phones, at: m.heldAt, type: "meeting_held", payload: null });
+    }
+  }
+
+  const people = groupReachedPeople([...crmRows.map(toReachRow), ...ledgerRows.map(toReachRow), ...heldRows], email);
   await fillNamesAndPhones(q.orgId, q.brandId, people);
   return people;
 }

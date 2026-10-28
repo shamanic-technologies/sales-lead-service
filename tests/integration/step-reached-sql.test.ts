@@ -159,6 +159,24 @@ describe.skipIf(!hasRealDatabase)("step-reached read against a real database", (
     expect(otherOrg.body.people).toEqual([]);
   });
 
+  it("meeting_attended: a booked meeting whose time passed with no cancel is held at its end (MEETING-ATTENDED-SOURCE-1028)", async () => {
+    const appt = (email: string, ref: string, startsAt: string, endsAt: string) =>
+      crmFact({ emails: [email], type: "meeting_booked", source: "gohighlevel", sourceRef: ref, payload: { via: "appointment", startsAt, endsAt } });
+    await appt(addr("met"), `met-${tag}`, "2026-10-20T15:00:00.000Z", "2026-10-20T15:30:00.000Z");
+    await appt(addr("cxl"), `cxl-${tag}`, "2026-10-20T15:00:00.000Z", "2026-10-20T15:30:00.000Z");
+    await crmFact({ emails: [addr("cxl")], type: "meeting_not_held", source: "gohighlevel", sourceRef: `cxl-${tag}`, payload: { reason: "cancelled" } });
+    await appt(addr("soon"), `soon-${tag}`, "2999-01-01T15:00:00.000Z", "2999-01-01T15:30:00.000Z");
+
+    const res = await get(`step=meeting_attended&since=${encodeURIComponent("2026-10-20T00:00:00Z")}`);
+    expect(res.status).toBe(200);
+    expect(res.body.people.map((p: { email: string; reachedAt: string }) => [p.email, p.reachedAt])).toEqual([
+      [addr("met"), "2026-10-20T15:30:00.000Z"],
+    ]);
+    expect((await get(`step=meeting_attended&since=${encodeURIComponent("2026-10-21T00:00:00Z")}`)).body.people).toEqual([]);
+    expect((await get(`step=meeting_attended&email=${encodeURIComponent(addr("met"))}`)).body.people).toHaveLength(1);
+    expect((await get(`step=meeting_attended&email=${encodeURIComponent(addr("cxl"))}`)).body.people).toEqual([]);
+  });
+
   it("refuses unknown and unobservable steps by name, and anything but exactly one of since/email", async () => {
     expect((await get("step=banana&since=2026-10-14T00:00:00Z")).body.error).toBe("unknown_step");
     expect((await get("step=conversation&since=2026-10-14T00:00:00Z")).body.error).toBe("step_not_observable");
