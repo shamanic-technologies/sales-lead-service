@@ -260,11 +260,12 @@ export async function transferBrand(input: BrandTransferInput): Promise<Transfer
         AND EXISTS (SELECT 1 FROM brand_journalists t WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.lead_id = s.lead_id)
     `);
     // A person's outcome trigger fires ONCE per (org, brand, offer, outcome): a live fire the target already holds
-    // for the same person makes the source's copy redundant, so it is dropped rather than colliding on the move.
+    // for the same person makes the source's copy redundant, so it is dropped rather than colliding on the move (an act,
+    // step `act:<type>`, fires once per fact and never collides).
     await tx.execute(sql`
       DELETE FROM outcome_trigger_fires s
       WHERE ${brandScalarPending}
-        AND s.status IN ('pending', 'delivered', 'refused')
+        AND s.status IN ('pending', 'delivered', 'refused') AND s.step NOT LIKE 'act:%'
         AND EXISTS (SELECT 1 FROM outcome_trigger_fires t
                     WHERE t.org_id = ${toOrg} AND t.brand_id = ${finalBrand} AND t.id <> s.id
                       AND t.offer_id = s.offer_id AND t.step = s.step AND t.person_key = s.person_key

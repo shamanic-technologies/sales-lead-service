@@ -267,8 +267,10 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
 
     const sent = ours().map((c) => [c.body.triggerId, (c.body.person as { email: string }).email, c.body.offerId]).sort();
-    // Not leads: the brand's only active offer is named; no lead id.
+    // Not leads: the brand's only active offer is named; no lead id. The declined card is no Paid client: it is an act
+    // of theirs, rung as itself (LEAD-EVENT-REFUSAL-NO-REACT-1028).
     expect(sent).toEqual([
+      ["account_event", addr("declined"), offerId],
       ["paid_client", addr("payer"), offerId],
       ["signed_up", addr("newcomer"), offerId],
     ]);
@@ -593,5 +595,57 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     expect(again).toMatchObject({ status: 409, reason: "already_answered" });
     expect(ours()).toHaveLength(1);
     expect(await reResolveSetAsideReach("crm:nothing-here")).toMatchObject({ status: 404 });
+  });
+
+  it("LEAD-EVENT-REFUSAL-NO-REACT-1028: a refused payment on a lead with a future stated follow-up rings Lead event, once per refusal", async () => {
+    // Tari (Slipless, 2026-10-28): our follow-up stated 14:00 "payment still pending", then two refused $100 cards.
+    const leadId = await seedLead("tari");
+    await db.execute(sql`
+      INSERT INTO lead_followup_dates (org_id, brand_id, lead_id, next_followup_at, basis, reason, stated_at)
+      VALUES (${orgId}, ${brandId}, ${leadId}, now() + interval '9 hours', 'stated', 'Payment still pending; check in the afternoon', now())
+    `);
+    const refused = { status: "failed", currency: "usd", refunded: false, amountMinor: 10000, description: "Payment for Invoice", amountRefunded: 0 };
+    // 05:24 and 05:38: two refusals 14 minutes apart (dated after the detector was armed, as every fresh fact).
+    await crmFact("payment", addr("tari"), { source: "stripe", occurredAt: new Date(), payload: refused });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+    await crmFact("payment", addr("tari"), { source: "stripe", occurredAt: new Date(Date.now() + 14 * 60_000), payload: refused });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours()).toHaveLength(2);
+    for (const call of ours()) {
+      expect(call.body).toMatchObject({
+        triggerId: "account_event",
+        brandId,
+        offerId,
+        leadId,
+        person: { email: addr("tari") },
+        item: { kind: "payment", source: "stripe", text: "payment: failed (stripe)", detail: refused },
+      });
+      expect(String(call.body.idempotencyKey)).toMatch(/^lead-service:act:crm:[0-9a-f-]{36}:/);
+    }
+    expect(new Set(ours().map((c) => c.body.idempotencyKey)).size).toBe(2);
+    // Never a Paid client, and the stated date never held the act back.
+    expect((await rowsOf({ step: "act:payment" })).map((r) => r.status)).toEqual(["delivered", "delivered"]);
+    expect(await rowsOf({ step: "paid_client" })).toEqual([]);
+  });
+
+  it("a burst of one act (product events of one session) is ONE occurrence; a message of theirs rings nothing here", async () => {
+    const leadId = await seedLead("onb");
+    const at = (min: number) => new Date(Date.now() + min * 60_000);
+    await crmFact("product_event", addr("onb"), { source: "posthog", occurredAt: at(1), payload: { event: "onboarding_step_viewed", text: "Onboarding step viewed" } });
+    await crmFact("product_event", addr("onb"), { source: "posthog", occurredAt: at(2), payload: { event: "onboarding_brand_created", text: "Brand created" } });
+    await crmFact("product_event", addr("onb"), { source: "posthog", occurredAt: at(3), payload: { event: "onboarding_launch_failed", text: "Launch failed" } });
+    await crmFact("message_in", addr("onb"), { source: "matrix", occurredAt: at(4) });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours().map((c) => [c.body.triggerId, c.body.leadId, (c.body.item as { text: string }).text])).toEqual([
+      ["account_event", leadId, "Onboarding step viewed (posthog)"],
+    ]);
+    expect((await rowsOf({ step: "act:product_event" })).map((r) => [r.status, r.skipReason]).sort()).toEqual([
+      ["delivered", null],
+      ["skipped", "coalesced"],
+      ["skipped", "coalesced"],
+    ]);
+    expect(await rowsOf({ step: "act:message_in" })).toEqual([]);
   });
 });

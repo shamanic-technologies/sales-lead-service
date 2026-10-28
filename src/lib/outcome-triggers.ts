@@ -16,6 +16,9 @@
  *       * the outcome ledger (`conversion_events`: tracker, a person's statement, a reply), never the `crm`
  *         rows (the fact copy above IS their record);
  *       * the follow-up ledger: an `acted` row of an AI Instant Call campaign = a booking call (booking-calls.ts).
+ *   - EVERY OTHER ACT OF THEIRS on the fact copy (a refused payment, a product / onboarding event: a crm fact of
+ *     theirs reaching no step, outcome-trigger-rules.ts `isTheirNewAct`) rings the generic `account_event` (a Lead
+ *     event member), ONCE PER FACT (step `act:<type>`), a burst of one kind coalesced (LEAD-EVENT-REFUSAL-NO-REACT-1028).
  *   The sweep is ARMED once (`outcome_trigger_sweep`): what happened before it never fires (no back-fill).
  *
  * Every reach is one `outcome_trigger_fires` row per offer (migration 0094) BEFORE anything is sent:
@@ -67,8 +70,17 @@ import {
   RESTATED_ACTION,
   UNANSWERED_SKIPS,
   actionAlreadyAnswered,
+  ACCOUNT_EVENT_TRIGGER,
+  ACT_COALESCE_WINDOW_MS,
+  COALESCED,
+  actIdempotencyKey,
+  actItem,
+  actStep,
+  isActStep,
+  isTheirNewAct,
   type CatalogueOutcomeTrigger,
 } from "./outcome-trigger-rules.js";
+import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
 
 const CATALOGUE_TTL_MS = 5 * 60_000;
 const CATALOGUE_TIMEOUT_MS = 30_000;
@@ -133,6 +145,8 @@ export interface OutcomeReach {
   statedOfferId: string | null;
   /** The campaign the record names (a statement's), read for its offer when none is stated. */
   statedCampaignId: string | null;
+  /** An act's item for the workflow (`act:<type>` steps only). */
+  item?: Record<string, unknown> | null;
 }
 
 /** Reads shared by every reach of one pass: one campaign read per org, one offer read per brand (and trigger). */
@@ -290,8 +304,12 @@ async function resolveReach(reach: OutcomeReach, lookups: Lookups): Promise<Reso
   }
   const needsBrand = !stated && !leadCampaignOffers.some((o) => o !== null);
   // A person in no campaign (an inbound visitor): the offers whose live campaign answers the trigger this reach fires.
-  const verdict = needsBrand ? outcomeTriggerFor(reach.step, await loadOutcomeTriggers()) : null;
-  const liveTriggerOffers = verdict?.fire ? await lookups.liveTriggerOffers(reach.orgId, reach.brandId, verdict.triggerId) : null;
+  const triggerId = !needsBrand
+    ? null
+    : isActStep(reach.step)
+      ? ACCOUNT_EVENT_TRIGGER
+      : ((v) => (v.fire ? v.triggerId : null))(outcomeTriggerFor(reach.step, await loadOutcomeTriggers()));
+  const liveTriggerOffers = triggerId ? await lookups.liveTriggerOffers(reach.orgId, reach.brandId, triggerId) : null;
   const activeBrandOffers = needsBrand ? await lookups.activeBrandOffers(reach.orgId, reach.brandId) : null;
   return { ...reach, leadId, email, phone, personKey, offers: pickOffers({ stated, leadCampaignOffers, liveTriggerOffers, activeBrandOffers }) };
 }
@@ -311,14 +329,43 @@ async function writeReach(r: ResolvedReach): Promise<string[]> {
     const reason = "reason" in r.offers ? r.offers.reason : "offer_unknown";
     const detail = "detail" in r.offers ? r.offers.detail : null;
     await db.execute(sql`
-      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, email, name, phone, occurred_at, source, status, skip_reason, last_error)
-      VALUES (${base}, '', ${person}, 'skipped', ${reason}, ${detail})
+      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, email, name, phone, occurred_at, source, item, status, skip_reason, last_error)
+      VALUES (${base}, '', ${person}, ${r.item ? JSON.stringify(r.item) : null}::jsonb, 'skipped', ${reason}, ${detail})
       ON CONFLICT DO NOTHING
     `);
     console.warn(`[lead-service] outcome ${r.step} NOT fired (${reason}): org=${r.orgId} brand=${r.brandId} ${r.personKey} ${r.sourceRef}: ${detail}`);
     return [];
   }
   const pending: string[] = [];
+  if (isActStep(r.step)) {
+    for (const offerId of r.offers.offerIds) {
+      // ONCE per fact; a burst of the same act for the same person is one occurrence (outcome-trigger-rules.ts).
+      const inserted = (await db.execute(sql`
+        INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, email, name, phone, occurred_at, source, item, status, next_attempt_at)
+        SELECT ${base}, ${offerId}, ${person}, ${r.item ? JSON.stringify(r.item) : null}::jsonb, 'pending', now() + ${`${WRITER_DELIVERY_LEASE_MS} milliseconds`}::interval
+        WHERE NOT EXISTS (
+          SELECT 1 FROM outcome_trigger_fires o
+          WHERE o.org_id = ${r.orgId} AND o.brand_id = ${r.brandId} AND o.offer_id = ${offerId} AND o.step = ${r.step}
+            AND o.person_key = ${r.personKey} AND o.status IN ('pending', 'delivered')
+            AND o.occurred_at >= ${r.occurredAt}::timestamptz - ${`${ACT_COALESCE_WINDOW_MS} milliseconds`}::interval
+            AND o.occurred_at <= ${r.occurredAt}::timestamptz
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id::text AS id
+      `)) as unknown as Array<{ id: string }>;
+      if (inserted.length > 0) {
+        pending.push(inserted[0].id);
+        continue;
+      }
+      // Either this fact was already read, or it falls inside a live occurrence of the same act: kept as seen.
+      await db.execute(sql`
+        INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, email, name, phone, occurred_at, source, item, status, skip_reason)
+        VALUES (${base}, ${offerId}, ${person}, ${r.item ? JSON.stringify(r.item) : null}::jsonb, 'skipped', ${COALESCED})
+        ON CONFLICT DO NOTHING
+      `);
+    }
+    return pending;
+  }
   for (const offerId of r.offers.offerIds) {
     const inserted = (await db.execute(sql`
       INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, email, name, phone, occurred_at, source, status, next_attempt_at)
@@ -345,8 +392,8 @@ export async function recordOutcomeReach(reach: OutcomeReach, lookups: Lookups =
   const resolved = await resolveReach(reach, lookups);
   if (!resolved) {
     await db.execute(sql`
-      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, occurred_at, source, status, skip_reason)
-      VALUES (${reach.sourceRef}, ${reach.orgId}, ${reach.brandId}, '', ${reach.step}, '', ${reach.occurredAt}::timestamptz, ${reach.source}, 'skipped', 'no_person')
+      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, occurred_at, source, item, status, skip_reason)
+      VALUES (${reach.sourceRef}, ${reach.orgId}, ${reach.brandId}, '', ${reach.step}, '', ${reach.occurredAt}::timestamptz, ${reach.source}, ${reach.item ? JSON.stringify(reach.item) : null}::jsonb, 'skipped', 'no_person')
       ON CONFLICT DO NOTHING
     `);
     return [];
@@ -377,8 +424,8 @@ async function recordSwept(reach: OutcomeReach, lookups: Lookups, now: Date): Pr
       `[lead-service] outcome ${reach.step} unresolvable for ${UNRESOLVABLE_AFTER_MS / 60_000} min, set aside (NOT fired): org=${reach.orgId} brand=${reach.brandId} ${reach.sourceRef}: ${message}`,
     );
     await db.execute(sql`
-      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, occurred_at, source, status, skip_reason, last_error)
-      VALUES (${reach.sourceRef}, ${reach.orgId}, ${reach.brandId}, '', ${reach.step}, '', ${reach.leadId}::uuid, ${reach.occurredAt}::timestamptz, ${reach.source}, 'skipped', 'unresolvable', ${message})
+      INSERT INTO outcome_trigger_fires (source_ref, org_id, brand_id, offer_id, step, person_key, lead_id, occurred_at, source, item, status, skip_reason, last_error)
+      VALUES (${reach.sourceRef}, ${reach.orgId}, ${reach.brandId}, '', ${reach.step}, '', ${reach.leadId}::uuid, ${reach.occurredAt}::timestamptz, ${reach.source}, ${reach.item ? JSON.stringify(reach.item) : null}::jsonb, 'skipped', 'unresolvable', ${message})
       ON CONFLICT DO NOTHING
     `);
     return [];
@@ -389,6 +436,7 @@ async function recordSwept(reach: OutcomeReach, lookups: Lookups, now: Date): Pr
 
 interface FireRow {
   id: string;
+  source_ref: string;
   org_id: string;
   brand_id: string;
   offer_id: string;
@@ -400,6 +448,7 @@ interface FireRow {
   phone: string | null;
   occurred_at: RawTimestamp;
   attempts: number;
+  item: Record<string, unknown> | null;
 }
 
 export type DeliveryResult = "delivered" | "skipped" | "refused" | "retry";
@@ -470,6 +519,7 @@ async function priorDoorEvent(
 /** One attempt to ring campaign-service's door for one pending row. Never throws. */
 export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): Promise<DeliveryResult> {
   try {
+    if (isActStep(row.step)) return await deliverAct(row, now);
     let triggers: CatalogueOutcomeTrigger[];
     try {
       triggers = await loadOutcomeTriggers();
@@ -558,10 +608,63 @@ export async function deliverOutcomeFire(row: FireRow, now: Date = new Date()): 
   }
 }
 
+/**
+ * One act of theirs (`act:<type>`) rung as `account_event`: once per FACT (its own idempotency key), so neither the
+ * once-per-person nor the for-person read of an outcome applies (a second refused payment is a new act). The trigger
+ * is campaign-service's to know: an unknown one is a 400, kept `refused`.
+ */
+async function deliverAct(row: FireRow, now: Date): Promise<DeliveryResult> {
+  const occurredAt = toIsoTimestamp(row.occurred_at);
+  const person = eventPerson(row.email, row.name, row.phone);
+  const body = {
+    triggerId: ACCOUNT_EVENT_TRIGGER,
+    brandId: row.brand_id,
+    offerId: row.offer_id,
+    idempotencyKey: actIdempotencyKey(row.source_ref, row.offer_id),
+    ...(occurredAt ? { occurredAt: new Date(Math.min(Date.parse(occurredAt), now.getTime())).toISOString() } : {}),
+    ...(row.lead_id ? { leadId: row.lead_id } : {}),
+    ...(person ? { person } : {}),
+    ...(row.item ? { item: row.item } : {}),
+  };
+  let response: Response;
+  try {
+    response = await fetchWithRetry(`${CAMPAIGN_SERVICE_URL}/internal/trigger-events`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": CAMPAIGN_SERVICE_API_KEY, "x-org-id": row.org_id },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return await keepForRetry(row, errorMessage(err));
+  }
+  const text = await response.text();
+  if (response.ok) {
+    let eventId: string | null = null;
+    try {
+      const parsed = JSON.parse(text) as { event?: { id?: unknown } };
+      eventId = typeof parsed.event?.id === "string" ? parsed.event.id : null;
+    } catch {
+      // Recorded (2xx); the id is only kept for the reader.
+    }
+    await settle(
+      row,
+      sql`status = 'delivered', trigger_id = ${ACCOUNT_EVENT_TRIGGER}, campaign_event_id = ${eventId}, delivered_at = now(), attempts = ${row.attempts + 1}, last_error = NULL`,
+    );
+    console.log(`[lead-service] act ${row.step} rung as ${ACCOUNT_EVENT_TRIGGER} at campaign-service (event ${eventId}): ${describe(row)} ${row.source_ref}`);
+    return "delivered";
+  }
+  if (response.status === 400) {
+    console.error(`[lead-service] act ${row.step} REFUSED by campaign-service, kept: ${describe(row)}: ${text.slice(0, 300)}`);
+    await settle(row, sql`status = 'refused', trigger_id = ${ACCOUNT_EVENT_TRIGGER}, attempts = ${row.attempts + 1}, last_error = ${`400 ${text}`.slice(0, 500)}`);
+    return "refused";
+  }
+  return await keepForRetry(row, `${response.status} ${text.slice(0, 300)}`);
+}
+
 async function deliverIds(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const rows = (await db.execute(sql`
-    SELECT id::text AS id, org_id, brand_id, offer_id, step, person_key, lead_id::text AS lead_id, email, name, phone, occurred_at, attempts
+    SELECT id::text AS id, source_ref, org_id, brand_id, offer_id, step, person_key, lead_id::text AS lead_id, email, name, phone, occurred_at, attempts, item
     FROM outcome_trigger_fires WHERE id = ANY(${sql.param(ids)}::uuid[]) AND status = 'pending'
   `)) as unknown as FireRow[];
   for (const row of rows) await deliverOutcomeFire(row);
@@ -591,7 +694,7 @@ export async function drainOutcomeTriggerFires(scope: OutcomeSweepScope | null =
       LIMIT ${DRAIN_BATCH}
       FOR UPDATE SKIP LOCKED
     )
-    RETURNING id::text AS id, org_id, brand_id, offer_id, step, person_key, lead_id::text AS lead_id, email, name, phone, occurred_at, attempts
+    RETURNING id::text AS id, source_ref, org_id, brand_id, offer_id, step, person_key, lead_id::text AS lead_id, email, name, phone, occurred_at, attempts, item
   `)) as unknown as FireRow[];
   for (const row of due) counts[await deliverOutcomeFire(row)]++;
   return counts;
@@ -671,6 +774,7 @@ interface CrmFactRow {
   full_name: string | null;
   phones: string[] | null;
   type: string;
+  source: string;
   occurred_at: RawTimestamp;
   payload: Record<string, unknown> | null;
   withdrawn: boolean;
@@ -721,11 +825,12 @@ export type ReResolveAnswer =
  */
 export async function reResolveSetAsideReach(sourceRef: string, now: Date = new Date()): Promise<ReResolveAnswer> {
   const rows = (await db.execute(sql`
-    SELECT org_id, brand_id, offer_id, step, lead_id::text AS lead_id, email, name, phone, occurred_at, source, status, skip_reason
+    SELECT org_id, brand_id, offer_id, step, lead_id::text AS lead_id, email, name, phone, occurred_at, source, status, skip_reason, item
     FROM outcome_trigger_fires WHERE source_ref = ${sourceRef} ORDER BY created_at
   `)) as unknown as Array<{
     org_id: string; brand_id: string; offer_id: string; step: string; lead_id: string | null; email: string | null;
     name: string | null; phone: string | null; occurred_at: RawTimestamp; source: string; status: string; skip_reason: string | null;
+    item: Record<string, unknown> | null;
   }>;
   if (rows.length === 0) return { status: 404, reason: "not_found", detail: `no outcome reach recorded under ${sourceRef}` };
   if (rows.some((r) => r.status !== "skipped" || !UNANSWERED_SKIPS.includes(r.skip_reason ?? ""))) {
@@ -753,6 +858,7 @@ export async function reResolveSetAsideReach(sourceRef: string, now: Date = new 
     phone: first.phone,
     statedOfferId: null,
     statedCampaignId: null,
+    item: first.item,
   });
   await deliverIds(pending);
   const after = (await db.execute(sql`
@@ -767,8 +873,8 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
   let reaches = 0;
   for (let batch = 0; batch < CRM_FACT_BATCHES_PER_TICK; batch++) {
     const facts = (await db.execute(sql`
-      SELECT f.fact_id, f.seq::text AS seq, f.org_id, f.brand_id, f.emails, f.full_name, f.phones, f.type, f.occurred_at, f.payload,
-        CASE WHEN f.type = ANY(${sql.param([...CRM_FACT_REACH_TYPES])}::text[])
+      SELECT f.fact_id, f.seq::text AS seq, f.org_id, f.brand_id, f.emails, f.full_name, f.phones, f.type, f.source, f.occurred_at, f.payload,
+        CASE WHEN f.type = ANY(${sql.param([...CRM_FACT_REACH_TYPES])}::text[]) OR f.type <> ALL(${sql.param([...CRM_NOT_THEIR_ACT])}::text[])
           THEN EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
           ELSE false END AS withdrawn
       FROM crm_facts f
@@ -780,15 +886,18 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
     let cursor = state.crmFactSeq;
     try {
       for (const f of facts) {
-        const step = scope && !scope.orgIds.includes(f.org_id) ? null : stepOfCrmFact(f.type);
+        const inScope_ = !scope || scope.orgIds.includes(f.org_id);
+        const outcome = inScope_ ? stepOfCrmFact(f.type) : null;
         const at = toIsoTimestamp(f.occurred_at);
         const emails = canonicalEmails(f.emails ?? []);
-        const reaches_ =
-          step !== null &&
-          !f.withdrawn &&
+        const reachesOutcome =
+          outcome !== null &&
           emails.length > 0 &&
-          rowReaches({ emails, name: f.full_name, phones: f.phones ?? [], at, type: f.type, payload: f.payload }) &&
-          isFreshReach(at, state.armedAt, now);
+          rowReaches({ emails, name: f.full_name, phones: f.phones ?? [], at, type: f.type, payload: f.payload });
+        // Any other act of theirs (a refused payment, a product event) rings Lead event as itself, once per fact.
+        const step = reachesOutcome ? outcome : inScope_ && isTheirNewAct(f.type, false) ? actStep(f.type) : null;
+        const phone = (f.phones ?? []).map((p) => p.trim()).find(Boolean) ?? null;
+        const reaches_ = step !== null && !f.withdrawn && (emails.length > 0 || (isActStep(step) && phone !== null)) && isFreshReach(at, state.armedAt, now);
         if (reaches_ && step && (await isRestatedAction(f, step, at))) {
           reaches++;
         } else if (reaches_ && step) {
@@ -804,9 +913,10 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
                 leadId: null,
                 emails,
                 name: f.full_name,
-                phone: (f.phones ?? []).map((p) => p.trim()).find(Boolean) ?? null,
+                phone,
                 statedOfferId: null,
                 statedCampaignId: null,
+                item: isActStep(step) ? actItem({ type: f.type, source: f.source, factId: f.fact_id, occurredAt: at, payload: f.payload }) : null,
               },
               lookups,
               now,
