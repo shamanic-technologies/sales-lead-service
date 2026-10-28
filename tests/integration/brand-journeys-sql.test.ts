@@ -10,6 +10,7 @@ const { db, sql } = await import("../../src/db/index.js");
 const { leads } = await import("../../src/db/schema.js");
 const { upsertTimelineFacts } = await import("../../src/lib/timeline-facts.js");
 const { streamBrandJourneys } = await import("../../src/lib/brand-journeys.js");
+const { clientSatisfiedRows } = await import("../../src/lib/client-sentiment.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -208,5 +209,32 @@ describe.skipIf(!hasRealDatabase)("brand journeys read against a real database",
     ]);
     // Existing fields unchanged: one email act per campaign, every send counted.
     expect(j.acts.map((a) => [a.campaignId, a.kind, a.count])).toEqual([[cT, "email", 3]]);
+  });
+
+  it("names the client message on each client_satisfied fact: same sourceRef on the two lead rows of one writer", async () => {
+    // CLIENT-SATISFIED-1027-SOURCEREF: one positive client message, written by one person who holds two lead rows of the
+    // brand, is one fact per lead row (the model is unchanged) and both name the same message, so a consumer counts it once.
+    const brand = randomUUID();
+    const a = await lead("cs-a");
+    const b = await lead("cs-b");
+    const other = await lead("cs-c");
+    const messageId = `crm-fact-${tag}`;
+    await upsertTimelineFacts([
+      ...clientSatisfiedRows({ orgId, brandId: brand }, [{
+        messageId, occurredAt: "2026-10-27T10:00:00.000Z", channel: "whatsapp", sentiment: "positive", confidence: 0.9,
+        model: "jev", judgedAt: "2026-10-27T10:05:00.000Z", humanId: randomUUID(), companyKey: "", leadIds: [a, b],
+      }]),
+      // Any other fact names no message.
+      { id: `cs-visit-${tag}`, org_id: orgId, brand_id: brand, offer_id: null, lead_id: other, campaign_id: null,
+        occurred_at: "2026-10-27T09:00:00.000Z", label: "website_visit", source: "crm", source_ref: `crm-visit-${tag}`,
+        attributable: null, attribution_basis: null, url: null, detail: {}, withdrawn_at: null } as never,
+    ]);
+
+    const journeys = [];
+    for await (const chunk of streamBrandJourneys(orgId, brand, new Map(), 50)) journeys.push(...chunk);
+    const satisfied = journeys.flatMap((j) => j.facts.filter((f) => f.label === "client_satisfied").map((f) => [j.leadId, f.sourceRef]));
+    expect(satisfied.sort()).toEqual([[a, messageId], [b, messageId]].sort());
+    const visit = journeys.find((j) => j.leadId === other)!.facts[0];
+    expect(visit).toMatchObject({ label: "website_visit", sourceRef: null });
   });
 });
