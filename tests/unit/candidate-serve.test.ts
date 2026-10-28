@@ -186,3 +186,63 @@ describe("serveThroughCandidates", () => {
     expect(revealCandidate).not.toHaveBeenCalled();
   });
 });
+
+describe("serveThroughCandidates records the walk (FACTORY-RECORD-SERVE-1028)", () => {
+  it("each candidate in order, with what decided it; the record replays to the revealed candidate", async () => {
+    const { ServeWalk, withServeWalk } = await import("../../src/lib/serve-walk.js");
+    const { replayServeWalk } = await import("../../src/lib/serve-walk-rules.js");
+    mustPassCriteria.mockResolvedValue([mustPass]);
+    nextCandidate
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("screened-out"), target })
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("must-fail"), target })
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("no-email"), target })
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("stuck"), target })
+      .mockResolvedValueOnce({ status: "candidate", candidate: cand("ok"), target });
+    judgeYesNo.mockResolvedValueOnce({ probabilities: { answer: 0.3 }, model: "jev" }).mockResolvedValue({ probabilities: { answer: 0.9 }, model: "jev" });
+    judge
+      .mockResolvedValueOnce({ verdict: { id: "v1", verdict: "no", reason: "slow" } })
+      .mockResolvedValue({ verdict: { id: "v2", verdict: "yes", reason: null } });
+    revealCandidate
+      .mockResolvedValueOnce({ status: "not_served", person: null })
+      .mockRejectedValueOnce(new HumanServiceStalledError("/reveal", CANDIDATE_CALL_TIMEOUT_MS))
+      .mockResolvedValueOnce({ status: "served", person, personId: "pid-ok" });
+    declineCandidate.mockResolvedValue(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const walk = new ServeWalk({ orgId: "org-1", brandId: "brand-1", campaignId: "camp-1", callerRunId: "r0", serveRunId: "run-1", mode: "serve", context: {} });
+    const r = await withServeWalk(walk, () => serveThroughCandidates("aud-1", ctx, "offer-a"));
+    expect(r?.status).toBe("served");
+
+    const steps = walk.steps.filter((s) => s.type === "candidate");
+    expect(steps.map((s) => [s.ref, s.outcome, s.reason])).toEqual([
+      ["candidate:screened-out", "skipped", "screen"],
+      ["candidate:must-fail", "skipped", "must_pass"],
+      ["candidate:no-email", "skipped", "reveal"],
+      ["candidate:stuck", "skipped", "reveal"],
+      // Decided further once filed as a lead (buffer.ts): still open here.
+      ["candidate:ok", "not_reached", null],
+    ]);
+    expect(steps[0].checks[0]).toEqual({
+      rule: "screen",
+      inputs: expect.objectContaining({ cached: null, yesProbability: 0.3, threshold: 0.5, providerPersonId: "p-screened-out" }),
+      passed: false,
+    });
+    expect(steps[1].checks[1]).toEqual({ rule: "must_pass", inputs: { verdicts: [{ criterionId: "crit-1", verdict: "no", reason: "slow" }] }, passed: false });
+    expect(walk.header.context.candidateBasis).toBe(decisionBasis([mustPass as never]));
+
+    // The revealed candidate closes as served (as buffer.ts does once it is filed): the record replays to it.
+    const { walkFoundPerson } = await import("../../src/lib/serve-walk.js");
+    await withServeWalk(walk, async () => {
+      const h = walkFoundPerson("person:pid-ok");
+      h.identify("lead-ok");
+      h.serve();
+    });
+    expect(replayServeWalk(walk.steps)).toEqual({ servedRef: "candidate:ok", servedLeadId: "lead-ok", mismatches: [] });
+  });
+
+  it("outside a serve nothing is recorded and nothing changes", async () => {
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target: null });
+    revealCandidate.mockResolvedValueOnce({ status: "served", person });
+    expect((await serveThroughCandidates("aud-1", ctx, "offer-a"))?.status).toBe("served");
+  });
+});

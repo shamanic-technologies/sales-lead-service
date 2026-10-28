@@ -1,4 +1,5 @@
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { walkCandidate, walkEvent, type WalkCandidateHandle } from "./serve-walk.js";
 import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import { db } from "../db/index.js";
@@ -655,6 +656,7 @@ export async function pickRetryCandidate(params: {
     statuses = response.results;
   } catch (err) {
     // Fail-closed: no evidence ⟹ no retry. Today's behaviour, minus one wasted call.
+    walkEvent("retry_pool_sender_unreadable", { sender: "email", candidates: candidates.length });
     console.warn(
       `[lead-service] retry-pool skipped: email-gateway status unavailable campaign=${params.campaignId} candidates=${candidates.length}:`,
       err,
@@ -671,6 +673,7 @@ export async function pickRetryCandidate(params: {
   const retryable: RetryCandidate[] = [];
   let queuedCount = 0;
   let unknownCount = 0;
+  const walked = new Map<string, WalkCandidateHandle>();
 
   for (const candidate of candidates) {
     let flags: CandidateStatusFlags | null;
@@ -686,6 +689,14 @@ export async function pickRetryCandidate(params: {
       flags = null;
     }
     const verdict = decideRetry(flags, candidate.servedAt, nowMs);
+    const handle = walkCandidate("retry_pool", `row:${candidate.id}`, candidate.leadId);
+    handle.check(
+      "retry_verdict",
+      { verdict, flags: flags ? { ...flags } : null, servedAt: candidate.servedAt === null ? null : String(candidate.servedAt instanceof Date ? candidate.servedAt.toISOString() : candidate.servedAt), nowMs },
+      verdict === "retry",
+    );
+    if (verdict === "retry") walked.set(candidate.id, handle);
+    else handle.skip();
     if (verdict === "terminal") terminalIds.push(candidate.id);
     else if (verdict === "sender_closed") closedIds.push(candidate.id);
     else if (verdict === "sender_refuses") refused.push({ id: candidate.id, refusal: flags!.refusal! });
@@ -731,6 +742,10 @@ export async function pickRetryCandidate(params: {
       parentRunId: params.parentRunId,
       workflowSlug: params.context.workflowSlug ?? null,
     });
+    const handle = walked.get(candidate.id);
+    handle?.check("claim", { claimed }, claimed);
+    if (claimed) handle?.serve();
+    else handle?.skip();
     if (claimed) {
       console.log(
         `[lead-service] retry-pool claimed campaign=${params.campaignId} leadId=${candidate.leadId} email=${candidate.email} attempt=${candidate.retryCount + 1} candidates=${candidates.length} terminal=${terminalIds.length} closed=${closedIds.length} refused=${refused.length} queued=${queuedCount} unknown=${unknownCount}`,
@@ -766,14 +781,20 @@ async function pickChannelCandidate(
       `[lead-service] retry-pool skipped: channel sender (crm-service) sends unavailable campaign=${params.campaignId} candidates=${candidates.length}:`,
       err,
     );
+    walkEvent("retry_pool_sender_unreadable", { sender: "channel", candidates: candidates.length });
     return null;
   }
 
   const sent: Array<{ id: string; sentAt: string; sendId: string }> = [];
   const retryable: RetryCandidate[] = [];
   let queuedCount = 0;
+  const walked = new Map<string, WalkCandidateHandle>();
   for (const candidate of candidates) {
     const decided = decideChannelRetry(sendsByEmail.get(channelSendKey(candidate.email)), params.campaignId, nowMs);
+    const handle = walkCandidate("retry_pool", `row:${candidate.id}`, candidate.leadId);
+    handle.check("channel_retry", { ...decided }, decided.verdict === "retry");
+    if (decided.verdict === "retry") walked.set(candidate.id, handle);
+    else handle.skip();
     if (decided.verdict === "channel_sent") sent.push({ id: candidate.id, sentAt: decided.sentAt, sendId: decided.sendId });
     else if (decided.verdict === "retry") retryable.push(candidate);
     else queuedCount += 1;
@@ -795,6 +816,10 @@ async function pickChannelCandidate(
       parentRunId: params.parentRunId,
       workflowSlug: params.context.workflowSlug ?? null,
     });
+    const handle = walked.get(candidate.id);
+    handle?.check("claim", { claimed }, claimed);
+    if (claimed) handle?.serve();
+    else handle?.skip();
     if (claimed) {
       console.log(
         `[lead-service] retry-pool claimed (channel sender) campaign=${params.campaignId} leadId=${candidate.leadId} attempt=${candidate.retryCount + 1} candidates=${candidates.length} channelSent=${sent.length} sending=${queuedCount}`,

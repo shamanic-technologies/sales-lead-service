@@ -38,6 +38,7 @@ import { startStaffIdentityMarksWorker } from "./lib/not-a-person.js";
 import { startLeadFollowupDatesWorker } from "./lib/lead-followup-date.js";
 import { startLeadSubjectEquivalencesWorker } from "./lib/lead-subject-equivalences.js";
 import { fileUniboxLeads, reconcileUniboxLeads } from "./lib/unibox-leads.js";
+import { startServeWalkPruneWorker } from "./lib/serve-walk.js";
 import { startMemoryReport } from "./lib/memory-report.js";
 import { ensurePostBootIndex, ensureReadModelSearchIndex, LOAD_INDEXES, RELATION_KEY_INDEX } from "./lib/read-model-search-index.js";
 
@@ -101,6 +102,8 @@ startChannelSendReconcileWorker();
 startBrandJournalistsWorker();
 // A lead whose every email is a staff address is not a real person: out of every figure (not-a-person.ts, FAKE-OUTCOMES-1022).
 startStaffIdentityMarksWorker();
+// FACTORY-RECORD-SERVE-1028: serve walks older than their retention are deleted.
+startServeWalkPruneWorker();
 // Two lead rows our own identity records say are ONE lead (repaired serve, duplicate of one human at one company,
 // folded engager) are stated the same subject at runs-service's ledger (lead-subject-equivalences.ts, LEDGER-RESIDUAL-1025).
 startLeadSubjectEquivalencesWorker();
