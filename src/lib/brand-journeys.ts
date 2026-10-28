@@ -55,6 +55,12 @@ export interface JourneyFact {
   transport: string | null;
   /** Clicks only: true = our tracker recorded it (judged human), false = the provider reported it (unscreened); null otherwise. */
   screened: boolean | null;
+  /**
+   * A fact recording a CLIENT MESSAGE (source `client_message`): crm-service's fact id of that message. The same message
+   * stated on several lead rows of its writer carries the same value, so a consumer counts it once per brand. null on
+   * every other fact.
+   */
+  sourceRef: string | null;
 }
 
 export interface JourneyAct {
@@ -141,6 +147,7 @@ export function toBrandJourney(r: RawJourney): BrandJourney {
       url: (f.url as string | null) ?? null,
       transport: (f.transport as string | null) ?? null,
       screened: (f.screened as boolean | null) ?? null,
+      sourceRef: (f.sourceRef as string | null) ?? null,
     })),
     acts: (r.acts ?? []).map((a) => ({
       campaignId: (a.campaignId as string | null) ?? null,
@@ -183,7 +190,8 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
     -- per timeline row (BOX-DB-LOAD-1027: 66k probes of 0.2 ms on the largest brand). Only the columns read.
     f AS (
       SELECT t.id, t.lead_id, t.offer_id, t.campaign_id, t.occurred_at, t.label, t.source, t.attributable,
-        t.attribution_basis, t.url, t.detail->'valueCents' AS value_cents, o.type AS outreach_type, o.transport
+        t.attribution_basis, t.url, t.detail->'valueCents' AS value_cents, o.type AS outreach_type, o.transport,
+        CASE WHEN t.source = 'client_message' THEN t.source_ref END AS message_ref
       FROM lead_timeline_facts t
       LEFT JOIN (
         SELECT DISTINCT ON (x.subject_key) x.subject_key, x.type, x.raw->>'transport' AS transport
@@ -199,7 +207,8 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
           'id', id, 'label', label, 'source', source, 'occurredAt', occurred_at,
           'campaignId', campaign_id, 'attributable', attributable, 'attributionBasis', attribution_basis,
           'valueCents', value_cents, 'url', url, 'transport', transport,
-          'screened', CASE WHEN outreach_type = 'link_clicked' THEN transport IS NOT DISTINCT FROM 'smtp' END
+          'screened', CASE WHEN outreach_type = 'link_clicked' THEN transport IS NOT DISTINCT FROM 'smtp' END,
+          'sourceRef', message_ref
         ) ORDER BY occurred_at ASC NULLS LAST, id ASC) AS facts
       FROM f WHERE attribution_basis IS DISTINCT FROM 'our_email'
       GROUP BY lead_id, offer_id
