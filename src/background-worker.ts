@@ -25,6 +25,7 @@ import { startSocialEngagementsWorker } from "./lib/social-engagements.js";
 import { startTriggerEventOutboxWorker } from "./lib/lead-requested-events.js";
 import { startRunOutcomeOutboxWorker } from "./lib/run-outcomes.js";
 import { startOutcomeFactDeclarationsWorker } from "./lib/outcome-fact-declarations.js";
+import { startPostTouchWorker } from "./lib/post-touch.js";
 import { startOutcomeTriggerWorker } from "./lib/outcome-triggers.js";
 import { startLeadIdentityWorker } from "./lib/lead-identity-sweep.js";
 import { startHumanEventsWorker } from "./lib/human-events.js";
@@ -74,6 +75,8 @@ startRunOutcomeOutboxWorker();
 // Every meeting booked / attended and sale our outreach caused is declared to runs-service's ledger once
 // (outcome-fact-declarations.ts, COST-ACCOUNTING-1023-P1).
 startOutcomeFactDeclarationsWorker();
+// A visit through one of our posts' links, credited to the post's run (FACTORY-P2-CONTENT-OUTCOMES).
+startPostTouchWorker();
 // Every outcome a person reaches (CRM fact, outcome ledger, booking call) rings its outcome trigger at campaign-service
 // once, and every undelivered ring is retried (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015).
 startOutcomeTriggerWorker();

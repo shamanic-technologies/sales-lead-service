@@ -26,7 +26,9 @@ import { declareRunOutcomesNow, FACT_OUTCOME_KEYS, factOutcomeDeclaration, OUTCO
  *
  * A hand-stated visit of a lead whose click OUR tracker measured (a live `website_visit` timeline fact from the
  * outreach copy) is the same visit: the measuring service's occurrence, never declared here (the rule every visit
- * count applies: `website_visit` here = visits known only by hand).
+ * count applies: `website_visit` here = visits known only by hand). Same for a lead whose visit through one of our
+ * posts' links was declared by the post-touch run (post-touch.ts), and a later signup / form / purchase CONSUMES that
+ * visit (`websiteVisit` evidence): the chain to the publishing run.
  *
  * subject = the lead (`subjectService: "lead-service"`), as on every run of the fleet. Each CONSUMES the outcome it
  * came from (`consumedOutcomeFor`, pure): a website visit the `message_sent` our outreach reached them with (a fact is
@@ -221,6 +223,11 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
           SELECT 1 FROM lead_timeline_facts t
           WHERE t.org_id = ce.org_id AND t.brand_id = ce.brand_id AND t.lead_id = ce.matched_lead_id
             AND t.label = 'website_visit' AND t.source = 'outreach' AND t.withdrawn_at IS NULL))
+        -- A visit through one of our posts' links is the post-touch run's occurrence (post-touch.ts), never a second one.
+        AND NOT (m.outcome_key = 'website_visit' AND EXISTS (
+          SELECT 1 FROM post_touch_declarations p
+          WHERE p.org_id = ce.org_id AND p.brand_id = ce.brand_id AND p.lead_id = ce.matched_lead_id
+            AND p.status IN ('delivered', 'queued')))
         ${scope ? sql`AND ce.org_id = ${scope.orgId}` : sql.empty()}
       ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key, ce.received_at ASC NULLS LAST, ce.id
     )
@@ -256,13 +263,19 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
     WHERE c.org_id = ${f.orgId} AND c.brand_id = ${f.brandId} AND c.matched_lead_id = ${f.leadId}::uuid
       AND c.event = ANY(${sql.param(events)}::text[]) AND c.withdrawn_at IS NULL AND c.attribution_status = 'attributed'
       ${crmOnly ? sql`AND c.source = 'crm'` : sql.empty()} ${before(sql.raw("c.received_at"))})`;
+  // A visit through one of our posts' links, DECLARED (post-touch.ts): the signup consumes the `website_visit` the
+  // post-touch run produced, which consumed the post (FACTORY-P2-CONTENT-OUTCOMES).
+  const postTouch = sql`EXISTS (
+    SELECT 1 FROM post_touch_declarations p
+    WHERE p.org_id = ${f.orgId} AND p.brand_id = ${f.brandId} AND p.lead_id = ${f.leadId}::uuid
+      AND p.status IN ('delivered', 'queued') ${before(sql.raw("p.visited_at"))})`;
   const declared = (outcome: FactOutcomeKey) => sql`EXISTS (
     SELECT 1 FROM outcome_fact_declarations d
     WHERE d.org_id = ${f.orgId} AND d.brand_id = ${f.brandId} AND d.lead_id = ${f.leadId}::uuid AND d.outcome_key = ${outcome})`;
   const rows = (await db.execute(sql`
     SELECT
       (${timeline(sql`t.source = 'reply' AND t.detail->>'classification' = 'positive'`)} OR ${ledger([CRM_POSITIVE_REPLY_STEP], true)}) AS positive_reply,
-      (${timeline(sql`t.label = 'website_visit'`)} OR ${ledger(["website_visit"], false)}) AS website_visit,
+      (${timeline(sql`t.label = 'website_visit'`)} OR ${ledger(["website_visit"], false)} OR ${postTouch}) AS website_visit,
       (${timeline(sql`t.label = 'form_filled'`)} OR ${ledger(["form_submission"], false)}) AS form_submitted,
       ${declared("meeting_booked")} AS declared_meeting_booked,
       ${declared("meeting_attended")} AS declared_meeting_attended,
