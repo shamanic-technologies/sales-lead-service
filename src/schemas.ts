@@ -9,6 +9,7 @@ import {
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
 import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { WALK_POOLS, WALK_RULES } from "./lib/serve-walk-rules.js";
 import { CAUSE_REASONS, LEAD_STATE_EVIDENCE_KINDS, LEAD_STATES } from "./lib/lead-states.js";
 import { EMAIL_SEND_WORKFLOW_SOURCES } from "./lib/repoint-causes.js";
 import { MEETING_ANSWER_VIAS, MEETING_ARMS, MEETING_UNKNOWN_REASONS } from "./lib/meeting-attribution-vocab.js";
@@ -8925,6 +8926,80 @@ registry.registerPath({
       },
     },
     401: { description: "Unauthorized" },
+  },
+});
+
+/** FACTORY-RECORD-SERVE-1028: the recorded walk of a serve (src/lib/serve-walk-rules.ts). */
+const WalkCheckSchema = z.object({
+  rule: z.enum(WALK_RULES as unknown as [string, ...string[]]).openapi({ description: "Which check: each is re-decidable from its own inputs." }),
+  inputs: z.record(z.string(), z.unknown()).openapi({ description: "What the check read (a free check's answer, the sender's statement, the screen's P(yes)...). Ids only." }),
+  passed: z.boolean().openapi({ description: "Whether the person passed it, as the serve decided." }),
+});
+const WalkStepSchema = z.object({
+  type: z.enum(["candidate", "event"]),
+  seq: z.number().int().openapi({ description: "Order in the walk." }),
+  pool: z.enum(WALK_POOLS as unknown as [string, ...string[]]).optional().openapi({ description: "candidate: where the person came from." }),
+  ref: z.string().optional().openapi({ description: "candidate: who, by id (`row:<leads_campaigns id>`, `candidate:<id>`, `person:<id>`, `lead:<id>`)." }),
+  leadId: z.string().nullable().optional().openapi({ description: "candidate: the lead they are (null before a candidate's reveal)." }),
+  checks: z.array(WalkCheckSchema).optional().openapi({ description: "candidate: every check applied, in order." }),
+  outcome: z.enum(["served", "skipped", "not_reached"]).optional().openapi({ description: "candidate: served, skipped, or looked at but never decided." }),
+  reason: z.string().nullable().optional().openapi({ description: "candidate: the rule of the first failed check when skipped." }),
+  what: z.string().optional().openapi({ description: "event: what happened that is not a person (an audience's answer, a sender unreadable...)." }),
+  detail: z.record(z.string(), z.unknown()).optional(),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/serve-walks",
+  summary: "The recorded walk of past serves, with its replay (internal, staff, read-only)",
+  description:
+    "FACTORY-RECORD-SERVE-1028. Every `POST /orgs/buffer/next` since this shipped stores its walk: each person looked at, in order, " +
+    "with every check that decided them (inputs + passed), served or skipped, plus events (an audience answered exhausted...). " +
+    "`replay` re-decides every check from its recorded inputs and hands out the first person passing all of theirs: " +
+    "`replay.servedLeadId` equals `servedLeadId` and `replay.mismatches` is empty when the record replays. What a pool's SQL filters " +
+    "out never reaches the walk; the policy those filters apply is in `context`. Name exactly one of `runId` (the serve's own run or " +
+    "the caller's run) or `campaignId`; newest first. Kept 90 days.",
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "query" as const, name: "runId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "campaignId", required: false, schema: { type: "string" as const } },
+    { in: "query" as const, name: "limit", required: false, schema: { type: "integer" as const, minimum: 1, maximum: 100 }, description: "Default 20." },
+  ],
+  responses: {
+    200: {
+      description: "Walks, newest first",
+      content: {
+        "application/json": {
+          schema: z.object({
+            walks: z.array(
+              z.object({
+                id: z.string(),
+                orgId: z.string(),
+                brandId: z.string(),
+                campaignId: z.string(),
+                callerRunId: z.string().nullable(),
+                serveRunId: z.string().nullable(),
+                mode: z.string().openapi({ description: "serve | find | find_contacted | find_due | stock | named." }),
+                found: z.boolean().nullable().openapi({ description: "null when the serve failed (`error`)." }),
+                reason: z.string().nullable(),
+                servedLeadId: z.string().nullable(),
+                error: z.string().nullable(),
+                context: z.record(z.string(), z.unknown()).openapi({ description: "The serve's stated policy, audience(s), sources, offer, candidate basis." }),
+                steps: z.array(WalkStepSchema),
+                startedAt: z.string(),
+                finishedAt: z.string(),
+                replay: z.object({
+                  servedRef: z.string().nullable(),
+                  servedLeadId: z.string().nullable(),
+                  mismatches: z.array(z.object({ seq: z.number().int(), ref: z.string(), recorded: z.string(), replayed: z.string() })),
+                }),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+    400: { description: "Neither or both of runId / campaignId, or a bad limit" },
   },
 });
 

@@ -3,6 +3,7 @@ import { Router } from "express";
 import { eq, lt, sql } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
 import { pullNext, type PullNextMode } from "../lib/buffer.js";
+import { recordServeWalk, ServeWalk, withServeWalk } from "../lib/serve-walk.js";
 import { createRun, updateRun } from "../lib/runs-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { BufferNextRequestSchema } from "../schemas.js";
@@ -409,8 +410,40 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       ? { kind: "stock", sourceCampaignIds: stockSourceIds }
       : null;
 
+  // FACTORY-RECORD-SERVE-1028: the walk of this serve (who was looked at, what decided each), stored with the serve.
+  const walk = new ServeWalk({
+    orgId: req.orgId!,
+    brandId,
+    campaignId,
+    callerRunId: runId,
+    serveRunId,
+    mode: pullMode?.kind ?? "serve",
+    context: {
+      audienceId: req.audienceId ?? null,
+      ...(pullMode?.kind === "find" ? { audienceIds: pullMode.audienceIds } : {}),
+      ...(pullMode?.kind === "stock" ? { sourceCampaignIds: pullMode.sourceCampaignIds } : {}),
+      ...(pullMode?.kind === "named" ? { namedLead: pullMode.named } : {}),
+      runCampaignId,
+      featureSlug,
+      runFeatureSlug,
+      reachableBy: reachableBy ?? null,
+      poolSender: poolSender ?? "email",
+      acceptedEmails: acceptedEmails ?? null,
+      relationships: parsed.data.relationships ?? null,
+      stepFilter: parsed.data.stepFilter ?? null,
+      excludeEmailedWithin: parsed.data.excludeEmailedWithin ?? null,
+      freshServeRefused: freshServeRefused ?? null,
+    },
+  });
+  let walkRecorded = false;
+  const recordWalk = (outcome: Parameters<typeof recordServeWalk>[1]) => {
+    if (walkRecorded) return;
+    walkRecorded = true;
+    recordServeWalk(walk, outcome);
+  };
+
   try {
-    const result = await pullNext(
+    const result = await withServeWalk(walk, () => pullNext(
       {
         orgId: req.orgId!,
         campaignId,
@@ -436,7 +469,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         ...(freshServeRefused ? { freshServeRefused } : {}),
       },
       pullSignal,
-    );
+    ));
+    recordWalk({ found: result.found, reason: result.reason ?? null, servedLeadId: result.lead?.leadId ?? null, error: null });
 
     // A named serve's empty answer always says whether to wait: a timed-out look is a wait.
     if (named && !result.found && result.final === undefined) {
@@ -488,6 +522,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     res.json(result);
   } catch (error) {
+    recordWalk({ found: null, reason: null, servedLeadId: null, error: error instanceof Error ? error.message : String(error) });
     if (isCreditInsufficientError(error)) {
       // A refusal for the campaign's sales-funnel MAX BUDGET (the org may have credit) names that cause:
       // billing's `reason` + `sales_funnel_cap` verbatim, never "add credit" (FUNNEL-CAP-NAMED-402-1016).

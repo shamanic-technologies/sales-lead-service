@@ -23952,6 +23952,306 @@
         }
       }
     },
+    "/internal/serve-walks": {
+      "get": {
+        "summary": "The recorded walk of past serves, with its replay (internal, staff, read-only)",
+        "description": "FACTORY-RECORD-SERVE-1028. Every `POST /orgs/buffer/next` since this shipped stores its walk: each person looked at, in order, with every check that decided them (inputs + passed), served or skipped, plus events (an audience answered exhausted...). `replay` re-decides every check from its recorded inputs and hands out the first person passing all of theirs: `replay.servedLeadId` equals `servedLeadId` and `replay.mismatches` is empty when the record replays. What a pool's SQL filters out never reaches the walk; the policy those filters apply is in `context`. Name exactly one of `runId` (the serve's own run or the caller's run) or `campaignId`; newest first. Kept 90 days.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "query",
+            "name": "runId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "campaignId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "description": "Default 20."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Walks, newest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "walks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "orgId": {
+                            "type": "string"
+                          },
+                          "brandId": {
+                            "type": "string"
+                          },
+                          "campaignId": {
+                            "type": "string"
+                          },
+                          "callerRunId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "serveRunId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "mode": {
+                            "type": "string",
+                            "description": "serve | find | find_contacted | find_due | stock | named."
+                          },
+                          "found": {
+                            "type": "boolean",
+                            "nullable": true,
+                            "description": "null when the serve failed (`error`)."
+                          },
+                          "reason": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "servedLeadId": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "error": {
+                            "type": "string",
+                            "nullable": true
+                          },
+                          "context": {
+                            "type": "object",
+                            "additionalProperties": {
+                              "nullable": true
+                            },
+                            "description": "The serve's stated policy, audience(s), sources, offer, candidate basis."
+                          },
+                          "steps": {
+                            "type": "array",
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string",
+                                  "enum": [
+                                    "candidate",
+                                    "event"
+                                  ]
+                                },
+                                "seq": {
+                                  "type": "integer",
+                                  "description": "Order in the walk."
+                                },
+                                "pool": {
+                                  "type": "string",
+                                  "enum": [
+                                    "retry_pool",
+                                    "released",
+                                    "contacted_prospects",
+                                    "followup_due",
+                                    "source_stock",
+                                    "candidates",
+                                    "serve_next",
+                                    "named"
+                                  ],
+                                  "description": "candidate: where the person came from."
+                                },
+                                "ref": {
+                                  "type": "string",
+                                  "description": "candidate: who, by id (`row:<leads_campaigns id>`, `candidate:<id>`, `person:<id>`, `lead:<id>`)."
+                                },
+                                "leadId": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "description": "candidate: the lead they are (null before a candidate's reveal)."
+                                },
+                                "checks": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "object",
+                                    "properties": {
+                                      "rule": {
+                                        "type": "string",
+                                        "enum": [
+                                          "screen",
+                                          "must_pass",
+                                          "reveal",
+                                          "journalist",
+                                          "recently_emailed",
+                                          "retry_verdict",
+                                          "channel_retry",
+                                          "claim",
+                                          "still_fits",
+                                          "prospect_followup",
+                                          "filed"
+                                        ],
+                                        "description": "Which check: each is re-decidable from its own inputs."
+                                      },
+                                      "inputs": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                          "nullable": true
+                                        },
+                                        "description": "What the check read (a free check's answer, the sender's statement, the screen's P(yes)...). Ids only."
+                                      },
+                                      "passed": {
+                                        "type": "boolean",
+                                        "description": "Whether the person passed it, as the serve decided."
+                                      }
+                                    },
+                                    "required": [
+                                      "rule",
+                                      "inputs",
+                                      "passed"
+                                    ]
+                                  },
+                                  "description": "candidate: every check applied, in order."
+                                },
+                                "outcome": {
+                                  "type": "string",
+                                  "enum": [
+                                    "served",
+                                    "skipped",
+                                    "not_reached"
+                                  ],
+                                  "description": "candidate: served, skipped, or looked at but never decided."
+                                },
+                                "reason": {
+                                  "type": "string",
+                                  "nullable": true,
+                                  "description": "candidate: the rule of the first failed check when skipped."
+                                },
+                                "what": {
+                                  "type": "string",
+                                  "description": "event: what happened that is not a person (an audience's answer, a sender unreadable...)."
+                                },
+                                "detail": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "nullable": true
+                                  }
+                                }
+                              },
+                              "required": [
+                                "type",
+                                "seq"
+                              ]
+                            }
+                          },
+                          "startedAt": {
+                            "type": "string"
+                          },
+                          "finishedAt": {
+                            "type": "string"
+                          },
+                          "replay": {
+                            "type": "object",
+                            "properties": {
+                              "servedRef": {
+                                "type": "string",
+                                "nullable": true
+                              },
+                              "servedLeadId": {
+                                "type": "string",
+                                "nullable": true
+                              },
+                              "mismatches": {
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "seq": {
+                                      "type": "integer"
+                                    },
+                                    "ref": {
+                                      "type": "string"
+                                    },
+                                    "recorded": {
+                                      "type": "string"
+                                    },
+                                    "replayed": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "seq",
+                                    "ref",
+                                    "recorded",
+                                    "replayed"
+                                  ]
+                                }
+                              }
+                            },
+                            "required": [
+                              "servedRef",
+                              "servedLeadId",
+                              "mismatches"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "orgId",
+                          "brandId",
+                          "campaignId",
+                          "callerRunId",
+                          "serveRunId",
+                          "mode",
+                          "found",
+                          "reason",
+                          "servedLeadId",
+                          "error",
+                          "context",
+                          "steps",
+                          "startedAt",
+                          "finishedAt",
+                          "replay"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "walks"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Neither or both of runId / campaignId, or a bad limit"
+          }
+        }
+      }
+    },
     "/internal/candidate-screenings/stats": {
       "get": {
         "summary": "How the audience screen before the paid reveal decided, fleet-wide, by month (internal, service-auth)",

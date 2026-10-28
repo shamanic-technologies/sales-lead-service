@@ -1,4 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
+import { walkCandidate } from "./serve-walk.js";
 import { createHash } from "node:crypto";
 import { db } from "../db/index.js";
 import type { ReachMethod } from "./people-client.js";
@@ -739,12 +740,19 @@ export async function claimDueFollowupLead(p: {
     for (const c of candidates) {
       const v = verdicts.get(c.lead_id);
       if (!v) throw new Error(`[lead-followup-date] no verdict for lead ${c.lead_id} (brand ${p.brandId})`);
-      if (!v.owed) {
+      const walked = walkCandidate("followup_due", `lead:${c.lead_id}`, c.lead_id);
+      if (!walked.check("prospect_followup", { owed: v.owed, kind: v.kind, reasons: v.reasons }, v.owed)) {
+        walked.skip();
         await postponeDue(db, { orgId: p.orgId, brandId: p.brandId, leadId: c.lead_id }, v);
         continue;
       }
       const found = await fileDueFind(p, c.lead_id);
-      if (found) return found;
+      walked.check("filed", { filed: found !== null }, found !== null);
+      if (found) {
+        walked.serve();
+        return found;
+      }
+      walked.skip();
       skipped.push(c.lead_id);
     }
   }

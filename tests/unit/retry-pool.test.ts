@@ -505,6 +505,40 @@ describe("pickRetryCandidate", () => {
     expect(rows[0].sent_at).toBeNull();
   });
 
+  it("records the walk: each row looked at, the sender's statement that decided it, the claim (FACTORY-RECORD-SERVE-1028)", async () => {
+    const { ServeWalk, withServeWalk } = await import("../../src/lib/serve-walk.js");
+    const { replayServeWalk } = await import("../../src/lib/serve-walk-rules.js");
+    rows = [
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000001", served_at: "2026-08-25T09:00:00.000Z" }),
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000002", served_at: "2026-08-25T10:00:00.000Z" }),
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000003", served_at: "2026-08-25T11:00:00.000Z" }),
+    ];
+    checkDeliveryStatus.mockResolvedValue({
+      results: [
+        { email: "aaaaaaaa-0000-4000-8000-000000000001@example.com", broadcast: { campaign: scoped({ contacted: true, queued: true }) } },
+        notHeld("aaaaaaaa-0000-4000-8000-000000000002@example.com"),
+        notHeld("aaaaaaaa-0000-4000-8000-000000000003@example.com"),
+      ],
+    });
+    const walk = new ServeWalk({ orgId: "org-1", brandId: "brand-1", campaignId: CAMPAIGN, callerRunId: "r0", serveRunId: "run-1", mode: "serve", context: {} });
+    const picked = await withServeWalk(walk, () => pickRetryCandidate(base));
+
+    expect(picked?.id).toBe("aaaaaaaa-0000-4000-8000-000000000002");
+    const people = walk.steps.filter((s) => s.type === "candidate");
+    expect(people.map((s) => [s.ref, s.outcome, s.reason, s.checks.map((c) => c.rule)])).toEqual([
+      ["row:aaaaaaaa-0000-4000-8000-000000000001", "skipped", "retry_verdict", ["retry_verdict"]],
+      ["row:aaaaaaaa-0000-4000-8000-000000000002", "served", null, ["retry_verdict", "claim"]],
+      // Retryable too, never reached: the one before it was claimed.
+      ["row:aaaaaaaa-0000-4000-8000-000000000003", "not_reached", null, ["retry_verdict"]],
+    ]);
+    expect(people[0].checks[0].inputs).toEqual(expect.objectContaining({ verdict: "in_vendor_queue", nowMs: NOW }));
+    expect(replayServeWalk(walk.steps)).toEqual({
+      servedRef: "row:aaaaaaaa-0000-4000-8000-000000000002",
+      servedLeadId: "lead-aaaaaaaa-0000-4000-8000-000000000002",
+      mismatches: [],
+    });
+  });
+
   it("marks a sent person terminal, never returns them, and never re-queries them", async () => {
     markSentUpdates.length = 0;
     rows = [row({ id: "aaaaaaaa-0000-4000-8000-000000000001" })];

@@ -1,4 +1,5 @@
 import { sql as dsql } from "drizzle-orm";
+import { walkCandidate } from "./serve-walk.js";
 import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
@@ -381,9 +382,19 @@ export async function claimContactedProspect(p: {
       context: { userId: p.userId, runId: p.runId },
     });
     for (const c of candidates) {
-      if (!verdicts.get(c.lead_id)?.owed) continue;
+      const v = verdicts.get(c.lead_id);
+      const walked = walkCandidate("contacted_prospects", `lead:${c.lead_id}`, c.lead_id);
+      if (!walked.check("prospect_followup", { owed: v?.owed ?? false, kind: v?.kind ?? null, reasons: v?.reasons ?? [] }, v?.owed === true)) {
+        walked.skip();
+        continue;
+      }
       const found = await fileFind(p, c.lead_id);
-      if (found) return found;
+      walked.check("filed", { filed: found !== null }, found !== null);
+      if (found) {
+        walked.serve();
+        return found;
+      }
+      walked.skip();
     }
     if (candidates.length < CANDIDATE_BATCH) return null;
   }

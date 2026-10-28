@@ -52,6 +52,7 @@ import { noteLeadFound } from "./outcome-triggers.js";
 import { CRM_PROVIDER, declareLeadFound } from "./crm-lead-identified.js";
 import { isAudienceNotServeableError } from "./people-client.js";
 import { prepareNamedServe, type NamedLeadRequest } from "./named-lead-serve.js";
+import { walkCandidate, walkContext, walkEvent, walkFoundPerson } from "./serve-walk.js";
 
 /**
  * What this serve does (src/lib/source-mode.ts, LEADS-ONLY-FUNNEL-CAMPAIGN 2026-10-12):
@@ -323,6 +324,7 @@ export async function pullNext(
   // The offer's enabled checks, read before anything is bought: the Bonus ones run once a person
   // is served (email verified, handed to the writer next), every one is read back for the writer.
   const checks = await offerChecks(params.orgId, params.brandId, offerId);
+  walkContext({ offerId });
   const writerChecks = async (fullLead: Awaited<ReturnType<typeof buildFullLead>>): Promise<WriterChecks> => {
     const identity: SpendIdentity | null = params.runId
       ? {
@@ -354,11 +356,13 @@ export async function pullNext(
       context: { userId: params.userId ?? null, workflowSlug: params.workflowSlug ?? null, featureSlug: params.runFeatureSlug },
     });
     if (!decision.ok) {
+      walkEvent("named_refused", { leadId: mode.named.leadId, triggerEventId: mode.named.triggerEventId, reason: decision.reason, final: decision.final });
       console.log(
         `[lead-service] pullNext found=false named campaign=${params.campaignId} lead=${mode.named.leadId} event=${mode.named.triggerEventId} reason=${decision.reason} final=${decision.final}`,
       );
       return { found: false, reason: decision.reason, message: decision.message, final: decision.final };
     }
+    walkCandidate("named", `lead:${mode.named.leadId}`, mode.named.leadId).serve();
     const namedLead = await buildFullLead(mode.named.leadId);
     const qualification = await writerChecks(namedLead);
     const [stored] = (await db.execute(sql`
@@ -453,6 +457,8 @@ export async function pullNext(
     const buyingSignal = readBuyingSignal(person.buyingSignal);
     const personId = readServedPersonId(served.personId);
     const verificationVerdict = readEmailVerdict(served.emailVerdict);
+    // The person this serve is deciding: the candidate human-service just revealed, else serve-next's answer.
+    const walked = walkFoundPerson(`person:${personId ?? person.providerPersonId}`);
     if (!person.email) {
       // serve-next promised a contactable person but gave no email — a producer
       // contract violation, not an empty result. Fail loud.
@@ -481,6 +487,7 @@ export async function pullNext(
       source: person.provider,
       ...(verificationVerdict ? { verificationVerdict } : {}),
     });
+    walked.identify(leadId);
     await recordEmploymentHistory({ leadId, person });
     // The phone the provider holds (crm only): what tells a phone pipe's pools who it can reach.
     if (typeof person.phone === "string" && person.phone.trim().length > 0) {
@@ -519,7 +526,9 @@ export async function pullNext(
 
     // A journalist of the brand is never a lead (JOURNALISTS-NOT-LEADS-1016): kept filed (every pool refuses them), the
     // next person is bought. Checked before the `lead_found` trigger rings and before the Bonus checks are paid.
-    if (await leadIsJournalist(leadId, params.orgId, params.brandIds)) {
+    const journalist = await leadIsJournalist(leadId, params.orgId, params.brandIds);
+    if (!walked.check("journalist", { journalist }, !journalist)) {
+      walked.skip();
       console.log(
         `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${JOURNALIST_REASON}: a journalist of the brand, kept filed under the campaign`,
       );
@@ -539,13 +548,16 @@ export async function pullNext(
     // Fresh contacts only: a person the brand emailed inside the window is not handed out. Already bought and filed
     // above, so nothing is lost: this campaign's paid pool (or the source's stock) hands them out later, filtered the
     // same way. Checked before the Bonus checks are paid.
-    if (recentlyEmailed && (await leadRecentlyEmailed(leadId, recentlyEmailed))) {
+    const emailedWithinWindow = recentlyEmailed ? await leadRecentlyEmailed(leadId, recentlyEmailed) : false;
+    if (recentlyEmailed && !walked.check("recently_emailed", { window: recentlyEmailed.window, emailedWithinWindow }, !emailedWithinWindow)) {
+      walked.skip();
       console.log(
         `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${RECENTLY_EMAILED_REASON} window=${recentlyEmailed.window}: kept filed under the campaign`,
       );
       return { found: false, reason: RECENTLY_EMAILED_REASON };
     }
 
+    walked.serve();
     const fullLead = await buildFullLead(leadId);
     const qualification = await writerChecks(fullLead);
 
@@ -597,6 +609,7 @@ export async function pullNext(
       brandProfileId: params.brandProfileId ?? null,
     });
     if (released) {
+      walkCandidate("released", `lead:${released.leadId}`, released.leadId).serve();
       const releasedLead = await buildFullLead(released.leadId);
       const qualification = await writerChecks(releasedLead);
       console.log(
@@ -773,7 +786,17 @@ export async function pullNext(
       // A "Lead follow-up due" find: still owed a follow-up by the brand now (any lead, emailed or not)?
       askDueOwed: (q) => dueVerdict(q, { userId: params.userId ?? null, runId: params.runId ?? null }),
     });
+    for (const row of claim.setAside) {
+      const handle = walkCandidate("source_stock", `row:${row.sourceRowId}`, row.leadId);
+      handle.check("still_fits", { fits: false, sourceCampaignId: row.sourceCampaignId, audienceId: row.audienceId, reason: row.reason }, false);
+      handle.skip();
+    }
     const stocked = claim.lead;
+    if (stocked) {
+      const handed = walkCandidate("source_stock", `lead:${stocked.leadId}`, stocked.leadId);
+      handed.check("still_fits", { fits: true, sourceCampaignId: stocked.sourceCampaignId, audienceId: stocked.audienceId }, true);
+      handed.serve();
+    }
     if (!stocked) {
       console.log(
         `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SOURCE_STOCK_EMPTY_REASON} sources=${mode.sourceCampaignIds.join(",")} setAside=${claim.setAside.length}`,
@@ -828,6 +851,7 @@ export async function pullNext(
     walk: for (const candidateAudienceId of mode.audienceIds) {
       // Out of walk time: answer now; the audiences not asked are asked first next run (never recorded, never skipped).
       if (Date.now() >= walkDeadline) {
+        walkEvent("walk_budget_spent", { audiencesNotAsked: mode.audienceIds.length - asked });
         unfinished++;
         break;
       }
@@ -844,6 +868,7 @@ export async function pullNext(
             (await serveNext(candidateAudienceId, audienceCtx, FIND_SERVE_NEXT_TIMEOUT_MS));
         } catch (err) {
           if (isAudienceNotServeableError(err)) {
+            walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "not_serveable" });
             notServeable++;
             await recordEmptyAnswer({ ...walked, reason: "not_serveable" });
             break;
@@ -851,6 +876,7 @@ export async function pullNext(
           if (err instanceof HumanServiceStalledError) {
             // human-service never answered for this audience: recorded so the next run asks every other audience
             // first (an ORDER, never a skip), and this run goes on to the next audience.
+            walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "stalled" });
             stalled++;
             unfinished++;
             console.error(
@@ -863,6 +889,7 @@ export async function pullNext(
         }
         if (served.status === "pending") {
           // An unfinished look at this audience (its progress is kept at human-service): the walk goes on.
+          walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "pending" });
           console.log(
             `[lead-service] pullNext source campaign=${params.campaignId} audienceId=${candidateAudienceId} serveNext=pending: asking the next audience`,
           );
@@ -870,11 +897,13 @@ export async function pullNext(
           continue walk;
         }
         if (isNoRecentPostsAnswer(served)) {
+          walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "no_recent_posts" });
           noRecentPosts++;
           await recordEmptyAnswer({ ...walked, reason: "no_recent_posts" });
           break;
         }
         if (served.status === "exhausted" || !served.person) {
+          walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "exhausted" });
           await recordEmptyAnswer({ ...walked, reason: "exhausted" });
           break;
         }
@@ -903,6 +932,7 @@ export async function pullNext(
 
   // The named audience does not feed this pipe (its origin): no fresh serve, the reason says why.
   if (params.freshServeRefused) {
+    walkEvent("fresh_serve_refused", { reason: params.freshServeRefused.reason, detail: params.freshServeRefused.detail });
     console.log(
       `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${params.freshServeRefused.reason} audienceId=${audienceId}: ${params.freshServeRefused.detail}`,
     );
@@ -914,6 +944,7 @@ export async function pullNext(
     const audienceOffer = await fetchAudienceOfferId(audienceId as string, params.orgId);
     if (audienceOffer !== null && audienceOffer !== offerId) {
       const mismatch = new AudienceOfferMismatchError(audienceId as string, audienceOffer, offerId);
+      walkEvent("audience_offer_mismatch", { audienceId, audienceOfferId: audienceOffer, offerId });
       console.error(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=${AUDIENCE_OFFER_MISMATCH_REASON}: ${mismatch.message}`);
       return { found: false, reason: AUDIENCE_OFFER_MISMATCH_REASON };
     }
@@ -938,6 +969,7 @@ export async function pullNext(
     } catch (err) {
       if (!(err instanceof HumanServiceStalledError)) throw err;
       // human-service never answered: an unfinished look, never exhaustion; the next run asks again.
+      walkEvent("audience_answer", { audienceId: servedAudienceId, answer: "stalled" });
       console.error(`[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId}: ${err.message}`);
       return { found: false, reason: SERVE_TIMED_OUT_REASON };
     }
@@ -947,6 +979,7 @@ export async function pullNext(
     // unfinished look, never exhaustion — reading it as exhaustion would stop the
     // campaign for good on an audience that still has people.
     if (served.status === "pending") {
+      walkEvent("audience_answer", { audienceId: servedAudienceId, answer: "pending" });
       console.log(
         `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${SERVE_TIMED_OUT_REASON} audienceId=${audienceId} serveNext=pending`,
       );
@@ -954,6 +987,7 @@ export async function pullNext(
     }
 
     if (isNoRecentPostsAnswer(served)) {
+      walkEvent("audience_answer", { audienceId: servedAudienceId, answer: "no_recent_posts" });
       console.log(
         `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${NO_RECENT_POSTS_REASON} audienceId=${audienceId}`,
       );
@@ -962,6 +996,7 @@ export async function pullNext(
     }
 
     if (served.status === "exhausted" || !served.person) {
+      walkEvent("audience_answer", { audienceId: servedAudienceId, answer: "exhausted" });
       console.log(
         `[lead-service] pullNext found=false campaign=${params.campaignId} reason=${AUDIENCE_EXHAUSTED_REASON} audienceId=${audienceId}`,
       );

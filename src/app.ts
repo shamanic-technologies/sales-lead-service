@@ -39,6 +39,7 @@ import leadProvenanceRoutes from "./routes/lead-provenance.js";
 import stepReachedRoutes from "./routes/step-reached.js";
 import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
+import serveWalksRoutes from "./routes/serve-walks.js";
 import candidateScreeningsRoutes from "./routes/candidate-screenings.js";
 import leadIdResolveRoutes from "./routes/lead-id-resolve.js";
 import leadStatesRoutes from "./routes/lead-states.js";
@@ -120,6 +121,7 @@ app.use(stepReachedRoutes);
 app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
 app.use(candidateScreeningsRoutes);
+app.use(serveWalksRoutes);
 app.use(leadIdResolveRoutes);
 app.use(leadStatesRoutes);
 // CLIENT-SENTIMENT-1027: every client message of a brand and its Client Sentiment verdict.
