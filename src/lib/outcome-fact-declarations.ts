@@ -28,7 +28,7 @@ import { declareRunOutcomesNow, FACT_OUTCOME_KEYS, factOutcomeDeclaration, OUTCO
  * outreach copy) is the same visit: the measuring service's occurrence, never declared here (the rule every visit
  * count applies: `website_visit` here = visits known only by hand). Same for a lead whose visit through one of our
  * posts' links was declared by the post-touch run (post-touch.ts), and a later signup / form / purchase CONSUMES that
- * visit (`websiteVisit` evidence): the chain to the publishing run.
+ * visit (`websiteVisit` evidence): the link to the publishing run.
  *
  * subject = the lead (`subjectService: "lead-service"`), as on every run of the fleet. Each CONSUMES the outcome it
  * came from (`consumedOutcomeFor`, pure): a website visit the `message_sent` our outreach reached them with (a fact is

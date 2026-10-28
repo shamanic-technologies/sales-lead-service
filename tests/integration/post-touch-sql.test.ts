@@ -3,7 +3,7 @@
  * post's run (src/lib/post-touch.ts, first-touch.ts, outcome-fact-declarations.ts). runs-service is faked at `fetch`
  * and records every run and declaration; email-gateway says nobody was ever emailed.
  *
- * The chain, end to end, through the real sweeps over bronze `crm_facts`:
+ * The whole path, end to end, through the real sweeps over bronze `crm_facts`:
  *   PostHog visit (entry URL `?dy_post=meta-service:<uuid>`) + a later CRM signup of the same email
  *   -> brand-signups files the person as a lead of the brand
  *   -> the post-touch sweep: ONE spend-free `post-touch-visit` run producing `website_visit` (the lead), consuming
