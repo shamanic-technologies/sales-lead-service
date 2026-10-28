@@ -8301,6 +8301,11 @@ const JourneyFactSchema = z
         "Clicks only: true = our tracker recorded the click (`smtp`: only a hit judged human is kept, a scanner's is withdrawn); " +
         "false = the provider reported it (no human/scanner verdict, mostly link scanners). null on every fact that is not a click.",
     }),
+    sourceRef: z.string().nullable().openapi({
+      description:
+        "A fact recording a CLIENT MESSAGE (source `client_message`, label `client_satisfied`): crm-service's fact id of that message. " +
+        "The same message stated on several lead rows of its writer carries the same value: count it once per brand. null on every other fact.",
+    }),
   })
   .openapi("JourneyFact");
 
