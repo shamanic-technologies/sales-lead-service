@@ -31,8 +31,16 @@ import { fetchCrmFactsPage, type CrmFactsPage } from "./crm-client.js";
 /** The one feed this service follows. A cursor row per feed, so a second feed is a second row. */
 export const PEOPLE_FACTS_FEED = "people_facts" as const;
 
-/** How often the pull asks for new facts. Cheap when there are none: one empty page. */
-export const CRM_FACT_FEED_INTERVAL_MS = 2 * 60_000;
+/**
+ * How often the pull asks for new facts. Cheap when there are none: one indexed empty page (`feed_seq > cursor`).
+ * A fact crm-service emits is readable here within this interval (UNIBOX-FACT-LAG-1028, owner 2026-10-28: refused
+ * payments and every dashboard/onboarding action belong in the Unibox at once). The old 2 min was the second half of
+ * a 7-min lag on 2026-10-28 (two refused charges emitted by crm at 05:08:43, copied here at 05:11:04, while a writer
+ * wrote at 05:11:01). Never raise it back above `CRM_FACT_MAX_LAG_MS`.
+ */
+export const CRM_FACT_FEED_INTERVAL_MS = 15_000;
+/** The bound a crm fact must be readable here within, once crm-service emitted it (asserted by the feed test). */
+export const CRM_FACT_MAX_LAG_MS = 60_000;
 const FIRST_PULL_DELAY_MS = 45_000;
 
 /** Facts asked per page, and pages per tick (a first backfill spans several ticks). */
