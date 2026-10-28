@@ -56,6 +56,7 @@ import { loadHumanFacts } from "./human-opt-out-read.js";
 import { registerServedEmail, upsertContactMethod } from "./leads-registry.js";
 import { inferLeadTimezone, writeStatedTimezone, type TimezoneSource } from "./lead-timezone.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
+import { crmFactHasEmail, crmFactHasPhone } from "./crm-fact-contact.js";
 
 export const NAMED_PERSON_SOURCE = "named_person";
 
@@ -140,7 +141,7 @@ async function knownToBrand(orgId: string, brandId: string, who: PersonIdentity)
     WHERE f.org_id = ${orgId}
       AND f.brand_id = ${brandId}
       AND f.type <> 'withdrawn'
-      AND EXISTS (SELECT 1 FROM unnest(f.emails) AS e WHERE lower(trim(e)) = ${email})
+      AND ${crmFactHasEmail("f", email)}
       AND NOT EXISTS (
         SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id
       )
@@ -178,7 +179,7 @@ async function knownPhoneToBrand(orgId: string, brandId: string, phone: string):
     WHERE f.org_id = ${orgId}
       AND f.brand_id = ${brandId}
       AND f.type <> 'withdrawn'
-      AND EXISTS (SELECT 1 FROM unnest(f.phones) AS p WHERE ${phoneValueSql(sql`p`)} = ${phone})
+      AND ${crmFactHasPhone("f", phone)}
       AND NOT EXISTS (
         SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id
       )
