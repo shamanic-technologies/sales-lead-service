@@ -17,6 +17,7 @@ import {
   type ReachRow,
   type ReachedPerson,
 } from "./step-reached.js";
+import { crmFactHasEmail } from "./crm-fact-contact.js";
 
 export type StepReachedQuery =
   | { orgId: string; brandId: string; step: string; since: string; email?: undefined }
@@ -59,7 +60,7 @@ export async function readStepReached(q: StepReachedQuery): Promise<ReachedPerso
   const crmWindow =
     email === null
       ? sql`AND f.occurred_at >= ${q.since}::timestamptz`
-      : sql`AND EXISTS (SELECT 1 FROM unnest(f.emails) AS e WHERE lower(trim(e)) = ${email})`;
+      : sql`AND ${crmFactHasEmail("f", email)}`;
 
   const crmRows = (await db.execute(sql`
     SELECT f.emails, f.full_name AS name, f.phones, f.occurred_at AS at, f.type, f.payload

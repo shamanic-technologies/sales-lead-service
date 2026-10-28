@@ -40,7 +40,8 @@ import { judgeSubject } from "./relationship-judge.js";
 import { EMPTY_RELATIONSHIP, loadRelationships, loadRelationshipsAt, recomputePolicy, type RelationshipBlock } from "./relationship-read.js";
 import { toSubject } from "./relationship-subjects.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
-import { canonicalE164, phoneValueSql } from "./e164-phone.js";
+import { canonicalE164 } from "./e164-phone.js";
+import { crmFactHasEmail, crmFactHasPhone } from "./crm-fact-contact.js";
 
 /**
  * Policies a claim may state: `pure_prospect` (leads only) and `current_client` (clients only, CLIENT-CHECKIN-LEAD-1024,
@@ -149,7 +150,7 @@ async function crmFactAge(orgId: string, brandId: string, email: string | null, 
       WHERE f.org_id = ${orgId}
         AND f.brand_id = ${brandId}
         AND f.type <> 'withdrawn'
-        AND EXISTS (SELECT 1 FROM unnest(f.phones) AS p WHERE ${phoneValueSql(sql`p`)} = ${canonical})
+        AND ${crmFactHasPhone("f", canonical)}
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
     `)) as unknown as Array<{ at: Date | string | null }>;
     return ageOf(rows[0]?.at);
@@ -160,7 +161,7 @@ async function crmFactAge(orgId: string, brandId: string, email: string | null, 
     WHERE f.org_id = ${orgId}
       AND f.brand_id = ${brandId}
       AND f.type <> 'withdrawn'
-      AND EXISTS (SELECT 1 FROM unnest(f.emails) AS e WHERE lower(trim(e)) = ${email.trim().toLowerCase()})
+      AND ${crmFactHasEmail("f", email.trim().toLowerCase())}
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
   `)) as unknown as Array<{ at: Date | string | null }>;
   return ageOf(rows[0]?.at);
