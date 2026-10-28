@@ -20,6 +20,7 @@
  */
 import { STEP_REACHED_EVIDENCE, ledgerRowReachesStep } from "./step-reached.js";
 import { canonicalE164 } from "./e164-phone.js";
+import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
 
 /** How this service is named in features-service's catalogue (`triggers[].firedBy`). */
 export const OUTCOME_TRIGGER_SELF = "lead-service";
@@ -228,4 +229,82 @@ export const UNANSWERED_SKIPS: readonly string[] = ["no_person", "offer_unknown"
 /** Whether an earlier copy of the same action already answered its trigger (see RESTATED_ACTION). */
 export function actionAlreadyAnswered(earlierCopies: ReadonlyArray<{ status: string; skipReason: string | null }>): boolean {
   return earlierCopies.some((r) => r.status !== "skipped" || !UNANSWERED_SKIPS.includes(r.skipReason ?? ""));
+}
+
+/**
+ * EVERY ACT OF THEIRS RINGS LEAD EVENT, not only the ones that reach a step (LEAD-EVENT-REFUSAL-NO-REACT-1028, owner
+ * 2026-10-24: ONE reactive campaign on "Lead event" = any new Unibox event of THEIR action toward us, its workflow
+ * decides write now / later / nothing; 2026-10-28: « Les paiements refusés doivent être dans l'unibox tout simplement,
+ * comme toutes les tentatives de paiement d'ailleurs et autres actions du dashboard et de l'onboarding »).
+ * Before, only a crm fact reaching a catalogue step fired anything: a refused card, a pending charge, a product /
+ * onboarding event reached no step, so nothing reacted (Tari, Slipless, 2026-10-28: two refused $100 top-ups after our
+ * WhatsApp said "your top-up is going through", follow-up left at 14:00 "payment still pending", corrected by hand).
+ *
+ * A crm fact that is an act of theirs (CRM_NOT_THEIR_ACT says what is not) and reaches NO step rings the generic
+ * `account_event` trigger ("Account Event", features-service, a member of `lead_event`), ONCE PER FACT (never once per
+ * person: a second refused payment is a new act), the fact's kind and detail on `item`. Not here (NOT_A_NEW_ACT):
+ *  - a MESSAGE of theirs: their words are judged first (a person or a machine, a lead wanting business) and ring
+ *    `hot_lead` / Positive reply on that judgment; a personal contact's message must never start a sales pipe;
+ *  - a fact another service already rings as `account_event` itself (crm-service's credit facts,
+ *    CREDIT-RAN-OUT-UNIBOX-EVENT-1024): rung twice otherwise.
+ * A burst of the same act (a dozen product events in one session) is ONE occurrence: an act of the same kind for the
+ * same person inside ACT_COALESCE_WINDOW_MS of a live one is kept `skipped` `coalesced` (the workflow reads the thread).
+ */
+export const ACCOUNT_EVENT_TRIGGER = "account_event";
+/** The ledger step of an act: `act:<crm fact type>` (never a catalogue step key). */
+export const ACT_STEP_PREFIX = "act:";
+/** Acts of the same kind for the same person within this window of a live one are one occurrence. */
+export const ACT_COALESCE_WINDOW_MS = 10 * 60_000;
+export const COALESCED = "coalesced";
+
+export const NOT_A_NEW_ACT: readonly string[] = [
+  // Their words: judged before they ring anything (hot_lead, Positive reply).
+  "message_in",
+  "group_message",
+  // crm-service rings account_event for these itself.
+  "credit_ran_out",
+  "credit_restored",
+];
+
+export function actStep(type: string): string {
+  return `${ACT_STEP_PREFIX}${type}`;
+}
+
+export function isActStep(step: string): boolean {
+  return step.startsWith(ACT_STEP_PREFIX);
+}
+
+/** Whether a crm fact of `type` that reaches no step (`reachesStep` false) rings Lead event as an act of theirs. */
+export function isTheirNewAct(type: string, reachesStep: boolean): boolean {
+  if (reachesStep) return false;
+  if ((CRM_NOT_THEIR_ACT as readonly string[]).includes(type)) return false;
+  return !NOT_A_NEW_ACT.includes(type);
+}
+
+/** campaign-service's idempotency key of one act: the record and the offer (once per fact, never per person). */
+export function actIdempotencyKey(sourceRef: string, offerId: string): string {
+  return `lead-service:act:${sourceRef}:${offerId}`;
+}
+
+/** Largest fact detail carried on the item verbatim (campaign-service takes 20,000 characters per item). */
+const ACT_DETAIL_MAX_CHARS = 8_000;
+
+/**
+ * What the workflow reads of the act (`/execute` `trigger.item`): its kind, the tool that stated it, when, a one-line
+ * text, and the fact's own detail verbatim (status, amount, event name...) when it fits.
+ */
+export function actItem(input: { type: string; source: string; factId: string; occurredAt: string | null; payload: Record<string, unknown> | null }): Record<string, unknown> {
+  const status = typeof input.payload?.status === "string" ? input.payload.status : null;
+  const event = typeof input.payload?.event === "string" ? input.payload.event : typeof input.payload?.name === "string" ? input.payload.name : null;
+  const stated = typeof input.payload?.text === "string" && input.payload.text.trim() ? input.payload.text.trim().slice(0, 500) : null;
+  const what = stated ?? [input.type.replace(/_/g, " "), event, status].filter(Boolean).join(": ");
+  const detail = input.payload && JSON.stringify(input.payload).length <= ACT_DETAIL_MAX_CHARS ? input.payload : null;
+  return {
+    kind: input.type,
+    text: `${what} (${input.source})`,
+    source: input.source,
+    factId: input.factId,
+    at: input.occurredAt,
+    ...(detail ? { detail } : {}),
+  };
 }

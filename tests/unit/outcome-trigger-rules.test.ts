@@ -217,3 +217,42 @@ describe("the person and the idempotency key", () => {
     }
   });
 });
+
+describe("every act of theirs rings Lead event (LEAD-EVENT-REFUSAL-NO-REACT-1028)", () => {
+  it("a refused payment, a product event, any new kind of act: an act; a step reach, ours, bookkeeping, a message: not", async () => {
+    const { isTheirNewAct } = await import("../../src/lib/outcome-trigger-rules.js");
+    expect(isTheirNewAct("payment", false)).toBe(true);
+    expect(isTheirNewAct("product_event", false)).toBe(true);
+    expect(isTheirNewAct("some_act_crm_states_tomorrow", false)).toBe(true);
+    // A payment that stands reaches Paid client: it rings that, never twice.
+    expect(isTheirNewAct("payment", true)).toBe(false);
+    for (const t of ["message_out", "withdrawn", "person_merged", "added_to_crm", "deal_status_changed", "meeting_not_held"]) {
+      expect(isTheirNewAct(t, false)).toBe(false);
+    }
+    // Their words are judged first (hot_lead / Positive reply); crm-service rings credit facts itself.
+    for (const t of ["message_in", "group_message", "credit_ran_out", "credit_restored"]) expect(isTheirNewAct(t, false)).toBe(false);
+  });
+
+  it("an act's ledger step, idempotency key (once per FACT) and the item the workflow reads", async () => {
+    const { actStep, isActStep, actIdempotencyKey, actItem } = await import("../../src/lib/outcome-trigger-rules.js");
+    expect(actStep("payment")).toBe("act:payment");
+    expect(isActStep("act:payment")).toBe(true);
+    expect(isActStep("paid_client")).toBe(false);
+    expect(actIdempotencyKey("crm:f1", "o1")).toBe("lead-service:act:crm:f1:o1");
+    const refused = { status: "failed", currency: "usd", refunded: false, amountMinor: 10000, description: "Payment for Invoice", amountRefunded: 0 };
+    expect(actItem({ type: "payment", source: "stripe", factId: "f1", occurredAt: "2026-10-28T05:24:40.000Z", payload: refused })).toEqual({
+      kind: "payment",
+      text: "payment: failed (stripe)",
+      source: "stripe",
+      factId: "f1",
+      at: "2026-10-28T05:24:40.000Z",
+      detail: refused,
+    });
+    const product = { text: "Onboarding step viewed · step: card", event: "onboarding_step_viewed" };
+    expect(actItem({ type: "product_event", source: "posthog", factId: "f2", occurredAt: null, payload: product }).text).toBe(
+      "Onboarding step viewed · step: card (posthog)",
+    );
+    const big = { blob: "x".repeat(9_000) };
+    expect(actItem({ type: "product_event", source: "posthog", factId: "f3", occurredAt: null, payload: big })).not.toHaveProperty("detail");
+  });
+});

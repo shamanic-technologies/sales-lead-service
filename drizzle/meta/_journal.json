@@ -911,6 +911,13 @@
       "when": 1788721400000,
       "tag": "0129_serve_walks",
       "breakpoints": true
+    },
+    {
+      "idx": 130,
+      "version": "7",
+      "when": 1788721500000,
+      "tag": "0130_act_trigger_fires",
+      "breakpoints": true
     }
   ]
 }
