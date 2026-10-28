@@ -48,6 +48,16 @@ describe("database pool limits", () => {
     });
   });
 
+  it("recycles connections so an idle backend does not keep a big query's memory (BOX-LOAD-1028-PG-CONNS)", async () => {
+    const db = await loadDb();
+
+    expect(db.POOL_OPTIONS.max_lifetime).toBe(300);
+    expect(db.POOL_OPTIONS.idle_timeout).toBe(60);
+    expect(db.sql.options.max_lifetime).toBe(300);
+    expect(db.sql.options.idle_timeout).toBe(60);
+    expect(db.healthSql.options.max_lifetime).toBe(300);
+  });
+
   it("takes an operator override from the environment", async () => {
     process.env.LEAD_DB_POOL_MAX = "35";
     process.env.LEAD_DB_STATEMENT_TIMEOUT_MS = "45000";

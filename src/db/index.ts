@@ -15,9 +15,9 @@ if (!connectionString) {
 // connection after a suspend loses that race and fails outright. Widen the
 // per-candidate budget to 5s.
 //
-// This is NOT a postgres.js option: `connect_timeout` already defaults to 30s and
-// `idle_timeout` defaults to `null` (idle connections are never closed), so
-// neither would help here — see brand-service#389.
+// This is NOT a postgres.js option: `connect_timeout` already defaults to 30s, and
+// `idle_timeout` (set below for memory, not for this) does not shorten a connect —
+// see brand-service#389.
 net.setDefaultAutoSelectFamilyAttemptTimeout(5_000);
 
 function positiveInt(name: string, fallback: number): number {
@@ -58,9 +58,21 @@ export const IDLE_IN_TRANSACTION_TIMEOUT_MS = positiveInt(
   120_000,
 );
 
+/**
+ * Connections are RECYCLED (BOX-LOAD-1028-PG-CONNS). A Postgres backend keeps the memory of the biggest query it
+ * ever ran until it exits; at postgres.js's default lifetime (30-60 min) lead_service's ~35 backends held ~0.7 GB
+ * of private memory on the shared box, ~0.3 GB of it swapped (2026-10-28). `max_lifetime` 5 min ends a connection
+ * after its current query (postgres.js never cuts a running query or a reserved connection); `idle_timeout` 60 s
+ * closes the ones a quiet stretch leaves unused. A reconnect is a local-network handshake.
+ */
+export const POOL_IDLE_TIMEOUT_S = 60;
+export const POOL_MAX_LIFETIME_S = 300;
+
 export const POOL_OPTIONS = {
   prepare: false,
   max: POOL_MAX,
+  idle_timeout: POOL_IDLE_TIMEOUT_S,
+  max_lifetime: POOL_MAX_LIFETIME_S,
   connection: {
     statement_timeout: STATEMENT_TIMEOUT_MS,
     idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
