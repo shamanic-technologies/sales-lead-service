@@ -176,7 +176,7 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
            a.ledger, a.caused, a.stated, a.rule_caused, a.rule_reason, touch.at AS first_touch_at
     FROM agg a JOIN keys k ON k.org_id = a.org_id AND k.brand_id = a.brand_id AND k.lead_id = a.lead_id
     -- Our first touch of the lead at (org, brand), any pipe: an email of ours on the outreach timeline, a non-email
-    -- pipe's send, an act of our follow-up worker (never a person's hand-typed Unibox message).
+    -- pipe's send, an act of our follow-up worker, a declared post touch (never a person's hand-typed Unibox message).
     CROSS JOIN LATERAL (
       SELECT min(x.at) AS at FROM (
         SELECT min(t.occurred_at) AS at FROM lead_timeline_facts t
@@ -188,6 +188,10 @@ export function leadStatesEvidenceSql(q: LeadStatesQuery): SQL {
         UNION ALL
         SELECT min(fa.occurred_at) FROM followup_actions fa
         WHERE fa.lead_id = k.lead_id AND fa.org_id = k.org_id AND fa.action = 'acted' AND k.brand_id = ANY(fa.brand_ids)
+        UNION ALL
+        -- A declared visit through one of our posts' links (post-touch.ts, first-touch.ts).
+        SELECT min(p.visited_at) FROM post_touch_declarations p
+        WHERE p.org_id = k.org_id AND p.brand_id = k.brand_id AND p.lead_id = k.lead_id AND p.status IN ('delivered', 'queued')
       ) x
     ) touch
     ORDER BY a.org_id, a.brand_id, a.lead_id

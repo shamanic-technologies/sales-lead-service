@@ -14,10 +14,15 @@
  *     address or name matching here.
  * The first touch is the earliest of the two. A Unibox message typed by a person (crm `message_out`) is not a pipe's
  * send and is not read.
+ *
+ * A POST TOUCH counts too (FACTORY-P2-CONTENT-OUTCOMES, post-touch.ts): the earliest visit of the lead through one of
+ * our published posts' links, once DECLARED on the ledger (`delivered` / `queued`). A person who clicked a post and
+ * signed up after was never emailed; without it their signup read `never_delivered` and was never ours.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
+import { firstPostTouches } from "./post-touch.js";
 
 /** Our first non-email pipe send to each lead at (org, brand); a lead with none is absent. */
 export async function firstChannelSends(
@@ -51,15 +56,17 @@ export function firstTouchAt(firstDeliveredEmailAt: string | null, firstChannelS
   return Date.parse(firstChannelSentAt) < Date.parse(firstDeliveredEmailAt) ? firstChannelSentAt : firstDeliveredEmailAt;
 }
 
-/** Folds every lead's non-email first send into an email-delivery map (missing leads read as never emailed). */
+/** Folds every lead's non-email first send AND first declared post touch into an email-delivery map (missing leads read as never emailed). */
 export async function withFirstChannelSends(
   orgId: string,
   brandId: string,
   leadIds: readonly string[],
   emailDelivered: ReadonlyMap<string, string | null>,
 ): Promise<Map<string, string | null>> {
-  const channel = await firstChannelSends(orgId, brandId, leadIds);
+  const [channel, posts] = await Promise.all([firstChannelSends(orgId, brandId, leadIds), firstPostTouches(orgId, brandId, leadIds)]);
   const out = new Map<string, string | null>();
-  for (const id of leadIds) out.set(id, firstTouchAt(emailDelivered.get(id) ?? null, channel.get(id) ?? null));
+  for (const id of leadIds) {
+    out.set(id, firstTouchAt(firstTouchAt(emailDelivered.get(id) ?? null, channel.get(id) ?? null), posts.get(id) ?? null));
+  }
   return out;
 }

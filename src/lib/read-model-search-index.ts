@@ -187,6 +187,14 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // post-touch.ts: the visits that came through one of our posts' links (`dy_post`), every 5 min (a handful of the
+    // ~420 MB table; the unscoped pass waits for this index rather than walk it). Predicate = the read's, verbatim.
+    name: "idx_crm_facts_post_visits",
+    on: "ON crm_facts (org_id, brand_id) WHERE type = 'website_visit' AND payload->>'firstUrl' LIKE '%dy_post=%'",
+    lockKey: "7290519146308441037",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
