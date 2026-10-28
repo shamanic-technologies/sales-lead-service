@@ -24,6 +24,13 @@ vi.mock("../../src/db/index.js", () => ({
   },
 }));
 
+// FACTORY-RECORD-SERVE-1028: the walk is written after the answer; here only WHAT is recorded.
+const recordServeWalk = vi.fn();
+vi.mock("../../src/lib/serve-walk.js", async (orig) => ({
+  ...((await orig()) as object),
+  recordServeWalk: (...a: unknown[]) => recordServeWalk(...a),
+}));
+
 vi.mock("../../src/db/schema.js", () => ({
   idempotencyCache: { idempotencyKey: "idempotency_key", createdAt: "created_at" },
 }));
@@ -216,6 +223,38 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(insertValues).toHaveBeenCalledWith(
       expect.objectContaining({ response: { found: false, reason: "no_audience" } }),
     );
+  });
+
+  it("records the serve's walk with its answer, inside the serve run (FACTORY-RECORD-SERVE-1028)", async () => {
+    const { currentServeWalk, walkEvent } = await import("../../src/lib/serve-walk.js");
+    pullNext.mockImplementationOnce(async () => {
+      walkEvent("audience_answer", { audienceId: "aud-1", answer: "exhausted" });
+      expect(currentServeWalk()).toBeDefined();
+      return { found: false, reason: "audience_exhausted" };
+    });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+
+    const res = await post(app);
+
+    expect(res.status).toBe(200);
+    expect(recordServeWalk).toHaveBeenCalledTimes(1);
+    const [walk, outcome] = recordServeWalk.mock.calls[0];
+    expect(outcome).toEqual({ found: false, reason: "audience_exhausted", servedLeadId: null, error: null });
+    expect(walk.header).toEqual(expect.objectContaining({ serveRunId: "serve-run-1", mode: "serve" }));
+    expect(walk.steps).toEqual([{ type: "event", seq: 1, what: "audience_answer", detail: { audienceId: "aud-1", answer: "exhausted" } }]);
+  });
+
+  it("a serve that throws still records its walk, with the error", async () => {
+    pullNext.mockRejectedValueOnce(new Error("human-service 500"));
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await post(app);
+
+    expect(recordServeWalk).toHaveBeenCalledTimes(1);
+    expect(recordServeWalk.mock.calls[0][1]).toEqual({ found: null, reason: null, servedLeadId: null, error: "human-service 500" });
   });
 
   it("still returns the cached response on an idempotency hit (early return preserved)", async () => {

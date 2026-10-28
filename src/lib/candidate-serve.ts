@@ -37,6 +37,7 @@ import {
 } from "./people-client.js";
 import { criterionKey, judge, mustPassCriteria, observe, probeOf, recordCheck, subjectFromOrganization, YES_THRESHOLD } from "./qualification.js";
 import { judgeYesNo } from "./qualification-judge.js";
+import { walkCandidate, walkContext } from "./serve-walk.js";
 import { TregMeter, type SpendIdentity } from "./treg-client.js";
 
 export const SCREEN_PROMPT_VERSION = "lead-v1";
@@ -129,10 +130,12 @@ export function decisionBasis(mustPass: QualificationCriterionRow[]): string {
 interface ScreenVerdict {
   pass: boolean;
   reason: string;
+  /** What decided it, for the serve's walk record (serve-walk-rules.ts `screen`). */
+  walkInputs: Record<string, unknown>;
 }
 
 async function screen(c: Candidate, target: { text: string; field: string } | null, ctx: ServiceContext, identity: SpendIdentity): Promise<ScreenVerdict> {
-  if (!target?.text?.trim()) return { pass: true, reason: "no_target_text" };
+  if (!target?.text?.trim()) return { pass: true, reason: "no_target_text", walkInputs: { noTarget: true } };
   const hash = targetHash(target.text);
   const [prior] = await db
     .select()
@@ -146,7 +149,13 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       ),
     )
     .limit(1);
-  if (prior) return { pass: prior.verdict === "pass", reason: prior.reason ?? "" };
+  if (prior) {
+    return {
+      pass: prior.verdict === "pass",
+      reason: prior.reason ?? "",
+      walkInputs: { cached: prior.verdict, yesProbability: prior.yesProbability ?? null, threshold: YES_THRESHOLD, targetHash: hash, promptVersion: SCREEN_PROMPT_VERSION },
+    };
+  }
 
   const { probabilities, model } = await judgeYesNo(
     { targetAudience: target.text, candidate: screenSnapshot(c) },
@@ -176,11 +185,18 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       companyName: c.company.name,
     })
     .onConflictDoNothing();
-  return { pass, reason };
+  return { pass, reason, walkInputs: { cached: null, yesProbability: p, threshold: YES_THRESHOLD, targetHash: hash, promptVersion: SCREEN_PROMPT_VERSION } };
 }
 
 /** The first must-pass check the company fails, or null. An unanswerable check never declines. */
-async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[], meter: TregMeter, identity: SpendIdentity): Promise<string | null> {
+async function failedMustPass(
+  c: Candidate,
+  mustPass: QualificationCriterionRow[],
+  meter: TregMeter,
+  identity: SpendIdentity,
+  /** Each check's answer, in order, for the serve's walk record (serve-walk-rules.ts `must_pass`). */
+  verdicts: Array<{ criterionId: string; verdict: string; reason: string | null }> = [],
+): Promise<string | null> {
   if (mustPass.length === 0) return null;
   const org = organizationFromCandidate(c);
   const subject = subjectFromOrganization(org);
@@ -189,6 +205,7 @@ async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[
     console.log(`[lead-service] candidate ${c.candidateId} has no company domain: must-pass checks cannot answer, not declined on them`);
     for (const criterion of mustPass) {
       await recordCheck({ criterion, subject: who, domain: null, verdictId: null, reason: "no_company_domain", runId: identity.runId });
+      verdicts.push({ criterionId: criterion.id, verdict: "unavailable", reason: "no_company_domain" });
     }
     return null;
   }
@@ -197,6 +214,7 @@ async function failedMustPass(c: Candidate, mustPass: QualificationCriterionRow[
     const observed = await observe(spec, subject, org, { meter, identity });
     const { verdict } = await judge({ question: criterion.question, probe: spec }, observed.observation, subject, { meter, identity });
     await recordCheck({ criterion, subject: who, domain: subject.domain, verdictId: verdict.id, reason: verdict.reason, runId: identity.runId });
+    verdicts.push({ criterionId: criterion.id, verdict: verdict.verdict, reason: verdict.reason ?? null });
     if (verdict.verdict === "no") return `criterion_failed:${criterion.id}`;
     if (verdict.verdict === "unavailable") {
       console.log(`[lead-service] must-pass ${criterion.id} could not answer for ${subject.domain} (${verdict.reason}): not declined on it`);
@@ -252,14 +270,20 @@ export async function serveThroughCandidates(
       mustPass = ctx.brandId ? await mustPassCriteria(ctx.orgId, ctx.brandId, offerId) : [];
     }
     const basis = decisionBasis(mustPass);
+    const walked = walkCandidate("candidates", `candidate:${candidate.candidateId}`);
+    walkContext({ candidateBasis: basis });
 
     const screened = await screen(candidate, next.target, ctx, identity);
-    if (!screened.pass) {
+    if (!walked.check("screen", { audienceId, providerPersonId: candidate.providerPersonId, ...screened.walkInputs }, screened.pass)) {
+      walked.skip();
       await declineCandidate(audienceId, candidate.candidateId, `screen_rejected ${screened.reason}`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
       continue;
     }
-    const failed = await failedMustPass(candidate, mustPass, meter, identity);
+    const mustPassVerdicts: Array<{ criterionId: string; verdict: string; reason: string | null }> = [];
+    const failed = await failedMustPass(candidate, mustPass, meter, identity, mustPassVerdicts);
+    if (mustPass.length > 0) walked.check("must_pass", { verdicts: mustPassVerdicts }, failed === null);
     if (failed) {
+      walked.skip();
       await declineCandidate(audienceId, candidate.candidateId, failed, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
       continue;
     }
@@ -273,6 +297,8 @@ export async function serveThroughCandidates(
       // never served anyone again). That candidate is declined, so the audience hands out the next one; a decline that
       // fails too leaves the stall to the caller, which moves on to another audience.
       console.error(`[lead-service] candidate ${candidate.candidateId} audience=${audienceId}: ${error.message}; declining it`);
+      walked.check("reveal", { status: REVEAL_STALLED_REASON, timeoutMs: error.timeoutMs }, false);
+      walked.skip();
       try {
         await declineCandidate(audienceId, candidate.candidateId, `${REVEAL_STALLED_REASON} after ${error.timeoutMs}ms`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
       } catch (declineError) {
@@ -281,10 +307,12 @@ export async function serveThroughCandidates(
       }
       continue;
     }
-    if (revealed.status === "served" && revealed.person) {
+    if (walked.check("reveal", { status: revealed.status === "served" && revealed.person ? "served" : revealed.status }, revealed.status === "served" && !!revealed.person)) {
+      // Decided further once filed as a lead (journalist, fresh contacts: buffer.ts recordServed).
       return { status: "served", person: revealed.person, personId: revealed.personId, emailVerdict: revealed.emailVerdict };
     }
     // Revealed but nobody servable came out (no deliverable email): the next candidate.
+    walked.skip();
     console.log(`[lead-service] candidate ${candidate.candidateId} revealed but not served; asking the next one`);
   }
   return { status: "pending", person: null };

@@ -918,4 +918,42 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     expect(assertRecentlyEmailedReadable).not.toHaveBeenCalled();
     expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ recentlyEmailed: null }));
   });
+
+  it("records the walk: each person bought, what skipped them, the one handed out; the record replays (FACTORY-RECORD-SERVE-1028)", async () => {
+    const { ServeWalk, withServeWalk } = await import("../../src/lib/serve-walk.js");
+    const { replayServeWalk } = await import("../../src/lib/serve-walk-rules.js");
+    served("lead-journalist", "troush@forbes.com");
+    served("lead-emailed", "emailed@x.com");
+    served("lead-fresh", "fresh@x.com");
+    leadIsJournalist.mockImplementation(async (leadId: string) => leadId === "lead-journalist");
+    leadRecentlyEmailed.mockImplementation((async (leadId: string) => leadId === "lead-emailed") as never);
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-fresh" });
+
+    const walk = new ServeWalk({ orgId: "org-1", brandId: "brand-1", campaignId: "campaign-1", callerRunId: "r0", serveRunId: "run-1", mode: "serve", context: {} });
+    const result = await withServeWalk(walk, () => pullNext({ ...baseParams, excludeEmailedWithin: "3_months" }));
+    leadIsJournalist.mockImplementation(async () => false);
+
+    expect(result.lead?.leadId).toBe("lead-fresh");
+    const people = walk.steps.filter((s) => s.type === "candidate");
+    expect(people.map((s) => [s.pool, s.leadId, s.outcome, s.reason])).toEqual([
+      ["serve_next", "lead-journalist", "skipped", "journalist"],
+      ["serve_next", "lead-emailed", "skipped", "recently_emailed"],
+      ["serve_next", "lead-fresh", "served", null],
+    ]);
+    expect(people[1].checks).toEqual([
+      { rule: "journalist", inputs: { journalist: false }, passed: true },
+      { rule: "recently_emailed", inputs: { window: "3_months", emailedWithinWindow: true }, passed: false },
+    ]);
+    expect(walk.header.context.offerId).toBeNull();
+    expect(replayServeWalk(walk.steps)).toEqual(expect.objectContaining({ servedLeadId: "lead-fresh", mismatches: [] }));
+  });
+
+  it("records an exhausted audience as an event, nobody served", async () => {
+    const { ServeWalk, withServeWalk } = await import("../../src/lib/serve-walk.js");
+    serveNext.mockResolvedValueOnce({ status: "exhausted", person: null });
+    const walk = new ServeWalk({ orgId: "org-1", brandId: "brand-1", campaignId: "campaign-1", callerRunId: "r0", serveRunId: "run-1", mode: "serve", context: {} });
+    const result = await withServeWalk(walk, () => pullNext(baseParams));
+    expect(result).toEqual({ found: false, reason: "audience_exhausted" });
+    expect(walk.steps).toEqual([{ type: "event", seq: 1, what: "audience_answer", detail: { audienceId: "aud-1", answer: "exhausted" } }]);
+  });
 });
