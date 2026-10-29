@@ -44,10 +44,10 @@ import { canonicalE164 } from "./e164-phone.js";
 import { crmFactHasEmail, crmFactHasPhone } from "./crm-fact-contact.js";
 
 /**
- * Policies a claim may state: `pure_prospect` (leads only) and `current_client` (clients only, CLIENT-CHECKIN-LEAD-1024,
- * `followup-client-gate.ts`). Never `business_only`: it holds back every never-judged non-subject forever.
+ * Policies a claim may state: `pure_prospect` (leads only), `current_client` (clients only, CLIENT-CHECKIN-LEAD-1024,
+ * `followup-client-gate.ts`) and `own_team` (the brand's own team and our staff only, ONE-AI-CONVERSES-1029, same file). Never `business_only`: it holds back every never-judged non-subject forever.
  */
-export const CLAIM_RELATIONSHIP_POLICIES = ["pure_prospect", "current_client"] as const;
+export const CLAIM_RELATIONSHIP_POLICIES = ["pure_prospect", "current_client", "own_team"] as const;
 export type ClaimRelationshipPolicy = (typeof CLAIM_RELATIONSHIP_POLICIES)[number];
 
 export function isClaimRelationshipPolicy(v: unknown): v is ClaimRelationshipPolicy {
