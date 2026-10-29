@@ -116,7 +116,7 @@ function offerScope(req: AuthenticatedRequest): OfferScope {
   return { orgId: req.orgId as string, brandId: req.params.brandId, offerId: req.params.offerId };
 }
 
-async function serializeCriterion(row: QualificationCriterionRow, passRate: PassRate) {
+async function serializeCriterion(row: QualificationCriterionRow, passRate: PassRate, orgId: string) {
   const spec = probeOf(row);
   return {
     id: row.id,
@@ -131,16 +131,17 @@ async function serializeCriterion(row: QualificationCriterionRow, passRate: Pass
     availability: spec.kind === "company_data" ? "in_our_data" : "custom_check",
     source: probeLabel(spec),
     probe: spec,
-    estimate: await estimateCostPerRow(spec),
+    estimate: await estimateCostPerRow(spec, orgId),
     passRate,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt ? row.updatedAt.toISOString() : null,
   };
 }
 
-async function serializeCriteria(rows: QualificationCriterionRow[]) {
+/** `orgId` = the org the criteria are shown to: its estimate is priced on that org's price list. */
+async function serializeCriteria(rows: QualificationCriterionRow[], orgId: string) {
   const rates = await passRates(rows.map((r) => r.id));
-  return Promise.all(rows.map((r) => serializeCriterion(r, rates.get(r.id)!)));
+  return Promise.all(rows.map((r) => serializeCriterion(r, rates.get(r.id)!, orgId)));
 }
 
 const NOT_FOUND = { error: "No live criterion with that id on this offer", code: "criterion_not_found" };
@@ -151,12 +152,12 @@ router.get(
   "/orgs/qualification/catalog",
   apiKeyAuth,
   requireOrgId,
-  wrap<AuthenticatedRequest>(async (_req, res) => {
+  wrap<AuthenticatedRequest>(async (req, res) => {
     try {
       const probes = await Promise.all(
         BUILTIN_PROBE_KEYS.map(async (key) => {
           const { description, spec } = BUILTIN_PROBES[key];
-          return { key, source: probeLabel(spec), description, availability: spec.kind === "company_data" ? "in_our_data" : "custom_check", estimate: await estimateCostPerRow(spec) };
+          return { key, source: probeLabel(spec), description, availability: spec.kind === "company_data" ? "in_our_data" : "custom_check", estimate: await estimateCostPerRow(spec, req.orgId as string) };
         }),
       );
       res.json({ probes });
@@ -179,7 +180,7 @@ router.post(
       if (!identity) return;
       const { rows, dropped } = await generateSuggestions({ ...offerScope(req), identity });
       await closeRun(identity, true);
-      res.json({ criteria: await serializeCriteria(rows), dropped, runId: identity.runId });
+      res.json({ criteria: await serializeCriteria(rows, identity.orgId), dropped, runId: identity.runId });
     } catch (error) {
       if (identity) await closeRun(identity, false).catch((e) => console.error("[lead-service] closing run failed:", e));
       if (error instanceof SuggestionDraftUnreadableError) {
@@ -244,7 +245,7 @@ router.post(
           createdByUserId: req.userId ?? null,
         })
         .returning();
-      const [criterion] = await serializeCriteria([row]);
+      const [criterion] = await serializeCriteria([row], req.orgId as string);
       res.status(201).json({ criterion });
     } catch (error) {
       if (error instanceof TregEndpointUnknownError) {
@@ -262,7 +263,7 @@ router.get(
   requireOrgId,
   wrap<AuthenticatedRequest>(async (req, res) => {
     try {
-      res.json({ criteria: await serializeCriteria(await listCriteria(offerScope(req))) });
+      res.json({ criteria: await serializeCriteria(await listCriteria(offerScope(req)), req.orgId as string) });
     } catch (error) {
       fail(res, error, "qualification criteria read");
     }
@@ -298,7 +299,7 @@ router.patch(
         res.status(404).json(NOT_FOUND);
         return;
       }
-      const [criterion] = await serializeCriteria([row]);
+      const [criterion] = await serializeCriteria([row], req.orgId as string);
       res.json({ criterion });
     } catch (error) {
       fail(res, error, "qualification criterion update");

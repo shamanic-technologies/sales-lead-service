@@ -647,14 +647,14 @@ export interface CostEstimate {
   storageUsd: number;
 }
 
-export async function estimateCostPerRow(spec: ProbeSpec): Promise<CostEstimate> {
+export async function estimateCostPerRow(spec: ProbeSpec, orgId: string): Promise<CostEstimate> {
   const [judgeIn, liteIn, liteOut] = await Promise.all([
-    priceCentsPerUnit(JUDGE_INPUT_COST_NAMES[SCREENSHOT_JUDGE]),
-    priceCentsPerUnit("google-flash-lite-3.1-tokens-input"),
-    priceCentsPerUnit("google-flash-lite-3.1-tokens-output"),
+    priceCentsPerUnit(JUDGE_INPUT_COST_NAMES[SCREENSHOT_JUDGE], orgId),
+    priceCentsPerUnit("google-flash-lite-3.1-tokens-input", orgId),
+    priceCentsPerUnit("google-flash-lite-3.1-tokens-output", orgId),
   ]);
   const screenshot = spec.kind === "treg" && spec.reading === "screenshot";
-  const jevIn = screenshot ? 0 : await priceCentsPerUnit(JUDGE_INPUT_COST_NAMES.jev);
+  const jevIn = screenshot ? 0 : await priceCentsPerUnit(JUDGE_INPUT_COST_NAMES.jev, orgId);
   const aiCents = screenshot
     ? EST.imageJudgeIn * judgeIn + EST.imageEvidenceIn * liteIn + EST.evidenceOut * liteOut
     : EST.stateTokens * EST.questions * jevIn + EST.evidenceIn * liteIn + EST.evidenceOut * liteOut;
@@ -665,8 +665,8 @@ export async function estimateCostPerRow(spec: ProbeSpec): Promise<CostEstimate>
     const entry = await getCatalogEntry(spec.calls[0].endpointId);
     const r = catalogEntryToCall(entry);
     if (!r.ok) throw new Error(`[lead-service] ${spec.calls[0].endpointId} is no longer usable: ${r.reason}`);
-    probeCents = r.vendorUsd * 1_000_000 * (await priceCentsPerUnit(TREG_COST_NAME));
-    if (screenshot) storageCents = await priceCentsPerUnit("cloudflare-r2-class-a-operation");
+    probeCents = r.vendorUsd * 1_000_000 * (await priceCentsPerUnit(TREG_COST_NAME, orgId));
+    if (screenshot) storageCents = await priceCentsPerUnit("cloudflare-r2-class-a-operation", orgId);
   }
   const round = (c: number) => Math.round(c * 10_000) / 1_000_000; // cents -> USD, 6 decimals
   return { perRowUsd: round(probeCents + aiCents + storageCents), probeUsd: round(probeCents), aiUsd: round(aiCents), storageUsd: round(storageCents) };

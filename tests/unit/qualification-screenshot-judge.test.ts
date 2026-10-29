@@ -142,7 +142,7 @@ describe("a screenshot check asks its own question of the image", () => {
 
 describe("the estimate shown before a check is turned on matches the path", () => {
   it("a screenshot row prices the image judgment and the image evidence, not a page description nor a text judgment", async () => {
-    await estimateCostPerRow(shot);
+    await estimateCostPerRow(shot, "org-1");
     expect(prices).toContain("typesafe-jev-1.13-tokens-input");
     expect(prices).toContain("google-flash-lite-3.1-tokens-input");
     expect(prices).toContain("cloudflare-r2-class-a-operation");
