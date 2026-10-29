@@ -14902,6 +14902,142 @@
           "days",
           "verdicts"
         ]
+      },
+      "PipeQueueResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "fromState": {
+            "type": "string",
+            "nullable": true,
+            "description": "The lead state the `from` step reaches (features-service step catalogue), null = none."
+          },
+          "toState": {
+            "type": "string",
+            "nullable": true
+          },
+          "unservedReason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "from_step_has_no_state",
+              "to_step_has_no_state",
+              null
+            ],
+            "description": "Why this pipe cannot be read off lead states (a step reaching no state): waiting and throughput are then empty, never a real zero."
+          },
+          "waitingCount": {
+            "type": "integer",
+            "description": "Every lead waiting (the list is the first `limit` of them)."
+          },
+          "waiting": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "campaignLeadId": {
+                  "type": "string",
+                  "nullable": true,
+                  "format": "uuid",
+                  "description": "The lead's latest leads_campaigns row at the brand: the id POST /orgs/leads/{id}/step-statements takes. Null = none (a lead only the brand's tools know)."
+                },
+                "firstName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "lastName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "orgName": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "orgDomain": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "photoUrl": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "waitingSince": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "First reach of the `from` state (ISO); null = reached, date unknown."
+                },
+                "causedByOutreach": {
+                  "type": "boolean",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "leadId",
+                "campaignLeadId",
+                "firstName",
+                "lastName",
+                "name",
+                "title",
+                "orgName",
+                "orgDomain",
+                "photoUrl",
+                "waitingSince",
+                "causedByOutreach"
+              ]
+            },
+            "description": "Oldest wait first; an undated wait last."
+          },
+          "throughput": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "week": {
+                  "type": "string"
+                },
+                "moved": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "week",
+                "moved"
+              ]
+            },
+            "description": "Per ISO week (Monday, UTC): leads that first reached the `to` state after reaching the `from` state. Every week from the first move to the current week, quiet weeks as 0."
+          }
+        },
+        "required": [
+          "brandId",
+          "from",
+          "to",
+          "fromState",
+          "toState",
+          "unservedReason",
+          "waitingCount",
+          "waiting",
+          "throughput"
+        ]
       }
     },
     "parameters": {},
@@ -26940,6 +27076,86 @@
           },
           "502": {
             "description": "client-service member list unreadable: `error: dependency_unavailable`"
+          }
+        }
+      }
+    },
+    "/orgs/leads/pipe-queue": {
+      "get": {
+        "summary": "Who waits on one pipe of the brand, and how many it moved per week",
+        "description": "A lead WAITS on the pipe when it reached the `from` step's lead state, has not reached the `to` step's state, and nobody stated it never will (a live won't-happen on the `to` step). Its wait starts at its first reach of the `from` state. Generic over any pipe: the leg is named by two catalogue step keys, mapped to states by features-service's step catalogue (never re-mapped here). Org-scoped (x-org-id): the brand's leads of that org only; a lead the org marked not a person is never returned.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The leg's from step key (e.g. meeting_booked)."
+            },
+            "required": true,
+            "description": "The leg's from step key (e.g. meeting_booked).",
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "The leg's to step key (e.g. meeting_attended)."
+            },
+            "required": true,
+            "description": "The leg's to step key (e.g. meeting_attended).",
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "1..500, default 100: people listed (waitingCount counts them all)."
+            },
+            "required": false,
+            "description": "1..500, default 100: people listed (waitingCount counts them all).",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pipe's queue and weekly throughput",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipeQueueResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid brandId, from, to or limit, or an unknown parameter"
+          },
+          "502": {
+            "description": "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`"
           }
         }
       }
