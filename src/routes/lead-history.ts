@@ -380,14 +380,18 @@ router.get(
     } else {
       deliveryRead = {
         ok: false,
+        notAsked: true,
         reason: "this lead carries no registered email, so no delivery evidence can be keyed to it",
       };
     }
 
     // Everything else, in parallel and bounded. A source with no email to ask about answers a
-    // stated refusal rather than an empty list.
+    // stated refusal rather than an empty list, read `not_asked` (the openapi contract: "a person with
+    // no registered email"), never `unavailable`: a phone-only client is not an outage
+    // (OLIVE-NO-EMAIL-NOT-ASKED-1029, the WhatsApp check-in stopped "blind" on it).
     const noEmail: SourceRead<never[]> = {
       ok: false,
+      notAsked: true,
       reason: "this lead carries no registered email, so this source cannot be asked about it",
     };
 
