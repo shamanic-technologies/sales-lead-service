@@ -6433,7 +6433,8 @@
                 "type": "string",
                 "enum": [
                   "pure_prospect",
-                  "current_client"
+                  "current_client",
+                  "own_team"
                 ],
                 "description": "The policy the claim stated."
               },
@@ -6470,9 +6471,10 @@
                         "not_a_client",
                         "team_member",
                         "staff",
-                        "personal"
+                        "personal",
+                        "not_team"
                       ],
-                      "description": "Forward verbatim. Under pure_prospect: not_a_lead (the brand knows this person as something other than a prospect, a payer included as tag customer; tags / unsureTags say what), staff (a staff or test address), team_member (a member of the org owning the brand). Under current_client: not_a_client (no live sale/purchase at the brand), team_member (a member of the org owning the brand, or tagged team), staff (a staff or test address), personal (a personal contact, yes or unsure). The row's followup_stopped_reason reads relationship_<reason>."
+                      "description": "Forward verbatim. Under pure_prospect: not_a_lead (the brand knows this person as something other than a prospect, a payer included as tag customer; tags / unsureTags say what), staff (a staff or test address), team_member (a member of the org owning the brand). Under current_client: not_a_client (no live sale/purchase at the brand), team_member (a member of the org owning the brand, or tagged team), staff (a staff or test address), personal (a personal contact, yes or unsure). Under own_team: not_team (neither staff, a test address, a member of the org owning the brand, nor tagged team). The row's followup_stopped_reason reads relationship_<reason>."
                     },
                     "tags": {
                       "type": "array",
@@ -6662,9 +6664,10 @@
             "type": "string",
             "enum": [
               "pure_prospect",
-              "current_client"
+              "current_client",
+              "own_team"
             ],
-            "description": "The relationship policy of the claiming pipe's strategy. current_client (CLIENT-CHECKIN-LEAD-1024) = clients only: a due person is handed out only if they PAID the brand (a live, attributed sale/purchase at the brand, this lead or another lead of the same human) and are not a personal contact (yes or unsure), not a member of the org owning the brand (nor tagged team), not staff or a test address. Under it the booked-meeting stop does not apply (a client has a sale). Refused = relationships.refused with reason not_a_client | team_member | staff | personal, row stopped (final); a payer with no human id yet = relationships.pending human_unknown, left due. (REPLY-ANY-LEAD-1015) pure_prospect = leads only, the exact complement of current_client on payers (LEAD-EVENT-LEADS-ONLY-1024): never staff or a test address (refused staff), never a member of the org owning the brand (refused team_member), never anyone who PAID the brand on current_client's own predicate or holds any sale on the ledger for the row or lead (refused not_a_lead, tags [customer]); then a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. Absent = unchanged behaviour."
+            "description": "The relationship policy of the claiming pipe's strategy. current_client (CLIENT-CHECKIN-LEAD-1024) = clients only: a due person is handed out only if they PAID the brand (a live, attributed sale/purchase at the brand, this lead or another lead of the same human) and are not a personal contact (yes or unsure), not a member of the org owning the brand (nor tagged team), not staff or a test address. Under it the booked-meeting stop does not apply (a client has a sale). Refused = relationships.refused with reason not_a_client | team_member | staff | personal, row stopped (final); a payer with no human id yet = relationships.pending human_unknown, left due. (REPLY-ANY-LEAD-1015) pure_prospect = leads only, the exact complement of current_client on payers (LEAD-EVENT-LEADS-ONLY-1024): never staff or a test address (refused staff), never a member of the org owning the brand (refused team_member), never anyone who PAID the brand on current_client's own predicate or holds any sale on the ledger for the row or lead (refused not_a_lead, tags [customer]); then a due person is handed out only if the brand knows them as nothing but a prospect (no tag but prospect, yes or unsure; a person no source of the org knows outside our outreach is one by definition). A person with another tag (personal, customer, team, investor, advisor, supplier, partner, other_professional; yes OR unsure) is REFUSED: named in relationships.refused with reason not_a_lead and their row stopped (final). A subject never judged is judged on demand (Jev) inside the call; a person still undecidable is named in relationships.pending and left due. own_team (ONE-AI-CONVERSES-1029) = the brand's own team only, exactly who the two others refuse as staff or team: a due person is handed out only if an address is staff or a test address, a member of the org owning the brand, or the person is tagged team (yes or unsure); anyone else is refused not_team, row stopped (final). Under it the booked-meeting stop does not apply. Absent = unchanged behaviour."
           }
         }
       },

@@ -139,3 +139,40 @@ describe("decideNeverALead (pure_prospect, LEAD-EVENT-LEADS-ONLY-1024)", async (
     }
   });
 });
+
+describe("decideTeamGate (own_team, ONE-AI-CONVERSES-1029)", async () => {
+  const { decideTeamGate, decideClientGate, decideNeverALead } = await import("../../src/lib/followup-client-gate.js");
+  const f = (over: Partial<Parameters<typeof decideTeamGate>[0]> = {}) => ({ block: block({}), emails: ["ana@lead.test"], memberKeys: new Set<string>(), ...over });
+
+  it("staff and test users are admitted (our own staff test on any brand's line)", () => {
+    expect(decideTeamGate(f({ emails: ["kevin.lourd+probe@gmail.com"] }))).toEqual({ kind: "admit" });
+    expect(decideTeamGate(f({ emails: ["x@distribute.you"] }))).toEqual({ kind: "admit" });
+  });
+  it("an org member or a team tag (yes or unsure) is admitted, even with no human yet", () => {
+    expect(decideTeamGate(f({ emails: ["bob+x@org.test"], memberKeys: new Set(["bob@org.test"]) }))).toEqual({ kind: "admit" });
+    expect(decideTeamGate(f({ block: block({ tags: ["team"] }) }))).toEqual({ kind: "admit" });
+    expect(decideTeamGate(f({ block: block({ unsureTags: ["team"] }) }))).toEqual({ kind: "admit" });
+    expect(decideTeamGate(f({ block: EMPTY_RELATIONSHIP, emails: ["x@distribute.you"] }))).toEqual({ kind: "admit" });
+  });
+  it("a lead, a client or a personal contact is refused not_team", () => {
+    expect(decideTeamGate(f())).toEqual({ kind: "refuse", reason: "not_team", tags: [], unsureTags: [] });
+    expect(decideTeamGate(f({ block: block({ tags: ["customer"] }) }))).toMatchObject({ reason: "not_team" });
+    expect(decideTeamGate(f({ block: block({ tags: ["personal"] }) }))).toMatchObject({ reason: "not_team" });
+  });
+  it("never two audiences: whoever own_team admits, current_client and the never-a-lead check refuse", () => {
+    const cases = [
+      { block: block({}), emails: ["kevin@pressbeat.io"], members: new Set<string>() },
+      { block: block({}), emails: ["bob@org.test"], members: new Set(["bob@org.test"]) },
+      { block: block({ unsureTags: ["team"] }), emails: ["ana@lead.test"], members: new Set<string>() },
+    ];
+    for (const c of cases) {
+      expect(decideTeamGate({ block: c.block, emails: c.emails, memberKeys: c.members }).kind).toBe("admit");
+      for (const paid of [true, false]) {
+        expect(decideClientGate({ block: c.block, emails: c.emails, paid, memberKeys: c.members }).kind).toBe("refuse");
+      }
+    }
+    // The never-a-lead check refuses staff and members outright; a team tag is refused by the relationship gate (not_a_lead).
+    expect(decideNeverALead({ emails: ["kevin@pressbeat.io"], paid: false, memberKeys: new Set() })?.kind).toBe("refuse");
+    expect(decideNeverALead({ emails: ["bob@org.test"], paid: false, memberKeys: new Set(["bob@org.test"]) })?.kind).toBe("refuse");
+  });
+});
