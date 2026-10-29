@@ -79,7 +79,7 @@ import {
   type ClaimRelationshipPolicy,
 } from "./followup-relationship-gate.js";
 import type { RelationshipTag } from "./relationship-tags.js";
-import { decideClientGate, decideNeverALead, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
+import { TEAM_REFUSAL_REASON, decideClientGate, decideNeverALead, decideTeamGate, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
 import { loadOrgMemberKeys } from "./org-members.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
@@ -240,8 +240,8 @@ export interface RefusedFollowup {
   /** Null for a person known by phone only (`phone` set). */
   email: string | null;
   phone: string | null;
-  /** `not_a_lead` under `pure_prospect`; a `ClientRefusalReason` under `current_client`. */
-  reason: typeof NOT_A_LEAD_REASON | ClientRefusalReason;
+  /** `not_a_lead` under `pure_prospect`; a `ClientRefusalReason` under `current_client`; `not_team` under `own_team`. */
+  reason: typeof NOT_A_LEAD_REASON | ClientRefusalReason | typeof TEAM_REFUSAL_REASON;
   tags: RelationshipTag[];
   unsureTags: RelationshipTag[];
 }
@@ -387,7 +387,8 @@ export async function loadFollowupCandidates(params: {
    * The relationship policy the claim states. `pure_prospect`: a row a trigger occurrence named (open grant) is
    * read whatever the booked-outcome stop says, and the policy decides (OCCURRENCE-POLICY-ADMITS-1019).
    * `current_client`: the booked-outcome stop does not apply at all (a client has a sale; the policy decides,
-   * CLIENT-CHECKIN-LEAD-1024). Absent: the stop applies unchanged.
+   * CLIENT-CHECKIN-LEAD-1024); `own_team` likewise (a team member's test sale is no booking). Absent: the stop applies
+   * unchanged.
    */
   policy?: ClaimRelationshipPolicy;
   /** Only this person's row(s) (CLAIM-OCCURRENCE-PERSON-1025). Absent = the campaign's due rows, oldest first. */
@@ -438,7 +439,7 @@ export async function loadFollowupCandidates(params: {
       ${params.person ? claimPersonSql(params.person) : sql``}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
       ${
-        params.policy === "current_client"
+        params.policy === "current_client" || params.policy === "own_team"
           ? sql``
           : sql`AND (
         ${params.policy === "pure_prospect" ? sql`${openOccurrenceSql()} OR ` : sql``}NOT EXISTS (
@@ -860,9 +861,18 @@ export async function pickFollowupCandidate(params: {
       if (report && budget) {
         let verdict:
           | Awaited<ReturnType<typeof gateFollowupCandidate>>
-          | ReturnType<typeof decideClientGate>;
+          | ReturnType<typeof decideClientGate>
+          | ReturnType<typeof decideTeamGate>;
         try {
-          if (report.policy === "current_client") {
+          if (report.policy === "own_team") {
+            // The brand's own team and our staff only (ONE-AI-CONVERSES-1029): whoever the two other policies refuse as such.
+            const [block, facts] = await Promise.all([
+              blockOfLeadEveryRelation(params.orgId, candidate.brandId, candidate.leadId),
+              loadClientFacts({ orgId: params.orgId, brandId: candidate.brandId, leadId: candidate.leadId, leadCampaignId: candidate.id }),
+            ]);
+            memberKeys ??= await loadOrgMemberKeys(params.orgId);
+            verdict = decideTeamGate({ block, emails: facts.emails, memberKeys });
+          } else if (report.policy === "current_client") {
             const [block, facts] = await Promise.all([
               blockOfLeadEveryRelation(params.orgId, candidate.brandId, candidate.leadId),
               loadClientFacts({ orgId: params.orgId, brandId: candidate.brandId, leadId: candidate.leadId, leadCampaignId: candidate.id }),

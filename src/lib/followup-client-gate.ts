@@ -86,6 +86,28 @@ export function decideNeverALead(f: { emails: readonly string[]; paid: boolean; 
   return null;
 }
 
+/**
+ * The `own_team` claim policy (ONE-AI-CONVERSES-1029, owner 2026-10-29: « ON VEUT UNE IA QUI CONVERSE AVEC LES LEADS ET
+ * LES CLIENTS AU BON MOMENT ET DE LA BONNE FAÇON », « Quand un lead nous écrit c'est un lead event non ? »): the brand's
+ * OWN TEAM, the third audience of the Lead event pipe beside `pure_prospect` and `current_client`. Whoever those two
+ * refuse as staff or team is exactly who this one admits, so a person writing to the brand lands in ONE of the three:
+ *  - admit  an address of the person is fleet staff or a test user (`isStaffEmail`: our own staff test on any brand's
+ *           assistant line), a member of the org owning the brand (client-service, `org-members.ts`), or `team` tagged
+ *           yes OR unsure (the same reading `current_client` refuses on, so an unsure team tag is never nobody's).
+ *  - refuse `not_team` anyone else (a lead, a client, a personal contact): final for that due row.
+ * Pure. No sale, personal or human-id check: none of those makes a team member someone else.
+ */
+export const TEAM_REFUSAL_REASON = "not_team" as const;
+
+export function decideTeamGate(f: { block: RelationshipBlock; emails: readonly string[]; memberKeys: ReadonlySet<string> }):
+  | { kind: "admit" }
+  | { kind: "refuse"; reason: typeof TEAM_REFUSAL_REASON; tags: RelationshipTag[]; unsureTags: RelationshipTag[] } {
+  if (f.emails.some((e) => isStaffEmail(e))) return { kind: "admit" };
+  if (anyMemberAddress(f.emails, f.memberKeys)) return { kind: "admit" };
+  if (heldTag(f.block, "team")) return { kind: "admit" };
+  return { kind: "refuse", reason: TEAM_REFUSAL_REASON, tags: [], unsureTags: [] };
+}
+
 /** The lead's registered addresses and whether the person paid the brand. One statement. */
 export async function loadClientFacts(p: {
   orgId: string;

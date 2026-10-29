@@ -63,7 +63,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under relationships: current_clien
       VALUES (${orgId}, ${p.brand ?? brandId}, 'sale', 'exact', 'attributed', ${leadId}::uuid, 'crm', 9900, ${p.withdrawn ? sql`now()` : sql`NULL`})`);
   }
 
-  const claim = (relationships?: "pure_prospect" | "current_client") =>
+  const claim = (relationships?: "pure_prospect" | "current_client" | "own_team") =>
     pickFollowupCandidate({
       orgId,
       campaignId,
@@ -175,6 +175,36 @@ describe.skipIf(!hasRealDatabase)("claim-next under relationships: current_clien
       { leadCampaignId: p.rowId, leadId: p.leadId, campaignId, email: p.email.toLowerCase(), phone: null, reason: "human_unknown", retryAfterSeconds: 300 },
     ]);
     expect((await readFollowupState(orgId, p.rowId))!.dueAt).not.toBeNull();
+  });
+
+  // ONE-AI-CONVERSES-1029: the brand's own team is the third audience; whoever the two others refuse as staff/team.
+  it("own_team hands out a member (with a sale: no booked stop) and staff, refuses a prospect and a client not_team", async () => {
+    const prospect = await dueLead();
+    const client = await dueLead();
+    await sale(client.leadId);
+    await new Promise((r) => setTimeout(r, 5));
+    const member = await dueLead();
+    await sale(member.leadId);
+    memberKeys.add(member.email.toLowerCase());
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() + interval '1 day' WHERE id = ${member.rowId}::uuid`);
+    const staff = await dueLead({ email: `kevin.lourd+${randomUUID().slice(0, 8)}@gmail.com` });
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() + interval '1 day' WHERE id = ${staff.rowId}::uuid`);
+
+    const r = await claim("own_team");
+    expect(r).toMatchObject({ claimed: null, reason: "relationship_refused" });
+    expect(r.relationships!.policy).toBe("own_team");
+    expect(r.relationships!.refused.map((x) => [x.leadId, x.reason])).toEqual(
+      expect.arrayContaining([
+        [prospect.leadId, "not_team"],
+        [client.leadId, "not_team"],
+      ]),
+    );
+    expect(await readFollowupState(orgId, client.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_not_team" });
+
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() - interval '1 minute' WHERE id = ANY(${sql.param([member.rowId, staff.rowId])}::uuid[])`);
+    const first = await claim("own_team");
+    const second = await claim("own_team");
+    expect([first.claimed?.id, second.claimed?.id].sort()).toEqual([member.rowId, staff.rowId].sort());
   });
 
   it("pure_prospect and no policy keep the booked stop for the same customer", async () => {
