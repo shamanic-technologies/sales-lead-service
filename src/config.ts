@@ -86,6 +86,9 @@ export const CONTENT_GENERATION_SERVICE_API_KEY = required("CONTENT_GENERATION_S
 export const BILLING_SERVICE_URL = required("BILLING_SERVICE_URL");
 export const BILLING_SERVICE_API_KEY = required("BILLING_SERVICE_API_KEY");
 export const COSTS_SERVICE_URL = required("COSTS_SERVICE_URL");
+// The price shown is the price of the org it is shown to (x-org-id), a read costs-service only
+// answers with its api key.
+export const COSTS_SERVICE_API_KEY = required("COSTS_SERVICE_API_KEY");
 export const CLOUDFLARE_SERVICE_URL = required("CLOUDFLARE_SERVICE_URL");
 export const CLOUDFLARE_SERVICE_API_KEY = required("CLOUDFLARE_SERVICE_API_KEY");
 export const TREG_BASE_URL = "https://treg.to";

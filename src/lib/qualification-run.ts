@@ -98,7 +98,7 @@ export async function runCriterionOnLeads(
   const spec = probeOf(criterion);
   const deps: QualificationDeps = { meter: new TregMeter(identity), identity, ...(researched ? { researched } : {}) };
   const leads = await buildFullLeadsBatch(leadIds);
-  const microCents = spec.kind === "treg" ? await priceCentsPerUnit(TREG_COST_NAME) : 0;
+  const microCents = spec.kind === "treg" ? await priceCentsPerUnit(TREG_COST_NAME, identity.orgId) : 0;
 
   const byDomain = new Map<string, FullLead[]>();
   const rows = new Map<string, SampleRow>();
