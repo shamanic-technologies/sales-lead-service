@@ -534,6 +534,8 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   const events: HistoryEvent[] = [];
   const sources = new Map<HistorySource, HistorySourceState>();
 
+  // A read that could not answer is `unavailable`, unless there was nothing to ask it about (`not_asked`).
+  const unreadStatus = (read: { notAsked?: true }): HistorySourceStatus => (read.notAsked ? "not_asked" : "unavailable");
   const noteSource = (
     source: HistorySource,
     status: HistorySourceStatus,
@@ -602,7 +604,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
 
   for (const campaign of input.campaigns) {
     if (!campaign.conversation.ok) {
-      noteSource("outreach", "unavailable", campaign.conversation.reason);
+      noteSource("outreach", unreadStatus(campaign.conversation), campaign.conversation.reason);
       continue;
     }
     noteSource("outreach", "ok", null);
@@ -642,7 +644,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   }
 
   if (!input.mailbox.ok) {
-    noteSource("mailbox", "unavailable", input.mailbox.reason);
+    noteSource("mailbox", unreadStatus(input.mailbox), input.mailbox.reason);
   } else {
     noteSource("mailbox", "ok", null);
     const conversation = input.mailbox.data;
@@ -704,7 +706,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   // when it matches, the staff mirror corrects the direction: it knows its own sender.
   if (input.staffMailbox) {
     if (!input.staffMailbox.ok) {
-      noteSource("staff-mailbox", "unavailable", input.staffMailbox.reason);
+      noteSource("staff-mailbox", unreadStatus(input.staffMailbox), input.staffMailbox.reason);
     } else {
       noteSource("staff-mailbox", "ok", null);
       const conversation = input.staffMailbox.data;
@@ -916,12 +918,12 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
     const asked = input.campaigns.some((c) => c.delivery !== null);
     noteSource("delivery", asked ? "ok" : "not_asked", asked ? null : "no served row in this scope");
   } else {
-    noteSource("delivery", "unavailable", input.deliveryRead.reason);
+    noteSource("delivery", unreadStatus(input.deliveryRead), input.deliveryRead.reason);
   }
 
   // ── What a human recorded on the outreach side ──
   if (!input.replyStatements.ok) {
-    noteSource("outreach", "unavailable", input.replyStatements.reason);
+    noteSource("outreach", unreadStatus(input.replyStatements), input.replyStatements.reason);
   } else {
     noteSource("outreach", "ok", null);
     const campaignIds = new Set(input.campaigns.map((c) => c.campaignId));
@@ -944,7 +946,7 @@ export function assembleLeadHistory(input: AssembleHistoryInput): AssembledHisto
   }
 
   if (!input.optOuts.ok) {
-    noteSource("outreach", "unavailable", input.optOuts.reason);
+    noteSource("outreach", unreadStatus(input.optOuts), input.optOuts.reason);
   } else {
     noteSource("outreach", "ok", null);
     for (const optOut of input.optOuts.data) {
