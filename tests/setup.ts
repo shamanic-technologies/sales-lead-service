@@ -36,6 +36,7 @@ const TEST_ENV_VARS: Record<string, string> = {
   BILLING_SERVICE_URL: "http://billing:3017",
   BILLING_SERVICE_API_KEY: "test-billing-key",
   COSTS_SERVICE_URL: "http://costs:3018",
+  COSTS_SERVICE_API_KEY: "test-costs-key",
   CLOUDFLARE_SERVICE_URL: "http://cloudflare:3019",
   CLOUDFLARE_SERVICE_API_KEY: "test-cloudflare-key",
   SOCIAL_SERVICE_URL: "http://social:3020",
