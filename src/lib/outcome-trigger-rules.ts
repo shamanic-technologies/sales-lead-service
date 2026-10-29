@@ -20,7 +20,7 @@
  */
 import { STEP_REACHED_EVIDENCE, ledgerRowReachesStep } from "./step-reached.js";
 import { canonicalE164 } from "./e164-phone.js";
-import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
+import { CRM_NOT_THEIR_ACT, isSessionlessProductEvent } from "./crm-act-types.js";
 
 /** How this service is named in features-service's catalogue (`triggers[].firedBy`). */
 export const OUTCOME_TRIGGER_SELF = "lead-service";
@@ -248,7 +248,9 @@ export function actionAlreadyAnswered(earlierCopies: ReadonlyArray<{ status: str
  *  - a fact another service already rings as `account_event` itself (crm-service's credit facts,
  *    CREDIT-RAN-OUT-UNIBOX-EVENT-1024): rung twice otherwise.
  * A burst of the same act (a dozen product events in one session) is ONE occurrence: an act of the same kind for the
- * same person inside ACT_COALESCE_WINDOW_MS of a live one is kept `skipped` `coalesced` (the workflow reads the thread).
+ * same person inside ACT_COALESCE_WINDOW_MS of a live one, EITHER SIDE of it, is kept `skipped` `coalesced` (the workflow
+ * reads the thread). Either side: facts reach the copy out of time order (crm stated three PostHog events of one second
+ * in seq order .263, .260, .136), and a window looking only backwards rang the two earlier ones too (2026-10-29).
  */
 export const ACCOUNT_EVENT_TRIGGER = "account_event";
 /** The ledger step of an act: `act:<crm fact type>` (never a catalogue step key). */
@@ -274,10 +276,14 @@ export function isActStep(step: string): boolean {
   return step.startsWith(ACT_STEP_PREFIX);
 }
 
-/** Whether a crm fact of `type` that reaches no step (`reachesStep` false) rings Lead event as an act of theirs. */
-export function isTheirNewAct(type: string, reachesStep: boolean): boolean {
+/**
+ * Whether a crm fact of `type` that reaches no step (`reachesStep` false) rings Lead event as an act of theirs. A
+ * product event the brand's server recorded in no session (crm-act-types.ts `isSessionlessProductEvent`) never does.
+ */
+export function isTheirNewAct(type: string, reachesStep: boolean, payload: Record<string, unknown> | null = null): boolean {
   if (reachesStep) return false;
   if ((CRM_NOT_THEIR_ACT as readonly string[]).includes(type)) return false;
+  if (isSessionlessProductEvent(type, payload)) return false;
   return !NOT_A_NEW_ACT.includes(type);
 }
 

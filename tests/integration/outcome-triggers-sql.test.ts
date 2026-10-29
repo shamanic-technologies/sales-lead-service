@@ -649,6 +649,25 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     expect(await rowsOf({ step: "act:message_in" })).toEqual([]);
   });
 
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: one second of out-of-order product events is ONE occurrence; a server identify rings nothing", async () => {
+    const leadId = await seedLead("nl");
+    const base = Date.now() + 60_000;
+    const ev = (event: string, sessionId: string | null) => ({ event, text: event, url: null, sessionId });
+    // crm stated them in seq order .263, .260, .136 (prod, lead ed47e3f5): the later ones came first.
+    await crmFact("product_event", addr("nl"), { source: "posthog", occurredAt: new Date(base + 263), payload: ev("signin_completed", "s1") });
+    await crmFact("product_event", addr("nl"), { source: "posthog", occurredAt: new Date(base + 260), payload: ev("signin_completed", "s1") });
+    await crmFact("product_event", addr("nl"), { source: "posthog", occurredAt: new Date(base + 136), payload: ev("signin_completed", "s1") });
+    await crmFact("product_event", addr("nl"), { source: "posthog", occurredAt: new Date(base + 500), payload: ev("newsletter_link_identified", null) });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours().map((c) => [c.body.triggerId, c.body.leadId])).toEqual([["account_event", leadId]]);
+    expect((await rowsOf({ step: "act:product_event" })).map((r) => [r.status, r.skipReason]).sort()).toEqual([
+      ["delivered", null],
+      ["skipped", "coalesced"],
+      ["skipped", "coalesced"],
+    ]);
+  });
+
   describe("MEETING-ATTENDED-SOURCE-1028: a booked meeting whose time passed was held", () => {
     const HOUR = 60 * 60_000;
     /** A booking with a meeting time, as crm-service states a calendar appointment. */

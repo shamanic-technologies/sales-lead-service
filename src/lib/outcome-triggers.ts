@@ -350,7 +350,7 @@ async function writeReach(r: ResolvedReach): Promise<string[]> {
           WHERE o.org_id = ${r.orgId} AND o.brand_id = ${r.brandId} AND o.offer_id = ${offerId} AND o.step = ${r.step}
             AND o.person_key = ${r.personKey} AND o.status IN ('pending', 'delivered')
             AND o.occurred_at >= ${r.occurredAt}::timestamptz - ${`${ACT_COALESCE_WINDOW_MS} milliseconds`}::interval
-            AND o.occurred_at <= ${r.occurredAt}::timestamptz
+            AND o.occurred_at <= ${r.occurredAt}::timestamptz + ${`${ACT_COALESCE_WINDOW_MS} milliseconds`}::interval
         )
         ON CONFLICT DO NOTHING
         RETURNING id::text AS id
@@ -897,7 +897,7 @@ async function sweepCrmFacts(state: SweepState, now: Date, lookups: Lookups, pen
           emails.length > 0 &&
           rowReaches({ emails, name: f.full_name, phones: f.phones ?? [], at, type: f.type, payload: f.payload });
         // Any other act of theirs (a refused payment, a product event) rings Lead event as itself, once per fact.
-        const step = reachesOutcome ? outcome : inScope_ && isTheirNewAct(f.type, false) ? actStep(f.type) : null;
+        const step = reachesOutcome ? outcome : inScope_ && isTheirNewAct(f.type, false, f.payload) ? actStep(f.type) : null;
         const phone = (f.phones ?? []).map((p) => p.trim()).find(Boolean) ?? null;
         const reaches_ = step !== null && !f.withdrawn && (emails.length > 0 || (isActStep(step) && phone !== null)) && isFreshReach(at, state.armedAt, now);
         if (reaches_ && step && (await isRestatedAction(f, step, at))) {
