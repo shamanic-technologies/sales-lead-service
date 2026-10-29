@@ -10573,3 +10573,66 @@ registry.registerPath({
     502: { description: "client-service member list unreadable: `error: dependency_unavailable`" },
   },
 });
+
+// FACTORY-P4-PAGES: who waits on one pipe of the brand, and how many it moved per week (src/lib/pipe-queue.ts).
+export const PIPE_QUEUE_MAX_LIMIT = 500;
+
+export const PipeQueueResponseSchema = z
+  .object({
+    brandId: z.string(),
+    from: z.string(),
+    to: z.string(),
+    fromState: z.string().nullable().openapi({ description: "The lead state the `from` step reaches (features-service step catalogue), null = none." }),
+    toState: z.string().nullable(),
+    unservedReason: z
+      .enum(["from_step_has_no_state", "to_step_has_no_state"])
+      .nullable()
+      .openapi({ description: "Why this pipe cannot be read off lead states (a step reaching no state): waiting and throughput are then empty, never a real zero." }),
+    waitingCount: z.number().int().openapi({ description: "Every lead waiting (the list is the first `limit` of them)." }),
+    waiting: z.array(
+      z.object({
+        leadId: z.string().uuid(),
+        campaignLeadId: z.string().uuid().nullable().openapi({ description: "The lead's latest leads_campaigns row at the brand: the id POST /orgs/leads/{id}/step-statements takes. Null = none (a lead only the brand's tools know)." }),
+        firstName: z.string().nullable(),
+        lastName: z.string().nullable(),
+        name: z.string().nullable(),
+        title: z.string().nullable(),
+        orgName: z.string().nullable(),
+        orgDomain: z.string().nullable(),
+        photoUrl: z.string().nullable(),
+        waitingSince: z.string().nullable().openapi({ description: "First reach of the `from` state (ISO); null = reached, date unknown." }),
+        causedByOutreach: z.boolean().nullable(),
+      }),
+    ).openapi({ description: "Oldest wait first; an undated wait last." }),
+    throughput: z
+      .array(z.object({ week: z.string(), moved: z.number().int() }))
+      .openapi({ description: "Per ISO week (Monday, UTC): leads that first reached the `to` state after reaching the `from` state. Every week from the first move to the current week, quiet weeks as 0." }),
+  })
+  .openapi("PipeQueueResponse");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/pipe-queue",
+  summary: "Who waits on one pipe of the brand, and how many it moved per week",
+  description:
+    "A lead WAITS on the pipe when it reached the `from` step's lead state, has not reached the `to` step's state, and nobody stated it never will (a live won't-happen on the `to` step). " +
+    "Its wait starts at its first reach of the `from` state. Generic over any pipe: the leg is named by two catalogue step keys, mapped to states by features-service's step catalogue (never re-mapped here). " +
+    "Org-scoped (x-org-id): the brand's leads of that org only; a lead the org marked not a person is never returned.",
+  request: {
+    query: z.object({
+      brandId: z.string(),
+      from: z.string().openapi({ description: "The leg's from step key (e.g. meeting_booked)." }),
+      to: z.string().openapi({ description: "The leg's to step key (e.g. meeting_attended)." }),
+      limit: z.string().optional().openapi({ description: `1..${PIPE_QUEUE_MAX_LIMIT}, default 100: people listed (waitingCount counts them all).` }),
+    }),
+  },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const } },
+  ],
+  responses: {
+    200: { description: "The pipe's queue and weekly throughput", content: { "application/json": { schema: PipeQueueResponseSchema } } },
+    400: { description: "Missing/invalid brandId, from, to or limit, or an unknown parameter" },
+    502: { description: "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`" },
+  },
+});

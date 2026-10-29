@@ -15,6 +15,7 @@ import leadFollowupDateRoutes from "./routes/lead-followup-date.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
 import leadsRoutes from "./routes/leads.js";
 import awaitingReplyRoutes from "./routes/awaiting-reply.js";
+import pipeQueueRoutes from "./routes/pipe-queue.js";
 import uniboxRoutes from "./routes/unibox.js";
 import disqualificationRoutes from "./routes/disqualifications.js";
 import notAPersonRoutes from "./routes/not-a-person.js";
@@ -94,6 +95,8 @@ app.use(crmEvidenceRoutes);
 app.use(qualificationRoutes);
 // Before leadsRoutes: `/orgs/leads/awaiting-reply` must not be read as a lead id.
 app.use(awaitingReplyRoutes);
+// Before leadsRoutes: `/orgs/leads/pipe-queue` is not a lead id.
+app.use(pipeQueueRoutes);
 // Before the leads router too: `/orgs/leads/disqualifications` must not be read as a lead id.
 app.use(disqualificationRoutes);
 // Before the leads router: /orgs/leads/not-a-person is not a lead id (FAKE-OUTCOMES-1022).
