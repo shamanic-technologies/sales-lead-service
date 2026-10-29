@@ -15,6 +15,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
+import { isSessionlessProductEvent, PRODUCT_EVENT_TYPE } from "./crm-act-types.js";
 import { INBOUND_FACT_TYPES } from "./relationship-intent.js";
 import { WORD_LABELS } from "./timeline-labels.js";
 
@@ -405,7 +406,7 @@ export const VISIT_LINES = 5;
  * their act toward the brand. The newest ones are read one by one, dated, in crm's own words; older ones are counted,
  * so a product firing an event per page never pushes the person's messages out of Jev's budget.
  */
-export const PRODUCT_EVENT_TYPE = "product_event";
+export { PRODUCT_EVENT_TYPE };
 export const PRODUCT_EVENT_LINES = 20;
 const PRODUCT_EVENT_TEXT_CHARS = 300;
 
@@ -431,8 +432,10 @@ function detailOf(p: Record<string, unknown>): Record<string, unknown> | null {
  * Visits: the newest VISIT_LINES each a dated line with what the visit shows, plus one summary line (count, first date).
  * Product events: the newest PRODUCT_EVENT_LINES each a dated line in crm's words, older ones counted on one line.
  */
-export function threadLinesOf(facts: readonly ThreadFact[], outreach: ReadonlyArray<{ label: string; occurred_at: Date | string | null; source: string }>): ThreadLine[] {
+export function threadLinesOf(allFacts: readonly ThreadFact[], outreach: ReadonlyArray<{ label: string; occurred_at: Date | string | null; source: string }>): ThreadLine[] {
   const at = (v: Date | string | null) => (v === null ? null : toIsoTimestamp(v));
+  // A product event the brand's server recorded about them in no session is our plumbing, never something they did.
+  const facts = allFacts.filter((f) => !isSessionlessProductEvent(f.type, f.payload));
   const visits = facts.filter((f) => f.type === "website_visit");
   const productEvents = facts.filter((f) => f.type === PRODUCT_EVENT_TYPE);
   let seen = 0;

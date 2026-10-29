@@ -27,7 +27,8 @@ export interface OutreachContext {
 
 export type SourceRead<T> =
   | { ok: true; data: T }
-  | { ok: false; reason: string };
+  /** `notAsked`: there was nothing to ask this source about (a lead with no registered email), never an outage. */
+  | { ok: false; reason: string; notAsked?: true };
 
 /** One message of a conversation, exactly as instantly-service serves it. */
 export interface OutreachMessage {

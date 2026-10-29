@@ -10,7 +10,7 @@ import { journalistClause, journalistScopeOf, type JournalistScope } from "./bra
 import { loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { judgeAutomatedActs, recordTheirActs, refreshActedAt } from "./their-acts.js";
-import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
+import { CRM_NOT_THEIR_ACT, sessionlessProductEventSql } from "./crm-act-types.js";
 
 /**
  * EVERY LEAD CARRIES A NEXT FOLLOW-UP DATE (LEAD-FOLLOWUP-DATE-1016, owner 2026-10-16: "Dans lead service, il faut
@@ -156,11 +156,12 @@ interface UniboxFact {
 
 /**
  * The crm facts the filter names, dated: `ours` = our Unibox messages (`message_out`); `theirs` = every fact that is
- * not ours nor bookkeeping (CRM_NOT_THEIR_ACT), so a kind of act crm-service starts stating counts the day it lands.
+ * not ours nor bookkeeping (CRM_NOT_THEIR_ACT) nor a product event the brand's server recorded in no session
+ * (`sessionlessProductEventSql`), so a kind of act crm-service starts stating counts the day it lands.
  */
 async function loadUniboxFacts(factFilter: SQL, whose: "ours" | "theirs" = "ours"): Promise<UniboxFact[]> {
   const kind =
-    whose === "ours" ? sql`f.type = 'message_out'` : sql`f.type <> ALL(${sql.param([...CRM_NOT_THEIR_ACT])}::text[])`;
+    whose === "ours" ? sql`f.type = 'message_out'` : sql`f.type <> ALL(${sql.param([...CRM_NOT_THEIR_ACT])}::text[]) AND NOT ${sessionlessProductEventSql(sql`f`)}`;
   return (await db.execute(sql`
     SELECT f.fact_id, f.type, f.contact_point, f.org_id, f.brand_id, f.occurred_at AS at, COALESCE(NULLIF(f.payload->>'channel', ''), f.source) AS channel,
       f.emails, f.phones, CASE WHEN (f.raw->>'humanId') ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human_id

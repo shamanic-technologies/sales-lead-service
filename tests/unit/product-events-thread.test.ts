@@ -49,6 +49,12 @@ describe("what Jev reads of a person's walk in the brand's product", () => {
     expect(lines[0].text).toBe("signup_completed");
   });
 
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: an event the brand's server recorded in no session is not in their thread", () => {
+    const identify = { ...event(2, "newsletter_link_identified", "Newsletter link identified"), payload: { event: "newsletter_link_identified", text: "Newsletter link identified", sessionId: null, url: null } };
+    const lines = threadLinesOf([identify, identify, event(3, "signin_completed", "Signin completed")], []);
+    expect(lines.map((l) => l.text)).toEqual(["Signin completed"]);
+  });
+
   it("a product event is their act (it moves when they last acted)", () => {
     expect(CRM_NOT_THEIR_ACT as readonly string[]).not.toContain("product_event");
   });

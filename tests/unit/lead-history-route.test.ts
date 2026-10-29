@@ -340,12 +340,15 @@ describe("GET /orgs/leads/:id/history", () => {
     const byName = Object.fromEntries(
       res.body.sources.map((s: { source: string }) => [s.source, s]),
     );
-    expect(byName.delivery.status).toBe("unavailable");
-    expect(byName.mailbox.status).toBe("unavailable");
-    expect(res.body.complete).toBe(false);
+    // Nothing to ask an email-keyed source about: `not_asked` with its reason (the openapi contract), never
+    // `unavailable` (an outage), so a reader never decides "blind" on a phone-only person (OLIVE-NO-EMAIL-NOT-ASKED-1029).
+    for (const name of ["delivery", "mailbox", "staff-mailbox"]) {
+      expect(byName[name].status).toBe("not_asked");
+      expect(byName[name].reason).toContain("no registered email");
+    }
+    expect(res.body.complete).toBe(true);
     expect(fetchMailboxConversation).not.toHaveBeenCalled();
     expect(fetchStaffMailboxConversation).not.toHaveBeenCalled();
-    expect(byName["staff-mailbox"].status).toBe("unavailable");
   });
 
   it("bounds the campaign fan-out and SAYS it did", async () => {

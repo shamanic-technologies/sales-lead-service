@@ -233,6 +233,19 @@ describe("every act of theirs rings Lead event (LEAD-EVENT-REFUSAL-NO-REACT-1028
     for (const t of ["message_in", "group_message", "credit_ran_out", "credit_restored"]) expect(isTheirNewAct(t, false)).toBe(false);
   });
 
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: a product event the brand's server recorded in no session is not their act", async () => {
+    const { isTheirNewAct } = await import("../../src/lib/outcome-trigger-rules.js");
+    const identify = { url: null, path: null, text: "Newsletter link identified", event: "newsletter_link_identified", sessionId: null, properties: { source: "server" } };
+    expect(isTheirNewAct("product_event", false, identify)).toBe(false);
+    // In a session of theirs: their act.
+    expect(isTheirNewAct("product_event", false, { ...identify, event: "onboarding_step_viewed", sessionId: "019a-sess" })).toBe(true);
+    // A source stating no session at all: nothing positive says a server recorded it.
+    expect(isTheirNewAct("product_event", false, { event: "order_placed" })).toBe(true);
+    expect(isTheirNewAct("product_event", false, null)).toBe(true);
+    // Only product events read the session: a payment with a null sessionId stays an act.
+    expect(isTheirNewAct("payment", false, { sessionId: null, status: "failed" })).toBe(true);
+  });
+
   it("an act's ledger step, idempotency key (once per FACT) and the item the workflow reads", async () => {
     const { actStep, isActStep, actIdempotencyKey, actItem } = await import("../../src/lib/outcome-trigger-rules.js");
     expect(actStep("payment")).toBe("act:payment");

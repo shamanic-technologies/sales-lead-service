@@ -439,6 +439,30 @@ describe("assembleLeadHistory — the de-duplication the browser was doing", () 
   });
 });
 
+describe("assembleLeadHistory — a person with no registered email (OLIVE-NO-EMAIL-NOT-ASKED-1029)", () => {
+  // Prod 2026-10-29: a phone-only client (Sepehr, Olive) read `unavailable` on delivery and outreach, and the
+  // WhatsApp check-in refused to write "blind". Nothing was there to ask: `not_asked`, per the contract.
+  const noEmail = { ok: false as const, notAsked: true as const, reason: "this lead carries no registered email, so this source cannot be asked about it" };
+  it("reads not_asked, never unavailable, on every email-keyed source", () => {
+    const { sources } = assembleLeadHistory(
+      input({
+        email: null as never,
+        campaigns: [campaign({ conversation: noEmail as never })],
+        deliveryRead: noEmail as never,
+        mailbox: noEmail as never,
+        replyStatements: noEmail as never,
+        optOuts: noEmail as never,
+      }),
+    );
+    const byName = Object.fromEntries(sources.map((s) => [s.source, s]));
+    for (const name of ["delivery", "outreach", "mailbox"]) {
+      expect(byName[name].status).toBe("not_asked");
+      expect(byName[name].reason).toContain("no registered email");
+    }
+    expect(sources.some((s) => s.status === "unavailable")).toBe(false);
+  });
+});
+
 describe("assembleLeadHistory — a source that could not be read", () => {
   it("degrades only itself, still answers, and says what is missing", () => {
     const { events, sources, complete } = assembleLeadHistory(
