@@ -932,6 +932,13 @@
       "when": 1788721620000,
       "tag": "0132_post_touch_declarations",
       "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1788808020000,
+      "tag": "0133_sessionless_product_events",
+      "breakpoints": true
     }
   ]
 }
