@@ -353,8 +353,22 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false });
     expect(await serveDue()).toBeNull();
 
-    // They write to us once on WhatsApp (matched by email here), a person's words on a point of the brand: served.
+    // ONE-AI-CONVERSES-1029-LEADFACTS: our server tying a newsletter link to them (mail scanners fire it too) is our own
+    // instrumentation, never an act of theirs, even on a point of the brand.
     const waPoint = `email:${emailedOnly.email}`;
+    const identified = randomUUID();
+    await db.execute(sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${identified}, GREATEST(${nextSeq()}::bigint, (SELECT COALESCE(max(seq), 0) + 1 FROM crm_facts)), ${orgId}, ${brandId}, ${waPoint}, ${waPoint}, 'Emailed Only', ARRAY[${emailedOnly.email}]::text[], '{}',
+        'product_event', '2026-09-22T08:00:00Z'::timestamptz, 'created_at', 'posthog', ${randomUUID()},
+        ${JSON.stringify({ event: "newsletter_link_identified", text: "Newsletter link identified", properties: { source: "server" } })}::jsonb, '{}'::jsonb)`);
+    await toBrandSubject(emailedOnly.humanId, [gmailPoint, otherPoint, waPoint]);
+    await fd.syncSendFeeds(30_000);
+    await refreshActedAt({ orgId, brandId });
+    expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: false });
+    expect(await serveDue()).toBeNull();
+
+    // They write to us once on WhatsApp (matched by email here), a person's words on a point of the brand: served.
     const written = randomUUID();
     await insertMessage(written, waPoint, "2026-10-02T08:00:00Z", { channel: "whatsapp" });
     await toBrandSubject(emailedOnly.humanId, [gmailPoint, otherPoint, waPoint]);

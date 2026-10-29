@@ -20,7 +20,7 @@
  */
 import { STEP_REACHED_EVIDENCE, ledgerRowReachesStep } from "./step-reached.js";
 import { canonicalE164 } from "./e164-phone.js";
-import { CRM_NOT_THEIR_ACT } from "./crm-act-types.js";
+import { CRM_NOT_THEIR_ACT, isOurInstrumentation } from "./crm-act-types.js";
 
 /** How this service is named in features-service's catalogue (`triggers[].firedBy`). */
 export const OUTCOME_TRIGGER_SELF = "lead-service";
@@ -248,7 +248,11 @@ export function actionAlreadyAnswered(earlierCopies: ReadonlyArray<{ status: str
  *  - a fact another service already rings as `account_event` itself (crm-service's credit facts,
  *    CREDIT-RAN-OUT-UNIBOX-EVENT-1024): rung twice otherwise.
  * A burst of the same act (a dozen product events in one session) is ONE occurrence: an act of the same kind for the
- * same person inside ACT_COALESCE_WINDOW_MS of a live one is kept `skipped` `coalesced` (the workflow reads the thread).
+ * same person inside ACT_COALESCE_WINDOW_MS of a live one, EITHER SIDE of it, is kept `skipped` `coalesced` (the
+ * workflow reads the thread). Either side: the sweep reads facts in crm-service's copy order (`seq`), not in time
+ * order, so a burst copied out of order must still be one occurrence (prod 2026-10-29: 3 facts 130 ms apart, copied
+ * latest first, each rang because the window only looked back from it).
+ * Our own instrumentation about them (crm-act-types.ts OUR_INSTRUMENTATION_EVENTS) is no act and rings nothing.
  */
 export const ACCOUNT_EVENT_TRIGGER = "account_event";
 /** The ledger step of an act: `act:<crm fact type>` (never a catalogue step key). */
@@ -275,9 +279,10 @@ export function isActStep(step: string): boolean {
 }
 
 /** Whether a crm fact of `type` that reaches no step (`reachesStep` false) rings Lead event as an act of theirs. */
-export function isTheirNewAct(type: string, reachesStep: boolean): boolean {
+export function isTheirNewAct(type: string, reachesStep: boolean, payload: Record<string, unknown> | null = null): boolean {
   if (reachesStep) return false;
   if ((CRM_NOT_THEIR_ACT as readonly string[]).includes(type)) return false;
+  if (isOurInstrumentation(type, payload)) return false;
   return !NOT_A_NEW_ACT.includes(type);
 }
 

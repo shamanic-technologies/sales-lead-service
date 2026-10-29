@@ -649,6 +649,35 @@ describe.skipIf(!hasRealDatabase)("outcome triggers against a real database", ()
     expect(await rowsOf({ step: "act:message_in" })).toEqual([]);
   });
 
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: a burst copied out of time order is still ONE occurrence", async () => {
+    // Prod 2026-10-29 (lead ed47e3f5): 3 product events 130 ms apart, copied by crm-service latest first; the window only
+    // looked back from each fact, so the two earlier ones each rang Lead event again.
+    const leadId = await seedLead("ooo");
+    const at = (ms: number) => new Date(Date.now() + 60_000 + ms);
+    await crmFact("product_event", addr("ooo"), { source: "posthog", occurredAt: at(127), payload: { event: "get_started_step_done", text: "Step done" } });
+    await crmFact("product_event", addr("ooo"), { source: "posthog", occurredAt: at(124), payload: { event: "get_started_step_done", text: "Step done" } });
+    await crmFact("product_event", addr("ooo"), { source: "posthog", occurredAt: at(0), payload: { event: "get_started_step_done", text: "Step done" } });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours().filter((c) => c.body.leadId === leadId)).toHaveLength(1);
+    expect((await rowsOf({ step: "act:product_event" })).filter((r) => r.leadId === leadId).map((r) => [r.status, r.skipReason]).sort()).toEqual([
+      ["delivered", null],
+      ["skipped", "coalesced"],
+      ["skipped", "coalesced"],
+    ]);
+  });
+
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: our server identifying a newsletter reader is no act of theirs: no Lead event", async () => {
+    const leadId = await seedLead("nl");
+    const identified = { event: "newsletter_link_identified", text: "Newsletter link identified · source: server", properties: { source: "server", newsletter_list: "newsletter" } };
+    await crmFact("product_event", addr("nl"), { source: "posthog", occurredAt: new Date(Date.now() + 60_000), payload: identified });
+    await crmFact("product_event", addr("nl-notlead"), { source: "posthog", occurredAt: new Date(Date.now() + 60_000), payload: identified });
+    await sweepOutcomeTriggers(new Date(), { orgIds: [orgId] });
+
+    expect(ours().filter((c) => c.body.leadId === leadId || (c.body.person as { email?: string })?.email === addr("nl-notlead"))).toEqual([]);
+    expect((await rowsOf({ step: "act:product_event" })).filter((r) => r.leadId === leadId)).toEqual([]);
+  });
+
   describe("MEETING-ATTENDED-SOURCE-1028: a booked meeting whose time passed was held", () => {
     const HOUR = 60 * 60_000;
     /** A booking with a meeting time, as crm-service states a calendar appointment. */

@@ -13,7 +13,9 @@
  *   2. a PERSON wrote it: every inbound message (`message_in`) is judged once by Jev, "a person or a machine?"
  *      (`crm_act_judgments`, platform-billed, `ACT_JUDGMENTS_PER_TICK`); unjudged = not counted yet (fail closed: a
  *      serve waits a tick, it never writes to a machine's sender). Other acts (a signup, a form, a payment, a visit, a
- *      `product_event` their use of the brand's product fired) are the person's by their type.
+ *      `product_event` their use of the brand's product fired) are the person's by their type, except our own
+ *      instrumentation about them (crm-act-types.ts OUR_INSTRUMENTATION_EVENTS: a newsletter link tied to them by our
+ *      server fires for mail scanners too, ONE-AI-CONVERSES-1029-LEADFACTS).
  * Both can change after the act landed (crm-service re-judges a conversation, a relation is withdrawn), so the store
  * keeps every act (`lead_crm_acts`) and `refreshActedAt` re-derives the last counted one on every pass.
  */
@@ -22,6 +24,7 @@ import { db } from "../db/index.js";
 import { judgeYesNo, type YesNoQuestion } from "./qualification-judge.js";
 import type { RunSupport } from "./run-tasks.js";
 import type { ObservedSend } from "./lead-followup-date.js";
+import { OUR_INSTRUMENTATION_EVENTS } from "./crm-act-types.js";
 
 /** Inbound messages judged per pass, fleet-wide (the platform's judgment credit is shared by every Jev call). */
 export const ACT_JUDGMENTS_PER_TICK = 40;
@@ -217,6 +220,10 @@ export function countedActsSql(scope: ActScope | null): SQL {
         AND (a.org_id, a.brand_id, a.contact_point) IN (SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p)
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
         AND (a.type <> 'message_in' OR EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id AND NOT j.automated))
+        -- Our own instrumentation about them is no act (crm-act-types.ts OUR_INSTRUMENTATION_EVENTS).
+        AND (a.type <> 'product_event' OR NOT EXISTS (
+          SELECT 1 FROM crm_facts e WHERE e.fact_id = a.fact_id
+            AND COALESCE(e.payload->>'event', '') = ANY(${sql.param([...OUR_INSTRUMENTATION_EVENTS])}::text[])))
       GROUP BY a.org_id, a.brand_id, a.lead_id
     )`;
 }

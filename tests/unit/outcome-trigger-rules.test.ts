@@ -233,6 +233,20 @@ describe("every act of theirs rings Lead event (LEAD-EVENT-REFUSAL-NO-REACT-1028
     for (const t of ["message_in", "group_message", "credit_ran_out", "credit_restored"]) expect(isTheirNewAct(t, false)).toBe(false);
   });
 
+  it("ONE-AI-CONVERSES-1029-LEADFACTS: our own instrumentation about them is no act; their product events still are", async () => {
+    const { isTheirNewAct } = await import("../../src/lib/outcome-trigger-rules.js");
+    const { isOurInstrumentation, OUR_INSTRUMENTATION_EVENTS } = await import("../../src/lib/crm-act-types.js");
+    expect(isTheirNewAct("product_event", false, { event: "newsletter_link_identified", properties: { source: "server" } })).toBe(false);
+    expect(isTheirNewAct("product_event", false, { event: "landing_variant_viewed" })).toBe(false);
+    for (const event of ["get_started_step_done", "signin_completed", "anonymous_org_created"]) {
+      expect(isTheirNewAct("product_event", false, { event })).toBe(true);
+    }
+    // Keyed on the product event only: another fact type carrying the same word stays an act.
+    expect(isOurInstrumentation("payment", { event: "newsletter_link_identified" })).toBe(false);
+    expect(isOurInstrumentation("product_event", null)).toBe(false);
+    expect(OUR_INSTRUMENTATION_EVENTS).toContain("newsletter_link_identified");
+  });
+
   it("an act's ledger step, idempotency key (once per FACT) and the item the workflow reads", async () => {
     const { actStep, isActStep, actIdempotencyKey, actItem } = await import("../../src/lib/outcome-trigger-rules.js");
     expect(actStep("payment")).toBe("act:payment");
