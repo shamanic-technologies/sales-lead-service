@@ -12,6 +12,7 @@
  * (scope-lock.ts). Spawned by `src/index.ts` once migrations are done; if it dies the request
  * thread logs it loudly and starts a new one.
  */
+import { startClientDateWakeWorker } from "./lib/client-date-wake.js";
 import { enableCrossThreadLocks } from "./lib/scope-lock.js";
 import { startCrmEvidenceWorker, syncBrandOnce } from "./lib/crm-evidence-worker.js";
 import { startBrandSignupsWorker } from "./lib/brand-signups.js";
@@ -110,6 +111,8 @@ startServeWalkPruneWorker();
 // Two lead rows our own identity records say are ONE lead (repaired serve, duplicate of one human at one company,
 // folded engager) are stated the same subject at runs-service's ledger (lead-subject-equivalences.ts, LEDGER-RESIDUAL-1025).
 startLeadSubjectEquivalencesWorker();
+// A client's date stated by a campaign wakes that campaign's row at the date (client-date-wake.ts, CLIENT-DATE-WAKE-1030).
+startClientDateWakeWorker();
 // Every lead of every brand carries a next follow-up date, moved by every send we observe on any channel; the brand's
 // Unibox prospects are filed as its leads first (lead-followup-date.ts, unibox-leads.ts, LEAD-FOLLOWUP-DATE-1016).
 let uniboxTicks = 0;
