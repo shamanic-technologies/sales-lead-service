@@ -52,6 +52,13 @@ export type RunTaskKind =
 
 export const RUN_TASKS = {
   "lead-serve": { declares: ["lead_found"] },
+  // FACTORY-P3 next outcomes (candidate-serve.ts): one candidate's decision on our own code (Monitoring's service path).
+  "candidate-decision": {
+    undeclared:
+      "Holds the audience screen's Jev judgment of ONE candidate (its child chat-service run) between the lead-serve run and the judgment; " +
+      "the lead-serve run above it declares lead_found, so its spend rolls into that serve exactly as the judgment's did before. " +
+      "The stored script's run (workflow-service, recordedBy lead) holds it the same way once switched.",
+  },
   "company-research": { declares: ["company_researched"] },
   "qualification-sample": { declares: ["company_researched"] },
   "qualification-preview": { declares: ["company_researched"] },
