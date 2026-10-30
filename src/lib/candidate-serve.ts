@@ -37,8 +37,21 @@ import {
 } from "./people-client.js";
 import { criterionKey, judge, mustPassCriteria, observe, probeOf, recordCheck, subjectFromOrganization, YES_THRESHOLD } from "./qualification.js";
 import { judgeYesNo } from "./qualification-judge.js";
-import { walkCandidate, walkContext } from "./serve-walk.js";
+import { walkCandidate, walkContext, type WalkCandidateHandle } from "./serve-walk.js";
 import { TregMeter, type SpendIdentity } from "./treg-client.js";
+import { createRun, updateRun } from "./runs-client.js";
+import { candidateDecisions } from "../db/schema.js";
+import {
+  decideWithScript,
+  decisionScriptSwitch,
+  DecisionScriptError,
+  findInFlight,
+  registerInFlight,
+  releaseInFlight,
+  type CandidateDecision,
+  type DecisionCall,
+  type InFlight,
+} from "./candidate-decision-script.js";
 
 export const SCREEN_PROMPT_VERSION = "lead-v1";
 /** The question human-service's screen asked, verbatim, so verdicts mean the same thing. */
@@ -134,7 +147,7 @@ interface ScreenVerdict {
   walkInputs: Record<string, unknown>;
 }
 
-async function screen(c: Candidate, target: { text: string; field: string } | null, ctx: ServiceContext, identity: SpendIdentity): Promise<ScreenVerdict> {
+async function screen(c: Candidate, target: { text: string; field: string } | null, ctx: ServiceContext, identity: SpendIdentity, recordRunId: string = identity.runId): Promise<ScreenVerdict> {
   if (!target?.text?.trim()) return { pass: true, reason: "no_target_text", walkInputs: { noTarget: true } };
   const hash = targetHash(target.text);
   const [prior] = await db
@@ -180,7 +193,8 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       yesProbability: p,
       reason,
       model,
-      runId: identity.runId,
+      // The serve's run, as before (the judgment's spend may hang on a decision's own run).
+      runId: recordRunId,
       companyDomain: c.company.domain,
       companyName: c.company.name,
     })
@@ -273,47 +287,257 @@ export async function serveThroughCandidates(
     const walked = walkCandidate("candidates", `candidate:${candidate.candidateId}`);
     walkContext({ candidateBasis: basis });
 
-    const screened = await screen(candidate, next.target, ctx, identity);
-    if (!walked.check("screen", { audienceId, providerPersonId: candidate.providerPersonId, ...screened.walkInputs }, screened.pass)) {
-      walked.skip();
-      await declineCandidate(audienceId, candidate.candidateId, `screen_rejected ${screened.reason}`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
-      continue;
-    }
-    const mustPassVerdicts: Array<{ criterionId: string; verdict: string; reason: string | null }> = [];
-    const failed = await failedMustPass(candidate, mustPass, meter, identity, mustPassVerdicts);
-    if (mustPass.length > 0) walked.check("must_pass", { verdicts: mustPassVerdicts }, failed === null);
-    if (failed) {
-      walked.skip();
-      await declineCandidate(audienceId, candidate.candidateId, failed, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
-      continue;
-    }
-
-    let revealed;
-    try {
-      revealed = await revealCandidate(audienceId, candidate.candidateId, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
-    } catch (error) {
-      if (!(error instanceof HumanServiceStalledError)) throw error;
-      // The reveal never answered (DOCDINNERS-SERVE-TIMEOUT-1027: the same candidate hung every run, so its audience
-      // never served anyone again). That candidate is declined, so the audience hands out the next one; a decline that
-      // fails too leaves the stall to the caller, which moves on to another audience.
-      console.error(`[lead-service] candidate ${candidate.candidateId} audience=${audienceId}: ${error.message}; declining it`);
-      walked.check("reveal", { status: REVEAL_STALLED_REASON, timeoutMs: error.timeoutMs }, false);
-      walked.skip();
-      try {
-        await declineCandidate(audienceId, candidate.candidateId, `${REVEAL_STALLED_REASON} after ${error.timeoutMs}ms`, basis, ctx, CANDIDATE_CALL_TIMEOUT_MS);
-      } catch (declineError) {
-        console.error(`[lead-service] candidate ${candidate.candidateId} audience=${audienceId}: decline after a stalled reveal failed:`, declineError);
-        throw error;
-      }
-      continue;
-    }
-    if (walked.check("reveal", { status: revealed.status === "served" && revealed.person ? "served" : revealed.status }, revealed.status === "served" && !!revealed.person)) {
+    const hasTarget = !!next.target?.text?.trim();
+    const decided: CandidateCtx = { audienceId, candidate, target: next.target, mustPass, basis, ctx, identity, meter, walked };
+    const choose = await decisionScriptSwitch();
+    const outcome =
+      choose.switched && choose.dynasty ? await decideByScript(choose.dynasty, decided, hasTarget) : await decideHere(decided, hasTarget);
+    if (outcome.decision === "served" && outcome.revealed?.person) {
       // Decided further once filed as a lead (journalist, fresh contacts: buffer.ts recordServed).
-      return { status: "served", person: revealed.person, personId: revealed.personId, emailVerdict: revealed.emailVerdict };
+      return { status: "served", person: outcome.revealed.person, personId: outcome.revealed.personId, emailVerdict: outcome.revealed.emailVerdict };
     }
-    // Revealed but nobody servable came out (no deliverable email): the next candidate.
-    walked.skip();
-    console.log(`[lead-service] candidate ${candidate.candidateId} revealed but not served; asking the next one`);
+    if (outcome.decision === "not_served") console.log(`[lead-service] candidate ${candidate.candidateId} revealed but not served; asking the next one`);
   }
   return { status: "pending", person: null };
+}
+
+// ─── FACTORY-P3 next outcomes (lead_identified): one candidate's DECISION ─────────────────────────────────────────────
+//
+// Four calls, each run by THIS code exactly as before (and by the stored script through its doors, below): the
+// screen (Jev, stored screening, reuse), the must-pass checks, the reveal, the decline. Each is recorded in the stored
+// script's words, so a decision made here is a case the script is proven on.
+
+/** A candidate being decided, as every call reads it. */
+export interface CandidateCtx {
+  audienceId: string;
+  candidate: Candidate;
+  target: { text: string; field: string } | null;
+  mustPass: QualificationCriterionRow[];
+  basis: string;
+  ctx: ServiceContext;
+  identity: SpendIdentity;
+  meter: TregMeter;
+  walked: WalkCandidateHandle;
+  /** The run a judgment's spend hangs under (the decision's own run here, the script's run on a door). */
+  judgeRunId?: string;
+  /** Set by a reveal that never answered: a decline that then fails re-throws THIS (as before). */
+  stalled?: HumanServiceStalledError;
+}
+
+export const SCREEN_CALL = "lead.candidate.screen";
+export const MUST_PASS_CALL = "lead.candidate.must_pass";
+export const REVEAL_CALL = "lead.candidate.reveal";
+export const DECLINE_CALL = "lead.candidate.decline";
+export const DECISION_TASK = "candidate-decision";
+
+/** The screen: the answer the script reads (the yes-probability, or the verdict a prior screening stored). */
+export async function screenCall(d: CandidateCtx): Promise<Record<string, unknown>> {
+  const identity = d.judgeRunId ? { ...d.identity, runId: d.judgeRunId } : d.identity;
+  const screened = await screen(d.candidate, d.target, d.ctx, identity, d.identity.runId);
+  const passed = d.walked.check("screen", { audienceId: d.audienceId, providerPersonId: d.candidate.providerPersonId, ...screened.walkInputs }, screened.pass);
+  if (!passed) d.walked.skip();
+  const cached = typeof screened.walkInputs.cached === "string" ? screened.walkInputs.cached : null;
+  return { yesProbability: typeof screened.walkInputs.yesProbability === "number" ? screened.walkInputs.yesProbability : null, cached, ...(cached ? { reason: screened.reason } : {}) };
+}
+
+export async function mustPassCall(d: CandidateCtx): Promise<Record<string, unknown>> {
+  const verdicts: Array<{ criterionId: string; verdict: string; reason: string | null }> = [];
+  const failed = await failedMustPass(d.candidate, d.mustPass, d.meter, d.identity, verdicts);
+  if (d.mustPass.length > 0) d.walked.check("must_pass", { verdicts }, failed === null);
+  if (failed) d.walked.skip();
+  return { failed };
+}
+
+/** The reveal: served, not served, or stalled (never answered: the decision then declines it). */
+export async function revealCall(d: CandidateCtx): Promise<{ answer: Record<string, unknown>; revealed: Awaited<ReturnType<typeof revealCandidate>> | null }> {
+  let revealed;
+  try {
+    revealed = await revealCandidate(d.audienceId, d.candidate.candidateId, d.basis, d.ctx, CANDIDATE_CALL_TIMEOUT_MS);
+  } catch (error) {
+    if (!(error instanceof HumanServiceStalledError)) throw error;
+    // DOCDINNERS-SERVE-TIMEOUT-1027: the same candidate hung every run, so its audience never served anyone again.
+    console.error(`[lead-service] candidate ${d.candidate.candidateId} audience=${d.audienceId}: ${error.message}; declining it`);
+    d.walked.check("reveal", { status: REVEAL_STALLED_REASON, timeoutMs: error.timeoutMs }, false);
+    d.walked.skip();
+    d.stalled = error;
+    return { answer: { status: "stalled", timeoutMs: error.timeoutMs }, revealed: null };
+  }
+  const served = revealed.status === "served" && !!revealed.person;
+  d.walked.check("reveal", { status: served ? "served" : revealed.status }, served);
+  if (!served) d.walked.skip();
+  return { answer: { status: served ? "served" : "not_served" }, revealed };
+}
+
+export async function declineCall(d: CandidateCtx, reason: string): Promise<Record<string, unknown>> {
+  try {
+    await declineCandidate(d.audienceId, d.candidate.candidateId, reason, d.basis, d.ctx, CANDIDATE_CALL_TIMEOUT_MS);
+  } catch (declineError) {
+    if (!d.stalled) throw declineError;
+    console.error(`[lead-service] candidate ${d.candidate.candidateId} audience=${d.audienceId}: decline after a stalled reveal failed:`, declineError);
+    throw d.stalled;
+  }
+  return { declined: true };
+}
+
+/** One call, recorded as the script's door answers it: its answer, or the refusal (re-thrown). */
+async function recorded<T>(calls: DecisionCall[], name: string, args: Record<string, unknown>, call: () => Promise<T>, answerOf: (t: T) => Record<string, unknown> = (t) => t as unknown as Record<string, unknown>): Promise<T> {
+  try {
+    const out = await call();
+    calls.push({ name, args, answer: { ok: true, data: answerOf(out) } });
+    return out;
+  } catch (error) {
+    calls.push({ name, args, answer: { ok: false, data: { error: messageOf(error) } } });
+    throw error;
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+type Revealed = Awaited<ReturnType<typeof revealCandidate>> | null;
+
+/** Our own decision, on its own `candidate-decision` run (child of the serve's run): Monitoring's service path. */
+async function decideHere(d: CandidateCtx, hasTarget: boolean): Promise<{ decision: CandidateDecision; revealed: Revealed }> {
+  const id0 = d.identity;
+  const run = await createRun({
+    orgId: id0.orgId,
+    serviceName: "lead-service",
+    taskName: DECISION_TASK,
+    parentRunId: id0.runId,
+    ...(id0.userId ? { userId: id0.userId } : {}),
+    ...(id0.brandId ? { brandId: id0.brandId } : {}),
+    ...(id0.campaignId ? { campaignId: id0.campaignId } : {}),
+    ...(id0.workflowSlug ? { workflowSlug: id0.workflowSlug } : {}),
+    ...(id0.featureSlug ? { featureSlug: id0.featureSlug } : {}),
+  });
+  const own: CandidateCtx = { ...d, judgeRunId: run.id };
+  const calls: DecisionCall[] = [];
+  const id = d.candidate.candidateId;
+  const decline = async (reason: string) => recorded(calls, DECLINE_CALL, { candidateId: id, reason }, () => declineCall(own, reason));
+  try {
+    let decision: CandidateDecision;
+    let revealed: Revealed = null;
+    decide: {
+      if (hasTarget) {
+        const s = await recorded(calls, SCREEN_CALL, { candidateId: id }, () => screenCall(own));
+        const verdict = screenVerdict(s);
+        if (!verdict.pass) {
+          await decline(`screen_rejected ${verdict.reason}`);
+          decision = "declined";
+          break decide;
+        }
+      }
+      const m = await recorded(calls, MUST_PASS_CALL, { candidateId: id }, () => mustPassCall(own));
+      if (typeof m.failed === "string") {
+        await decline(m.failed);
+        decision = "declined";
+        break decide;
+      }
+      const r = await recorded(calls, REVEAL_CALL, { candidateId: id }, () => revealCall(own), (x) => x.answer);
+      revealed = r.revealed;
+      if (r.answer.status === "stalled") {
+        await decline(`${REVEAL_STALLED_REASON} after ${String(r.answer.timeoutMs)}ms`);
+        decision = "stalled";
+      } else decision = r.answer.status === "served" ? "served" : "not_served";
+    }
+    await closeRun(run.id, "completed", d.identity);
+    await recordDecision(d, { path: "service", runId: run.id, hasTarget, calls, decision, error: null });
+    return { decision, revealed };
+  } catch (error) {
+    await closeRun(run.id, "failed", d.identity);
+    await recordDecision(d, { path: "service", runId: run.id, hasTarget, calls, decision: null, error: messageOf(error) });
+    throw error;
+  }
+}
+
+/** The screen's rule on the screen call's answer (the stored script's own rule, mirrored for our path). */
+function screenVerdict(s: Record<string, unknown>): { pass: boolean; reason: string } {
+  if (typeof s.cached === "string") return { pass: s.cached === "pass", reason: String(s.reason ?? "") };
+  const p = Number(s.yesProbability);
+  return { pass: p > YES_THRESHOLD, reason: `P(yes)=${p.toFixed(3)} threshold>${YES_THRESHOLD}` };
+}
+
+async function closeRun(runId: string, status: "completed" | "failed", identity: SpendIdentity): Promise<void> {
+  try {
+    await updateRun(runId, status, { orgId: identity.orgId, ...(identity.userId ? { userId: identity.userId } : {}) });
+  } catch (error) {
+    console.error(`[lead-service] candidate-decision run ${runId} not closed ${status}: ${messageOf(error)}`);
+  }
+}
+
+/** The stored script decides; its doors run each call here, the judgment's spend on the script's run. */
+async function decideByScript(dynasty: string, d: CandidateCtx, hasTarget: boolean): Promise<{ decision: CandidateDecision; revealed: Revealed }> {
+  const serveRunId = d.identity.runId;
+  const entry = registerInFlight(serveRunId, d.candidate.candidateId, d);
+  try {
+    const out = await decideWithScript({
+      dynasty,
+      orgId: d.identity.orgId,
+      userId: d.identity.userId,
+      serveRunId,
+      tracking: { brandId: d.identity.brandId, campaignId: d.identity.campaignId, workflowSlug: d.identity.workflowSlug, featureSlug: d.identity.featureSlug },
+      candidateId: d.candidate.candidateId,
+      hasTarget,
+    });
+    await recordDecision(d, { path: "script", runId: out.runId, hasTarget, calls: entry.calls, decision: out.decision, error: null });
+    return { decision: out.decision, revealed: entry.revealed as Revealed };
+  } catch (error) {
+    await recordDecision(d, { path: "script", runId: error instanceof DecisionScriptError ? error.runId : null, hasTarget, calls: entry.calls, decision: null, error: messageOf(error) });
+    if (entry.thrown) throw entry.thrown;
+    throw error;
+  } finally {
+    releaseInFlight(serveRunId, entry as InFlight<unknown>);
+  }
+}
+
+/** Fail-soft: the serve is the product, its decision record is evidence (personal data: never logged). */
+async function recordDecision(d: CandidateCtx, r: { path: "service" | "script"; runId: string | null; hasTarget: boolean; calls: DecisionCall[]; decision: CandidateDecision | null; error: string | null }): Promise<void> {
+  try {
+    await db.insert(candidateDecisions).values({
+      orgId: d.identity.orgId,
+      serveRunId: d.identity.runId,
+      runId: r.runId,
+      audienceId: d.audienceId,
+      candidateId: d.candidate.candidateId,
+      path: r.path,
+      hasTarget: r.hasTarget,
+      calls: r.calls,
+      decision: r.decision,
+      error: r.error ? r.error.slice(0, 1000) : null,
+    });
+  } catch (error) {
+    console.error(`[lead-service] candidate decision NOT recorded (the serve stands): ${messageOf(error)}`);
+  }
+}
+
+/**
+ * A door of the stored decision (`POST /internal/candidate-decisions/<call>`): only for a candidate in flight here
+ * (serve run x candidate), the judgment's spend on the SCRIPT's run. Keeps the error our own code would have thrown.
+ */
+export async function doorCall(input: { callerRunId: string; scriptRunId: string; call: string; candidateId: string; reason?: string }): Promise<{ status: number; body: Record<string, unknown> }> {
+  const entry = findInFlight<CandidateCtx>(input.callerRunId, input.candidateId);
+  if (!entry) return { status: 409, body: { error: `no candidate ${input.candidateId} in flight for run ${input.callerRunId}` } };
+  const d = entry.ctx;
+  d.judgeRunId = input.scriptRunId;
+  const args: Record<string, unknown> = { candidateId: input.candidateId, ...(input.call === DECLINE_CALL ? { reason: input.reason } : {}) };
+  try {
+    let data: Record<string, unknown>;
+    if (input.call === SCREEN_CALL) data = await screenCall(d);
+    else if (input.call === MUST_PASS_CALL) data = await mustPassCall(d);
+    else if (input.call === REVEAL_CALL) {
+      const r = await revealCall(d);
+      entry.revealed = r.revealed;
+      data = r.answer;
+    } else if (input.call === DECLINE_CALL) {
+      if (!input.reason) return { status: 400, body: { error: "a decline needs its reason" } };
+      data = await declineCall(d, input.reason);
+    } else return { status: 400, body: { error: `no call named ${input.call}` } };
+    entry.calls.push({ name: input.call, args, answer: { ok: true, data } });
+    return { status: 200, body: data };
+  } catch (error) {
+    entry.thrown = error instanceof Error ? error : new Error(String(error));
+    entry.calls.push({ name: input.call, args, answer: { ok: false, data: { error: messageOf(error) } } });
+    return { status: 502, body: { error: messageOf(error) } };
+  }
 }

@@ -28,6 +28,16 @@ vi.mock("../../src/lib/qualification.js", async (orig) => ({
   judge: (...a: unknown[]) => judge(...a),
 }));
 
+// FACTORY-P3 next outcomes: each decision on our own code is its own `candidate-decision` run; the stored-script
+// switch is off here (its path is pinned in candidate-decision-script.test.ts).
+const createRun = vi.fn(async (_p: unknown) => ({ id: "decision-run" }));
+const updateRun = vi.fn(async () => undefined);
+vi.mock("../../src/lib/runs-client.js", async (orig) => ({ ...((await orig()) as object), createRun: (p: unknown) => createRun(p), updateRun: () => updateRun() }));
+vi.mock("../../src/lib/candidate-decision-script.js", async (orig) => ({
+  ...((await orig()) as object),
+  decisionScriptSwitch: async () => ({ switched: false, dynasty: null }),
+}));
+
 const priorScreenings: unknown[] = [];
 const inserted: unknown[] = [];
 vi.mock("../../src/db/index.js", () => ({
