@@ -939,6 +939,13 @@
       "when": 1788808020000,
       "tag": "0133_sessionless_product_events",
       "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1788808080000,
+      "tag": "0134_candidate_decisions",
+      "breakpoints": true
     }
   ]
 }

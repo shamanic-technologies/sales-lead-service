@@ -41,6 +41,7 @@ import stepReachedRoutes from "./routes/step-reached.js";
 import sourcePeopleRoutes from "./routes/source-people.js";
 import sourceLeadsFoundRoutes from "./routes/source-leads-found.js";
 import serveWalksRoutes from "./routes/serve-walks.js";
+import candidateDecisionRoutes from "./routes/candidate-decisions.js";
 import candidateScreeningsRoutes from "./routes/candidate-screenings.js";
 import leadIdResolveRoutes from "./routes/lead-id-resolve.js";
 import leadStatesRoutes from "./routes/lead-states.js";
@@ -125,6 +126,7 @@ app.use(sourcePeopleRoutes);
 app.use(sourceLeadsFoundRoutes);
 app.use(candidateScreeningsRoutes);
 app.use(serveWalksRoutes);
+app.use(candidateDecisionRoutes); // FACTORY-P3 next outcomes: the stored candidate decision's doors + recorded decisions
 app.use(leadIdResolveRoutes);
 app.use(leadStatesRoutes);
 // CLIENT-SENTIMENT-1027: every client message of a brand and its Client Sentiment verdict.

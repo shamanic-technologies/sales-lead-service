@@ -24091,6 +24091,120 @@
         }
       }
     },
+    "/internal/candidate-decisions/{door}": {
+      "post": {
+        "summary": "A door of the stored candidate decision (FACTORY-P3 next outcomes, lead_identified; service key)",
+        "description": "`door` = screen (Jev, stored screening, reuse: {yesProbability, cached, reason?}), must-pass ({failed}), reveal ({status: served|not_served|stalled, timeoutMs?}), decline (body `reason`: {declined}). Serves ONLY a candidate in flight in a serve here (`x-caller-run-id` = the serve's run, body `candidateId`); the judgment's spend hangs on the script's run (`x-run-id`). 409 nothing in flight, 502 refused.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "screen",
+                "must-pass",
+                "reveal",
+                "decline"
+              ]
+            },
+            "required": true,
+            "name": "door",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "x-api-key",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "x-run-id",
+            "in": "header"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "x-caller-run-id",
+            "in": "header"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "candidateId": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "candidateId"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The call's answer"
+          },
+          "409": {
+            "description": "Nothing in flight"
+          },
+          "502": {
+            "description": "Refused"
+          }
+        }
+      }
+    },
+    "/internal/candidate-decisions/recorded": {
+      "get": {
+        "summary": "Every candidate decision with each call in the stored script's words (service key; read by workflow-service's case recorder)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "after",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "x-api-key",
+            "in": "header"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{decisions, nextAfter, hasMore}"
+          }
+        }
+      }
+    },
     "/internal/serve-walks": {
       "get": {
         "summary": "The recorded walk of past serves, with its replay (internal, staff, read-only)",

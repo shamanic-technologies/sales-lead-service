@@ -12,6 +12,7 @@ import {
   jsonb,
   bigint,
   doublePrecision,
+  bigserial,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { BuyingSignal } from "../lib/buying-signal.js";
@@ -1074,6 +1075,28 @@ export type QualificationObservationRow = typeof qualificationObservations.$infe
 export type QualificationVerdictRow = typeof qualificationVerdicts.$inferSelect;
 
 // --- The pre-pay audience screen, decided here (migration 0052; src/lib/candidate-serve.ts) ---
+// FACTORY-P3 next outcomes (lead_identified, migration 0134): every candidate DECISION with each call in the stored
+// script's words, on either path. Read only by GET /internal/candidate-decisions/recorded. Never logged.
+export const candidateDecisions = pgTable(
+  "candidate_decisions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+    orgId: text("org_id").notNull(),
+    serveRunId: text("serve_run_id"),
+    runId: text("run_id"),
+    audienceId: text("audience_id").notNull(),
+    candidateId: text("candidate_id").notNull(),
+    path: text("path").notNull(),
+    hasTarget: boolean("has_target").notNull(),
+    calls: jsonb("calls").notNull(),
+    decision: text("decision"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("idx_candidate_decisions_seq").on(table.seq), index("idx_candidate_decisions_created").on(table.createdAt)],
+);
+
 export const candidateScreenings = pgTable(
   "candidate_screenings",
   {

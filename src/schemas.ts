@@ -8949,6 +8949,28 @@ const WalkStepSchema = z.object({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/internal/candidate-decisions/{door}",
+  summary: "A door of the stored candidate decision (FACTORY-P3 next outcomes, lead_identified; service key)",
+  description:
+    "`door` = screen (Jev, stored screening, reuse: {yesProbability, cached, reason?}), must-pass ({failed}), reveal ({status: served|not_served|stalled, timeoutMs?}), decline (body `reason`: {declined}). Serves ONLY a candidate in flight in a serve here (`x-caller-run-id` = the serve's run, body `candidateId`); the judgment's spend hangs on the script's run (`x-run-id`). 409 nothing in flight, 502 refused.",
+  request: {
+    params: z.object({ door: z.enum(["screen", "must-pass", "reveal", "decline"]) }),
+    headers: z.object({ "x-api-key": z.string(), "x-run-id": z.string(), "x-caller-run-id": z.string() }),
+    body: { required: true, content: { "application/json": { schema: z.object({ candidateId: z.string(), reason: z.string().optional() }) } } },
+  },
+  responses: { 200: { description: "The call's answer" }, 409: { description: "Nothing in flight" }, 502: { description: "Refused" } },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/candidate-decisions/recorded",
+  summary: "Every candidate decision with each call in the stored script's words (service key; read by workflow-service's case recorder)",
+  request: { headers: z.object({ "x-api-key": z.string() }), query: z.object({ after: z.string().optional(), limit: z.string().optional() }) },
+  responses: { 200: { description: "{decisions, nextAfter, hasMore}" } },
+});
+
+registry.registerPath({
   method: "get",
   path: "/internal/serve-walks",
   summary: "The recorded walk of past serves, with its replay (internal, staff, read-only)",
