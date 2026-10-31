@@ -200,9 +200,11 @@ export async function subjectsToJudge(scope: Scope, limit: number, cardHash: str
           AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO}))
         OR (j.judged_at < ${JUDGE_CHANGED_AT}::timestamptz
           AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(j.probabilities) e(k, v) WHERE e.k <> 'personal' AND e.v::float8 >= ${JUDGED_NO})))
-      AND s.has_direct ${onlyHumans}
+      -- A person who only answered our outreach has no crm message on their points (has_direct false) but wrote to
+      -- the brand: judged too, else their interest is never asked (UNIBOX-REPLY-LAG-1031, Richard Jones, Doc Dinners).
+      AND (s.has_direct OR s.wrote_to_us) ${onlyHumans}
     -- People a source states as prospect / customer (the ones campaigns write to) and people we talk with, first.
-    ORDER BY (s.has_messages OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
+    ORDER BY (s.has_messages OR s.wrote_to_us OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
                AND e.human_id = s.human_id)) DESC,
              (j.human_id IS NULL) DESC, s.thread_seq DESC
     LIMIT ${limit}
