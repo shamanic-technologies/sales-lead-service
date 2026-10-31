@@ -16,7 +16,8 @@ import { sql } from "../db/index.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 
 export const OUTREACH_FACTS_FEED = "outreach_facts" as const;
-export const OUTREACH_FACT_FEED_INTERVAL_MS = 2 * 60_000;
+/** 30 s (UNIBOX-REPLY-LAG-1031): a reply reaches the Unibox within a minute of instantly-service emitting it. */
+export const OUTREACH_FACT_FEED_INTERVAL_MS = 30_000;
 const FIRST_PULL_DELAY_MS = 30_000;
 export const OUTREACH_FACTS_PAGE_SIZE = 1000;
 export const OUTREACH_FACTS_MAX_PAGES_PER_TICK = 400;

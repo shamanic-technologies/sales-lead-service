@@ -42,12 +42,13 @@ export const WANTS_BUSINESS_QUESTION: YesNoQuestion = {
  * some basis already makes a lead (prospect / customer: evidence, a person's yes, or a judgment from the unsure edge);
  * the read decides for sure before anyone is asked.
  */
-export async function intentSubjectsToJudge(scope: Scope, limit: number): Promise<Subject[]> {
+export async function intentSubjectsToJudge(scope: Scope, limit: number, humans?: readonly string[]): Promise<Subject[]> {
+  const onlyHumans = humans === undefined ? sql`` : sql`AND s.human_id = ANY(${sql.param([...humans])}::uuid[])`;
   const rows = (await db.execute(sql`
     SELECT s.* FROM relationship_subjects s
     LEFT JOIN relationship_intent_judgments i ON i.org_id = s.org_id AND i.brand_id = s.brand_id AND i.human_id = s.human_id
       AND i.company_key = s.company_key
-    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND s.wrote_to_us AND s.has_direct
+    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} AND s.wrote_to_us AND s.has_direct ${onlyHumans}
       AND (i.human_id IS NULL OR i.thread_seq < s.thread_seq OR (s.shares_human AND i.thread_scope <> 'relation')
         OR (s.last_inbound_at IS NOT NULL AND (i.inbound_at IS NULL OR s.last_inbound_at > i.inbound_at)))
       AND (

@@ -188,7 +188,8 @@ async function companyCard(key: string): Promise<Array<{ name: string | null; do
  * the fleet's shared judgment credit on people no offer text can move), or judged before JUDGE_CHANGED_AT while it
  * placed them nowhere (every tag under the no edge: the old judge read a thin thread as "nothing to the brand").
  */
-export async function subjectsToJudge(scope: Scope, limit: number, cardHash: string): Promise<Subject[]> {
+export async function subjectsToJudge(scope: Scope, limit: number, cardHash: string, humans?: readonly string[]): Promise<Subject[]> {
+  const onlyHumans = humans === undefined ? sql`` : sql`AND s.human_id = ANY(${sql.param([...humans])}::uuid[])`;
   const rows = (await db.execute(sql`
     SELECT s.* FROM relationship_subjects s
     LEFT JOIN relationship_judgments j ON j.org_id = s.org_id AND j.brand_id = s.brand_id AND j.human_id = s.human_id AND j.company_key = s.company_key
@@ -199,7 +200,7 @@ export async function subjectsToJudge(scope: Scope, limit: number, cardHash: str
           AND ((j.probabilities->>'prospect')::float8 >= ${JUDGED_NO} OR (j.probabilities->>'customer')::float8 >= ${JUDGED_NO}))
         OR (j.judged_at < ${JUDGE_CHANGED_AT}::timestamptz
           AND NOT EXISTS (SELECT 1 FROM jsonb_each_text(j.probabilities) e(k, v) WHERE e.k <> 'personal' AND e.v::float8 >= ${JUDGED_NO})))
-      AND s.has_direct
+      AND s.has_direct ${onlyHumans}
     -- People a source states as prospect / customer (the ones campaigns write to) and people we talk with, first.
     ORDER BY (s.has_messages OR EXISTS (SELECT 1 FROM relationship_evidence e WHERE e.org_id = s.org_id AND e.brand_id = s.brand_id
                AND e.human_id = s.human_id)) DESC,

@@ -389,11 +389,16 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
  * rows of the org's own TEAM (TEAM-OUT-OF-UNIBOX-1017, org-members.ts: a member, or a +tag variant of a member's
  * address, is on the brand's side and never a row). Members unreadable = thrown (the refresh fails, rows kept).
  */
-export async function refreshUniboxRows(scope: Scope): Promise<{ rows: number; removed: number; teamMembers: number }> {
+export async function refreshUniboxRows(
+  scope: Scope,
+  opts: { humans?: readonly string[] } = {},
+): Promise<{ rows: number; removed: number; teamMembers: number }> {
   const [catalogue, members] = await Promise.all([loadLifecycleCatalogue(), loadOrgMemberKeys(scope.orgId)]);
+  // `humans` (UNIBOX-REPLY-LAG-1031, the fast lane): only those humans' rows, same derivation, same order.
+  const onlyHumans = opts.humans === undefined ? sql`` : sql`AND human_id = ANY(${sql.param([...opts.humans])}::uuid[])`;
   const all = (await db.execute(sql`
     SELECT human_id::text AS human, company_key, relation_keys, contact_points, name, emails, phones, person_keys, last_inbound_at, updated_at
-    FROM relationship_subjects WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
+    FROM relationship_subjects WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} ${onlyHumans}
     ORDER BY human_id, company_key
   `)) as unknown as SubjectRow[];
   const team = all.filter((s) => anyMemberAddress(s.emails, members));
@@ -408,7 +413,7 @@ export async function refreshUniboxRows(scope: Scope): Promise<{ rows: number; r
   }
   const removed = (await db.execute(sql`
     DELETE FROM unibox_rows u
-    WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId}
+    WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} ${opts.humans === undefined ? sql`` : sql`AND u.human_id = ANY(${sql.param([...opts.humans])}::uuid[])`}
       AND NOT EXISTS (SELECT 1 FROM relationship_subjects s WHERE s.org_id = u.org_id AND s.brand_id = u.brand_id AND s.human_id = u.human_id
         AND s.company_key = u.company_key)
     RETURNING 1

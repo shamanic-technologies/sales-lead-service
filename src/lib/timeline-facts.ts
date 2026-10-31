@@ -336,6 +336,45 @@ async function outreachRows(
   return { rows, unjudged, unplaced, withdrawn };
 }
 
+/**
+ * The Unibox fast lane's half of the timeline (UNIBOX-REPLY-LAG-1031): the replies the outreach copy just received are
+ * labelled and written NOW, by the same rule as the brand sync (`outreachRow`), instead of waiting up to 15 min for the
+ * brand's next whole sync (Richard Jones, Doc Dinners, 2026-10-30: copied 22:01, labelled 22:16). Only the CURRENT fact
+ * of each subject is written; a withdrawn or superseded-by-another-kind subject is left to the brand sync. Returns the
+ * (org, brand, address) of every reply written, for the Unibox. Throws while the copy has not caught up once.
+ */
+export async function syncRepliesNow(subjectKeys: readonly string[]): Promise<Array<{ orgId: string; brandId: string; email: string }>> {
+  if (subjectKeys.length === 0) return [];
+  const { caughtUp } = await loadOutreachFeedState();
+  if (!caughtUp) throw new Error("the outreach fact copy has not reached the end of the feed yet; refusing to read it partial");
+  const facts = (await sql`
+    SELECT DISTINCT ON (subject_key) seq::text AS seq, subject_key, type, occurred_at, lead_email, campaign_id, raw, org_id, brand_ids
+    FROM outreach_facts
+    WHERE subject_key IN (SELECT jsonb_array_elements_text(${JSON.stringify(subjectKeys)}::jsonb))
+    ORDER BY subject_key, seq DESC
+  `) as unknown as Array<OutreachFactRow & { org_id: string; brand_ids: string[] }>;
+  const replies = facts.filter((f) => f.type === "reply");
+  const leadByEmail = await readLeadEmails([...new Set(replies.map((f) => f.lead_email))]);
+  const offersByOrg = new Map<string, Promise<Map<string, string | null>>>();
+  const noSite: SiteHosts = async () => [];
+  const rows: TimelineFactRow[] = [];
+  const touched: Array<{ orgId: string; brandId: string; email: string }> = [];
+  for (const f of replies) {
+    const leadId = leadByEmail.get(f.lead_email);
+    if (!leadId) continue;
+    if (!offersByOrg.has(f.org_id)) offersByOrg.set(f.org_id, fetchOrgCampaignOffers({ orgId: f.org_id }));
+    const offers = await offersByOrg.get(f.org_id)!;
+    for (const brandId of f.brand_ids) {
+      const row = await outreachRow(f.org_id, brandId, f, leadId, offers, noSite);
+      if (row === "unjudged" || row === "unplaced") continue;
+      rows.push(row);
+      touched.push({ orgId: f.org_id, brandId, email: f.lead_email.toLowerCase() });
+    }
+  }
+  await upsertTimelineFacts(rows);
+  return touched;
+}
+
 /** Mark the rows of subjects the feed withdrew; their content stays as last stated. */
 async function markWithdrawn(orgId: string, brandId: string, subjectKeys: readonly string[]): Promise<number> {
   if (subjectKeys.length === 0) return 0;
