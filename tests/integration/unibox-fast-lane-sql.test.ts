@@ -162,13 +162,8 @@ describe.skipIf(!hasRealDatabase)("unibox fast lane (UNIBOX-REPLY-LAG-1031)", ()
     await db.execute(sql`
       INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, campaign_id, label, source, source_ref, occurred_at, attributable, attribution_basis)
       VALUES (${`send:${randomUUID()}`}, ${orgId}, ${brandId}, ${leadId}::uuid, 'camp-cold', 'initial_email', 'outreach', 'x', '2026-10-30T20:00:00Z', true, 'our_email')`);
-    // Our cold email, mirrored by crm-service on his address (a direct conversation).
-    crmSeq += 1n;
-    await db.execute(sql`
-      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${crmSeq.toString()}::bigint, ${orgId}, ${brandId}, ${personKey}, ${personKey}, 'Richard Jones', ${sql.param([email])}::text[], '{}'::text[],
-        'message_out', '2026-10-30T20:00:00Z', 'event', 'gmail', ${randomUUID()}, '{"text":"Would Doc Dinners fit your clinic?"}'::jsonb,
-        ${JSON.stringify({ humanId: richard })}::jsonb)`);
+    // As in prod: crm-service holds NO message on his address (our cold email went out through the outreach
+    // provider), so his relation has no direct crm conversation; his only word is the outreach reply.
     // The brand as prod held it before the reply: every relation a subject and a row (planner statistics as prod's).
     await db.execute(sql`ANALYZE crm_facts`);
     await db.execute(sql`ANALYZE crm_registry_facts`);
