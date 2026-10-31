@@ -33,6 +33,7 @@ import { startHumanEventsWorker } from "./lib/human-events.js";
 import { startHumanOptOutsWorker } from "./lib/human-opt-outs.js";
 import { startLeadTimezoneWorker } from "./lib/lead-timezone.js";
 import { startRelationshipSweepWorker } from "./lib/relationship-sweep.js";
+import { startUniboxFastLaneWorker } from "./lib/unibox-fast-lane.js";
 import { startClientSentimentWorker } from "./lib/client-sentiment.js";
 import { startChannelSendReconcileWorker } from "./lib/channel-send-reconcile.js";
 import { startBrandJournalistsWorker } from "./lib/brand-journalists.js";
@@ -96,6 +97,8 @@ startLeadTimezoneWorker();
 // Who each person is to each brand: leads from the CRM feed, Jev's tags on the whole thread, suggested
 // merges, unknown companies looked up (relationship-sweep.ts, RELATIONSHIP-TAGS-1014).
 startRelationshipSweepWorker();
+// The people who just wrote to a brand reach its Unibox within a pass, whatever the round's length (UNIBOX-REPLY-LAG-1031).
+startUniboxFastLaneWorker();
 // Every message a client of a brand writes it is judged once positive / neutral / negative (client-sentiment.ts, CLIENT-SENTIMENT-1027).
 startClientSentimentWorker();
 // Every served row of a non-email pipe carries what its sender (crm-service) states it sent, live or stopped

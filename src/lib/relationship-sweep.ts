@@ -24,6 +24,7 @@ import { detectHotLeads, type HotLeadPass } from "./hot-lead-triggers.js";
 import { InsufficientCreditError } from "./treg-client.js";
 import { crmIdentifiedAmong, subjectIdentified } from "./crm-lead-identified.js";
 import type { Subject } from "./relationship-subjects.js";
+import { noteScopeSwept, noteSweepRound } from "./unibox-fast-lane-state.js";
 
 export const RELATIONSHIP_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_DELAY_MS = 150_000;
@@ -48,14 +49,23 @@ export interface ScopeTick {
   error: string | null;
 }
 
-export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: number } = {}): Promise<ScopeTick> {
-  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, policyChanged: 0, unibox: null, hotLeads: null, error: null };
-  const refresh = await refreshSubjects(scope);
-  tick.subjects = refresh.subjects;
-  tick.withoutHuman = refresh.withoutHuman;
-  tick.evidenceWritten = await writeEvidence(scope);
+/** What one judging pass did (tags then wants business), on at most two runs (see `judgeSubjects`). */
+export interface JudgePass {
+  judged: number;
+  judgeFailed: number;
+  intentJudged: number;
+}
 
-  // Two runs at most per tick (LEDGER-RESIDUAL-1025, owner 2026-10-25): judgments of relations crm-service already
+/**
+ * Judge these subjects' tags, then the wants-business answer of those who wrote, the way the sweep does. Shared by the
+ * sweep and the Unibox fast lane (UNIBOX-REPLY-LAG-1031). An org out of credit throws `InsufficientCreditError`.
+ */
+export async function judgeSubjects(
+  scope: Scope,
+  pick: { tags: (cardHash: string) => Promise<Subject[]>; intent: () => Promise<Subject[]> },
+): Promise<JudgePass> {
+  const pass: JudgePass = { judged: 0, judgeFailed: 0, intentJudged: 0 };
+  // Two runs at most per pass (LEDGER-RESIDUAL-1025, owner 2026-10-25): judgments of relations crm-service already
   // IDENTIFIED (and declared lead_identified) ride a run created with the `repeat_production` mark (waste, abnormal
   // loss); every other judgment rides a production run (crm-service's to declare). Decided per subject, never mixed.
   const runs: { repeat: { id: string } | null; production: { id: string } | null } = { repeat: null, production: null };
@@ -71,7 +81,7 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
   };
   let failed = false;
   try {
-    // The brand card Jev reads (LEADS-JUDGE-BRAND-1021): unreadable = nobody judged this tick, the rest still refreshes.
+    // The brand card Jev reads (LEADS-JUDGE-BRAND-1021): unreadable = nobody judged this pass, the rest still refreshes.
     const cardHash = await brandCardOf(scope.orgId, scope.brandId).then(
       (c) => c.hash,
       (err: unknown) => {
@@ -79,9 +89,8 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
         return null;
       },
     );
-    const todo = cardHash === null ? [] : await subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK, cardHash);
-    const intentTodo = await intentSubjectsToJudge(scope, opts.intent ?? INTENT_PER_TICK);
-    identified = await crmIdentifiedAmong(scope.orgId, scope.brandId, [...todo, ...intentTodo].flatMap((s) => s.relationKeys));
+    const todo = cardHash === null ? [] : await pick.tags(cardHash);
+    identified = await crmIdentifiedAmong(scope.orgId, scope.brandId, todo.flatMap((s) => s.relationKeys));
     if (todo.length > 0) {
       let next = 0;
       const worker = async () => {
@@ -89,47 +98,77 @@ export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: 
           const s = todo[next++];
           try {
             await judgeSubject(s, await runIdFor(s));
-            tick.judged++;
+            pass.judged++;
           } catch (err) {
             if (err instanceof InsufficientCreditError) throw err;
-            tick.judgeFailed++;
-            if (tick.judgeFailed >= MAX_JUDGE_FAILURES) next = todo.length;
+            pass.judgeFailed++;
+            if (pass.judgeFailed >= MAX_JUDGE_FAILURES) next = todo.length;
             console.error(`[lead-service] relationship judgment failed for human ${s.humanId} (brand ${scope.brandId}):`, err);
           }
         }
       };
       await Promise.all(Array.from({ length: JUDGE_CONCURRENCY }, worker));
     }
-    if (tick.judgeFailed < MAX_JUDGE_FAILURES) {
+    // Picked once the tags are written: who is a lead decides who is asked (a first judgment can make one).
+    const intentTodo = pass.judgeFailed < MAX_JUDGE_FAILURES ? await pick.intent() : [];
+    const identifiedForIntent = await crmIdentifiedAmong(scope.orgId, scope.brandId, intentTodo.flatMap((s) => s.relationKeys));
+    identified = new Set([...identified, ...identifiedForIntent]);
+    if (pass.judgeFailed < MAX_JUDGE_FAILURES) {
       for (const s of intentTodo) {
-        if (tick.judgeFailed >= MAX_JUDGE_FAILURES) break;
+        if (pass.judgeFailed >= MAX_JUDGE_FAILURES) break;
         try {
           await judgeIntent(s, await runIdFor(s));
-          tick.intentJudged++;
+          pass.intentJudged++;
         } catch (err) {
           if (err instanceof InsufficientCreditError) throw err;
-          tick.judgeFailed++;
+          pass.judgeFailed++;
           console.error(`[lead-service] intent judgment failed for human ${s.humanId} (brand ${scope.brandId}):`, err);
         }
       }
     }
-    tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
-    tick.unibox = await refreshUniboxRows(scope);
-    // A failed hot-lead pass writes nothing and is retried next tick; it never fails the answers already refreshed.
-    try {
-      tick.hotLeads = await detectHotLeads(scope);
-    } catch (err) {
-      console.error(`[lead-service] hot lead pass failed for org ${scope.orgId} brand ${scope.brandId} (retried next tick):`, err);
-    }
   } catch (err) {
     failed = true;
-    tick.error = errorMessage(err);
-    if (!(err instanceof InsufficientCreditError)) throw err;
-    console.warn(`[lead-service] relationship sweep: org ${scope.orgId} spend refused (${tick.error}); skipped this tick`);
+    throw err;
   } finally {
     for (const r of [runs.repeat, runs.production]) {
       if (r) await updateRun(r.id, failed ? "failed" : "completed", { orgId: scope.orgId, brandId: scope.brandId }).catch((e) => console.error("[lead-service] relationship run close failed:", e));
     }
+  }
+  return pass;
+}
+
+export async function sweepScope(scope: Scope, opts: { judge?: number; intent?: number } = {}): Promise<ScopeTick> {
+  const tick: ScopeTick = { scope, subjects: 0, withoutHuman: 0, evidenceWritten: 0, judged: 0, judgeFailed: 0, intentJudged: 0, policyChanged: 0, unibox: null, hotLeads: null, error: null };
+  const startedAt = Date.now();
+  try {
+    const refresh = await refreshSubjects(scope);
+    tick.subjects = refresh.subjects;
+    tick.withoutHuman = refresh.withoutHuman;
+    tick.evidenceWritten = await writeEvidence(scope);
+    try {
+      const pass = await judgeSubjects(scope, {
+        tags: (cardHash) => subjectsToJudge(scope, opts.judge ?? JUDGE_PER_TICK, cardHash),
+        intent: () => intentSubjectsToJudge(scope, opts.intent ?? INTENT_PER_TICK),
+      });
+      tick.judged = pass.judged;
+      tick.judgeFailed = pass.judgeFailed;
+      tick.intentJudged = pass.intentJudged;
+      tick.policyChanged = await recomputePolicy(scope.orgId, scope.brandId);
+      tick.unibox = await refreshUniboxRows(scope);
+      // A failed hot-lead pass writes nothing and is retried next tick; it never fails the answers already refreshed.
+      try {
+        tick.hotLeads = await detectHotLeads(scope);
+      } catch (err) {
+        console.error(`[lead-service] hot lead pass failed for org ${scope.orgId} brand ${scope.brandId} (retried next tick):`, err);
+      }
+    } catch (err) {
+      tick.error = errorMessage(err);
+      if (!(err instanceof InsufficientCreditError)) throw err;
+      console.warn(`[lead-service] relationship sweep: org ${scope.orgId} spend refused (${tick.error}); skipped this tick`);
+    }
+  } finally {
+    // The fast lane re-applies what it wrote while this round read the brand (an older read must not stand).
+    noteScopeSwept(scope, startedAt);
   }
   return tick;
 }
@@ -138,13 +177,16 @@ let sweeping = false;
 
 export async function sweepAllOnce(): Promise<ScopeTick[]> {
   const out: ScopeTick[] = [];
-  for (const scope of await listScopes()) {
+  const startedAt = Date.now();
+  const scopes = await listScopes();
+  for (const scope of scopes) {
     try {
       out.push(await sweepScope(scope));
     } catch (err) {
       console.error(`[lead-service] relationship sweep failed for org ${scope.orgId} brand ${scope.brandId}:`, err);
     }
   }
+  noteSweepRound(startedAt, Date.now(), scopes.length);
   return out;
 }
 

@@ -68,12 +68,13 @@ export interface ProRelation {
  * The brand's live relations (a withdrawn one is gone): the professional ones whose own tags hold
  * `professional_to_brand` are subjects; every relation of a human (personal included) counts for `shares_human`.
  */
-async function liveRelations(scope: Scope): Promise<{ pro: ProRelation[]; perHuman: Map<string, number> }> {
+async function liveRelations(scope: Scope, atomicHumans?: readonly string[]): Promise<{ pro: ProRelation[]; perHuman: Map<string, number> }> {
+  const onlyHumans = atomicHumans === undefined ? sql`` : sql`AND f.raw->>'humanId' = ANY(${sql.param([...atomicHumans])}::text[])`;
   const rows = (await db.execute(sql`
     SELECT CASE WHEN f.raw->>'humanId' ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human,
       f.person_key, f.full_name AS name, f.seq::text AS seq, f.payload
     FROM crm_registry_facts f
-    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.type = 'relation'
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.type = 'relation' ${onlyHumans}
       AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
   `)) as unknown as Array<{ human: string | null; person_key: string; name: string | null; seq: string; payload: Record<string, unknown> }>;
   const pro: ProRelation[] = [];
@@ -157,12 +158,31 @@ export interface SubjectRefresh {
 export const subjectKey = (human: string, companyKey: string) => `${human}|${companyKey}`;
 
 /**
+ * Every atomic human id this org reads as one of `humans` (themselves, the fleet ids merged into them, the ids this
+ * org links to them): a scoped refresh reads ALL the relations that fold into their subjects, never a partial fold.
+ */
+async function atomicIdsOf(orgId: string, humans: readonly string[]): Promise<{ canon: Set<string>; atomic: string[] }> {
+  const canonOf = await canonicalHumans(orgId, humans);
+  const canon = new Set(humans.map((h) => canonOf.get(h) ?? h));
+  const rows = (await db.execute(sql`
+    WITH c AS (SELECT unnest(${sql.param([...canon])}::uuid[]) AS id),
+    o AS (SELECT id FROM c UNION SELECT a.atomic_human_id FROM org_human_aliases a WHERE a.org_id = ${orgId} AND a.human_id IN (SELECT id FROM c))
+    SELECT id::text AS id FROM o UNION SELECT h.atomic_human_id::text FROM human_aliases h WHERE h.human_id IN (SELECT id FROM o)
+  `)) as unknown as Array<{ id: string }>;
+  return { canon, atomic: rows.map((r) => r.id) };
+}
+
+/**
  * Rebuild the brand's subjects: ONE per professional relation crm-service states (the human at a company,
  * PERSON-RELATIONS-1017), with only that relation's contact points, emails, phones and what happened on them.
  * A personal relation makes no subject. Two relations of one human at one company (two crm persons) fold into one.
+ * `humans` (UNIBOX-REPLY-LAG-1031, the Unibox fast lane) rebuilds only THOSE humans' subjects, by the same derivation:
+ * every relation folding into them is read, a relation of theirs that went is removed, nobody else is touched.
  */
-export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
-  const { pro, perHuman } = await liveRelations(scope);
+export async function refreshSubjects(scope: Scope, opts: { humans?: readonly string[] } = {}): Promise<SubjectRefresh> {
+  const only = opts.humans === undefined ? null : await atomicIdsOf(scope.orgId, opts.humans);
+  if (only && only.canon.size === 0) return { persons: 0, subjects: 0, withoutHuman: 0 };
+  const { pro, perHuman } = await liveRelations(scope, only?.atomic);
   const canon = await canonicalHumans(scope.orgId, pro.map((p) => p.human).filter((h): h is string => h !== null));
   const relationsOfCanon = new Map<string, number>();
   for (const [atomic, n] of perHuman) {
@@ -217,7 +237,7 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
       a.lastIn = laterOf(a.lastIn, at);
     }
   }
-  const rows = [...bySubject.values()].map((a) => ({
+  const rows = [...bySubject.values()].filter((a) => !only || only.canon.has(a.human)).map((a) => ({
     human: a.human,
     company: a.company,
     name: bestName(a.names),
@@ -234,6 +254,8 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
     wrote: a.wrote,
     lastIn: a.lastIn === null ? null : new Date(a.lastIn).toISOString(),
   }));
+  // One lock order for every writer of these rows (the full sweep and the fast lane run side by side): no deadlock.
+  rows.sort((a, b) => (a.human < b.human ? -1 : a.human > b.human ? 1 : a.company < b.company ? -1 : a.company > b.company ? 1 : 0));
   // A lead whose company became known ('' -> X) keeps its tags, only when that human has no other relation left
   // ('' is then the same relation, found its company).
   const companiesOf = new Map<string, string[]>();
@@ -243,9 +265,10 @@ export async function refreshSubjects(scope: Scope): Promise<SubjectRefresh> {
   for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500));
   // A relation that went (withdrawn, merged into another human, no longer professional to the brand) is no row.
   const keep = JSON.stringify(rows.map((r) => ({ human: r.human, company: r.company })));
+  const onlyRows = only ? sql`AND s.human_id = ANY(${sql.param([...only.canon])}::uuid[])` : sql``;
   await db.execute(sql`
     DELETE FROM relationship_subjects s
-    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId}
+    WHERE s.org_id = ${scope.orgId} AND s.brand_id = ${scope.brandId} ${onlyRows}
       AND NOT EXISTS (SELECT 1 FROM jsonb_to_recordset(${keep}::jsonb) AS v(human uuid, company text)
         WHERE v.human = s.human_id AND v.company = s.company_key)
   `);
