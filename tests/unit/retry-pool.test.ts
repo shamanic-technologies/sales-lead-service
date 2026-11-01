@@ -26,6 +26,7 @@ interface Row {
   send_refused_at?: string | null;
   send_refused_until?: string | null;
   channel_sent_at?: string | null;
+  retry_stopped_at?: string | null;
   status: string;
 }
 
@@ -80,6 +81,15 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
     return Promise.resolve([]);
   }
 
+  // BLANK-CANDIDATES-1101: the claim cap's stop statement.
+  if (/SET retry_stopped_at =/.test(text)) {
+    const stopped = rows.filter(
+      (r) => r.status === "served" && r.sent_at === null && (r.sender_closed_at ?? null) === null && (r.retry_stopped_at ?? null) === null && r.retry_count >= MAX_RETRY_CLAIMS,
+    );
+    for (const r of stopped) r.retry_stopped_at = "stopped";
+    return Promise.resolve(stopped.map((r) => ({ id: r.id, lead_id: r.lead_id, retry_count: r.retry_count })));
+  }
+
   if (/retry_claimed_at =/.test(text) && /^\s*(WITH claimed AS \(\s*)?UPDATE leads_campaigns/.test(text)) {
     const now = paramAfter(params, /SET\s+retry_claimed_at = $/) as string;
     const id = paramAfter(params, /WHERE id = $/) as string;
@@ -91,6 +101,8 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
       row.status !== "served" ||
       row.sent_at !== null ||
       (row.sender_closed_at ?? null) !== null ||
+      (row.retry_stopped_at ?? null) !== null ||
+      row.retry_count >= MAX_RETRY_CLAIMS ||
       (/channel_sent_at IS NULL/.test(text) && (row.channel_sent_at ?? null) !== null) ||
       refusalStands(row, refusalNow) ||
       (row.retry_claimed_at !== null && row.retry_claimed_at >= leaseCutoff)
@@ -113,6 +125,8 @@ function execute(query: { queryChunks: unknown[] }): Promise<unknown[]> {
         r.status === "served" &&
         r.sent_at === null &&
         (r.sender_closed_at ?? null) === null &&
+        (r.retry_stopped_at ?? null) === null &&
+        r.retry_count < MAX_RETRY_CLAIMS &&
         (!/lc\.channel_sent_at IS NULL/.test(text) || (r.channel_sent_at ?? null) === null) &&
         !refusalStands(r, refusalNow) &&
         (r.retry_claimed_at === null || r.retry_claimed_at < leaseCutoff),
@@ -176,6 +190,7 @@ import {
   CHANNEL_RETRY_CANDIDATE_BATCH_SIZE,
   decideChannelRetry,
   decideRetry,
+  MAX_RETRY_CLAIMS,
   pickRetryCandidate,
   poolSenderOf,
   RETRY_QUEUE_TTL_MS,
@@ -572,7 +587,7 @@ describe("pickRetryCandidate", () => {
       row({
         id: "aaaaaaaa-0000-4000-8000-000000000001",
         served_at: new Date(NOW - 30 * 24 * 60 * 60 * 1000).toISOString(),
-        retry_count: 104,
+        retry_count: MAX_RETRY_CLAIMS - 1, // the 2026-09 loop reached 104 before the claim cap
       }),
       row({ id: "aaaaaaaa-0000-4000-8000-000000000002" }),
     ];
@@ -590,7 +605,7 @@ describe("pickRetryCandidate", () => {
 
     // The slot goes to somebody who can actually be emailed.
     expect(picked?.id).toBe("aaaaaaaa-0000-4000-8000-000000000002");
-    expect(rows[0].retry_count).toBe(104);
+    expect(rows[0].retry_count).toBe(MAX_RETRY_CLAIMS - 1);
     expect(rows[0].retry_claimed_at).toBeNull();
     // Closed with its own marker — NOT sent_at, because nothing was sent.
     const closed = markSentUpdates.filter((u) => "senderClosedAt" in (u.set as object));
@@ -707,6 +722,22 @@ describe("pickRetryCandidate", () => {
     expect((await pickRetryCandidate({ ...base, nowMs: later }))?.id).toBe(
       "aaaaaaaa-0000-4000-8000-000000000002",
     );
+  });
+
+  // BLANK-CANDIDATES-1101: the same people were handed out 100+ times each, ~2,000 runs a day, no send.
+  it("stops a person handed out MAX_RETRY_CLAIMS times, logs why, and takes the next one", async () => {
+    rows = [
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000001", served_at: "2026-08-25T09:00:00.000Z", retry_count: MAX_RETRY_CLAIMS }),
+      row({ id: "aaaaaaaa-0000-4000-8000-000000000002", served_at: "2026-08-25T10:00:00.000Z" }),
+    ];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await pickRetryCandidate(base))?.id).toBe("aaaaaaaa-0000-4000-8000-000000000002");
+    expect(rows[0].retry_stopped_at).not.toBeNull();
+    expect(errors.mock.calls.some((a) => /retry-pool STOPPED .*reason=retry_claims_exhausted/.test(String(a[0])))).toBe(true);
+    errors.mockRestore();
+    // Never again, however long it waits.
+    rows[1].sent_at = "2026-08-25T12:30:00.000Z";
+    expect(await pickRetryCandidate({ ...base, nowMs: NOW + 48 * 60 * 60 * 1000 })).toBeNull();
   });
 
   it("skips a served row that carries no registered email", async () => {

@@ -263,6 +263,11 @@ export const leadsCampaigns = pgTable(
     //                    Not sent_at, which the lead history reads as the email hand-off.
     channelSentAt: timestamp("channel_sent_at", { withTimezone: true }),
     channelSendId: text("channel_send_id"),
+    // retry_stopped_* — terminal WITHOUT a send (migration 0135, BLANK-CANDIDATES-1101): the paid-pool retry handed this
+    //                    person out MAX_RETRY_CLAIMS times and nobody contacted them; the row leaves the pool for good
+    //                    with its reason (retry-pool.ts). Not sent_at, not sender_closed_at (no sender stated anything).
+    retryStoppedAt: timestamp("retry_stopped_at", { withTimezone: true }),
+    retryStoppedReason: text("retry_stopped_reason"),
     // --- Follow-up queue (src/lib/followup-queue.ts) ---
     // What we owe this person NEXT, and when. Once somebody shows a sales interest we owe them an
     // answer now and, if they go quiet, further answers at growing intervals, indefinitely, until
@@ -1095,6 +1100,23 @@ export const candidateDecisions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("idx_candidate_decisions_seq").on(table.seq), index("idx_candidate_decisions_created").on(table.createdAt)],
+);
+
+/** BLANK-CANDIDATES-1101: a candidate offered with nothing the screen could judge (migration 0135, blank-candidates.ts). */
+export const blankCandidates = pgTable(
+  "blank_candidates",
+  {
+    candidateId: text("candidate_id").primaryKey(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id"),
+    audienceId: text("audience_id").notNull(),
+    providerPersonId: text("provider_person_id").notNull(),
+    runId: text("run_id"),
+    seenCount: integer("seen_count").notNull().default(1),
+    firstSeenAt: timestamp("first_seen_at", { withTimezone: true }).notNull().defaultNow(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("idx_blank_candidates_last_seen").on(table.lastSeenAt)],
 );
 
 export const candidateScreenings = pgTable(
