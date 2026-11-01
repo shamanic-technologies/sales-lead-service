@@ -72,6 +72,29 @@ export function targetHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
+/** JSON with object keys sorted at every depth, so the same facts always hash the same. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v ?? null);
+}
+
+/**
+ * BLIND-SCREEN-CACHE-1101: the hash of exactly what the screen judged (`screenSnapshot`). A stored verdict is reused
+ * only for the SAME input: a candidate whose facts changed since (a teaser filled after a blank offer) is judged again
+ * on what it now carries, never served the verdict made on other facts.
+ */
+export function screenInputHash(c: Candidate): string {
+  return createHash("sha256").update(canonicalJson(screenSnapshot(c))).digest("hex");
+}
+
 /** The screen's input: the teaser fields human-service's screen judged, the company domain excluded. */
 export function screenSnapshot(c: Candidate) {
   return {
@@ -153,6 +176,7 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
   // BLANK-CANDIDATES-1101: nothing to judge on is never a verdict, and never a billed judgment.
   if (isBlankCandidate(c)) throw new BlankCandidateError(c.candidateId);
   const hash = targetHash(target.text);
+  const inputHash = screenInputHash(c);
   const [prior] = await db
     .select()
     .from(candidateScreenings)
@@ -165,7 +189,8 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       ),
     )
     .limit(1);
-  if (prior) {
+  // A row stored before input hashes existed (NULL) or on other facts is never reused: judged again, row replaced.
+  if (prior && prior.inputHash === inputHash) {
     return {
       pass: prior.verdict === "pass",
       reason: prior.reason ?? "",
@@ -200,8 +225,24 @@ async function screen(c: Candidate, target: { text: string; field: string } | nu
       runId: recordRunId,
       companyDomain: c.company.domain,
       companyName: c.company.name,
+      inputHash,
     })
-    .onConflictDoNothing();
+    // One row per (audience, person, target, prompt): the verdict on the candidate's latest facts replaces the old one.
+    .onConflictDoUpdate({
+      target: [candidateScreenings.audienceId, candidateScreenings.providerPersonId, candidateScreenings.targetHash, candidateScreenings.promptVersion],
+      set: {
+        candidateId: c.candidateId,
+        verdict: pass ? "pass" : "reject",
+        yesProbability: p,
+        reason,
+        model,
+        runId: recordRunId,
+        companyDomain: c.company.domain,
+        companyName: c.company.name,
+        inputHash,
+        createdAt: new Date(),
+      },
+    });
   return { pass, reason, walkInputs: { cached: null, yesProbability: p, threshold: YES_THRESHOLD, targetHash: hash, promptVersion: SCREEN_PROMPT_VERSION } };
 }
 

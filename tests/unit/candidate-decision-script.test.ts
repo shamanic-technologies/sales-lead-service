@@ -45,7 +45,7 @@ const inserted: unknown[] = [];
 vi.mock("../../src/db/index.js", () => ({
   db: {
     select: () => ({ from: () => ({ where: () => ({ limit: async () => priorScreenings }) }) }),
-    insert: () => ({ values: (v: unknown) => ({ onConflictDoNothing: async () => inserted.push(v) }) }),
+    insert: () => ({ values: (v: unknown) => ({ onConflictDoUpdate: async () => inserted.push(v) }) }),
   },
 }));
 
