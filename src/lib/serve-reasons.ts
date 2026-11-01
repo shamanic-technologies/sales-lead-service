@@ -88,6 +88,8 @@ export const CONTACTED_PROSPECTS_NONE_OWED_REASON = "contacted_prospects_none_ow
 export const LEAD_FOLLOWUP_NONE_DUE_REASON = "lead_followup_none_due" as const;
 export const RECENTLY_EMAILED_REASON = "recently_emailed" as const;
 export const JOURNALIST_REASON = "journalist" as const;
+/** COMPANY-MARK-SERVE-1101: every person bought was a lead (or at a company) the client marked Disqualified for the brand. */
+export const DISQUALIFIED_REASON = "disqualified" as const;
 /** Named-person serves (src/lib/named-lead-serve.ts): why the named person cannot be worked by this run. */
 export const NAMED_LEAD_REASONS = [
   "named_lead_not_filed",
@@ -100,6 +102,7 @@ export const NAMED_LEAD_REASONS = [
   "named_lead_unwritable",
   "named_lead_sender_unreadable",
   "named_lead_journalist",
+  "named_lead_disqualified",
 ] as const;
 export type NamedLeadReason = (typeof NAMED_LEAD_REASONS)[number];
 
@@ -119,6 +122,7 @@ export const SERVE_EMPTY_REASONS = [
   LEAD_FOLLOWUP_NONE_DUE_REASON,
   RECENTLY_EMAILED_REASON,
   JOURNALIST_REASON,
+  DISQUALIFIED_REASON,
   ...SALES_FUNNEL_CAP_REASONS,
   ...NAMED_LEAD_REASONS,
 ] as const;

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { resolveServedIdentity } from "./serve-identity.js";
 import { db } from "../db/index.js";
 import { leadIsJournalist } from "./brand-journalists.js";
+import { leadServeDisqualification } from "./disqualified-sql.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
@@ -36,6 +37,7 @@ import {
   LEAD_FOLLOWUP_NONE_DUE_REASON,
   RECENTLY_EMAILED_REASON,
   JOURNALIST_REASON,
+  DISQUALIFIED_REASON,
   isNoRecentPostsAnswer,
   type ServeEmptyReason,
 } from "./serve-reasons.js";
@@ -155,7 +157,7 @@ interface PullNextParams {
  */
 export const FRESH_SERVE_ATTEMPTS = 5;
 /** A fresh serve that bought someone it cannot hand out keeps them filed and buys the next. */
-const BUY_NEXT_REASONS: ReadonlySet<string> = new Set([RECENTLY_EMAILED_REASON, JOURNALIST_REASON]);
+const BUY_NEXT_REASONS: ReadonlySet<string> = new Set([RECENTLY_EMAILED_REASON, JOURNALIST_REASON, DISQUALIFIED_REASON]);
 
 /**
  * A source unit's walk ANSWERS inside its caller's 5 minutes (DOCDINNERS-SERVE-TIMEOUT-1027). No new audience is
@@ -352,6 +354,7 @@ export async function pullNext(
       brandId: params.brandId,
       campaignId: params.campaignId,
       named: mode.named,
+      offerId,
       sender: params.poolSender ?? "email",
       runId: params.runId ?? null,
       parentRunId: params.parentRunId ?? null,
@@ -415,6 +418,7 @@ export async function pullNext(
     acceptedEmails: poolEmails,
     relationships,
     recentlyEmailed,
+    offerId,
     ...(params.poolSender ? { sender: params.poolSender } : {}),
   });
 
@@ -535,6 +539,18 @@ export async function pullNext(
         `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${JOURNALIST_REASON}: a journalist of the brand, kept filed under the campaign`,
       );
       return { found: false, reason: JOURNALIST_REASON };
+    }
+
+    // A lead (or its company) the client marked Disqualified for this brand x offer is never served
+    // (COMPANY-MARK-SERVE-1101): kept filed (every pool refuses them too), the next person is bought.
+    const disqualified = await leadServeDisqualification(leadId, params.orgId, params.brandIds, offerId);
+    const passesMarks = !disqualified.lead && !disqualified.company;
+    if (!walked.check("disqualified", disqualified, passesMarks)) {
+      walked.skip();
+      console.log(
+        `[lead-service] pullNext skipped campaign=${params.campaignId} audienceId=${servedAudienceId} leadId=${leadId} reason=${DISQUALIFIED_REASON} lead=${disqualified.lead} company=${disqualified.company}: marked Disqualified for the brand, kept filed under the campaign`,
+      );
+      return { found: false, reason: DISQUALIFIED_REASON };
     }
 
     // The person was FOUND for this brand and offer: its `lead_found` outcome trigger rings campaign-service's door
@@ -658,6 +674,7 @@ export async function pullNext(
       // Nothing is bought: the people were already emailed, so a source stating no email choice takes them as found.
       acceptedEmails: params.acceptedEmails ?? "as_found",
       recentlyEmailed,
+      offerId,
       signal,
     });
     if (!find) {
@@ -712,6 +729,7 @@ export async function pullNext(
       acceptedEmails: params.acceptedEmails ?? "as_found",
       relationships,
       recentlyEmailed,
+      offerId,
       signal,
     });
     if (!find) {
@@ -765,6 +783,7 @@ export async function pullNext(
       acceptedEmails: poolEmails,
       relationships,
       recentlyEmailed,
+      offerId,
       // A find outside the source's own funnel audiences, origin or offer is not its own (LEAK-1012 part 2); then the
       // audience's owner says whether it still fits now (STILL-FITS-1012). Neither is re-graded here.
       askFit: async ({ sourceCampaignId, ...q }) => {

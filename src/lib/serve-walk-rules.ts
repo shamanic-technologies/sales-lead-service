@@ -35,6 +35,8 @@ export const WALK_RULES = [
   "reveal",
   /** A journalist of the brand is never a lead: `{journalist}`. */
   "journalist",
+  /** A lead (or its company) marked Disqualified for the brand x offer is never served: `{lead, company}`. */
+  "disqualified",
   /** Fresh contacts only: `{window, emailedWithinWindow}`. */
   "recently_emailed",
   /** The email sender's statement on a paid-pool row (decideRetry): `{verdict, flags, servedAt, nowMs}`. */
@@ -111,6 +113,8 @@ export function evaluateWalkCheck(check: Pick<WalkCheck, "rule" | "inputs">): bo
       return i.status === "served";
     case "journalist":
       return !bool(i, "journalist");
+    case "disqualified":
+      return !bool(i, "lead") && !bool(i, "company");
     case "recently_emailed":
       return !bool(i, "emailedWithinWindow");
     case "retry_verdict":

@@ -9,7 +9,7 @@ import { loadLeadAndCompanyMarks } from "./lead-disqualification.js";
 import { loadRelationships, type RelationshipBlock } from "./relationship-read.js";
 import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { reachClauses } from "./reach-sql.js";
-import { journalistScopeOf } from "./brand-journalists.js";
+import { serveExclusionScopeOf } from "./disqualified-sql.js";
 import { isMemberAddress, loadOrgMemberKeys } from "./org-members.js";
 import type { ReachMethod } from "./people-client.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
@@ -355,6 +355,8 @@ export async function claimContactedProspect(p: {
   acceptedEmails: PoolEmailPolicy;
   /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
   recentlyEmailed?: RecentlyEmailedScope | null;
+  /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
+  offerId?: string | null;
   signal?: AbortSignal;
 }): Promise<ContactedProspectFind | null> {
   for (let offset = 0; ; offset += CANDIDATE_BATCH) {
@@ -369,7 +371,7 @@ export async function claimContactedProspect(p: {
           SELECT 1 FROM lead_timeline_facts x
           WHERE x.org_id = t.org_id AND x.brand_id = t.brand_id AND x.lead_id = t.lead_id AND x.withdrawn_at IS NULL
             AND x.label = ANY(${dsql.param([...STOP_LABELS])}::text[]))
-        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails, null, p.recentlyEmailed, journalistScopeOf(p.orgId, [p.brandId]))}
+        ${reachClauses(dsql`t.lead_id`, p.reachableBy, p.acceptedEmails, null, p.recentlyEmailed, serveExclusionScopeOf(p.orgId, [p.brandId], p.offerId ?? null))}
       GROUP BY t.lead_id
       ORDER BY max(t.occurred_at) ASC NULLS FIRST, t.lead_id ASC
       LIMIT ${CANDIDATE_BATCH} OFFSET ${offset}

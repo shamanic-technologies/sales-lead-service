@@ -10,6 +10,8 @@
  *   1. the person holds a row on THIS campaign of the org (`named_lead_not_filed`, final);
  *   2. a registered email (`named_lead_no_email`, final: the sender's records are keyed on it);
  *   2b. not a journalist of the brand (`named_lead_journalist`, final; JOURNALISTS-NOT-LEADS-1016);
+ *   2c. not a lead or company the client marked Disqualified for the brand x offer (`named_lead_disqualified`, final;
+ *       COMPANY-MARK-SERVE-1101);
  *   3. not opted out / do-not-contact (the human's facts), not unsubscribed / hard-bounced (the sender's answer)
  *      (`named_lead_suppressed`, final);
  *   4. per OCCURRENCE (`named_lead_serves`): a redelivered run of an occurrence already handed out is refused once
@@ -33,6 +35,7 @@ import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { fetchChannelSendsBatch, channelSendKey, type ChannelSend } from "./channel-send-client.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { leadIsJournalist } from "./brand-journalists.js";
+import { leadServeDisqualification } from "./disqualified-sql.js";
 import { senderSuppression, type SuppressionReason } from "./named-person.js";
 import { campaignScopeFlags, type CandidateStatusFlags, type PoolSender } from "./retry-pool.js";
 import { recordEmploymentHistory } from "./leads-registry.js";
@@ -314,6 +317,8 @@ export async function prepareNamedServe(params: {
   brandId: string;
   campaignId: string;
   named: NamedLeadRequest;
+  /** The campaign's offer: a Disqualified mark naming it refuses the person. null = brand-wide marks only. */
+  offerId: string | null;
   sender: PoolSender;
   runId: string | null;
   parentRunId: string | null;
@@ -331,6 +336,14 @@ export async function prepareNamedServe(params: {
   // A brand never sells to a journalist (JOURNALISTS-NOT-LEADS-1016, brand-journalists.ts).
   if (await leadIsJournalist(named.leadId, orgId, [brandId])) {
     return { ok: false, ...refuse("named_lead_journalist", "This person is a journalist you pitch for press coverage, so no sales campaign writes to them.") };
+  }
+  // A lead or company the client marked Disqualified for the brand x offer is never pursued (COMPANY-MARK-SERVE-1101).
+  const marks = await leadServeDisqualification(named.leadId, orgId, [brandId], params.offerId);
+  if (marks.company) {
+    return { ok: false, ...refuse("named_lead_disqualified", "You marked this person's company as not your target, so no campaign writes to them.") };
+  }
+  if (marks.lead) {
+    return { ok: false, ...refuse("named_lead_disqualified", "You marked this person as not the right contact, so no campaign writes to them.") };
   }
 
   const human = (await loadHumanFacts([named.leadId])).get(named.leadId);

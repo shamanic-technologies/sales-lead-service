@@ -60,6 +60,7 @@
               "lead_followup_none_due",
               "recently_emailed",
               "journalist",
+              "disqualified",
               "sales_funnel_max_budget_reached",
               "sales_funnel_max_budget_unreadable",
               "named_lead_not_filed",
@@ -71,7 +72,8 @@
               "named_lead_sender_finished",
               "named_lead_unwritable",
               "named_lead_sender_unreadable",
-              "named_lead_journalist"
+              "named_lead_journalist",
+              "named_lead_disqualified"
             ],
             "description": "Why the answer is empty. Always present when found=false; absent when a lead was served. ONLY `audience_exhausted` is evidence that a population ran out — human-service walked the audience this service was told to serve and reported nobody left. Every other value states that no exhaustion was observed: `no_audience` means the caller sent no x-audience-id, so this service (which never picks audiences) looked at nobody; `serve_timed_out` means the serve budget expired before the look finished; `audience_not_serveable` means the named audience has no committed provider yet, so its population is unknown rather than empty; `credit_insufficient` means the org has no platform credit, so no paid enrichment/search/LLM action was performed; `sales_funnel_max_budget_reached` / `sales_funnel_max_budget_unreadable` mean billing refused a spend because the campaign's sales funnel MAX BUDGET was reached (or could not be read), not for lack of credit: billing's own reason verbatim, with `sales_funnel_cap` and `message` beside it (a wait: raise the max budget, never add credit); `source_campaign_off` names a source campaign that is off; `source_stock_empty` means the campaign's sources find leads in their own runs and hold none nobody worked yet (nothing is found on demand from them); `no_recent_posts` means a LinkedIn-engagement audience's competitor pages hold no post inside its window, so there was nobody to read yet (it wins over every other empty answer of a walk that served nobody; the audience fills once a competitor posts). On a SOURCE campaign's own run (x-campaign-id = a `start_to_lead_found` campaign) the lead is found in the source's own audiences, stored under it, and contacted by nobody; `audience_exhausted` there means every one of its audiences was walked and has nobody left. Decide whether outreach may stop by testing for `audience_exhausted` specifically — never by excluding known-benign values, so a reason added later defaults to not-exhaustion.",
             "example": "audience_exhausted"
@@ -24424,6 +24426,7 @@
                                           "must_pass",
                                           "reveal",
                                           "journalist",
+                                          "disqualified",
                                           "recently_emailed",
                                           "retry_verdict",
                                           "channel_retry",

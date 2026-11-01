@@ -6,7 +6,8 @@ import type { ReachMethod } from "./people-client.js";
 import { emailPolicyClause, type PoolEmailPolicy } from "./email-policy.js";
 import { relationshipClause, type RelationshipScope } from "./reach-sql.js";
 import { recentlyEmailedClause, type RecentlyEmailedScope } from "./recently-emailed-sql.js";
-import { journalistClause, journalistScopeOf, type JournalistScope } from "./brand-journalists.js";
+import { journalistClause } from "./brand-journalists.js";
+import { disqualifiedClause, serveExclusionScopeOf, type ServeExclusionScope } from "./disqualified-sql.js";
 import { loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { judgeAutomatedActs, recordTheirActs, refreshActedAt } from "./their-acts.js";
@@ -616,7 +617,7 @@ export async function stateLeadFollowupDate(input: {
 
 /**
  * Who a multichannel follow-up can reach: a lead carrying ANY of the pipe's contact methods (default email or phone; a
- * follow-up writes on whichever the person holds), never a journalist, an email verdict the pipe refuses, a relationship
+ * follow-up writes on whichever the person holds), never a journalist, a lead or company marked Disqualified, an email verdict the pipe refuses, a relationship
  * the pipe refuses, or a recently emailed person when the tactic asks it.
  */
 export function dueReachClauses(
@@ -625,7 +626,7 @@ export function dueReachClauses(
   acceptedEmails: PoolEmailPolicy | null | undefined,
   relationships: RelationshipScope | null | undefined,
   recentlyEmailed: RecentlyEmailedScope | null | undefined,
-  journalists: JournalistScope,
+  exclusions: ServeExclusionScope,
 ): SQL {
   const methods = reachableBy && reachableBy.length > 0 ? [...new Set(reachableBy)].sort() : (["email", "phone"] as ReachMethod[]);
   return sql.join(
@@ -634,7 +635,8 @@ export function dueReachClauses(
       emailPolicyClause(leadId, acceptedEmails),
       relationshipClause(leadId, relationships ?? null),
       recentlyEmailedClause(leadId, recentlyEmailed),
-      journalistClause(leadId, journalists),
+      journalistClause(leadId, exclusions),
+      disqualifiedClause(leadId, exclusions),
     ],
     sql` `,
   );
@@ -702,6 +704,8 @@ export async function claimDueFollowupLead(p: {
   acceptedEmails: PoolEmailPolicy;
   relationships?: RelationshipScope | null;
   recentlyEmailed?: RecentlyEmailedScope | null;
+  /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
+  offerId?: string | null;
   signal?: AbortSignal;
 }): Promise<DueFollowupFind | null> {
   const skipped: string[] = [];
@@ -715,7 +719,7 @@ export async function claimDueFollowupLead(p: {
         AND NOT EXISTS (
           SELECT 1 FROM lead_followup_due_serves ds WHERE ds.org_id = d.org_id AND ds.brand_id = d.brand_id AND ds.lead_id = d.lead_id
             AND ds.handed_at IS NULL AND ds.set_aside_at IS NULL)
-        ${dueReachClauses(sql`d.lead_id`, p.reachableBy, p.acceptedEmails, p.relationships, p.recentlyEmailed, journalistScopeOf(p.orgId, [p.brandId]))}
+        ${dueReachClauses(sql`d.lead_id`, p.reachableBy, p.acceptedEmails, p.relationships, p.recentlyEmailed, serveExclusionScopeOf(p.orgId, [p.brandId], p.offerId ?? null))}
       ORDER BY d.next_followup_at ASC, d.lead_id ASC
       LIMIT ${DUE_BATCH}
     `)) as unknown as Array<{ lead_id: string }>;

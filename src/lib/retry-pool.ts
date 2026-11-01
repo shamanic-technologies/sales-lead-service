@@ -402,6 +402,8 @@ export async function loadRetryCandidates(params: {
   relationships?: RelationshipScope | null;
   /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
   recentlyEmailed?: RecentlyEmailedScope | null;
+  /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
+  offerId?: string | null;
 }): Promise<RetryCandidate[]> {
   const leaseCutoff = new Date(params.nowMs - RETRY_CLAIM_LEASE_MS).toISOString();
   const nowIso = new Date(params.nowMs).toISOString();
@@ -436,7 +438,7 @@ export async function loadRetryCandidates(params: {
       -- A "Lead follow-up due" round (LEAD-FOLLOWUP-DATE-1016) is never retried: the writer sends or states a date, and
       -- the next round comes from that date, never from this pool.
       AND NOT EXISTS (SELECT 1 FROM lead_followup_due_serves ds_r WHERE ds_r.handed_lead_campaign_id = lc.id)
-      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, { orgId: sql`lc.org_id`, brandIds: sql`lc.brand_ids` })}
+      ${reachClauses(sql`lc.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, { orgId: sql`lc.org_id`, brandIds: sql`lc.brand_ids`, offerId: sql`${params.offerId ?? null}::text` })}
     ORDER BY COALESCE(lc.retry_claimed_at, lc.served_at, lc.created_at) ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -676,6 +678,8 @@ export async function pickRetryCandidate(params: {
   relationships?: RelationshipScope | null;
   /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
   recentlyEmailed?: RecentlyEmailedScope | null;
+  /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
+  offerId?: string | null;
   /** Who states whether a person was contacted (poolSenderOf). Absent = email-gateway (today). */
   sender?: PoolSender;
 }): Promise<RetryCandidate | null> {
@@ -691,6 +695,7 @@ export async function pickRetryCandidate(params: {
     acceptedEmails: params.acceptedEmails ?? null,
     relationships: params.relationships ?? null,
     recentlyEmailed: params.recentlyEmailed ?? null,
+    offerId: params.offerId ?? null,
     ...(sender === "channel" ? { limit: CHANNEL_RETRY_CANDIDATE_BATCH_SIZE } : {}),
   });
   if (candidates.length === 0) return null;
