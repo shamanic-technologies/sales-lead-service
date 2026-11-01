@@ -46,11 +46,11 @@ const inserted: unknown[] = [];
 vi.mock("../../src/db/index.js", () => ({
   db: {
     select: () => ({ from: () => ({ where: () => ({ limit: async () => priorScreenings }) }) }),
-    insert: () => ({ values: (v: unknown) => ({ onConflictDoNothing: async () => inserted.push(v) }) }),
+    insert: () => ({ values: (v: unknown) => ({ onConflictDoUpdate: async (u: unknown) => inserted.push({ ...(v as object), onConflict: u }) }) }),
   },
 }));
 
-const { serveThroughCandidates, decisionBasis, screenSnapshot, SCREEN_QUESTION, CANDIDATE_CALL_TIMEOUT_MS } = await import("../../src/lib/candidate-serve.js");
+const { serveThroughCandidates, decisionBasis, screenSnapshot, screenInputHash, SCREEN_QUESTION, CANDIDATE_CALL_TIMEOUT_MS } = await import("../../src/lib/candidate-serve.js");
 const { CandidatesUnsupportedError, HumanServiceStalledError } = await import("../../src/lib/people-client.js");
 
 const ctx = { orgId: "org-1", userId: "user-1", runId: "run-1", brandId: "brand-1", campaignId: "camp-1" };
@@ -175,12 +175,43 @@ describe("serveThroughCandidates", () => {
     expect(inserted.map((v) => (v as { verdict: string }).verdict)).toEqual(["reject", "pass"]);
   });
 
-  it("a person screened before (re-offered after a crash) is not judged again", async () => {
-    priorScreenings.push({ verdict: "pass", reason: "P(yes)=0.9" });
+  it("a person screened before on the same facts (re-offered after a crash) is not judged again", async () => {
+    priorScreenings.push({ verdict: "pass", reason: "P(yes)=0.9", inputHash: screenInputHash(cand("c1")) });
     nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target });
     revealCandidate.mockResolvedValue({ status: "served", person, replayed: true });
     await serveThroughCandidates("aud-1", ctx, "offer-a");
     expect(judgeYesNo).not.toHaveBeenCalled();
+  });
+
+  it("BLIND-SCREEN-CACHE-1101: a verdict made on other facts (a blank teaser, since filled) is never reused: judged again on the real facts, row replaced", async () => {
+    const blank = { ...cand("c1"), person: { name: null, title: null, headline: null, seniority: null, city: null, state: null, country: null }, company: { name: null, domain: null, industry: null, employees: null, city: null, state: null, country: null, keywords: [] } };
+    expect(screenInputHash(blank as never)).not.toEqual(screenInputHash(cand("c1")));
+    priorScreenings.push({ verdict: "reject", reason: "P(yes)=0.110 threshold>0.5", inputHash: screenInputHash(blank as never) });
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target });
+    judgeYesNo.mockResolvedValueOnce({ probabilities: { answer: 0.8 }, model: "jev-1.13.0" });
+    revealCandidate.mockResolvedValue({ status: "served", person, personId: "pid-1", replayed: false });
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "served", person, personId: "pid-1" });
+    expect(judgeYesNo).toHaveBeenCalledTimes(1);
+    expect(declineCandidate).not.toHaveBeenCalled();
+    const row = inserted[0] as { verdict: string; inputHash: string; onConflict: { set: { verdict: string; inputHash: string } } };
+    expect(row.inputHash).toEqual(screenInputHash(cand("c1")));
+    expect(row.onConflict.set).toMatchObject({ verdict: "pass", inputHash: screenInputHash(cand("c1")) });
+  });
+
+  it("a row stored before input hashes existed is never reused", async () => {
+    priorScreenings.push({ verdict: "reject", reason: "P(yes)=0.07", inputHash: null });
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target });
+    judgeYesNo.mockResolvedValueOnce({ probabilities: { answer: 0.8 }, model: "jev-1.13.0" });
+    revealCandidate.mockResolvedValue({ status: "served", person, personId: "pid-1", replayed: false });
+    await serveThroughCandidates("aud-1", ctx, "offer-a");
+    expect(judgeYesNo).toHaveBeenCalledTimes(1);
+  });
+
+  it("the input hash ignores key order but not values", () => {
+    const a = cand("c1");
+    const reordered = { ...a, person: { country: "US", state: "OH", city: "Columbus", seniority: "owner", headline: null, title: "Owner", name: "Ann" } };
+    expect(screenInputHash(reordered)).toEqual(screenInputHash(a));
+    expect(screenInputHash({ ...a, person: { ...a.person, title: "CEO" } })).not.toEqual(screenInputHash(a));
   });
 
   it("no target text: nothing to screen against, the person is not judged", async () => {
