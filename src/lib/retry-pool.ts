@@ -64,6 +64,19 @@ export const RETRY_QUEUE_TTL_MS = 5 * 24 * 60 * 60 * 1000;
 export const RETRY_CLAIM_LEASE_MS = 60 * 60 * 1000;
 
 /**
+ * How many times one paid serve may be handed out again by this pool (BLANK-CANDIDATES-1101).
+ *
+ * Every claim is a run that took the person and contacted nobody. A sender that never states anything terminal about
+ * them (a writer that refuses, a vendor duplicate that sends nothing, a pipe that never writes) made the pool hand the
+ * same people out forever: 100+ claims each, ~2,000 runs a day producing no send. Past this count the row leaves the
+ * pool for good with `retry_stopped_reason` (never `sent_at`: nothing went out). Prod 2026-11-01: 92% of rows the pool handed back and
+ * later saw contacted were contacted within 10 claims (3,835 of 4,157).
+ */
+export const MAX_RETRY_CLAIMS = 10;
+/** The stated reason of a row stopped by the cap (owner-readable, `leads_campaigns.retry_stopped_reason`). */
+export const RETRY_CLAIMS_EXHAUSTED_REASON = "retry_claims_exhausted";
+
+/**
  * How many of the campaign's oldest non-terminal serves we look at per pull.
  *
  * This is what keeps the email-gateway call a fixed size whatever the campaign's age:
@@ -413,6 +426,11 @@ export async function loadRetryCandidates(params: {
       AND lc.sent_at IS NULL
       AND lc.sender_closed_at IS NULL
       AND lc.channel_sent_at IS NULL
+      AND lc.retry_stopped_at IS NULL
+      AND COALESCE(lc.retry_count, 0) < ${MAX_RETRY_CLAIMS}
+      -- A SOURCE's own find (source_found) is nobody's paid serve awaiting a send: a source contacts nobody, its finds
+      -- are the stock the pipe it feeds takes (source-stock.ts). Never handed back from this pool.
+      AND lc.status_reason IS DISTINCT FROM 'source_found'
       AND (lc.send_refused_at IS NULL OR (lc.send_refused_until IS NOT NULL AND lc.send_refused_until <= ${nowIso}))
       AND (lc.retry_claimed_at IS NULL OR lc.retry_claimed_at < ${leaseCutoff})
       -- A "Lead follow-up due" round (LEAD-FOLLOWUP-DATE-1016) is never retried: the writer sends or states a date, and
@@ -518,6 +536,36 @@ export async function markSendRefusedCandidates(
 }
 
 /**
+ * Stop, for good and with its reason, every row of this campaign the pool already handed out `MAX_RETRY_CLAIMS` times
+ * without anybody contacting them. Logged per row (lead id), so the owner reads why the person left the pool.
+ */
+export async function stopExhaustedRetries(params: { orgId: string; campaignId: string; nowMs: number }): Promise<Array<{ id: string; leadId: string; retryCount: number }>> {
+  const now = new Date(params.nowMs).toISOString();
+  const rows = (await db.execute(sql`
+    UPDATE leads_campaigns
+       SET retry_stopped_at = ${now}::timestamptz,
+           retry_stopped_reason = ${RETRY_CLAIMS_EXHAUSTED_REASON},
+           updated_at = ${now}::timestamptz
+     WHERE org_id = ${params.orgId}
+       AND campaign_id = ${params.campaignId}
+       AND status = 'served'
+       AND sent_at IS NULL
+       AND sender_closed_at IS NULL
+       AND channel_sent_at IS NULL
+       AND retry_stopped_at IS NULL
+       AND COALESCE(retry_count, 0) >= ${MAX_RETRY_CLAIMS}
+    RETURNING id, lead_id, retry_count
+  `)) as unknown as Array<{ id: string; lead_id: string; retry_count: number | string }>;
+  const stopped = rows.map((r) => ({ id: r.id, leadId: r.lead_id, retryCount: Number(r.retry_count) }));
+  for (const r of stopped) {
+    console.error(
+      `[lead-service] retry-pool STOPPED campaign=${params.campaignId} row=${r.id} leadId=${r.leadId} reason=${RETRY_CLAIMS_EXHAUSTED_REASON}: handed out ${r.retryCount} times and nobody contacted them; never handed out by this pool again`,
+    );
+  }
+  return stopped;
+}
+
+/**
  * Claim one candidate for this run, atomically.
  *
  * Two runs pulling at the same time both read `contacted = false` for the same person;
@@ -558,6 +606,9 @@ export async function claimCandidate(params: {
        AND sent_at IS NULL
        AND sender_closed_at IS NULL
        AND channel_sent_at IS NULL
+       AND retry_stopped_at IS NULL
+       AND COALESCE(retry_count, 0) < ${MAX_RETRY_CLAIMS}
+       AND status_reason IS DISTINCT FROM 'source_found'
        AND (send_refused_at IS NULL OR (send_refused_until IS NOT NULL AND send_refused_until <= ${now}))
        AND (retry_claimed_at IS NULL OR retry_claimed_at < ${leaseCutoff})
     RETURNING id
@@ -631,6 +682,7 @@ export async function pickRetryCandidate(params: {
   const nowMs = params.nowMs ?? Date.now();
   const sender: PoolSender = params.sender ?? "email";
 
+  await stopExhaustedRetries({ orgId: params.orgId, campaignId: params.campaignId, nowMs });
   const candidates = await loadRetryCandidates({
     orgId: params.orgId,
     campaignId: params.campaignId,
