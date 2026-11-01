@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
-import { journalistScopeOf } from "./brand-journalists.js";
+import { serveExclusionScopeOf } from "./disqualified-sql.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
 import { fetchAudienceOfferId, fetchAudienceOriginSlug, loadOriginsByChannelSlug } from "./sourcing-origin.js";
 
@@ -136,7 +136,7 @@ export async function claimReleasedLead(params: {
 }): Promise<ReleasedLead | null> {
   if (params.brandIds.length === 0) return null;
   const brands = sql.join(params.brandIds.map((b) => sql`${b}`), sql`, `);
-  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds));
+  const reach = reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, serveExclusionScopeOf(params.orgId, params.brandIds, params.offerId));
   const candidates = (await db.execute(sql`
     SELECT s.id, s.campaign_id, s.lead_id, s.audience_id
       FROM leads_campaigns s
