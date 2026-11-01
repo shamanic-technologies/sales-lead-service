@@ -298,6 +298,7 @@ describe.skipIf(!hasRealDatabase)("channel-send reconcile reads against a real d
     }
   });
 
+  const poolOrgId = randomUUID();
   // BLANK-CANDIDATES-1101: the pool handed the same people out 100+ times each (campaign a70d7e5b, ~2,000 runs a day).
   it("stops a row after MAX_RETRY_CLAIMS claims, with its reason, and never hands it out again", async () => {
     const capCampaignId = `itest-cap-${randomUUID()}`;
@@ -305,17 +306,17 @@ describe.skipIf(!hasRealDatabase)("channel-send reconcile reads against a real d
     await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `cap-${randomUUID()}@itest.example`, source: "apollo" });
     const [row] = await db
       .insert(leadsCampaigns)
-      .values({ leadId: lead.id, campaignId: capCampaignId, orgId, brandIds: [brandId], status: "served", servedAt: new Date(Date.now() - 60_000), retryCount: MAX_RETRY_CLAIMS - 1 })
+      .values({ leadId: lead.id, campaignId: capCampaignId, orgId: poolOrgId, brandIds: [randomUUID()], status: "served", servedAt: new Date(Date.now() - 60_000), retryCount: MAX_RETRY_CLAIMS - 1 })
       .returning({ id: leadsCampaigns.id });
     try {
       // The last claim allowed still goes through.
-      expect(await loadRetryCandidates({ orgId, campaignId: capCampaignId, nowMs: Date.now() })).toHaveLength(1);
+      expect(await loadRetryCandidates({ orgId: poolOrgId, campaignId: capCampaignId, nowMs: Date.now() })).toHaveLength(1);
       expect(await claimCandidate({ id: row.id, nowMs: Date.now(), runId: null, parentRunId: null })).toBe(true);
       // Lease over: the row is at the cap, never loaded nor claimable again.
       const later = Date.now() + 2 * 60 * 60 * 1000;
-      expect(await loadRetryCandidates({ orgId, campaignId: capCampaignId, nowMs: later })).toHaveLength(0);
+      expect(await loadRetryCandidates({ orgId: poolOrgId, campaignId: capCampaignId, nowMs: later })).toHaveLength(0);
       expect(await claimCandidate({ id: row.id, nowMs: later, runId: null, parentRunId: null })).toBe(false);
-      const stopped = await stopExhaustedRetries({ orgId, campaignId: capCampaignId, nowMs: later });
+      const stopped = await stopExhaustedRetries({ orgId: poolOrgId, campaignId: capCampaignId, nowMs: later });
       expect(stopped).toEqual([{ id: row.id, leadId: lead.id, retryCount: MAX_RETRY_CLAIMS }]);
       const [after] = await db
         .select({ at: leadsCampaigns.retryStoppedAt, reason: leadsCampaigns.retryStoppedReason, sentAt: leadsCampaigns.sentAt })
@@ -325,7 +326,7 @@ describe.skipIf(!hasRealDatabase)("channel-send reconcile reads against a real d
       expect(after.reason).toBe(RETRY_CLAIMS_EXHAUSTED_REASON);
       expect(after.sentAt).toBeNull();
       // Stopped once: a second pass finds nothing to stop.
-      expect(await stopExhaustedRetries({ orgId, campaignId: capCampaignId, nowMs: later })).toEqual([]);
+      expect(await stopExhaustedRetries({ orgId: poolOrgId, campaignId: capCampaignId, nowMs: later })).toEqual([]);
     } finally {
       await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, capCampaignId));
       await db.delete(leadContactMethods).where(eq(leadContactMethods.leadId, lead.id));
@@ -338,10 +339,10 @@ describe.skipIf(!hasRealDatabase)("channel-send reconcile reads against a real d
     await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `src-${randomUUID()}@itest.example`, source: "apollo" });
     const [row] = await db
       .insert(leadsCampaigns)
-      .values({ leadId: lead.id, campaignId: srcCampaignId, orgId, brandIds: [brandId], status: "served", statusReason: "source_found", servedAt: new Date(Date.now() - 60_000) })
+      .values({ leadId: lead.id, campaignId: srcCampaignId, orgId: poolOrgId, brandIds: [randomUUID()], status: "served", statusReason: "source_found", servedAt: new Date(Date.now() - 60_000) })
       .returning({ id: leadsCampaigns.id });
     try {
-      expect(await loadRetryCandidates({ orgId, campaignId: srcCampaignId, nowMs: Date.now() })).toHaveLength(0);
+      expect(await loadRetryCandidates({ orgId: poolOrgId, campaignId: srcCampaignId, nowMs: Date.now() })).toHaveLength(0);
       expect(await claimCandidate({ id: row.id, nowMs: Date.now(), runId: null, parentRunId: null })).toBe(false);
     } finally {
       await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, srcCampaignId));
