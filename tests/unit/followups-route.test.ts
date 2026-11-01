@@ -119,6 +119,32 @@ describe("POST /orgs/campaigns/:campaignId/followups/claim-next", () => {
     expect(pickFollowupCandidate).toHaveBeenCalledTimes(3);
   });
 
+  it("a due person held back (paid) is NAMED beside found=false; reason unchanged (WF-SILENT-FOLLOWUP-1101)", async () => {
+    const held = {
+      leadCampaignId: ROW,
+      leadId: "lead-1",
+      campaignId: "camp-1",
+      email: "info@martiandbb.com",
+      phone: null,
+      reason: "booked_outcome",
+      outcome: "sale",
+      message: "This person already paid, and a payment ends the follow-ups on this campaign, so no message was sent.",
+    };
+    pickFollowupCandidate
+      .mockResolvedValueOnce({ claimed: null, reason: "nothing_due", heldBack: [held] })
+      .mockResolvedValueOnce({ claimed: null, reason: "nothing_due" });
+
+    const res = await request(app).post(url).set(claimAuth).send({ alsoCampaignIds: ["camp-2"] });
+
+    expect(res.body).toEqual({ found: false, reason: "nothing_due", heldBack: [held] });
+  });
+
+  it("nobody held back: the answer carries no heldBack key (byte-identical to before)", async () => {
+    pickFollowupCandidate.mockResolvedValueOnce({ claimed: null, reason: "nothing_due" });
+    const res = await request(app).post(url).set(claimAuth).send({});
+    expect(res.body).toEqual({ found: false, reason: "nothing_due" });
+  });
+
   it("alsoCampaignIds: 400 when it is not an array of ids, nothing claimed", async () => {
     const res = await request(app).post(url).set(claimAuth).send({ alsoCampaignIds: "camp-2" });
     expect(res.status).toBe(400);

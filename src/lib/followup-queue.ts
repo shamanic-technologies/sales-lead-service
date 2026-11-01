@@ -438,19 +438,7 @@ export async function loadFollowupCandidates(params: {
       AND ${notJournalistSql()}
       ${params.person ? claimPersonSql(params.person) : sql``}
       AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
-      ${
-        params.policy === "current_client" || params.policy === "own_team"
-          ? sql``
-          : sql`AND (
-        ${params.policy === "pure_prospect" ? sql`${openOccurrenceSql()} OR ` : sql``}NOT EXISTS (
-          SELECT 1
-          FROM conversion_events ce
-          WHERE ce.withdrawn_at IS NULL
-            AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
-            AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
-        )
-      )`
-      }
+      ${bookedStopAppliesTo(params.policy) ? sql`AND NOT ${bookedStopHoldsSql(params.policy)}` : sql``}
     ORDER BY lc.followup_due_at ASC, lc.id ASC
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
@@ -472,6 +460,156 @@ export async function loadFollowupCandidates(params: {
       wonOnLedger: Boolean(r.won_on_ledger),
     }))
     .filter((c) => c.brandId.length > 0);
+}
+
+/** Does the follow-up loop's booked stop apply under this claim's policy? (`current_client` / `own_team`: never.) */
+function bookedStopAppliesTo(policy: ClaimRelationshipPolicy | undefined): boolean {
+  return policy !== "current_client" && policy !== "own_team";
+}
+
+/**
+ * TRUE when the booked stop holds this due row back (a live booked meeting, attended meeting or sale on the ledger for
+ * the row or its lead). Under `pure_prospect` a row a trigger occurrence named (open grant) is the policy's to decide,
+ * so the stop does not hold it. The candidate read excludes these rows; the held-back read names them.
+ */
+function bookedStopHoldsSql(policy: ClaimRelationshipPolicy | undefined) {
+  const booked = sql`EXISTS (
+          SELECT 1
+          FROM conversion_events ce
+          WHERE ce.withdrawn_at IS NULL
+            AND ce.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
+            AND (ce.lead_campaign_id = lc.id OR ce.matched_lead_id = lc.lead_id)
+        )`;
+  return policy === "pure_prospect" ? sql`(NOT ${openOccurrenceSql()} AND ${booked})` : booked;
+}
+
+/** Why a due person was deliberately NOT handed out by a claim (WF-SILENT-FOLLOWUP-1101). Every value is final. */
+export type HeldBackReason =
+  /** A booked meeting, an attended meeting or a sale is on record: the follow-ups on this queue are over. */
+  | "booked_outcome"
+  /** The brand knows this person as a journalist: never a sales follow-up. */
+  | "journalist"
+  /** They unsubscribed or asked us to stop: their row was stopped during this call. */
+  | "opted_out";
+
+export type HeldBackOutcome = (typeof FOLLOWUP_BOOKED_OUTCOMES)[number];
+
+/**
+ * A person who IS due on the claimed queue but whom this service held back, and why, in words a caller can pass on
+ * verbatim. Served beside a `found: false` answer so "nobody is due" is never confused with "the due person is held".
+ */
+export interface HeldBackFollowup {
+  leadCampaignId: string;
+  leadId: string;
+  campaignId: string;
+  email: string | null;
+  phone: string | null;
+  reason: HeldBackReason;
+  /** The strongest booked outcome on record (sale > meeting_attended > meeting_booked); null unless `booked_outcome`. */
+  outcome: HeldBackOutcome | null;
+  /** One plain English sentence saying why no message goes out. */
+  message: string;
+}
+
+const HELD_BACK_MESSAGES: Record<HeldBackReason | HeldBackOutcome, string> = {
+  sale: "This person already paid, and a payment ends the follow-ups on this campaign, so no message was sent.",
+  meeting_attended: "This person already attended a meeting, which ends the follow-ups on this campaign, so no message was sent.",
+  meeting_booked: "This person already booked a meeting, which ends the follow-ups on this campaign, so no message was sent.",
+  booked_outcome: "This person already booked or paid, which ends the follow-ups on this campaign, so no message was sent.",
+  journalist: "This person is known as a journalist for this brand, and journalists never get sales follow-ups, so no message was sent.",
+  opted_out: "This person unsubscribed or asked us to stop, so no message was sent.",
+};
+
+const OUTCOME_STRENGTH: readonly HeldBackOutcome[] = ["sale", "meeting_attended", "meeting_booked"];
+
+/** The held-back entry for one due person (pure). */
+export function heldBackEntry(
+  who: Pick<HeldBackFollowup, "leadCampaignId" | "leadId" | "campaignId" | "email" | "phone">,
+  reason: HeldBackReason,
+  outcomes: readonly string[] = [],
+): HeldBackFollowup {
+  const outcome = reason === "booked_outcome" ? (OUTCOME_STRENGTH.find((o) => outcomes.includes(o)) ?? null) : null;
+  return { ...who, reason, outcome, message: HELD_BACK_MESSAGES[outcome ?? reason] };
+}
+
+/** At most this many held-back people are named per held campaign (the answer stays small on a big queue). */
+export const HELD_BACK_LIMIT = 20;
+
+/**
+ * The due rows of this campaign the candidate read leaves out ON PURPOSE (booked stop, journalist), every other gate
+ * of the candidate read kept (due, not leased, claimable by the acting campaign, the person named, the responder cut).
+ * A READ: settles nothing. Asked only when a claim hands out nobody.
+ */
+export async function loadHeldBackFollowups(params: {
+  orgId: string;
+  campaignId: string;
+  nowMs: number;
+  responderStartedAtIso: string;
+  actingCampaignId: string;
+  policy?: ClaimRelationshipPolicy;
+  person?: ReturnType<typeof claimPersonKeys>;
+}): Promise<HeldBackFollowup[]> {
+  const now = new Date(params.nowMs).toISOString();
+  const leaseCutoff = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
+  const booked = bookedStopAppliesTo(params.policy) ? bookedStopHoldsSql(params.policy) : sql`false`;
+
+  const rows = (await db.execute(sql`
+    SELECT
+      lc.id, lc.lead_id, lc.campaign_id,
+      lower(em.value) AS email,
+      ph.value AS phone,
+      ${booked} AS booked,
+      NOT ${notJournalistSql()} AS journalist,
+      ARRAY(
+        SELECT DISTINCT ce2.event
+        FROM conversion_events ce2
+        WHERE ce2.withdrawn_at IS NULL
+          AND ce2.event = ANY(${sql.param(FOLLOWUP_BOOKED_OUTCOMES as unknown as string[])}::text[])
+          AND (ce2.lead_campaign_id = lc.id OR ce2.matched_lead_id = lc.lead_id)
+      ) AS outcomes
+    FROM leads_campaigns lc
+    LEFT JOIN LATERAL (
+      SELECT cm.value FROM lead_contact_methods cm
+      WHERE cm.lead_id = lc.lead_id AND cm.channel = 'email'
+      ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
+      LIMIT 1
+    ) em ON true
+    LEFT JOIN LATERAL (
+      SELECT cm.value FROM lead_contact_methods cm
+      WHERE cm.lead_id = lc.lead_id AND cm.channel = 'phone'
+      ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
+      LIMIT 1
+    ) ph ON true
+    WHERE lc.org_id = ${params.orgId}
+      AND lc.campaign_id = ${params.campaignId}
+      AND lc.followup_due_at IS NOT NULL
+      AND lc.followup_due_at <= ${now}
+      AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
+      AND ${handedClaimableSql(params.actingCampaignId)}
+      AND ${ownedByActingSql(params.actingCampaignId)}
+      ${params.person ? claimPersonSql(params.person) : sql``}
+      AND NOT (COALESCE(lc.followup_count, 0) = 0 AND lc.followup_due_at < ${params.responderStartedAtIso}::timestamptz)
+      AND (${booked} OR NOT ${notJournalistSql()})
+    ORDER BY lc.followup_due_at ASC, lc.id ASC
+    LIMIT ${HELD_BACK_LIMIT}
+  `)) as unknown as Array<{
+    id: string;
+    lead_id: string;
+    campaign_id: string;
+    email: string | null;
+    phone: string | null;
+    booked: boolean | null;
+    journalist: boolean | null;
+    outcomes: string[] | null;
+  }>;
+
+  return rows.map((r) =>
+    heldBackEntry(
+      { leadCampaignId: r.id, leadId: r.lead_id, campaignId: r.campaign_id, email: r.email ?? null, phone: r.phone ?? null },
+      r.booked ? "booked_outcome" : "journalist",
+      r.outcomes ?? [],
+    ),
+  );
 }
 
 /**
@@ -600,6 +738,8 @@ export type FollowupClaim = (
 ) & {
   /** Present ONLY when the claim stated a relationship policy. */
   relationships?: RelationshipGateReport;
+  /** Present ONLY when nobody was claimed AND a due person was deliberately held back (WF-SILENT-FOLLOWUP-1101). */
+  heldBack?: HeldBackFollowup[];
 };
 
 /**
@@ -801,7 +941,25 @@ export async function pickFollowupCandidate(params: {
     ? { policy: params.relationships, refused: [], pending: [] }
     : undefined;
   const withReport = (claim: FollowupClaim): FollowupClaim => (report ? { ...claim, relationships: report } : claim);
-  if (candidates.length === 0) return withReport({ claimed: null, reason: "nothing_due" });
+  // Nobody handed out: name the due people held back on purpose, so "nothing due" never hides "held" (WF-SILENT-FOLLOWUP-1101).
+  const nobody = async (reason: FollowupEmptyReason, optedOut: FollowupCandidate[] = []): Promise<FollowupClaim> => {
+    const heldBack = [
+      ...optedOut.map((c) =>
+        heldBackEntry({ leadCampaignId: c.id, leadId: c.leadId, campaignId: c.campaignId, email: c.email, phone: c.phone }, "opted_out"),
+      ),
+      ...(await loadHeldBackFollowups({
+        orgId: params.orgId,
+        campaignId: params.campaignId,
+        nowMs,
+        responderStartedAtIso,
+        actingCampaignId: params.actingCampaignId,
+        policy: params.relationships,
+        person: params.person ?? null,
+      })),
+    ];
+    return withReport(heldBack.length > 0 ? { claimed: null, reason, heldBack } : { claimed: null, reason });
+  };
+  if (candidates.length === 0) return nobody("nothing_due");
 
   // One gateway call per brand present in the window — in practice exactly one, because a
   // campaign's rows share a brand.
@@ -836,6 +994,7 @@ export async function pickFollowupCandidate(params: {
   const humanFacts = phoneOnly.length > 0 ? await loadHumanFacts(phoneOnly.map((c) => c.leadId)) : null;
 
   const optedOutIds: string[] = [];
+  const optedOutCandidates: FollowupCandidate[] = [];
   const answerable: FollowupCandidate[] = [];
   for (const candidate of candidates) {
     const human = candidate.email ? null : humanFacts?.get(candidate.leadId);
@@ -844,6 +1003,7 @@ export async function pickFollowupCandidate(params: {
       : Boolean(human?.optedOut || human?.doNotContact);
     if (optedOut) {
       optedOutIds.push(candidate.id);
+      optedOutCandidates.push(candidate);
     } else {
       answerable.push(candidate);
     }
@@ -939,9 +1099,9 @@ export async function pickFollowupCandidate(params: {
     await budget?.close();
   }
 
-  if (report && report.pending.length > 0) return withReport({ claimed: null, reason: "relationship_pending" });
-  if (report && report.refused.length > 0) return withReport({ claimed: null, reason: "relationship_refused" });
-  return withReport({ claimed: null, reason: "all_claimed" });
+  if (report && report.pending.length > 0) return nobody("relationship_pending", optedOutCandidates);
+  if (report && report.refused.length > 0) return nobody("relationship_refused", optedOutCandidates);
+  return nobody("all_claimed", optedOutCandidates);
 }
 
 export interface FollowupState {
