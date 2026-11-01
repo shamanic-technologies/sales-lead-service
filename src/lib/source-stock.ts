@@ -4,7 +4,7 @@ import { db } from "../db/index.js";
 import { readBuyingSignal, type BuyingSignal } from "./buying-signal.js";
 import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
-import { journalistScopeOf } from "./brand-journalists.js";
+import { serveExclusionScopeOf } from "./disqualified-sql.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
 import { contactOf, dueReachClauses, markDueServe, openDueServeOfSourceRow, openDueServeSql, postponeDue } from "./lead-followup-date.js";
 import type { ProspectFollowupVerdict } from "./prospect-followup.js";
@@ -110,6 +110,8 @@ export async function claimStockedLead(params: {
   relationships?: RelationshipScope | null;
   /** Tactic "Fresh contacts only" (src/lib/recently-emailed.ts): absent = nothing asked. */
   recentlyEmailed?: RecentlyEmailedScope | null;
+  /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
+  offerId?: string | null;
   /** Asks the audience's owner whether a found person still fits it (never answered here). */
   askFit: AskAudienceFit;
   /**
@@ -155,9 +157,9 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
              AND NOT EXISTS (
                SELECT 1 FROM leads_campaigns o WHERE o.lead_id = s.lead_id AND o.campaign_id = ${params.outreachCampaignId}
              )
-             ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))})
+             ${reachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, serveExclusionScopeOf(params.orgId, params.brandIds, params.offerId ?? null))})
            OR (${params.askDueOwed ? sql`TRUE` : sql`FALSE`} AND ${openDueServeSql(sql`s.id`)}
-             ${dueReachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, journalistScopeOf(params.orgId, params.brandIds))})
+             ${dueReachClauses(sql`s.lead_id`, params.reachableBy, params.acceptedEmails, params.relationships, params.recentlyEmailed, serveExclusionScopeOf(params.orgId, params.brandIds, params.offerId ?? null))})
          )
        ORDER BY COALESCE(s.served_at, s.created_at) ASC, s.id ASC
        LIMIT 1

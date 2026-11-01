@@ -53,6 +53,11 @@ const leadIsJournalist = vi.fn(async (_leadId: string, _orgId: string, _brandIds
 vi.mock("../../src/lib/brand-journalists.js", () => ({
   leadIsJournalist: (...args: unknown[]) => leadIsJournalist(...(args as [string, string, string[]])),
 }));
+// A lead or company marked Disqualified for the brand (disqualified-sql.ts, COMPANY-MARK-SERVE-1101): nobody by default.
+const leadServeDisqualification = vi.fn(async (_leadId: string, _orgId: string, _brandIds: string[], _offerId: string | null) => ({ lead: false, company: false }));
+vi.mock("../../src/lib/disqualified-sql.js", () => ({
+  leadServeDisqualification: (...args: unknown[]) => leadServeDisqualification(...(args as [string, string, string[], string | null])),
+}));
 vi.mock("../../src/lib/recently-emailed.js", () => ({
   leadRecentlyEmailed: (...args: unknown[]) => leadRecentlyEmailed(...(args as [])),
   assertRecentlyEmailedReadable: (...args: unknown[]) => assertRecentlyEmailedReadable(...(args as [])),
@@ -906,6 +911,23 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     leadIsJournalist.mockImplementation(async () => false);
   });
 
+  it("never hands out a person whose company the client marked Disqualified: kept filed, the next one is bought (COMPANY-MARK-SERVE-1101)", async () => {
+    served("lead-acme", "bob@acme.com");
+    served("lead-other", "buyer@x.com");
+    leadServeDisqualification.mockImplementation(async (leadId: string) => ({ lead: false, company: leadId === "lead-acme" }));
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-other" });
+
+    const result = await pullNext(baseParams);
+    leadServeDisqualification.mockImplementation(async () => ({ lead: false, company: false }));
+
+    expect(result.found).toBe(true);
+    expect(result.lead?.leadId).toBe("lead-other");
+    expect(serveNext).toHaveBeenCalledTimes(2);
+    expect(leadServeDisqualification).toHaveBeenCalledWith("lead-acme", "org-1", ["brand-1"], null);
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-acme", campaignId: "campaign-1", status: "served" }));
+    expect(buildFullLead).toHaveBeenCalledTimes(1);
+  });
+
   it("not asked: today's serve, a recently emailed person is handed out, nothing is looked up", async () => {
     served("lead-emailed", "emailed@x.com");
     leadRecentlyEmailed.mockResolvedValue(true);
@@ -942,6 +964,7 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     ]);
     expect(people[1].checks).toEqual([
       { rule: "journalist", inputs: { journalist: false }, passed: true },
+      { rule: "disqualified", inputs: { lead: false, company: false }, passed: true },
       { rule: "recently_emailed", inputs: { window: "3_months", emailedWithinWindow: true }, passed: false },
     ]);
     expect(walk.header.context.offerId).toBeNull();

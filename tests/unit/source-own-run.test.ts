@@ -9,6 +9,7 @@ const serveNext = vi.fn();
 const serveThroughCandidates = vi.fn(async (..._a: unknown[]): Promise<unknown> => null);
 vi.mock("../../src/lib/candidate-serve.js", () => ({ serveThroughCandidates: (...a: unknown[]) => serveThroughCandidates(...a) }));
 vi.mock("../../src/lib/brand-journalists.js", () => ({ leadIsJournalist: vi.fn(async () => false) }));
+vi.mock("../../src/lib/disqualified-sql.js", () => ({ leadServeDisqualification: vi.fn(async () => ({ lead: false, company: false })) }));
 vi.mock("../../src/lib/serve-identity.js", () => ({ resolveServedIdentity: vi.fn(async () => null) }));
 
 const { HumanServiceStalledError } = vi.hoisted(() => ({ HumanServiceStalledError: class HumanServiceStalledError extends Error {} }));
