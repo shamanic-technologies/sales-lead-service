@@ -32,7 +32,7 @@ import {
   ClaimRelationshipUnavailableError,
   isClaimRelationshipPolicy,
 } from "../lib/followup-relationship-gate.js";
-import type { FollowupEmptyReason, RelationshipGateReport } from "../lib/followup-queue.js";
+import type { FollowupEmptyReason, HeldBackFollowup, RelationshipGateReport } from "../lib/followup-queue.js";
 
 const router = Router();
 
@@ -213,6 +213,8 @@ router.post(
     try {
       let result: Awaited<ReturnType<typeof pickFollowupCandidate>> | null = null;
       let reasonNobody: FollowupEmptyReason | undefined;
+      // Due people held back on purpose across the held campaigns (WF-SILENT-FOLLOWUP-1101); served only when nobody is claimed.
+      const heldBack: HeldBackFollowup[] = [];
       for (const heldCampaignId of heldCampaignIds) {
         const attempt = await pickFollowupCandidate({
           orgId: req.orgId as string,
@@ -242,13 +244,19 @@ router.post(
           result = attempt;
           break;
         }
+        if (attempt.heldBack) heldBack.push(...attempt.heldBack);
         // "Someone was due but taken" says more than "nobody was due", whichever queue said it; a person
         // still undecided says more than one refused (they are still owed, the caller asks again).
         if (reasonNobody === undefined || EMPTY_REASON_RANK[attempt.reason] > EMPTY_REASON_RANK[reasonNobody]) reasonNobody = attempt.reason;
       }
 
       if (!result?.claimed) {
-        res.json({ found: false, reason: reasonNobody, ...(report ? { relationships: report } : {}) });
+        res.json({
+          found: false,
+          reason: reasonNobody,
+          ...(report ? { relationships: report } : {}),
+          ...(heldBack.length > 0 ? { heldBack } : {}),
+        });
         return;
       }
 

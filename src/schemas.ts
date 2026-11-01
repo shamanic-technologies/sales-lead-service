@@ -5858,6 +5858,32 @@ const FollowupClaimSchema = z
       })
       .optional()
       .openapi({ description: "Present ONLY when the body stated `relationships` (absent = the response is byte-identical to a claim with no policy)." }),
+    heldBack: z
+      .array(
+        z.object({
+          leadCampaignId: z.string().openapi({ description: "The due leads_campaigns row held back." }),
+          leadId: z.string(),
+          campaignId: z.string().openapi({ description: "The held campaign whose row it is." }),
+          email: z.string().nullable().openapi({ description: "The person's canonical email; null for a person known by phone only." }),
+          phone: z.string().nullable().openapi({ description: "The person's first registered phone (E.164 as stored), null when none." }),
+          reason: z.enum(["booked_outcome", "journalist", "opted_out"]).openapi({
+            description:
+              "Why this due person was NOT handed out. Every value is final for this queue; forward `message` verbatim. booked_outcome: a booked meeting, an attended meeting or a sale (a payment) is on record for the row or the lead, which ends the follow-ups on this queue (`outcome` names the strongest). journalist: the brand knows this person as a journalist, never a sales follow-up. opted_out: they unsubscribed or asked us to stop; their row was stopped during this call. New values may be added: treat an unknown one as final and forward `message`.",
+          }),
+          outcome: z.enum(["sale", "meeting_attended", "meeting_booked"]).nullable().openapi({
+            description: "The strongest booked outcome on record (sale > meeting_attended > meeting_booked); null unless reason is booked_outcome.",
+          }),
+          message: z.string().openapi({
+            description: "One plain English sentence saying why no message goes out to this person, written to be passed on verbatim.",
+            example: "This person already paid, and a payment ends the follow-ups on this campaign, so no message was sent.",
+          }),
+        }),
+      )
+      .optional()
+      .openapi({
+        description:
+          "Present ONLY when found=false AND at least one person IS due on the claimed queue(s) but was deliberately held back (WF-SILENT-FOLLOWUP-1101): tells \"nobody is due\" (absent) from \"the due person is held, and why\". `reason` keeps its meaning unchanged (a queue whose only due person is held still answers nothing_due). At most 20 per held campaign, oldest due first; when the body names a `person`, only that person.",
+      }),
     followup: z
       .object({
         id: z.string().openapi({ description: "The leads_campaigns row to answer for." }),

@@ -191,6 +191,53 @@ describe.skipIf(!hasRealDatabase)("follow-up queue against a real database", () 
     expect(candidates).toHaveLength(0);
   });
 
+  it("a campaign whose only due person PAID answers nothing_due AND names them, held back by the booked stop (WF-SILENT-FOLLOWUP-1101)", async () => {
+    const id = await seedDueRow(new Date(Date.now() - 60_000));
+    const [row] = await db
+      .select({ leadId: leadsCampaigns.leadId })
+      .from(leadsCampaigns)
+      .where(eq(leadsCampaigns.id, id));
+    const [cm] = await db
+      .select({ value: leadContactMethods.value })
+      .from(leadContactMethods)
+      .where(eq(leadContactMethods.leadId, row.leadId));
+
+    const { conversionEvents } = await import("../../src/db/schema.js");
+    // A CRM sale keyed to the PERSON (no lifecycle row), as the prod case (lead 3a4f1089, campaign 3b19055d).
+    await db.insert(conversionEvents).values({
+      brandId,
+      orgId,
+      event: "sale",
+      matchConfidence: "deterministic",
+      attributionStatus: "attributed",
+      source: "crm",
+      matchedLeadId: row.leadId,
+    });
+
+    const claim = await pickFollowupCandidate({ orgId, campaignId, runId: randomUUID(), actingCampaignId, context: { orgId } });
+
+    expect(claim).toEqual({
+      claimed: null,
+      reason: "nothing_due",
+      heldBack: [
+        {
+          leadCampaignId: id,
+          leadId: row.leadId,
+          campaignId,
+          email: cm.value.toLowerCase(),
+          phone: null,
+          reason: "booked_outcome",
+          outcome: "sale",
+          message: "This person already paid, and a payment ends the follow-ups on this campaign, so no message was sent.",
+        },
+      ],
+    });
+    // Still held: the row was not claimed, stopped or touched.
+    const state = await readFollowupState(orgId, id);
+    expect(state).toMatchObject({ claimedAt: null, stoppedReason: null });
+    expect(state?.dueAt).not.toBeNull();
+  });
+
   it("a withdrawn booking stops stopping them — the read filters withdrawn statements", async () => {
     const id = await seedDueRow(new Date(Date.now() - 60_000));
     const { conversionEvents } = await import("../../src/db/schema.js");
