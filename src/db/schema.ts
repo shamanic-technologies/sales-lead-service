@@ -1139,6 +1139,8 @@ export const candidateScreenings = pgTable(
     // The candidate's company as human-service offered it (migration 0063); NULL on older rows.
     companyDomain: text("company_domain"),
     companyName: text("company_name"),
+    // sha256 of the judged input (candidate-serve.ts `screenInputHash`, migration 0136); NULL on older rows = never reused.
+    inputHash: text("input_hash"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
