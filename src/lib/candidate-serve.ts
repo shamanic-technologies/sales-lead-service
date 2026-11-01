@@ -37,7 +37,8 @@ import {
 } from "./people-client.js";
 import { criterionKey, judge, mustPassCriteria, observe, probeOf, recordCheck, subjectFromOrganization, YES_THRESHOLD } from "./qualification.js";
 import { judgeYesNo } from "./qualification-judge.js";
-import { walkCandidate, walkContext, type WalkCandidateHandle } from "./serve-walk.js";
+import { walkCandidate, walkContext, walkEvent, type WalkCandidateHandle } from "./serve-walk.js";
+import { BlankCandidateError, isBlankCandidate, noteBlankCandidate } from "./blank-candidates.js";
 import { TregMeter, type SpendIdentity } from "./treg-client.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { candidateDecisions } from "../db/schema.js";
@@ -149,6 +150,8 @@ interface ScreenVerdict {
 
 async function screen(c: Candidate, target: { text: string; field: string } | null, ctx: ServiceContext, identity: SpendIdentity, recordRunId: string = identity.runId): Promise<ScreenVerdict> {
   if (!target?.text?.trim()) return { pass: true, reason: "no_target_text", walkInputs: { noTarget: true } };
+  // BLANK-CANDIDATES-1101: nothing to judge on is never a verdict, and never a billed judgment.
+  if (isBlankCandidate(c)) throw new BlankCandidateError(c.candidateId);
   const hash = targetHash(target.text);
   const [prior] = await db
     .select()
@@ -280,6 +283,15 @@ export async function serveThroughCandidates(
     }
     const candidate = next.candidate;
 
+    // BLANK-CANDIDATES-1101: a candidate with an empty teaser has nothing the screen can judge. Neither passed nor
+    // declined (a decline is final), no judgment asked: a loud failure of the producer (logged, counted for the
+    // Monitoring hub). This audience is not asked again this run (it would hand the same candidate back): `pending`,
+    // an unfinished look, never exhaustion.
+    if (next.target?.text?.trim() && isBlankCandidate(candidate)) {
+      walkEvent("candidate_blank", { audienceId, candidateId: candidate.candidateId });
+      await noteBlankCandidate(candidate, { orgId: ctx.orgId, brandId: ctx.brandId ?? null, runId: ctx.runId ?? null });
+      return { status: "pending", person: null };
+    }
     if (mustPass === null) {
       mustPass = ctx.brandId ? await mustPassCriteria(ctx.orgId, ctx.brandId, offerId) : [];
     }

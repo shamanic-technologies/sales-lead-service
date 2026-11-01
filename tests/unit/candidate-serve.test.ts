@@ -38,6 +38,9 @@ vi.mock("../../src/lib/candidate-decision-script.js", async (orig) => ({
   decisionScriptSwitch: async () => ({ switched: false, dynasty: null }),
 }));
 
+const noteBlankCandidate = vi.fn(async (..._a: unknown[]) => undefined);
+vi.mock("../../src/lib/blank-candidates.js", async (orig) => ({ ...((await orig()) as object), noteBlankCandidate: (...a: unknown[]) => noteBlankCandidate(...a) }));
+
 const priorScreenings: unknown[] = [];
 const inserted: unknown[] = [];
 vi.mock("../../src/db/index.js", () => ({
@@ -109,6 +112,33 @@ describe("serveThroughCandidates", () => {
     declineCandidate.mockRejectedValueOnce(new Error("decline 500"));
     vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(serveThroughCandidates("aud-1", ctx, "offer-a")).rejects.toBeInstanceOf(HumanServiceStalledError);
+  });
+
+  // BLANK-CANDIDATES-1101: Doc Dinners' candidates arrived with an empty teaser; Jev saw nothing and declined 355/355.
+  it("a candidate with an empty teaser is neither passed nor declined, no judgment billed, recorded loud, and the audience is left for this run", async () => {
+    const blank = {
+      ...cand("blank"),
+      person: { name: null, title: null, headline: null, seniority: null, city: null, state: null, country: null },
+      company: { name: null, domain: "wellsetdenver.com", industry: null, employees: null, city: null, state: null, country: null, keywords: null },
+    };
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: blank, target });
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual({ status: "pending", person: null });
+    expect(judgeYesNo).not.toHaveBeenCalled();
+    expect(declineCandidate).not.toHaveBeenCalled();
+    expect(revealCandidate).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+    expect(inserted).toHaveLength(0);
+    expect(nextCandidate).toHaveBeenCalledTimes(1);
+    expect(noteBlankCandidate).toHaveBeenCalledWith(blank, { orgId: "org-1", brandId: "brand-1", runId: "run-1" });
+  });
+
+  it("an audience with no target text never screens, so a blank candidate there is decided as before", async () => {
+    const blank = { ...cand("blank"), person: { name: null, title: null, headline: null, seniority: null, city: null, state: null, country: null } };
+    blank.company = { ...blank.company, name: null, industry: null, employees: null, country: null, keywords: null };
+    nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: blank, target: null });
+    revealCandidate.mockResolvedValueOnce({ status: "served", person, replayed: false });
+    expect(await serveThroughCandidates("aud-1", ctx, "offer-a")).toEqual(expect.objectContaining({ status: "served", person }));
+    expect(noteBlankCandidate).not.toHaveBeenCalled();
   });
 
   it("an audience not served through candidates hands back to serve-next", async () => {

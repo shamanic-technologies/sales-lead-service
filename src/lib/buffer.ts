@@ -242,7 +242,9 @@ export async function pullNext(
   const startedAt = Date.now();
   const mode: PullNextMode = params.mode ?? { kind: "serve" };
   // A source unit's own run: stores what it finds under itself, contacts nobody (no retry/released pool, no Bonus).
-  const finding = mode.kind === "find" || mode.kind === "find_contacted";
+  // "Lead follow-up due" (find_due) is a source's own run too: before BLANK-CANDIDATES-1101 it drained the retry pool of
+  // the source itself and handed its own finds out 100+ times each (campaign a70d7e5b, ~2,000 runs a day, no send).
+  const finding = mode.kind === "find" || mode.kind === "find_contacted" || mode.kind === "find_due";
 
   // A source unit's own run with no audience of its origin: it looked at nobody (never exhaustion).
   if (mode.kind === "find" && mode.audienceIds.length === 0) {

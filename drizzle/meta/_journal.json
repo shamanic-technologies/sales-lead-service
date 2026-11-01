@@ -946,6 +946,13 @@
       "when": 1788808080000,
       "tag": "0134_candidate_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1788894480000,
+      "tag": "0135_blank_candidates_retry_cap",
+      "breakpoints": true
     }
   ]
 }
