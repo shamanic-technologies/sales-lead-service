@@ -175,6 +175,11 @@ interface SubjectRow {
   updated_at: Ts;
 }
 
+/** Every spelling an outreach copy may hold an address under (as registered, and lower-cased), for an index-friendly `= ANY`. */
+export function addressSpellings(emails: readonly string[]): string[] {
+  return Array.from(new Set(emails.flatMap((e) => [e, e.toLowerCase()])));
+}
+
 /** Derive the rows of these subjects (pure orchestration of reads; nothing written). */
 export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectRow[], catalogue: LifecycleCatalogue): Promise<UniboxRow[]> {
   if (subjects.length === 0) return [];
@@ -215,7 +220,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
   for (const s of subjects) for (const c of s.contact_points ?? []) subjectsOfPoint.set(c, [...(subjectsOfPoint.get(c) ?? []), keyOf(s)]);
   const points = [...subjectsOfPoint.keys()];
 
-  const [timeline, crm, humanFacts, marks, identities] = await Promise.all([
+  const [timeline, crm, humanFacts, marks, identities, answers] = await Promise.all([
     leadIds.length === 0
       ? Promise.resolve([] as Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>)
       : (db.execute(sql`
@@ -253,6 +258,22 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
              FROM leads_organizations lo WHERE lo.lead_id = l.id AND lo.current AND coalesce(lo.title, '') <> '') AS titles
           FROM leads l WHERE l.id = ANY(${sql.param(leadIds)}::uuid[])
         `) as unknown as Promise<Array<{ lead_id: string; first_name: string | null; last_name: string | null; name: string | null; titles: Array<{ org: string; title: string }> | null }>>),
+    // Our ANSWERS in the outreach thread (UNIBOX-INTEREST-1102): an email we sent into their thread outside the sequence
+    // (`reply_sent`: our automated responder, or a person of the brand writing from the thread), the CURRENT fact of each
+    // subject of the outreach copy (a withdrawn subject is absent). Without it a thread we answered read "waiting on us".
+    emails.length === 0
+      ? Promise.resolve([] as Array<{ email: string; last_at: Ts | null }>)
+      : (db.execute(sql`
+          SELECT lower(c.lead_email) AS email, max(c.occurred_at) AS last_at
+          FROM (
+            SELECT DISTINCT ON (o.subject_key) o.type, o.lead_email, o.occurred_at, o.brand_ids
+            FROM outreach_facts o
+            WHERE o.org_id = ${scope.orgId} AND o.lead_email = ANY(${sql.param(addressSpellings(subjects.flatMap((x) => x.emails ?? [])))}::text[])
+            ORDER BY o.subject_key, o.seq DESC
+          ) c
+          WHERE c.type = 'reply_sent' AND ${scope.brandId} = ANY(c.brand_ids)
+          GROUP BY 1
+        `) as unknown as Promise<Array<{ email: string; last_at: Ts | null }>>),
   ]);
   const identityOfLead = new Map(identities.map((r) => [r.lead_id, r]));
 
@@ -281,6 +302,14 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       if (UNSUBSCRIBED_LABELS.includes(t.label)) unsubscribed.add(k);
       if (t.label === "bounced") bounced.add(k);
       touch(k, iso(t.last_at));
+    }
+  }
+  for (const a of answers) {
+    for (const sub of subjects) {
+      if (!(sub.emails ?? []).some((e) => e.toLowerCase() === a.email)) continue;
+      const k = keyOf(sub);
+      oursAt.set(k, later(oursAt.get(k) ?? null, iso(a.last_at)));
+      touch(k, iso(a.last_at));
     }
   }
   const customerFacts = new Map<string, CustomerFact[]>();

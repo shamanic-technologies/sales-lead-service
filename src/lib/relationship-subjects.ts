@@ -455,7 +455,22 @@ function detailOf(p: Record<string, unknown>): Record<string, unknown> | null {
  * Visits: the newest VISIT_LINES each a dated line with what the visit shows, plus one summary line (count, first date).
  * Product events: the newest PRODUCT_EVENT_LINES each a dated line in crm's words, older ones counted on one line.
  */
-export function threadLinesOf(allFacts: readonly ThreadFact[], outreach: ReadonlyArray<{ label: string; occurred_at: Date | string | null; source: string }>): ThreadLine[] {
+/**
+ * One line of OUR OUTREACH thread (UNIBOX-INTEREST-1102): a timeline label (`initial_email`, `question`, `opted_out`...),
+ * and for a reply of theirs (`source = 'reply'`, direction `in`) the reply's CURRENT verdict as the outreach copy states
+ * it, or an answer of ours in that thread (`reply_sent`, direction `out`, written by our automation or a person of the
+ * brand). The reply's words are not held here; without its verdict Jev read "I would like to learn more about what you
+ * can do for us" as a bare `question` label and answered 0.42 (Edmund Bartlett, Beyond Logic, 2026-11-02).
+ */
+export interface OutreachLine {
+  label: string;
+  occurred_at: Date | string | null;
+  source: string;
+  direction?: "in" | "out" | null;
+  detail?: Record<string, unknown> | null;
+}
+
+export function threadLinesOf(allFacts: readonly ThreadFact[], outreach: readonly OutreachLine[]): ThreadLine[] {
   const at = (v: Date | string | null) => (v === null ? null : toIsoTimestamp(v));
   // A product event the brand's server recorded about them in no session is our plumbing, never something they did.
   const facts = allFacts.filter((f) => !isSessionlessProductEvent(f.type, f.payload));
@@ -507,7 +522,7 @@ export function threadLinesOf(allFacts: readonly ThreadFact[], outreach: Readonl
     lines.push({ at: null, source: "product", kind: `fired ${productEvents.length} event(s) in the brand's product${since}`, direction: null, text: null, detail: null });
   }
   for (const o of outreach) {
-    lines.push({ at: at(o.occurred_at), source: `our_outreach:${o.source}`, kind: o.label, direction: null, text: null, detail: null });
+    lines.push({ at: at(o.occurred_at), source: `our_outreach:${o.source}`, kind: o.label, direction: o.direction ?? null, text: null, detail: o.detail ?? null });
   }
   return lines;
 }
@@ -531,10 +546,54 @@ export async function readThread(s: Subject): Promise<ThreadLine[]> {
     ORDER BY f.occurred_at NULLS FIRST, f.seq
   `)) as unknown as ThreadFact[];
   const outreach = (await db.execute(sql`
-    SELECT f.label, f.occurred_at, f.source
-    FROM lead_timeline_facts f
-    WHERE f.lead_id IN (${relationLeadIdsSql(s)}) AND f.org_id = ${s.orgId} AND f.brand_id = ${s.brandId} AND f.withdrawn_at IS NULL
-    ORDER BY f.occurred_at DESC NULLS LAST LIMIT 60
-  `)) as unknown as Array<{ label: string; occurred_at: Date | string | null; source: string }>;
-  return threadLinesOf(facts, outreach.reverse());
+    SELECT x.label, x.occurred_at, x.source, x.verdict, x.sent_by, x.subject FROM (
+      SELECT f.label, f.occurred_at, f.source, o.raw->'reply'->'verdict' AS verdict, NULL::text AS sent_by, f.detail->>'subject' AS subject
+      FROM lead_timeline_facts f
+      LEFT JOIN LATERAL (
+        SELECT c.raw FROM outreach_facts c WHERE f.source = 'reply' AND c.subject_key = f.id ORDER BY c.seq DESC LIMIT 1
+      ) o ON true
+      WHERE f.lead_id IN (${relationLeadIdsSql(s)}) AND f.org_id = ${s.orgId} AND f.brand_id = ${s.brandId} AND f.withdrawn_at IS NULL
+      UNION ALL
+      SELECT 'reply_sent', c.occurred_at, 'reply_sent', NULL, c.raw->'replySent'->>'sentBy', c.raw->'replySent'->>'subject'
+      FROM (
+        SELECT DISTINCT ON (o.subject_key) o.type, o.occurred_at, o.raw, o.brand_ids
+        FROM outreach_facts o
+        WHERE o.org_id = ${s.orgId} AND o.lead_email = ANY(${sql.param([...new Set([...s.emails, ...s.emails.map((e) => e.toLowerCase())]), ""])}::text[])
+        ORDER BY o.subject_key, o.seq DESC
+      ) c
+      WHERE c.type = 'reply_sent' AND ${s.brandId} = ANY(c.brand_ids)
+    ) x
+    ORDER BY x.occurred_at DESC NULLS LAST LIMIT 60
+  `)) as unknown as RawOutreachLine[];
+  return threadLinesOf(facts, outreach.reverse().map(outreachLineOf));
+}
+
+export interface RawOutreachLine {
+  label: string;
+  occurred_at: Date | string | null;
+  source: string;
+  verdict: Record<string, unknown> | null;
+  sent_by: string | null;
+  subject: string | null;
+}
+
+/** The verdict fields a reply line carries: what the reply's own classifier stated, never re-derived here. */
+const REPLY_VERDICT_KEYS = ["classification", "positiveSignal", "declinedOffer", "stopRequested", "notOurTarget", "notOurTargetReason", "automatedAnswer", "handedToPerson", "handoffReason"];
+
+/** PURE: one stored outreach row as Jev's line: a reply of theirs is `in` with its verdict, an answer of ours `out` with who wrote it. */
+export function outreachLineOf(r: RawOutreachLine): OutreachLine {
+  const subject = typeof r.subject === "string" && r.subject ? { subject: r.subject.slice(0, DETAIL_VALUE_CHARS) } : {};
+  if (r.source === "reply_sent") {
+    const writtenBy = r.sent_by === "human" ? "a person of the brand" : r.sent_by === "automation" ? "the brand's automated responder" : null;
+    return { label: "answered them in the thread", occurred_at: r.occurred_at, source: r.source, direction: "out", detail: { ...subject, ...(writtenBy ? { writtenBy } : {}) } };
+  }
+  if (r.source !== "reply") return { label: r.label, occurred_at: r.occurred_at, source: r.source };
+  const verdict: Record<string, unknown> = {};
+  for (const k of REPLY_VERDICT_KEYS) {
+    const v = r.verdict?.[k];
+    if (v === undefined || v === null || v === false || v === "") continue;
+    verdict[k] = v;
+  }
+  const detail = { ...subject, ...(Object.keys(verdict).length > 0 ? { replyVerdict: verdict } : {}) };
+  return { label: `replied (${r.label})`, occurred_at: r.occurred_at, source: r.source, direction: "in", detail: Object.keys(detail).length > 0 ? detail : null };
 }

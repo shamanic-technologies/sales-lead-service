@@ -104,7 +104,7 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads WHERE id = ANY(${sql.param(createdLeads)}::uuid[])`);
     await db.execute(sql`DELETE FROM organizations WHERE id = ANY(${sql.param(createdOrgs)}::uuid[])`);
-    for (const t of ["crm_facts", "relationship_subjects", "relationship_evidence", "lead_timeline_facts", "lead_disqualification_marks", "unibox_rows"]) {
+    for (const t of ["crm_facts", "relationship_subjects", "relationship_evidence", "lead_timeline_facts", "lead_disqualification_marks", "unibox_rows", "outreach_facts"]) {
       await db.execute(sql`DELETE FROM ${sql.raw(t)} WHERE org_id = ${orgId}`);
     }
   });
@@ -327,5 +327,57 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect(thread.map((l) => l.kind)).toEqual(["signup"]); // "dinner tonight?" is the personal relation's, never here
     expect((await readUniboxLead(scope, null, `rel:${adam}:org:${cifacom}`))!.lead.humanId).toBe(adam);
     expect(await readUniboxLead(scope, null, `rel:${adam}:pro`)).toBeNull();
+  });
+
+  it("a reply to our outreach reaches Jev with its verdict, and our answers in that thread are ours: waiting on them, not on us (UNIBOX-INTEREST-1102)", async () => {
+    const edmund = randomUUID();
+    await connectionTag({ orgId, brandId, human: edmund, personKey: "email:ed@bi.com", name: "Edmund", emails: ["ed@bi.com"] });
+    const [lead] = (await db.execute(sql`
+      INSERT INTO leads (first_name, last_name, name, human_id) VALUES ('Edmund', 'Bartlett', 'Edmund Bartlett', ${edmund}::uuid) RETURNING id::text`)) as unknown as Array<{ id: string }>;
+    createdLeads.push(lead.id);
+    await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'email', 'Ed@bi.com', 'itest')`);
+    await db.execute(sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at)
+      VALUES (${lead.id}::uuid, 'camp-cold', ${orgId}, ${sql.param([brandId])}::text[], 'served', '2026-11-02T08:00:00Z')`);
+    const replyKey = `reply:imap:${randomUUID()}`;
+    await db.execute(sql`
+      INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, campaign_id, label, source, source_ref, occurred_at, detail)
+      VALUES (${`ievt:${randomUUID()}`}, ${orgId}, ${brandId}, ${lead.id}::uuid, 'camp-cold', 'initial_email', 'outreach', ${randomUUID()}, '2026-11-02T12:23:48Z', '{"step":1}'::jsonb),
+             (${replyKey}, ${orgId}, ${brandId}, ${lead.id}::uuid, 'camp-cold', 'question', 'reply', ${replyKey}, '2026-11-02T13:22:45Z',
+              '{"subject":"Re: custom software","classification":"positive"}'::jsonb)`);
+    const fact = async (subjectKey: string, type: string, at: string, raw: Record<string, unknown>, brands = [brandId]) => {
+      seq += 1n;
+      await db.execute(sql`
+        INSERT INTO outreach_facts (seq, subject_key, type, occurred_at, lead_email, org_id, campaign_id, brand_ids, raw)
+        VALUES (${seq.toString()}::bigint, ${subjectKey}, ${type}, ${at}::timestamptz, 'ed@bi.com', ${orgId}, 'camp-cold', ${sql.param(brands)}::text[], ${JSON.stringify(raw)}::jsonb)`);
+    };
+    await fact(replyKey, "reply", "2026-11-02T13:22:45Z", {
+      reply: { verdict: { classification: "positive", positiveSignal: "information_request", stopRequested: false, declinedOffer: false, kind: "lead_info_requested" } },
+    });
+    // Our automated responder at 13:24, then the brand's own person at 13:26, both in his thread; a third answer was withdrawn;
+    // a fourth went to the same address for ANOTHER brand.
+    await fact("rsent:a", "reply_sent", "2026-11-02T13:24:13Z", { replySent: { sentBy: "automation", subject: "Re: custom software" } });
+    await fact("rsent:b", "reply_sent", "2026-11-02T13:26:59Z", { replySent: { sentBy: "human", subject: "Re: custom software" } });
+    await fact("rsent:c", "reply_sent", "2026-11-02T14:00:00Z", { replySent: { sentBy: "human" } });
+    await fact("rsent:c", "withdrawn", "2026-11-02T14:05:00Z", {});
+    await fact("rsent:d", "reply_sent", "2026-11-02T15:00:00Z", { replySent: { sentBy: "human" } }, [randomUUID()]);
+
+    await refreshSubjects(scope);
+    const subject = (await db.execute(sql`SELECT * FROM relationship_subjects WHERE org_id = ${orgId} AND human_id = ${edmund}::uuid`)) as unknown as Array<Record<string, unknown>>;
+    expect(subject).toHaveLength(1);
+    const thread = await readThread(toSubject(subject[0]));
+    expect(thread).toEqual([
+      { at: "2026-11-02T12:23:48.000Z", source: "our_outreach:outreach", kind: "initial_email", direction: null, text: null, detail: null },
+      {
+        at: "2026-11-02T13:22:45.000Z", source: "our_outreach:reply", kind: "replied (question)", direction: "in", text: null,
+        detail: { subject: "Re: custom software", replyVerdict: { classification: "positive", positiveSignal: "information_request" } },
+      },
+      { at: "2026-11-02T13:24:13.000Z", source: "our_outreach:reply_sent", kind: "answered them in the thread", direction: "out", text: null, detail: { subject: "Re: custom software", writtenBy: "the brand's automated responder" } },
+      { at: "2026-11-02T13:26:59.000Z", source: "our_outreach:reply_sent", kind: "answered them in the thread", direction: "out", text: null, detail: { subject: "Re: custom software", writtenBy: "a person of the brand" } },
+    ]);
+
+    await refreshUniboxRows(scope);
+    const row = (await readUniboxPage(scope, {}, { limit: 50, cursor: null })).rows.find((r) => r.humanId === edmund)!;
+    expect(row).toMatchObject({ lastTheirsAt: "2026-11-02T13:22:45.000Z", lastOursAt: "2026-11-02T13:26:59.000Z", conversation: "waiting_on_them" });
   });
 });
