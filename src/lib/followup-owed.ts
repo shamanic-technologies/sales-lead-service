@@ -15,7 +15,8 @@
  * responder has drained yet has no cut, the first claim hands that backlog over). Claim-time-only
  * gates (opt-out lookup at email-gateway, the relationship policy) are NOT evaluated: an owed answer
  * may then claim nobody, and the caller asks again later. Never the reverse: a person the claim would
- * hand out is always read owed.
+ * hand out is always read owed. WHEN is the person's: their one next follow-up date at the brand
+ * (ONE-FOLLOWUP-PER-LEAD-1103) holds every row of theirs until it comes.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -75,7 +76,9 @@ export async function readFollowupOwed(params: {
   const now = new Date(nowMs).toISOString();
   const leaseCutoff = new Date(nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
 
-  // owed_at = when the claim would take the row: its due date, or the end of a live lease if later.
+  // owed_at = when the claim would take the row: its due date, the end of a live lease, or the person's ONE next
+  // follow-up date at the brand (ONE-FOLLOWUP-PER-LEAD-1103, `personDueSql` in the claim), whichever is latest.
+  // A stopped person date (a person's word) is owed nothing, like the claim.
   const rows = (await db.execute(sql`
     WITH owed AS (
       SELECT
@@ -84,11 +87,18 @@ export async function readFollowupOwed(params: {
           lc.followup_due_at,
           CASE WHEN lc.followup_claimed_at IS NOT NULL AND lc.followup_claimed_at >= ${leaseCutoff}::timestamptz
                THEN lc.followup_claimed_at + (${FOLLOWUP_CLAIM_LEASE_MS} * interval '1 millisecond')
-               ELSE lc.followup_due_at END
+               ELSE lc.followup_due_at END,
+          pd.at
         ) AS owed_at
       FROM leads_campaigns lc
       LEFT JOIN followup_responders fr ON fr.held_campaign_id = lc.campaign_id
+      LEFT JOIN LATERAL (
+        SELECT max(d.next_followup_at) AS at, bool_or(d.next_followup_at IS NULL) AS stopped
+        FROM lead_followup_dates d
+        WHERE d.org_id = lc.org_id AND d.lead_id = lc.lead_id AND d.brand_id = ANY(lc.brand_ids)
+      ) pd ON true
       WHERE lc.org_id = ${orgId}
+        AND NOT COALESCE(pd.stopped, false)
         AND lc.campaign_id = ANY(${sql.param(held)}::text[])
         AND lc.followup_due_at IS NOT NULL
         AND ${handedClaimableSql(acting)}

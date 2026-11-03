@@ -59,12 +59,12 @@ describe.skipIf(!hasRealDatabase)("scheduled follow-ups of a campaign (NEXT-STEP
     await dated(e, hours(24 * 30), "stop_recheck", writer); // not owed: asked again later, not a follow-up
     await dated(f, hours(5), "stated", other); // another campaign's
     await dated(await person(), hours(24 * 60), "stated", writer); // beyond the by-day horizon
-    await queuedRow(a, writer, hours(3)); // same person, earlier in the reactive queue: counted once, at 3h
+    await queuedRow(a, writer, hours(3)); // same person in the reactive queue: counted once, at their ONE date 13h (ONE-FOLLOWUP-PER-LEAD-1103)
     await queuedRow(f, writer, hours(40));
 
     const s = await loadScheduledFollowups(orgId, [writer]);
     expect(s).toMatchObject({ leads: 5, due: 1, upcoming: 4, laterThanHorizon: 1 });
-    expect(new Date(s.nextAt!).getTime()).toBeCloseTo(new Date(hours(3)).getTime(), -4);
+    expect(new Date(s.nextAt!).getTime()).toBeCloseTo(new Date(hours(13)).getTime(), -4);
     expect(s.oldestDueAt).not.toBeNull();
     expect(s.byDay.reduce((n, d) => n + d.leads, 0)).toBe(3);
 
