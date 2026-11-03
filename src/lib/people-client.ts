@@ -230,6 +230,12 @@ export interface ServiceContext {
    */
   reachableBy?: ReachMethod[];
   /**
+   * The messaging network(s) the serving pipe writes on (`whatsapp`...), sent as `reachableOn` on serve-next: human-service asks
+   * crm-service whether the person's number is on it and never serves one that is not (GMAPS-SOURCE-1103). Absent /
+   * empty = no key on the wire (bytes unchanged).
+   */
+  reachableOn?: string[];
+  /**
    * Which verified emails the serving workflow accepts (src/lib/email-policy.ts), sent as `acceptedEmails` on every
    * serve, candidate and reveal body: human-service owns "deliverable". Absent = no key on the wire (valid only).
    */
@@ -384,7 +390,13 @@ export interface ServeNextResult {
 export async function serveNext(audienceId: string, ctx: ServiceContext, timeoutMs?: number): Promise<ServeNextResult> {
   return callHuman<ServeNextResult>(
     `/orgs/audiences/${encodeURIComponent(audienceId)}/serve-next`,
-    { method: "POST", body: serveBody(ctx), ctx, timeoutMs },
+    // `reachableOn` rides serve-next only (human-service reads it there; its candidate/reveal bodies are strict).
+    {
+      method: "POST",
+      body: { ...serveBody(ctx), ...(ctx.reachableOn && ctx.reachableOn.length > 0 ? { reachableOn: [...ctx.reachableOn] } : {}) },
+      ctx,
+      timeoutMs,
+    },
   );
 }
 

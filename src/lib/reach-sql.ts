@@ -8,8 +8,9 @@ import { disqualifiedClause, type ServeExclusionScope } from "./disqualified-sql
 
 /**
  * `AND EXISTS (...)` per contact method the serving pipe needs (src/lib/channel-reach.ts), on the lead the row names.
- * Email is always required (a served lead carries one: lead-service's served contract), so with no reach stated the
- * fragment is exactly the email check every pool already made. Methods are the stored `lead_contact_methods.channel`
+ * No reach stated = email (an email pipe states nothing: the check every pool always made). A pipe that states its
+ * methods needs exactly those (GMAPS-SOURCE-1103: a WhatsApp pipe takes a merchant found on Google Maps with a phone
+ * and no email; the paid-pool retry still keeps email-held rows only, its sender question is keyed by address). Methods are the stored `lead_contact_methods.channel`
  * words (`email`, `phone`). The pipe's email policy (src/lib/email-policy.ts, absent = `valid_only`) keeps out a lead
  * whose address carries a verdict it refuses (a catch-all person never reaches a valid-only campaign from a pool).
  * The tactic "Fresh contacts only" (src/lib/recently-emailed.ts) keeps out a lead the brand emailed inside its window.
@@ -25,7 +26,7 @@ export function reachClauses(
   recentlyEmailed: RecentlyEmailedScope | null | undefined,
   exclusions: ServeExclusionScope,
 ): SQL {
-  const methods = [...new Set<ReachMethod>(["email", ...(reachableBy ?? [])])].sort();
+  const methods = pipeMethods(reachableBy);
   return sql.join(
     [
       ...methods.map(
@@ -39,6 +40,11 @@ export function reachClauses(
     ],
     sql` `,
   );
+}
+
+/** The contact methods a pipe needs: what it states, else email. */
+export function pipeMethods(reachableBy: readonly ReachMethod[] | null | undefined): ReachMethod[] {
+  return [...new Set<ReachMethod>(reachableBy && reachableBy.length > 0 ? reachableBy : ["email"])].sort();
 }
 
 /** The pipe's relationship policy and the brand(s) it serves for (RELATIONSHIP-TAGS-1014). */

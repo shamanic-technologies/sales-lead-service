@@ -83,6 +83,7 @@ vi.mock("../../src/lib/sourcing-origin.js", () => {
     OriginNotFedError,
     resolveSourcingOriginSlug: (...a: unknown[]) => resolveSourcingOriginSlug(...a),
     loadChannelContactMethods: async (slug: string) => CONTACT_METHODS[slug] ?? null,
+    loadChannelMessagingNetwork: async (slug: string) => (slug === "cold-whatsapp-outreach" ? "whatsapp" : null),
   };
 });
 
@@ -733,6 +734,20 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
 
     expect(res.status).toBe(200);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"], mode: { kind: "find", audienceIds: ["aud-1", "aud-2"] } }), expect.anything());
+    expect(pullNext.mock.calls[0][0]).not.toHaveProperty("reachableOn");
+  });
+
+  it("a source unit's own run carries the network its lead strategy states (the workflow's reachableOn, GMAPS-SOURCE-1103)", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: null, phone: "+77012345678" } });
+
+    const res = await postAsUnit(undefined, { reachableBy: ["phone"], reachableOn: ["whatsapp"] });
+
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"], reachableOn: ["whatsapp"] }), expect.anything());
   });
 
   // --- CRM-WARM-NURTURE-1015: the pipe's CRM funnel-step filter, crm-service's vocabulary, carried verbatim ---
@@ -940,6 +955,8 @@ describe("POST /orgs/buffer/next — the pipe's reach and its sources (owner 202
     const res = await postFor("cold-whatsapp-outreach");
     expect(res.status).toBe(200);
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }), expect.anything());
+    // GMAPS-SOURCE-1103: the number must be ON WhatsApp (the catalogue names the channel's network).
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ reachableOn: ["whatsapp"] }), expect.anything());
     // WA-RESERVE-LOOP-1014: its paid pool asks the channel's own sender whether a person was written to.
     expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ poolSender: "channel" }), expect.anything());
   });

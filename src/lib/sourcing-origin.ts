@@ -45,6 +45,8 @@ let originsCache: {
   byChannel: Map<string, Set<string>>;
   /** features-service `contactMethodsByChannel`: how each one-to-one channel reaches a person. */
   contactMethodsByChannel: Map<string, string[]>;
+  /** features-service `messagingNetworkByChannel`: the messaging network a channel writes on (`whatsapp`), GMAPS-SOURCE-1103. */
+  messagingNetworkByChannel: Map<string, string>;
   byList: Map<string, SourcingOriginName>;
   listsBySlug: Map<string, SourcingOriginName & { lists: string[] }>;
 } | null = null;
@@ -148,7 +150,22 @@ async function loadOriginsCatalogue(): Promise<NonNullable<typeof originsCache>>
       contactMethodsByChannel.set(channel, methods as string[]);
     }
   }
-  originsCache = { at: Date.now(), byChannel, byList, listsBySlug, contactMethodsByChannel };
+  // WHICH messaging network a phone channel writes on (WhatsApp is not SMS). Absent under an older catalogue = none.
+  const messagingNetworkByChannel = new Map<string, string>();
+  const rawNetworks = (body as { messagingNetworkByChannel?: unknown }).messagingNetworkByChannel;
+  if (rawNetworks !== undefined) {
+    if (!rawNetworks || typeof rawNetworks !== "object" || Array.isArray(rawNetworks)) {
+      throw new SourcingOriginUnresolvedError("features-service messagingNetworkByChannel unreadable");
+    }
+    for (const [channel, network] of Object.entries(rawNetworks as Record<string, unknown>)) {
+      if (network === null) continue;
+      if (typeof network !== "string" || network.length === 0) {
+        throw new SourcingOriginUnresolvedError(`features-service messagingNetworkByChannel entry unreadable for channel=${channel}`);
+      }
+      messagingNetworkByChannel.set(channel, network);
+    }
+  }
+  originsCache = { at: Date.now(), byChannel, byList, listsBySlug, contactMethodsByChannel, messagingNetworkByChannel };
   return originsCache;
 }
 
@@ -164,6 +181,11 @@ export async function loadOriginsByChannelSlug(channelSlug: string): Promise<Set
 /** Every channel the catalogue states contact methods for (features-service `contactMethodsByChannel`). */
 export async function listChannelsWithContactMethods(): Promise<string[]> {
   return [...(await loadOriginsCatalogue()).contactMethodsByChannel.keys()];
+}
+
+/** The messaging network a channel writes on (`whatsapp`), or null when the catalogue names none. */
+export async function loadChannelMessagingNetwork(channelSlug: string): Promise<string | null> {
+  return (await loadOriginsCatalogue()).messagingNetworkByChannel.get(channelSlug) ?? null;
 }
 
 export async function loadChannelContactMethods(channelSlug: string): Promise<string[] | null> {

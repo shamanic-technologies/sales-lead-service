@@ -15,6 +15,7 @@ import {
   upsertLeadFromPerson,
   recordEmploymentHistory,
   registerServedEmail,
+  registerServedPhone,
   upsertContactMethod,
 } from "./leads-registry.js";
 import { buildFullLead } from "./lead-shape.js";
@@ -44,7 +45,8 @@ import {
 import { claimStockedLead, SOURCE_FOUND_STATUS_REASON } from "./source-stock.js";
 import { claimContactedProspect, handoutOfSourceRow, loadProspectFollowupVerdicts } from "./prospect-followup.js";
 import { claimDueFollowupLead, dueVerdict } from "./lead-followup-date.js";
-import type { RelationshipScope } from "./reach-sql.js";
+import { pipeMethods, type RelationshipScope } from "./reach-sql.js";
+import { canonicalE164 } from "./e164-phone.js";
 import type { RelationshipPolicy } from "./relationship-tags.js";
 import { askAudienceFit } from "./audience-fit-client.js";
 import type { RecentlyEmailedScope, RecentlyEmailedWindow } from "./recently-emailed-sql.js";
@@ -117,6 +119,8 @@ interface PullNextParams {
    * (human-service `reachableBy`) and applied to every pool (retry, stock, released). Absent = no requirement.
    */
   reachableBy?: ReachMethod[];
+  /** The messaging network(s) the pipe writes on (`whatsapp`), forwarded on every fresh serve (people-client `reachableOn`). */
+  reachableOn?: string[];
   /**
    * Who states whether a served person of THIS campaign was contacted (retry-pool.ts `poolSenderOf`, from the channel's
    * own contact methods): absent = email-gateway (today); `channel` = the non-email sender's record (crm-service).
@@ -183,9 +187,9 @@ interface PullNextResult {
   final?: boolean;
   lead?: {
     leadId: string;
-    /** null only on a "Lead follow-up due" serve of a person known by phone alone. */
+    /** null only for a person known by phone alone ("Lead follow-up due", or a business found with a phone and no email). */
     email: string | null;
-    /** Stated on "Lead follow-up due" serves (source run and the follow-up pipe's stock): the person's phone, null when none. */
+    /** Stated on "Lead follow-up due" serves and on every serve of a person known by phone alone: the person's phone. */
     phone?: string | null;
     data: unknown;
     brandIds: string[];
@@ -282,6 +286,7 @@ export async function pullNext(
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId: audienceId ?? undefined,
     ...(params.reachableBy && params.reachableBy.length > 0 ? { reachableBy: params.reachableBy } : {}),
+    ...(params.reachableOn && params.reachableOn.length > 0 ? { reachableOn: params.reachableOn } : {}),
     ...(params.acceptedEmails ? { acceptedEmails: params.acceptedEmails } : {}),
     ...(params.relationships ? { relationships: params.relationships } : {}),
     ...(params.stepFilter ? { stepFilter: params.stepFilter } : {}),
@@ -465,13 +470,17 @@ export async function pullNext(
     const verificationVerdict = readEmailVerdict(served.emailVerdict);
     // The person this serve is deciding: the candidate human-service just revealed, else serve-next's answer.
     const walked = walkFoundPerson(`person:${personId ?? person.providerPersonId}`);
-    if (!person.email) {
-      // serve-next promised a contactable person but gave no email — a producer
-      // contract violation, not an empty result. Fail loud.
+    // A person with no email is served by PHONE (GMAPS-SOURCE-1103: a merchant on Google Maps has a phone, rarely an
+    // address): kept when a source finds them (its stock is handed only to pipes that reach by phone) or when the
+    // serving pipe reaches by phone and not by email. Anything else is a producer contract violation. Fail loud.
+    const servedPhone = canonicalE164(typeof person.phone === "string" ? person.phone : null);
+    const byPhoneOnly = !person.email && servedPhone !== null && (mode.kind === "find" || !pipeMethods(params.reachableBy).includes("email"));
+    if (!person.email && !byPhoneOnly) {
       throw new Error(
-        `[lead-service] serve-next returned status=served without an email: audienceId=${servedAudienceId}, campaign=${params.campaignId}`,
+        `[lead-service] serve-next returned status=served without an email${servedPhone ? " to a pipe that needs one" : " or an E.164 phone"}: audienceId=${servedAudienceId}, campaign=${params.campaignId}`,
       );
     }
+    const contactLabel = person.email ? `email=${person.email}` : `phone=${servedPhone}`;
 
     // 5. Record into silver (leads + contact + organization + lifecycle row).
     //
@@ -486,17 +495,19 @@ export async function pullNext(
     // new company lands on a NEW lead. null (an owner did not answer) = today's email-first pick.
     const identity = await resolveServedIdentity(person);
     const resolvedLeadId = await upsertLeadFromPerson(person, { enriched: true, identity });
-    const leadId = await registerServedEmail({
-      leadId: resolvedLeadId,
-      email: person.email,
-      status: person.emailStatus ?? null,
-      source: person.provider,
-      ...(verificationVerdict ? { verificationVerdict } : {}),
-    });
+    const leadId = person.email
+      ? await registerServedEmail({
+          leadId: resolvedLeadId,
+          email: person.email,
+          status: person.emailStatus ?? null,
+          source: person.provider,
+          ...(verificationVerdict ? { verificationVerdict } : {}),
+        })
+      : await registerServedPhone({ leadId: resolvedLeadId, phone: servedPhone as string, source: person.provider });
     walked.identify(leadId);
     await recordEmploymentHistory({ leadId, person });
-    // The phone the provider holds (crm only): what tells a phone pipe's pools who it can reach.
-    if (typeof person.phone === "string" && person.phone.trim().length > 0) {
+    // The phone the provider holds: what tells a phone pipe's pools who it can reach.
+    if (person.email && typeof person.phone === "string" && person.phone.trim().length > 0) {
       const phone = await upsertContactMethod({ leadId, channel: "phone", value: person.phone.trim(), source: person.provider });
       if (!phone.inserted) {
         console.warn(`[lead-service] served phone already belongs to another lead: leadId=${leadId} campaign=${params.campaignId} (not recorded)`);
@@ -513,7 +524,7 @@ export async function pullNext(
         status: "served",
         // A find is the SOURCE's fact (src/lib/source-stock.ts reads it as stock); a serve is the outreach campaign's.
         statusReason: mode.kind === "find" ? SOURCE_FOUND_STATUS_REASON : "served",
-        statusDetails: `Served via audience ${servedAudienceId}, email=${person.email}, leadId=${leadId}, campaign=${params.campaignId}`,
+        statusDetails: `Served via audience ${servedAudienceId}, ${contactLabel}, leadId=${leadId}, campaign=${params.campaignId}`,
         servedAt: new Date(),
         parentRunId: params.parentRunId ?? null,
         runId: params.runId ?? null,
@@ -555,7 +566,7 @@ export async function pullNext(
 
     // The person was FOUND for this brand and offer: its `lead_found` outcome trigger rings campaign-service's door
     // once (outcome-triggers.ts, EVERY-OUTCOME-FIRES-1015). Not awaited: it never blocks, slows or fails the serve.
-    noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, campaignId: params.campaignId, offerId });
+    noteLeadFound({ orgId: params.orgId, brandId: params.brandId, leadId, email: person.email, ...(person.email ? {} : { phone: servedPhone }), campaignId: params.campaignId, offerId });
     // The serve run PRODUCED this lead_found (and consumed the email check it handed out): stated at runs-service so the
     // run's cost lands on the outcome (run-outcomes.ts, COST-ACCOUNTING-1023-P1). Not awaited, never fails the serve.
     // A person from the client's CRM also consumes the `lead_identified` crm-service produced (crm-lead-identified.ts).
@@ -580,7 +591,7 @@ export async function pullNext(
     const qualification = await writerChecks(fullLead);
 
     console.log(
-      `[lead-service] pullNext found=true campaign=${params.campaignId} audienceId=${servedAudienceId} email=${person.email} leadId=${leadId}`,
+      `[lead-service] pullNext found=true campaign=${params.campaignId} audienceId=${servedAudienceId} ${contactLabel} leadId=${leadId}`,
     );
 
     return {
@@ -588,6 +599,7 @@ export async function pullNext(
       lead: {
         leadId,
         email: person.email,
+        ...(person.email ? {} : { phone: servedPhone }),
         data: fullLead,
         brandIds: params.brandIds,
         orgId: params.orgId,

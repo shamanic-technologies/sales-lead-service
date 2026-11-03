@@ -1,4 +1,4 @@
-import { loadChannelContactMethods } from "./sourcing-origin.js";
+import { loadChannelContactMethods, loadChannelMessagingNetwork } from "./sourcing-origin.js";
 import type { ReachMethod } from "./people-client.js";
 
 /**
@@ -31,6 +31,21 @@ function warnOnce(channelSlug: string, line: string): void {
 export function combineReach(channel: ReachMethod[] | null, stated: readonly ReachMethod[] | null): ReachMethod[] | null {
   const all = new Set<ReachMethod>([...(channel ?? []), ...(stated ?? [])]);
   return all.size === 0 ? null : [...all].sort();
+}
+
+/** PURE: the networks a serve's people must be on, the channel's and the workflow's stated ones together. Null = none. */
+export function combineNetworks(channel: string | null, stated: readonly string[] | null): string[] | null {
+  const all = new Set<string>([...(channel ? [channel] : []), ...(stated ?? [])]);
+  return all.size === 0 ? null : [...all].sort();
+}
+
+/**
+ * WHERE a phone channel writes (features-service `messagingNetworkByChannel`, GMAPS-SOURCE-1103): a WhatsApp pipe needs
+ * a number that is ON WhatsApp, which `reachableBy: phone` cannot say. Passed as `reachableOn`; human-service asks
+ * crm-service per number. null = the channel names no network (no check, today's bytes).
+ */
+export async function channelMessagingNetwork(channelSlug: string): Promise<string | null> {
+  return loadChannelMessagingNetwork(channelSlug);
 }
 
 export async function channelReachableBy(channelSlug: string): Promise<ReachMethod[] | null> {

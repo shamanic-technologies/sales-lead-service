@@ -712,7 +712,9 @@ export function noteLeadFound(input: {
   orgId: string;
   brandId: string;
   leadId: string;
-  email: string;
+  /** null for a person served by phone alone (GMAPS-SOURCE-1103): `phone` names them. */
+  email: string | null;
+  phone?: string | null;
   /** The serve's campaign (source unit or outreach). */
   campaignId: string;
   /** The offer that campaign sells, when the serve already read it. */
@@ -727,9 +729,9 @@ export function noteLeadFound(input: {
       sourceRef: `serve:${input.campaignId}:${input.leadId}`,
       occurredAt: new Date().toISOString(),
       leadId: input.leadId,
-      emails: canonicalEmails([input.email]),
+      emails: input.email ? canonicalEmails([input.email]) : [],
       name: null,
-      phone: null,
+      phone: input.email ? null : (input.phone ?? null),
       statedOfferId: input.offerId,
       statedCampaignId: input.campaignId,
     });
