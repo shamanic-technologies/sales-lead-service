@@ -1002,6 +1002,15 @@ export const BufferNextRequestSchema = z
           "WHO this run hands out, as its pipe's lead strategy states it (the workflow a play runs says it): only people reachable by EVERY listed contact method (`phone` = a phone number, e.g. a WhatsApp-reachable strategy; `email` = a deliverable address). Added to what the campaign's channel itself requires. Applies to the fresh serve (human-service never hands out, reveals or marks served a person without them) and to every already-paid pool. A source campaign's own run walks its audiences with it, so two strategies of one source never take each other's people. Absent = no requirement beyond the channel's (unchanged behaviour).",
         example: ["phone"],
       }),
+    reachableOn: z
+      .array(z.string().min(1))
+      .min(1)
+      .optional()
+      .openapi({
+        description:
+          "WHERE this run's people must be reachable, as its pipe's lead strategy states it: messaging networks the person's phone must be on (e.g. `whatsapp`; crm-service answers whether a number is on it, never guessed). Added to the network the campaign's channel itself writes on (features-service catalogue). Forwarded verbatim to human-service on every serve. Absent = no network check beyond the channel's (unchanged behaviour). GMAPS-SOURCE-1103.",
+        example: ["whatsapp"],
+      }),
     relationships: z.enum(RELATIONSHIP_POLICIES).optional().openapi({
       description:
         "The pipe's relationship policy (tactic \"Business contacts only\", RELATIONSHIP-TAGS-1014). `business_only`: nobody the brand knows as personal, investor, supplier, team, partner or advisor (yes, or still unsure) is handed out, nor anybody whose whole thread was never judged yet. Applies to every already-paid pool and is forwarded to human-service serve-next. Absent = today's serve.",

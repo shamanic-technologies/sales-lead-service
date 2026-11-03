@@ -14,3 +14,23 @@ describe("combineReach", () => {
     expect(combineReach(null, null)).toBeNull();
   });
 });
+
+describe("combineNetworks (GMAPS-SOURCE-1103)", () => {
+  it("joins the channel's network and the stated ones; nothing = null", async () => {
+    const { combineNetworks } = await import("../../src/lib/channel-reach.js");
+    expect(combineNetworks("whatsapp", null)).toEqual(["whatsapp"]);
+    expect(combineNetworks("whatsapp", ["whatsapp"])).toEqual(["whatsapp"]);
+    expect(combineNetworks(null, ["whatsapp"])).toEqual(["whatsapp"]);
+    expect(combineNetworks(null, null)).toBeNull();
+  });
+});
+
+describe("pipeMethods (GMAPS-SOURCE-1103)", () => {
+  it("a pipe needs what it states, else email", async () => {
+    const { pipeMethods } = await import("../../src/lib/reach-sql.js");
+    expect(pipeMethods(null)).toEqual(["email"]);
+    expect(pipeMethods([])).toEqual(["email"]);
+    expect(pipeMethods(["phone"])).toEqual(["phone"]);
+    expect(pipeMethods(["phone", "email"])).toEqual(["email", "phone"]);
+  });
+});

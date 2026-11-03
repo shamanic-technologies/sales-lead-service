@@ -92,15 +92,28 @@ describe("upsertLeadFromPerson identity precedence", () => {
     });
   });
 
-  it("fails loud when the person carries neither an email nor a provider person id", async () => {
+  // GMAPS-SOURCE-1103: a business found on Google Maps has a phone and no email: the phone is its identity.
+  it("a person with no email is the lead that owns their phone (canonical E.164), ahead of the provider id", async () => {
+    findFirstContact.mockResolvedValue({ leadId: EMAIL_OWNER });
+    findFirstLead.mockResolvedValue({ id: PROVIDER_ID_OWNER });
+
+    const { upsertLeadFromPerson } = await import("../../src/lib/leads-registry.js");
+    const leadId = await upsertLeadFromPerson({ ...PERSON, email: null, phone: "+7 701 234-56-78" } as never, { enriched: true });
+
+    expect(leadId).toBe(EMAIL_OWNER);
+    expect(insertValues).not.toHaveBeenCalled();
+    expect(findFirstContact).toHaveBeenCalledOnce();
+  });
+
+  it("fails loud when the person carries neither an email, a provider person id nor a phone", async () => {
     const { upsertLeadFromPerson } = await import("../../src/lib/leads-registry.js");
 
     await expect(
       upsertLeadFromPerson(
-        { ...PERSON, email: null, providerPersonId: null } as never,
+        { ...PERSON, email: null, providerPersonId: null, phone: null } as never,
         { enriched: true },
       ),
-    ).rejects.toThrow(/no providerPersonId and no email/);
+    ).rejects.toThrow(/no providerPersonId, no email and no phone/);
   });
 });
 

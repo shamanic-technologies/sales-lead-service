@@ -96,6 +96,29 @@ describe.skipIf(!hasRealDatabase)("source stock against a real database", () => 
     expect(sourceRows.every((r) => r.status === "served")).toBe(true);
   });
 
+  // GMAPS-SOURCE-1103: a business found on Google Maps carries a phone and no email.
+  it("a find known by phone alone goes to a pipe that reaches by phone (email null + phone), never to an email pipe", async () => {
+    const s = `itest-src-${randomUUID()}`;
+    const lead = await seedFound(s, "2026-10-12T01:00:00Z", { email: false });
+    const phone = `+7701${String(Math.floor(Math.random() * 1e7)).padStart(7, "0")}`;
+    await db.insert(leadContactMethods).values({ leadId: lead, channel: "phone", value: phone, source: "google_maps" });
+
+    expect((await claimAll(`itest-out-${randomUUID()}`, [s])).lead).toBeNull();
+
+    const asked: Array<Parameters<AskAudienceFit>[0]> = [];
+    const out = `itest-out-${randomUUID()}`;
+    const got = await claimStockedLead({
+      orgId, sourceCampaignIds: [s], outreachCampaignId: out, brandIds: [brandId], featureSlug: "cold-whatsapp-outreach",
+      runId: randomUUID(), parentRunId: randomUUID(), userId: null, workflowSlug: "cold-wa-x", goal: "signup",
+      activeGoalId: null, brandProfileId: null, reachableBy: ["phone"],
+      askFit: async (q) => { asked.push(q); return { fits: true }; },
+    });
+    expect(got.lead).toMatchObject({ leadId: lead, email: null, phone });
+    expect(asked[0]).toMatchObject({ email: null, phone, audienceId: "aud-1" });
+    const [row] = await db.select().from(leadsCampaigns).where(eq(leadsCampaigns.campaignId, out));
+    expect(row.statusDetails).toContain(`phone=${phone}`);
+  });
+
   it("as_found stock hands the person as the source found them, unknown verdict included (UNKNOWN-RESTORE-1016)", async () => {
     const s = `itest-src-${randomUUID()}`;
     const unknown = await seedFound(s, "2026-10-12T01:00:00Z", { verdict: "unknown" });

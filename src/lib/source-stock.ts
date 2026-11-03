@@ -41,9 +41,9 @@ export interface StockedLead {
   sourceRowId: string;
   sourceCampaignId: string;
   leadId: string;
-  /** null only for a "Lead follow-up due" find known by phone alone (LEAD-FOLLOWUP-DATE-1016). */
+  /** null only for a person known by phone alone ("Lead follow-up due", or a business found with no email: GMAPS-SOURCE-1103). */
   email: string | null;
-  /** The person's phone, stated for a "Lead follow-up due" find only. */
+  /** The person's phone, stated for a "Lead follow-up due" find and for every find known by phone alone. */
   phone?: string | null;
   audienceId: string | null;
   buyingSignal: BuyingSignal | null;
@@ -64,7 +64,9 @@ export type AskAudienceFit = (question: {
   /** The source unit holding the find: a find outside its funnel's audiences, origin or offer is not its own. */
   sourceCampaignId: string;
   audienceId: string;
-  email: string;
+  /** null = a find known by phone alone (GMAPS-SOURCE-1103): `phone` names them. */
+  email: string | null;
+  phone?: string;
   personId: string | null;
 }) => Promise<AudienceFitVerdict>;
 
@@ -72,6 +74,7 @@ export interface SetAsideLead {
   sourceRowId: string;
   sourceCampaignId: string;
   leadId: string;
+  /** The person's email, else (known by phone alone) their phone. */
   email: string;
   /** null = a contacted pure prospect (no audience). */
   audienceId: string | null;
@@ -179,13 +182,11 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
     const due = params.askDueOwed ? await openDueServeOfSourceRow(tx, row.id) : null;
     if (due) return handDueFind(tx, params, row, due);
 
-    const [email] = (await tx.execute(sql`
-      SELECT cm.value FROM lead_contact_methods cm
-       WHERE cm.lead_id = ${row.lead_id} AND cm.channel = 'email'
-       ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
-       LIMIT 1
-    `)) as unknown as Array<{ value: string }>;
-    if (!email) throw new Error(`[source-stock] found lead ${row.lead_id} (row ${row.id}) has no registered email`);
+    // Email first; a find known by phone alone (GMAPS-SOURCE-1103) reaches only a pipe that states phone (reachClauses).
+    const contact = await contactOf(tx, row.lead_id);
+    if (!contact.email && !contact.phone) throw new Error(`[source-stock] found lead ${row.lead_id} (row ${row.id}) has neither an email nor a phone`);
+    const handle = contact.email ?? (contact.phone as string);
+    const contactLabel = contact.email ? `email=${contact.email}` : `phone=${contact.phone}`;
     // Every audience find is recorded under the audience that found it (src/lib/buffer.ts); the one find with none is a
     // contacted pure prospect, re-asked whether still owed. Anything else: nobody can say it fits.
     const owed = row.audience_id ? null : ((await params.askStillOwed?.(row.id)) ?? null);
@@ -194,13 +195,20 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
     }
 
     const verdict: StillOwedVerdict =
-      owed ?? (await params.askFit({ sourceCampaignId: row.campaign_id, audienceId: row.audience_id as string, email: email.value, personId: row.person_id }));
+      owed ??
+      (await params.askFit({
+        sourceCampaignId: row.campaign_id,
+        audienceId: row.audience_id as string,
+        email: contact.email,
+        ...(contact.email ? {} : { phone: contact.phone as string }),
+        personId: row.person_id,
+      }));
     if (!verdict.fits && "release" in verdict) {
       await tx.execute(sql`DELETE FROM prospect_followup_handouts WHERE lead_campaign_id = ${row.id}::uuid`);
       await tx.execute(sql`DELETE FROM leads_campaigns WHERE id = ${row.id}`);
       return {
         kind: "set_aside",
-        row: { sourceRowId: row.id, sourceCampaignId: row.campaign_id, leadId: row.lead_id, email: email.value, audienceId: null, reason: verdict.reason },
+        row: { sourceRowId: row.id, sourceCampaignId: row.campaign_id, leadId: row.lead_id, email: handle, audienceId: null, reason: verdict.reason },
       };
     }
     if (!verdict.fits) {
@@ -215,7 +223,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
           sourceRowId: row.id,
           sourceCampaignId: row.campaign_id,
           leadId: row.lead_id,
-          email: email.value,
+          email: handle,
           audienceId: row.audience_id,
           reason: verdict.reason,
         },
@@ -236,7 +244,7 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
         brand_profile_id, audience_id, buying_signal, person_id
       ) VALUES (
         ${row.lead_id}, ${params.outreachCampaignId}, ${params.orgId}, ARRAY[${brandIds}]::text[], 'served', 'served',
-        ${`Served from the stock of source campaign ${row.campaign_id} (row ${row.id}), email=${email.value}, leadId=${row.lead_id}, campaign=${params.outreachCampaignId}`},
+        ${`Served from the stock of source campaign ${row.campaign_id} (row ${row.id}), ${contactLabel}, leadId=${row.lead_id}, campaign=${params.outreachCampaignId}`},
         now(), ${params.parentRunId}, ${params.runId}, ${params.runId}, ${params.userId}, ${params.workflowSlug}, ${params.featureSlug},
         ${goal}, ${params.activeGoalId}, ${params.brandProfileId}, ${row.audience_id},
         ${row.buying_signal === null || row.buying_signal === undefined ? null : JSON.stringify(row.buying_signal)}::jsonb, ${row.person_id}
@@ -249,7 +257,8 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
         sourceRowId: row.id,
         sourceCampaignId: row.campaign_id,
         leadId: row.lead_id,
-        email: email.value,
+        email: contact.email,
+        ...(contact.email ? {} : { phone: contact.phone }),
         audienceId: row.audience_id,
         buyingSignal: readBuyingSignal(row.buying_signal),
         personId: row.person_id,
