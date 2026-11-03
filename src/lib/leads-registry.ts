@@ -12,6 +12,7 @@ import type { Person } from "./people-client.js";
 import { findLeadBySocialLinkedin, foldSocialLead } from "./social-identity.js";
 import type { ServedIdentity } from "./serve-identity.js";
 import { writeEnrichedTimezone } from "./lead-timezone.js";
+import { canonicalE164 } from "./e164-phone.js";
 
 // Person fields the gateway's neutral Person provides that map 1:1 to lead columns.
 // (departments / functions / twitter / github / facebook are NOT in the neutral
@@ -229,13 +230,20 @@ async function pickAndUpsertLead(
   const metadata = person as unknown;
   const enrichedAt = options.enriched ? new Date() : null;
 
-  if (!person.email && !person.providerPersonId) {
+  // A person with no email is held by their phone (GMAPS-SOURCE-1103: a merchant found on Google Maps): one phone =
+  // one lead, the same as one email = one lead.
+  const servedPhone = person.email ? null : canonicalE164(typeof person.phone === "string" ? person.phone : null);
+  if (!person.email && !person.providerPersonId && !servedPhone) {
     throw new Error(
-      "[lead-service] upsertLeadFromPerson: person has no providerPersonId and no email",
+      "[lead-service] upsertLeadFromPerson: person has no providerPersonId, no email and no phone",
     );
   }
 
-  const emailOwnerId = person.email ? await findLeadByEmail(person.email) : null;
+  const emailOwnerId = person.email
+    ? await findLeadByEmail(person.email)
+    : servedPhone
+      ? await findLeadByPhone(servedPhone)
+      : null;
   let providerOwnerId = person.providerPersonId
     ? await findLeadByApolloPersonId(person.providerPersonId)
     : null;
@@ -328,7 +336,9 @@ async function pickAndUpsertLead(
     ? await findLeadByApolloPersonId(person.providerPersonId)
     : person.email
       ? await findLeadByEmail(person.email)
-      : null;
+      : servedPhone
+        ? await findLeadByPhone(servedPhone)
+        : null;
   if (raced) return raced;
   throw new Error("[lead-service] upsertLeadFromPerson failed to insert or locate the lead");
 }
@@ -488,6 +498,23 @@ export async function registerServedEmail(params: {
   console.log(
     `[lead-service] identity: re-attributed serve to the lead that owns the email — email=${params.email} from=${params.leadId} to=${owner}`,
   );
+  return owner;
+}
+
+/**
+ * The phone twin of `registerServedEmail` for a person served with no email (GMAPS-SOURCE-1103): the canonical E.164
+ * phone is the identity (one phone = one lead), so a phone another lead holds re-attributes the serve to that lead.
+ */
+export async function registerServedPhone(params: { leadId: string; phone: string; source: string }): Promise<string> {
+  const result = await upsertContactMethod({ leadId: params.leadId, channel: "phone", value: params.phone, source: params.source });
+  if (result.inserted) return params.leadId;
+  const owner = await findLeadByPhone(params.phone);
+  if (!owner) {
+    throw new Error(
+      `[lead-service] phone ${params.phone} hit the global one-value-one-lead index but no owning lead could be found (leadId=${params.leadId})`,
+    );
+  }
+  console.log(`[lead-service] identity: re-attributed serve to the lead that owns the phone — phone=${params.phone} from=${params.leadId} to=${owner}`);
   return owner;
 }
 
@@ -762,6 +789,14 @@ export async function findLeadByApolloPersonId(apolloPersonId: string): Promise<
 export async function findLeadByEmail(email: string): Promise<string | null> {
   const row = await db.query.leadContactMethods.findFirst({
     where: and(eq(leadContactMethods.channel, "email"), eq(leadContactMethods.value, email)),
+  });
+  return row?.leadId ?? null;
+}
+
+/** The lead holding this E.164 phone (stored canonical; `idx_lcm_channel_value`: one phone = one lead). */
+export async function findLeadByPhone(phone: string): Promise<string | null> {
+  const row = await db.query.leadContactMethods.findFirst({
+    where: and(eq(leadContactMethods.channel, "phone"), eq(leadContactMethods.value, phone)),
   });
   return row?.leadId ?? null;
 }

@@ -120,6 +120,7 @@ vi.mock("../../src/lib/sourcing-origin.js", () => ({
   resolveSourcingOriginSlug: vi.fn(async () => "sourcing-apollo-cold-filters"),
   OriginNotFedError: class extends Error {},
   loadChannelContactMethods: vi.fn(async () => null),
+  loadChannelMessagingNetwork: vi.fn(async () => null),
 }));
 const resolveServeSource = vi.fn();
 vi.mock("../../src/lib/source-campaign.js", () => ({ resolveServeSource: (...a: unknown[]) => resolveServeSource(...a) }));

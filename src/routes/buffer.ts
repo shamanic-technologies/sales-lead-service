@@ -15,7 +15,7 @@ import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, fundingCapOf, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError, isStepFilterRefusal } from "../lib/people-client.js";
 import { OriginNotFedError, resolveSourcingOriginSlug } from "../lib/sourcing-origin.js";
-import { channelReachableBy, combineReach } from "../lib/channel-reach.js";
+import { channelMessagingNetwork, channelReachableBy, combineNetworks, combineReach } from "../lib/channel-reach.js";
 import { poolSenderOf, type PoolSender } from "../lib/retry-pool.js";
 import type { ReachMethod } from "../lib/people-client.js";
 import { ORIGIN_NOT_FED_REASON, type ServeEmptyReason } from "../lib/serve-reasons.js";
@@ -125,6 +125,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
   // WHO this pipe can reach (src/lib/channel-reach.ts): the outreach channel's contact methods, passed on every serve.
   let reachableBy: ReachMethod[] | null = null;
+  // WHERE (which messaging network) the pipe writes: the channel's own network plus the lead strategy's (GMAPS-SOURCE-1103).
+  let reachableOn: string[] | null = null;
   // Who states whether a served person was contacted (src/lib/retry-pool.ts `poolSenderOf`): email-gateway unless the
   // channel does not write by email.
   let poolSender: PoolSender = "email";
@@ -184,6 +186,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     // required, on every serve and every pool.
     const channelMethods = await channelReachableBy(featureSlug);
     reachableBy = combineReach(channelMethods, parsed.data.reachableBy ?? null);
+    reachableOn = combineNetworks(await channelMessagingNetwork(featureSlug), parsed.data.reachableOn ?? null);
     // Who says whether a served person was contacted: the sender of the channel's own method (WA-RESERVE-LOOP-1014).
     poolSender = poolSenderOf(channelMethods);
 
@@ -427,6 +430,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       featureSlug,
       runFeatureSlug,
       reachableBy: reachableBy ?? null,
+      ...(reachableOn ? { reachableOn } : {}),
       poolSender: poolSender ?? "email",
       acceptedEmails: acceptedEmails ?? null,
       relationships: parsed.data.relationships ?? null,
@@ -461,6 +465,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         audienceId: req.audienceId ?? null,
         ...(pullMode ? { mode: pullMode } : {}),
         ...(reachableBy ? { reachableBy } : {}),
+        ...(reachableOn ? { reachableOn } : {}),
         ...(poolSender === "channel" ? { poolSender } : {}),
         ...(acceptedEmails ? { acceptedEmails } : {}),
         ...(parsed.data.relationships ? { relationships: parsed.data.relationships } : {}),

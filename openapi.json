@@ -1431,6 +1431,18 @@
               "phone"
             ]
           },
+          "reachableOn": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "WHERE this run's people must be reachable, as its pipe's lead strategy states it: messaging networks the person's phone must be on (e.g. `whatsapp`; crm-service answers whether a number is on it, never guessed). Added to the network the campaign's channel itself writes on (features-service catalogue). Forwarded verbatim to human-service on every serve. Absent = no network check beyond the channel's (unchanged behaviour). GMAPS-SOURCE-1103.",
+            "example": [
+              "whatsapp"
+            ]
+          },
           "relationships": {
             "type": "string",
             "enum": [

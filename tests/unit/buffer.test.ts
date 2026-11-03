@@ -20,11 +20,13 @@ vi.mock("../../src/lib/brand-client.js", () => ({
 const upsertLeadFromPerson = vi.fn();
 const recordEmploymentHistory = vi.fn();
 const registerServedEmail = vi.fn();
+const registerServedPhone = vi.fn();
 const upsertContactMethod = vi.fn(async () => ({ inserted: true }));
 vi.mock("../../src/lib/leads-registry.js", () => ({
   upsertLeadFromPerson: (...args: unknown[]) => upsertLeadFromPerson(...args),
   recordEmploymentHistory: (...args: unknown[]) => recordEmploymentHistory(...args),
   registerServedEmail: (...args: unknown[]) => registerServedEmail(...args),
+  registerServedPhone: (...args: unknown[]) => registerServedPhone(...args),
   upsertContactMethod: (...args: unknown[]) => upsertContactMethod(...args),
 }));
 
@@ -730,6 +732,28 @@ describe("pullNext for a pipe: reach, sources, released people (owner 2026-10-12
     expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }));
     expect(claimReleasedLead).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }));
     expect(upsertContactMethod).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-1", channel: "phone", value: "+33612345678" }));
+  });
+
+  // GMAPS-SOURCE-1103: a merchant found on Google Maps has a phone and no email.
+  it("a WhatsApp pipe serves a business known by phone alone: held by its phone, answered with email null + phone", async () => {
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, provider: "apollo", email: null, firstName: null, lastName: null, phone: "+7 701 234 5678" } });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-new");
+    registerServedPhone.mockResolvedValueOnce("lead-phone-owner");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-phone-owner" });
+    const result = await pullNext({ ...baseParams, featureSlug: "cold-whatsapp-outreach", reachableBy: ["phone"] });
+    expect(registerServedEmail).not.toHaveBeenCalled();
+    expect(registerServedPhone).toHaveBeenCalledWith({ leadId: "lead-new", phone: "+77012345678", source: "apollo" });
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ leadId: "lead-phone-owner", status: "served", statusDetails: expect.stringContaining("phone=+77012345678") }));
+    expect(result.lead).toMatchObject({ leadId: "lead-phone-owner", email: null, phone: "+77012345678" });
+  });
+
+  it("a business with no email is refused to a pipe that needs email, and with no E.164 phone to any pipe", async () => {
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, email: null, phone: "+77012345678" } });
+    await expect(pullNext(baseParams)).rejects.toThrow(/without an email to a pipe that needs one/);
+    serveNext.mockResolvedValueOnce({ status: "served", person: { ...person, email: null, phone: "8 701 234 5678" } });
+    await expect(pullNext({ ...baseParams, featureSlug: "cold-whatsapp-outreach", reachableBy: ["phone"] })).rejects.toThrow(/without an email or an E.164 phone/);
+    expect(upsertLeadFromPerson).not.toHaveBeenCalled();
   });
 
   // WA-RESERVE-LOOP-1014: the pool of a pipe that does not write by email asks the channel's sender, not email-gateway.
