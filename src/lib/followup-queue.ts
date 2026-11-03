@@ -62,7 +62,7 @@
  * the one predicate, used by the read and the claim.
  */
 import { errorString } from "./db-error.js";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
 import { followupActionInsert } from "./followup-actions.js";
@@ -81,6 +81,7 @@ import {
 import type { RelationshipTag } from "./relationship-tags.js";
 import { TEAM_REFUSAL_REASON, decideClientGate, decideNeverALead, decideTeamGate, loadClientFacts, type ClientRefusalReason } from "./followup-client-gate.js";
 import { loadOrgMemberKeys } from "./org-members.js";
+import { DEFAULT_GAP_DAYS } from "./lead-followup-date.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
 
@@ -106,6 +107,50 @@ export function notJournalistSql(alias: "lc" | "" = "lc") {
   const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : `leads_campaigns.${name}`);
   return sql`NOT EXISTS (SELECT 1 FROM brand_journalists bj_f WHERE bj_f.lead_id = ${col("lead_id")} AND bj_f.journalist
     AND bj_f.org_id = ${col("org_id")} AND bj_f.brand_id = ANY(${col("brand_ids")}))`;
+}
+
+/**
+ * ONE NEXT FOLLOW-UP DATE PER LEAD (ONE-FOLLOWUP-PER-LEAD-1103, owner 2026-11-03: « une fiche ne doit pas etre par
+ * campaign mais par lead »). A row's `followup_due_at` says WHICH campaign holds a debt toward the person and who may
+ * take it; WHEN the person is next followed up is their ONE date at the brand (`lead_followup_dates`, per org x brand x
+ * lead), which every row statement and every observed send moves and every claim takes. A row is due only once that
+ * date has come: a person answered 16 s ago through one row is never due again through another (Doc Dinners
+ * 2026-11-02: Thomas answered twice, 61 s apart, through his meeting-booking row then his cold-email row). No date yet
+ * (a lead filed since the last 2-min pass) = due; a stopped date (a person's word) = not due.
+ */
+export function personDueSql(nowIso: string, alias: "lc" | "" = "lc") {
+  const col = (name: string) => sql.raw(alias ? `${alias}.${name}` : `leads_campaigns.${name}`);
+  return sql`NOT EXISTS (SELECT 1 FROM lead_followup_dates pd WHERE pd.org_id = ${col("org_id")} AND pd.lead_id = ${col("lead_id")}
+    AND pd.brand_id = ANY(${col("brand_ids")}) AND (pd.next_followup_at IS NULL OR pd.next_followup_at > ${nowIso}::timestamptz))`;
+}
+
+/**
+ * The person's date for a row's statement: the row's due date becomes the person's ONE date at each brand of the row
+ * (the latest statement wins, earlier or later), stated by the writer. An `acted` statement naming no next date is a
+ * send like any other: the person's date moves to now + the send gap (`lead-followup-date.ts`' send rule), so a claim
+ * never leaves them due through another row the moment its lease ends. `rows` is a CTE returning `org_id, brand_ids,
+ * lead_id, followup_due_at`; otherwise a row with no due date states nothing.
+ */
+function statePersonDateSql(rows: SQL, actingCampaignId: string | null, reason: string | null, nowIso: string, acted: boolean) {
+  const sendGap = sql.raw(`interval '${DEFAULT_GAP_DAYS} days'`);
+  return sql`INSERT INTO lead_followup_dates AS d (org_id, brand_id, lead_id, next_followup_at, basis, reason, stated_by_campaign_id, stated_at)
+      SELECT r.org_id, b, r.lead_id,
+             COALESCE(r.followup_due_at, ${nowIso}::timestamptz + ${sendGap}),
+             CASE WHEN r.followup_due_at IS NULL THEN 'send' ELSE 'stated' END,
+             CASE WHEN r.followup_due_at IS NULL THEN ${`Answered by the follow-up queue + ${DEFAULT_GAP_DAYS} days`}
+                  ELSE ${reason ?? "Follow-up scheduled by the follow-up queue"} END,
+             ${actingCampaignId}, ${nowIso}::timestamptz
+      FROM ${rows} r CROSS JOIN LATERAL unnest(r.brand_ids) AS b
+      WHERE (r.followup_due_at IS NOT NULL OR ${acted}) AND r.org_id IS NOT NULL AND b IS NOT NULL AND b <> ''
+      ON CONFLICT (org_id, brand_id, lead_id) DO UPDATE SET
+        next_followup_at = EXCLUDED.next_followup_at, basis = EXCLUDED.basis, reason = EXCLUDED.reason,
+        stated_by_campaign_id = CASE WHEN EXCLUDED.basis = 'stated' THEN EXCLUDED.stated_by_campaign_id ELSE d.stated_by_campaign_id END,
+        stated_at = CASE WHEN EXCLUDED.basis = 'stated' THEN EXCLUDED.stated_at ELSE d.stated_at END,
+        stated_run_id = CASE WHEN EXCLUDED.basis = 'stated' THEN NULL ELSE d.stated_run_id END,
+        stopped_at = NULL, updated_at = now()
+        -- A person's word stopped them: only a writer's stated date reopens (as on lead-followup-date's send rule).
+        WHERE NOT (d.basis = 'stopped' AND EXCLUDED.basis = 'send')
+      RETURNING d.lead_id`;
 }
 
 export function handedClaimableSql(actingCampaignId: string, alias: "lc" | "" = "lc") {
@@ -432,6 +477,7 @@ export async function loadFollowupCandidates(params: {
       AND lc.campaign_id = ${params.campaignId}
       AND lc.followup_due_at IS NOT NULL
       AND lc.followup_due_at <= ${now}
+      AND ${personDueSql(now)}
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
       AND ${handedClaimableSql(params.actingCampaignId)}
       AND ${ownedByActingSql(params.actingCampaignId)}
@@ -584,6 +630,7 @@ export async function loadHeldBackFollowups(params: {
       AND lc.campaign_id = ${params.campaignId}
       AND lc.followup_due_at IS NOT NULL
       AND lc.followup_due_at <= ${now}
+      AND ${personDueSql(now)}
       AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
       AND ${handedClaimableSql(params.actingCampaignId)}
       AND ${ownedByActingSql(params.actingCampaignId)}
@@ -632,10 +679,37 @@ export async function claimFollowup(params: {
   const now = new Date(params.nowMs).toISOString();
   const leaseCutoff = new Date(params.nowMs - FOLLOWUP_CLAIM_LEASE_MS).toISOString();
 
+  const leaseEnd = new Date(params.nowMs + FOLLOWUP_CLAIM_LEASE_MS).toISOString();
+
   // The ledger row is written by the SAME statement that wins the claim, so a claim can never
   // exist without the record of who took it, and a lost race writes nothing.
+  //
+  // The claim also TAKES the person's one next follow-up date (ONE-FOLLOWUP-PER-LEAD-1103): it moves to the lease's
+  // end at every brand of the row, only while it has come, under the date row's lock. A second claim of the same
+  // person through ANY row (another held campaign, a predecessor) waits on that lock, re-reads the moved date and
+  // claims nothing. The acting worker's `acted` then states the real next date; a worker that dies leaves the
+  // person due again when the lease ends.
   const rows = (await db.execute(sql`
-    WITH claimed AS (
+    WITH target AS (
+      SELECT lc.org_id, b AS brand_id, lc.lead_id
+      FROM leads_campaigns lc CROSS JOIN LATERAL unnest(lc.brand_ids) AS b
+      WHERE lc.id = ${params.id} AND lc.org_id IS NOT NULL AND b IS NOT NULL AND b <> ''
+        -- Only a row the claim below may take moves the person's date (no date taken for a claim that cannot win).
+        AND lc.followup_due_at IS NOT NULL
+        AND lc.followup_due_at <= ${now}
+        AND (lc.followup_claimed_at IS NULL OR lc.followup_claimed_at < ${leaseCutoff})
+        AND ${handedClaimableSql(params.actingCampaignId)}
+        AND ${ownedByActingSql(params.actingCampaignId)}
+        AND ${notJournalistSql()}
+    ), person_taken AS (
+      INSERT INTO lead_followup_dates AS d (org_id, brand_id, lead_id, next_followup_at, basis, reason)
+      SELECT t.org_id, t.brand_id, t.lead_id, ${leaseEnd}::timestamptz, 'not_yet', 'Claimed by a follow-up worker: answered once the claim is acted on'
+      FROM target t
+      ON CONFLICT (org_id, brand_id, lead_id) DO UPDATE SET
+        next_followup_at = EXCLUDED.next_followup_at, basis = 'not_yet', reason = EXCLUDED.reason, updated_at = now()
+        WHERE d.next_followup_at IS NOT NULL AND d.next_followup_at <= ${now}::timestamptz
+      RETURNING d.brand_id
+    ), claimed AS (
       UPDATE leads_campaigns
          SET followup_claimed_at = ${now},
              -- An open grant is consumed by this claim: the brand's statement buys exactly one claim.
@@ -650,6 +724,8 @@ export async function claimFollowup(params: {
          AND ${handedClaimableSql(params.actingCampaignId, "")}
          AND ${ownedByActingSql(params.actingCampaignId, "")}
          AND ${notJournalistSql("")}
+         AND (SELECT count(*) FROM person_taken) = (SELECT count(*) FROM target)
+         AND (SELECT count(*) FROM target) > 0
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
     ), logged AS (
       ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now, sql`claimed`, params.workflowSlug ?? null)}
@@ -1342,6 +1418,14 @@ export async function writeFollowupStatement(params: {
        WHERE id = ${params.id} AND org_id = ${params.orgId}
       RETURNING ${STATE_COLUMNS}, org_id, brand_ids
     )${
+      // The row's due date is the person's ONE next follow-up date at the brand from now on (ONE-FOLLOWUP-PER-LEAD-1103),
+      // in the SAME statement: no other row of theirs is due before it.
+      setsDue
+        ? sql`, person_dated AS (
+      ${statePersonDateSql(sql`updated`, params.actingCampaignId ?? null, params.reason, now, acted)}
+    )`
+        : sql``
+    }${
       acted
         ? sql`, logged AS (
       ${followupActionInsert("acted", params.actingCampaignId ?? null, params.runId ?? null, now, sql`updated`, params.workflowSlug ?? null, params.llmAlias ?? null)}

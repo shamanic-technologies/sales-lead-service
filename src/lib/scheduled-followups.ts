@@ -49,8 +49,15 @@ export async function loadScheduledFollowups(orgId: string, campaignIds: readonl
       WHERE d.org_id = ${orgId} AND d.stated_by_campaign_id = ANY(${ids}::text[])
         AND d.next_followup_at IS NOT NULL AND d.basis NOT IN ('stopped', 'stop_recheck')
       UNION ALL
-      SELECT lc.lead_id, lc.followup_due_at AS at FROM leads_campaigns lc
+      -- A queue row goes out when the person's ONE date at the brand has come too (ONE-FOLLOWUP-PER-LEAD-1103).
+      SELECT lc.lead_id, GREATEST(lc.followup_due_at, pd.at) AS at FROM leads_campaigns lc
+      LEFT JOIN LATERAL (
+        SELECT max(d.next_followup_at) AS at, bool_or(d.next_followup_at IS NULL) AS stopped
+        FROM lead_followup_dates d
+        WHERE d.org_id = lc.org_id AND d.lead_id = lc.lead_id AND d.brand_id = ANY(lc.brand_ids)
+      ) pd ON true
       WHERE lc.org_id = ${orgId} AND lc.campaign_id = ANY(${ids}::text[]) AND lc.followup_due_at IS NOT NULL
+        AND NOT COALESCE(pd.stopped, false)
     ),
     per_lead AS (SELECT lead_id, min(at) AS at FROM dated GROUP BY lead_id),
     clock AS (SELECT now() AS now)

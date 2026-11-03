@@ -38,7 +38,9 @@ import { CRM_NOT_THEIR_ACT, sessionlessProductEventSql } from "./crm-act-types.j
  *   not_yet / stop_recheck   the serve asked the verdict (prospect-followup.ts, same stops: client, personal and other
  *             relationships, opted out, unsubscribed, bounced, disqualified, booked, positive reply) and it said "not
  *             now" (date = its retry time) or "no" (date = now + STOP_RECHECK_DAYS, re-asked then: a stop is a fact
- *             about today, never a tombstone).
+ *             about today, never a tombstone). A follow-up worker's CLAIM is a `not_yet` too (`claimFollowup`,
+ *             ONE-FOLLOWUP-PER-LEAD-1103): the date moves to the claim lease's end, so no other row of theirs is claimed
+ *             meanwhile; the worker's `acted` states the next one.
  */
 
 export const DEFAULT_GAP_DAYS = 7;
