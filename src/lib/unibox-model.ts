@@ -40,7 +40,7 @@ import {
   lifecycleOf,
   rolesOf,
   statusOf,
-  STEP_OF_TIMELINE_LABEL,
+  stepOfTimelineFact,
   typesOf,
   type CustomerFact,
   type LifecycleRung,
@@ -222,13 +222,14 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
 
   const [timeline, crm, humanFacts, marks, identities, answers] = await Promise.all([
     leadIds.length === 0
-      ? Promise.resolve([] as Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>)
+      ? Promise.resolve([] as Array<{ lead_id: string; label: string; classification: string | null; first_at: Ts | null; last_at: Ts | null }>)
       : (db.execute(sql`
-          SELECT lead_id::text AS lead_id, label, min(occurred_at) AS first_at, max(occurred_at) AS last_at
+          SELECT lead_id::text AS lead_id, label, detail->>'classification' AS classification,
+            min(occurred_at) AS first_at, max(occurred_at) AS last_at
           FROM lead_timeline_facts
           WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND withdrawn_at IS NULL AND lead_id = ANY(${sql.param(leadIds)}::uuid[])
-          GROUP BY 1, 2
-        `) as unknown as Promise<Array<{ lead_id: string; label: string; first_at: Ts | null; last_at: Ts | null }>>),
+          GROUP BY 1, 2, 3
+        `) as unknown as Promise<Array<{ lead_id: string; label: string; classification: string | null; first_at: Ts | null; last_at: Ts | null }>>),
     points.length === 0
       ? Promise.resolve([] as Array<{ contact_point: string; type: string; payload: Record<string, unknown>; occurred_at: Ts | null; source_ref: string }>)
       : (db.execute(sql`
@@ -296,7 +297,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
   }
   for (const t of timeline) {
     for (const k of subjectsOfLead.get(t.lead_id) ?? []) {
-      const step = STEP_OF_TIMELINE_LABEL[t.label];
+      const step = stepOfTimelineFact(t.label, t.classification);
       if (step) reach(stepsOf(k), step, iso(t.first_at));
       if (SEND_LABELS.includes(t.label)) oursAt.set(k, later(oursAt.get(k) ?? null, iso(t.last_at)));
       if (UNSUBSCRIBED_LABELS.includes(t.label)) unsubscribed.add(k);
@@ -1003,11 +1004,11 @@ export async function readUniboxLead(
     GROUP BY campaign_id
   `)) as unknown as Array<{ campaign_id: string; served_at: Ts | null }>;
   const facts = (await db.execute(sql`
-    SELECT campaign_id, label, min(occurred_at) AS at FROM lead_timeline_facts
+    SELECT campaign_id, label, detail->>'classification' AS classification, min(occurred_at) AS at FROM lead_timeline_facts
     WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND withdrawn_at IS NULL AND campaign_id IS NOT NULL
       AND lead_id = ANY(${sql.param(lead.leadIds)}::uuid[])
-    GROUP BY 1, 2
-  `)) as unknown as Array<{ campaign_id: string; label: string; at: Ts | null }>;
+    GROUP BY 1, 2, 3
+  `)) as unknown as Array<{ campaign_id: string; label: string; classification: string | null; at: Ts | null }>;
   // Shown at the grain the customer knows: a pipe folds into the campaign it belongs to. A filing that is no campaign
   // (a signup, a Unibox conversation: `signups:<brand>`, `unibox:<brand>`) is not listed; its steps still count in the
   // lead's Lifecycle.
@@ -1029,7 +1030,7 @@ export async function readUniboxLead(
     reach(v.steps, "lead_found", at);
   }
   for (const f of facts) {
-    const step = STEP_OF_TIMELINE_LABEL[f.label];
+    const step = stepOfTimelineFact(f.label, f.classification);
     const v = step ? of(f.campaign_id) : null;
     if (v && step) reach(v.steps, step, iso(f.at));
   }

@@ -18,6 +18,7 @@
  * disqualification marks (lead level, then company level).
  */
 import type { RelationshipTag } from "./relationship-tags.js";
+import { WORD_LABELS, type TimelineItemLabel } from "./timeline-labels.js";
 
 export const UNIBOX_TYPES = ["prospect", "customer", "partner", "investor", "supplier", "employee", "advisor", "press", "other"] as const;
 export type UniboxType = (typeof UNIBOX_TYPES)[number];
@@ -204,6 +205,20 @@ export const STEP_OF_TIMELINE_LABEL: Readonly<Record<string, string>> = {
   paid_client: "paid_client",
   industry_update_video: "industry_update_video",
 };
+
+/**
+ * The step one timeline fact reaches (DEALS-ENGAGED-POSREPLY-1106, owner 2026-11-06: "a positive reply = Engaged").
+ * A person's reply the sender classified POSITIVE reaches `conversation` whatever label placed it: a positive
+ * information request is labelled a question (`replyLabel`), and reading the label alone left those people on
+ * "Contacted". The sender's classification is the one judgment per reply, read verbatim, never re-judged here; a
+ * machine's answer (not a person's word) never counts. Null = the fact reaches no step.
+ */
+export function stepOfTimelineFact(label: string, classification: string | null | undefined): string | null {
+  const step = STEP_OF_TIMELINE_LABEL[label];
+  if (step) return step;
+  if (classification === "positive" && WORD_LABELS.has(label as TimelineItemLabel)) return "conversation";
+  return null;
+}
 
 /**
  * WHO the row is (UNIBOX-PERSON-NAME-1021, owner 2026-10-21: "Andreas Oberleitner @ Platomics", never his address).
