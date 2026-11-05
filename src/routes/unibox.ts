@@ -50,6 +50,8 @@ import {
 } from "../lib/unibox-model.js";
 import { resolveUniboxScope, UniboxScopeUnavailableError } from "../lib/unibox-scope.js";
 import { AmbiguousBrandError, readUniboxLeadState } from "../lib/unibox-state.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -113,7 +115,7 @@ function scopeFailed(res: import("express").Response, error: unknown): boolean {
   return true;
 }
 
-router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox-lifecycle-counts"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
     const catalogue = await loadLifecycleCatalogue();
@@ -132,7 +134,7 @@ router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, asyn
   }
 });
 
-router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
     const catalogue = await loadLifecycleCatalogue();
@@ -170,7 +172,7 @@ router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, async (req: Authentic
   }
 });
 
-router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox-lead"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
     const humanId = typeof req.query.humanId === "string" ? req.query.humanId.trim() : "";
@@ -196,7 +198,7 @@ router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, async (req: Auth
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-router.get("/orgs/leads/unibox-state", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/unibox-state", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox-state"]), async (req: AuthenticatedRequest, res) => {
   try {
     const leadId = typeof req.query.leadId === "string" ? req.query.leadId.trim() : "";
     const email = typeof req.query.email === "string" ? req.query.email.trim() : "";

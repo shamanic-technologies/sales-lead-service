@@ -4,6 +4,8 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { loadProspectFollowupVerdicts } from "../lib/prospect-followup.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -59,7 +61,7 @@ router.get("/orgs/leads/:id/prospect-followup", apiKeyAuth, requireOrgId, async 
 });
 
 /** By email at a brand: the lead of the org's brand registered on that address (case-folded). */
-router.get("/orgs/brands/:brandId/prospect-followup", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+router.get("/orgs/brands/:brandId/prospect-followup", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/prospect-followup"]), async (req: AuthenticatedRequest, res: Response) => {
   const brandId = String(req.params.brandId ?? "").trim();
   const email = typeof req.query.email === "string" ? req.query.email.trim().toLowerCase() : "";
   if (!brandId || !email) {

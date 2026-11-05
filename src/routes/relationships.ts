@@ -15,6 +15,8 @@ import { WANTS_BUSINESS } from "../lib/relationship-intent.js";
 import { db } from "../db/index.js";
 import { sql } from "drizzle-orm";
 import { isRelationshipTag } from "../lib/relationship-tags.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 /** A tag, or the `wants_business` answer a person of the org may state (HOT-INBOUND-UNANSWERED-1016). */
@@ -79,7 +81,7 @@ router.post("/internal/brands/:brandId/relationships/query", apiKeyAuth, require
   }
 });
 
-router.get("/orgs/brands/:brandId/relationships/review", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+router.get("/orgs/brands/:brandId/relationships/review", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/relationships/review"]), async (req: AuthenticatedRequest, res: Response) => {
   const brandId = brandOf(req, res);
   if (!brandId) return;
   try {

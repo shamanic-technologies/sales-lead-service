@@ -107,6 +107,8 @@ import {
   withChannelSend,
   type FlattenedStatus,
 } from "../lib/delivery-flatten.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 // Re-exported: these used to live in this module and callers/tests may import them from here.
 export { flattenBrandStatus, flattenCampaignStatus, flattenFamilyStatus };
@@ -815,7 +817,7 @@ const compactCompression = compression({
   filter: (req) => req.query.view === "compact" || (typeof req.query.limit === "string" && req.query.format !== "csv"),
 });
 
-router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads"]), compactCompression, async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
   // Every byte of a streamed response goes through this: it batches the per-row writes and waits
   // when the socket is full, so what this process holds is one batch rather than the difference
@@ -1442,7 +1444,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, compactCompression, async (r
  * FAIL LOUD: email-gateway unreachable is a 502, never a count of zero — a wrong number here is
  * one nothing anywhere would go red about.
  */
-router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/bucket-counts"]), async (req: AuthenticatedRequest, res) => {
   try {
     let statuses: readonly string[];
     let searchTokens: string[] | null;
@@ -1523,7 +1525,7 @@ function stageBreakdown(observed: ReadonlyMap<string, number>): Array<{ stage: s
  * `handed = ongoing + meetingsBooked + dropped` (see readConversationCounts). A campaign that was
  * handed nobody answers zeros, never 404. Registered BEFORE `/orgs/leads/:id`.
  */
-router.get("/orgs/leads/conversation-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/conversation-counts", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/conversation-counts"]), async (req: AuthenticatedRequest, res) => {
   try {
     const campaignId = typeof req.query.campaignId === "string" ? req.query.campaignId.trim() : "";
     if (!campaignId) {
@@ -1560,7 +1562,7 @@ router.get("/orgs/leads/conversation-counts", apiKeyAuth, requireOrgId, async (r
  * FAIL LOUD: email-gateway unreachable is a 502 and so is a standing that cannot be resolved at
  * all — never a count of zero, which is a wrong number nothing anywhere would go red about.
  */
-router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/standing-counts"]), async (req: AuthenticatedRequest, res) => {
   try {
     let statuses: readonly string[];
     let searchTokens: string[] | null;
@@ -1638,7 +1640,7 @@ const CHANGE_FEED_REFUSED_PARAMS = [
  * time. A `since` that no longer names this scope's feed is answered with the whole scope again,
  * `full: true` and a `reason` — the consumer replaces its copy. See lead-change-feed.ts.
  */
-router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, compression(), async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/changes"]), compression(), async (req: AuthenticatedRequest, res) => {
   let streamingStarted = false;
   const writer = new ResponseWriter(res);
   const client = watchClient(req, res);
@@ -1791,7 +1793,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * constructing a list query, and `{ leadDetail }` says what it is where a one-element `{ leads: [] }`
  * would not.
  */
-router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/:id", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/:id"]), async (req: AuthenticatedRequest, res) => {
   try {
     const id = req.params.id;
     if (!UUID_RE.test(id)) {
@@ -1822,6 +1824,7 @@ router.get(
   "/orgs/campaigns/:campaignId/leads/by-lead/:leadId",
   apiKeyAuth,
   requireOrgId,
+  acceptQuery(READ_QUERY_PARAMS["GET /orgs/campaigns/:campaignId/leads/by-lead/:leadId"]),
   async (req: AuthenticatedRequest, res) => {
     try {
       const { campaignId, leadId } = req.params;
