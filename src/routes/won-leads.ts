@@ -8,6 +8,8 @@ import {
 } from "../middleware/auth.js";
 import { toIsoTimestamp } from "../lib/basic-leads.js";
 import { SALE_STEP } from "../lib/closed-deal.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -61,6 +63,7 @@ router.get(
   "/orgs/brands/:brandId/won-leads",
   apiKeyAuth,
   requireOrgId,
+  acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/won-leads"]),
   async (req: AuthenticatedRequest, res: Response) => {
     const brandId = String(req.params.brandId ?? "").trim();
     if (!brandId) {
