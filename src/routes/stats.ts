@@ -16,6 +16,8 @@ import {
   fetchFeatureDynastyMap,
   fetchWorkflowDynastyMap,
 } from "../lib/dynasty-client.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const VALID_GROUP_BY = [
   "campaignId",
@@ -630,7 +632,7 @@ async function buildAttributionAwareStats(
 
 const ZERO_STATS = { groups: [] };
 
-router.get("/orgs/stats", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/stats", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/stats"]), async (req: AuthenticatedRequest, res) => {
   try {
     const groupByParam = typeof req.query.groupBy === "string" ? req.query.groupBy : undefined;
     if (groupByParam && !VALID_GROUP_BY.includes(groupByParam as GroupByField)) {

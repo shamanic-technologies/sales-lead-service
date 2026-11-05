@@ -25,6 +25,8 @@ import {
   readAwaitingReplyWithReport,
   recordAnsweredOutside,
 } from "../lib/awaiting-reply-read.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -39,7 +41,7 @@ function respondReadFailure(res: Response, error: unknown, what: string) {
   res.status(500).json({ error: `${what} failed` });
 }
 
-router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/awaiting-reply"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = typeof req.query.brandId === "string" ? req.query.brandId.trim() : "";
     if (!brandId) {

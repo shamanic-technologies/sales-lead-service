@@ -13,6 +13,8 @@ import {
   type FollowupStatement,
 } from "../lib/lead-followup-date.js";
 import { loadScheduledFollowups } from "../lib/scheduled-followups.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -135,7 +137,7 @@ router.put("/orgs/leads/:id/followup-date", apiKeyAuth, requireOrgId, async (req
  * the people whose next follow-up date one of them last stated, plus their reactive follow-up queue, once per person
  * at the earliest time. `campaignIds` = comma-separated campaign ids of the org (a sales funnel campaign's units).
  */
-router.get("/orgs/followup-dates/scheduled", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res: Response) => {
+router.get("/orgs/followup-dates/scheduled", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/followup-dates/scheduled"]), async (req: AuthenticatedRequest, res: Response) => {
   const raw = typeof req.query.campaignIds === "string" ? req.query.campaignIds : "";
   const campaignIds = [...new Set(raw.split(",").map((s) => s.trim()).filter((s) => s !== ""))];
   if (campaignIds.length === 0) {

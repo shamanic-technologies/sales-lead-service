@@ -78,6 +78,8 @@ import {
 import { createLeadStandingResolver } from "../lib/lead-standing-resolver.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
 import { matchesForContacts } from "../lib/crm-matching.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -424,6 +426,7 @@ router.get(
   "/orgs/leads/crm-pairings",
   apiKeyAuth,
   requireOrgId,
+  acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/crm-pairings"]),
   async (req: AuthenticatedRequest, res) => {
     const brandId = parseBrandId(req.query.brandId);
     if (!brandId) {
@@ -545,6 +548,7 @@ router.get(
   "/orgs/leads/crm-pairing-counts",
   apiKeyAuth,
   requireOrgId,
+  acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/crm-pairing-counts"]),
   async (req: AuthenticatedRequest, res) => {
     const brandId = parseBrandId(req.query.brandId);
     if (!brandId) {

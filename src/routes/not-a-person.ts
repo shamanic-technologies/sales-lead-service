@@ -23,6 +23,8 @@ import {
   restoreConversion,
   withdrawConversion,
 } from "../lib/conversion-withdrawal.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -47,7 +49,7 @@ function readNote(raw: unknown, required: boolean): string | null {
   return note;
 }
 
-router.get("/orgs/leads/not-a-person", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/not-a-person", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/not-a-person"]), async (req: AuthenticatedRequest, res) => {
   let leadId: string | null;
   try {
     leadId = optionalString(req.query.leadId, "leadId");
@@ -138,7 +140,7 @@ router.delete("/orgs/leads/:id/not-a-person", apiKeyAuth, requireOrgId, async (r
   }
 });
 
-router.get("/orgs/brands/:brandId/conversions", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/brands/:brandId/conversions", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/conversions"]), async (req: AuthenticatedRequest, res) => {
   let event: string | null;
   let leadIdRaw: string | null;
   let email: string | null;

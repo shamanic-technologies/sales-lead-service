@@ -37,6 +37,8 @@ import {
   withdrawDisqualification,
   type DisqualificationLevel,
 } from "../lib/lead-disqualification.js";
+import { acceptQuery } from "../lib/query-params.js";
+import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
 const router = Router();
 
@@ -81,7 +83,7 @@ function fail(res: Response, error: unknown, what: string) {
   res.status(500).json({ error: `${what} failed` });
 }
 
-router.get("/orgs/leads/disqualifications", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+router.get("/orgs/leads/disqualifications", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/disqualifications"]), async (req: AuthenticatedRequest, res) => {
   let brandId: string | null;
   let offerId: string | null;
   try {
