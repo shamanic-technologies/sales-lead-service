@@ -26,7 +26,6 @@ import {
   formSubmissionsFrom,
   paidValueCents,
   positiveReplyEvidence,
-  crmCauseRule,
   crmOutcomeSignature,
   effectiveCrmCause,
   evidenceFromEvents,
@@ -47,6 +46,8 @@ import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { loadCrmFunnelEvents } from "./crm-fact-events.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
 import { withFirstChannelSends } from "./first-touch.js";
+import { coherentCauseRule, type PersonStep } from "./outcome-cause-coherence.js";
+import { loadPersonOutcomes } from "./outcome-cause.js";
 
 export interface CrmJudgingResult {
   /** Contacts walked. */
@@ -242,9 +243,12 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
   // Our first touch on ANY channel a pipe sends on (first-touch.ts): a WhatsApp send counts like a delivered email.
   const firstDelivered = await withFirstChannelSends(orgId, brandId, leadIds, firstEmailDelivered);
 
-  const [nonCrm, causeStatements] = await Promise.all([
+  const [nonCrm, causeStatements, nonCrmSteps] = await Promise.all([
     loadNonCrmOutcomeKeys(brandId, leadIds),
     loadCauseStatements(brandId, leadIds),
+    // Whose win a CRM step was reads the person's OTHER steps too (outcome-cause-coherence.ts): the
+    // ones another source holds come from the ledger, the CRM's own from this pass's evidence.
+    loadPersonOutcomes(orgId, brandId, leadIds, { excludeCrm: true }),
   ]);
 
   // Only a sale their GoHighLevel pipeline evidences takes its value off an opportunity; a paid one
@@ -283,6 +287,22 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     }
     if (reply) steps.set(`outcome:${CRM_POSITIVE_REPLY_STEP}`, reply);
 
+    // Every step of the person this pass would leave standing: the other sources' live rows plus the
+    // CRM steps no person/tracker statement outranks.
+    const personSteps: PersonStep[] = [...(nonCrmSteps.steps.get(leadId) ?? [])];
+    for (const item of steps.values()) {
+      if (item.evidence.kind !== "outcome" || nonCrm.has(`${leadId}:${item.evidence.step}`)) continue;
+      const stated = causeStatements.get(`${leadId}:${item.evidence.step}`)?.causedByOutreach ?? null;
+      // A reply a person said was not ours is not written (below), so it is no step of theirs either.
+      if (item.evidence.step === CRM_POSITIVE_REPLY_STEP && stated === false) continue;
+      personSteps.push({
+        key: `crm:${item.evidence.step}`,
+        event: item.evidence.step,
+        occurredAt: item.evidence.occurredAt,
+        personCause: stated,
+      });
+    }
+
     for (const item of steps.values()) {
       if (item.evidence.kind !== "outcome") continue;
       const step = item.evidence.step;
@@ -291,7 +311,11 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
       // must not both count.
       if (nonCrm.has(`${leadId}:${step}`)) continue;
 
-      const rule = crmCauseRule(item.evidence.occurredAt, firstDelivered.get(leadId) ?? null);
+      const rule = coherentCauseRule(
+        { key: `crm:${step}`, event: step, occurredAt: item.evidence.occurredAt },
+        personSteps,
+        firstDelivered.get(leadId) ?? null,
+      );
       const cause = effectiveCrmCause(rule, causeStatements.get(`${leadId}:${step}`) ?? null);
       // A person who said this reply was NOT ours outranks the date: it is not written.
       if (step === CRM_POSITIVE_REPLY_STEP && cause.causedByOutreach !== true) continue;

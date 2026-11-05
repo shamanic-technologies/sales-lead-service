@@ -23,21 +23,34 @@
  *   - Nothing is fabricated when a sibling cannot answer: email-gateway failing leaves the brand's
  *     rows exactly as they were (null stays null) and is logged; the next sweep retries.
  *
+ *   - The rule reads the PERSON's steps, not the row alone (outcome-cause-coherence.ts,
+ *     DIGEST-SALES-ATTRIB-1105): a step after one of theirs that was not ours is not ours either, an
+ *     undated step is ours only when everything we know of the person came through us.
+ *
  * `OUTCOME_CAUSE_INTERVAL_MS` IS the bound on how long a new unanswered outcome reads null before
- * the rule answers it. An answer that can still move — never delivered yet (we may email them
- * later), not attributed yet (a match can be resolved later) — is re-evaluated on every sweep; a
- * dated answer against a delivery is final, because a first delivery cannot move.
+ * the rule answers it, and on how long a row keeps an answer another step of the person moved. Every
+ * unanswered row is re-decided each sweep (the brand's ledger is small: 507 rows fleet-wide on
+ * 2026-11-05); a lead's first touch stated by a final answer is never asked again, because a first
+ * delivery cannot move.
  */
 import { errorMessage } from "./db-error.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { crmCauseRule, type CrmCauseRuleReason } from "./crm-evidence.js";
+import { loadCauseStatements } from "./crm-evidence-store.js";
+import {
+  CROSS_STEP_REASONS,
+  coherentCauseRule,
+  sameCoherentRule,
+  type CauseAnchorStep,
+  type CoherentCauseReason,
+  type PersonStep,
+} from "./outcome-cause-coherence.js";
 import { checkDeliveryStatus } from "./email-gateway-client.js";
 import { flattenBrandStatus } from "./delivery-flatten.js";
 import { withFirstChannelSends } from "./first-touch.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 
-export type OutcomeCauseReason = CrmCauseRuleReason | "not_matched";
+export type OutcomeCauseReason = CoherentCauseReason | "not_matched";
 
 /** What `cause_rule` holds: the rule's answer, why, and the inputs it was computed from. */
 export interface StoredOutcomeCauseRule {
@@ -47,19 +60,21 @@ export interface StoredOutcomeCauseRule {
   /** The lead the outcome is ATTRIBUTED to (null when it is not attributed to anyone). */
   leadId: string | null;
   occurredAt: string | null;
+  /** The person's step the answer leans on (cross-step reasons only: outcome-cause-coherence.ts). */
+  afterStep?: CauseAnchorStep;
 }
 
-/** Reasons whose answer can still change on a later sweep. */
-const OPEN_REASONS: readonly OutcomeCauseReason[] = ["never_delivered", "not_matched"];
-
 /**
- * The rule for one outcome. Identical to the CRM path's (`crmCauseRule`) plus one precondition the
- * CRM path never needs (its rows are paired to a lead by construction): an outcome nobody could
- * attribute to one of our leads has nobody we could have emailed, so it is undecided.
+ * The rule for one outcome. The CRM path's rule read across the person's steps (`coherentCauseRule`:
+ * a step after one of theirs that was not ours is not ours either) plus one precondition the CRM path
+ * never needs (its rows are paired to a lead by construction): an outcome nobody could attribute to
+ * one of our leads has nobody we could have emailed, so it is undecided. With no `person` given, the
+ * outcome is judged alone (the date rule).
  */
 export function outcomeCauseRule(
   input: { leadId: string | null; occurredAt: string | null },
   firstDeliveredAt: string | null,
+  person?: { key: string; event: string; steps: readonly PersonStep[] },
 ): StoredOutcomeCauseRule {
   if (input.leadId === null) {
     return {
@@ -70,63 +85,50 @@ export function outcomeCauseRule(
       occurredAt: input.occurredAt,
     };
   }
-  const rule = crmCauseRule(input.occurredAt, firstDeliveredAt);
+  const rule = coherentCauseRule(
+    { key: person?.key ?? "", event: person?.event ?? "", occurredAt: input.occurredAt },
+    person?.steps ?? [],
+    firstDeliveredAt,
+  );
   return { ...rule, leadId: input.leadId, occurredAt: input.occurredAt };
 }
 
 /** A pending row as the sweep reads it. */
 export interface PendingOutcomeRow {
   id: string;
+  event?: string;
   leadId: string | null;
   occurredAt: string | null;
   causedByOutreach: boolean | null;
   causeRule: StoredOutcomeCauseRule | null;
 }
 
-/** Only an attributed, dated outcome needs our first delivery to be answered. */
-export function needsFirstDelivery(row: Pick<PendingOutcomeRow, "leadId" | "occurredAt">): boolean {
-  return row.leadId !== null && row.occurredAt !== null;
-}
-
-/**
- * Whether a row's stored answer still stands without asking anything: its inputs are unchanged and
- * the reason it gave cannot move.
- */
-export function ruleIsSettled(row: PendingOutcomeRow): boolean {
-  const r = row.causeRule;
-  if (!r) return false;
-  if (OPEN_REASONS.includes(r.reason)) return false;
-  if (r.leadId !== row.leadId || r.occurredAt !== row.occurredAt) return false;
-  return row.causedByOutreach === r.causedByOutreach;
-}
-
 function sameRule(a: StoredOutcomeCauseRule | null, b: StoredOutcomeCauseRule): boolean {
   return (
     a !== null &&
-    a.causedByOutreach === b.causedByOutreach &&
-    a.reason === b.reason &&
-    a.firstDeliveredAt === b.firstDeliveredAt &&
+    sameCoherentRule(a as Parameters<typeof sameCoherentRule>[0], b as Parameters<typeof sameCoherentRule>[1]) &&
     a.leadId === b.leadId &&
     a.occurredAt === b.occurredAt
   );
 }
 
+/** Reasons that state a FINAL first touch of the lead (a first delivery cannot move once it happened). */
+const FIRST_TOUCH_KNOWN_REASONS: ReadonlySet<string> = new Set<string>([
+  "after_first_delivery",
+  "before_first_delivery",
+  ...CROSS_STEP_REASONS,
+]);
+
 /**
- * The work list, as one SQL predicate so the brand listing and the per-brand read agree: live,
- * non-CRM outcomes no person answered whose rule answer is missing, open, stale against the row's
- * attribution, or not what the row carries.
+ * The work list: every live, non-CRM outcome no person answered. Whose win one step was depends on the
+ * person's OTHER steps (outcome-cause-coherence.ts), which any source can add or take back at any time,
+ * so every such row is re-decided each sweep; an unchanged answer writes nothing, and a lead's first
+ * touch already stated by a final answer is never asked again (no email-gateway call for it).
  */
 const PENDING = sql`
   source <> 'crm'
   AND withdrawn_at IS NULL
   AND stated_caused_by_outreach IS NULL
-  AND (
-    cause_rule IS NULL
-    OR cause_rule->>'reason' IN ('never_delivered', 'not_matched')
-    OR (cause_rule->>'leadId') IS DISTINCT FROM
-       (CASE WHEN attribution_status = 'attributed' THEN matched_lead_id::text END)
-    OR caused_by_outreach IS DISTINCT FROM (cause_rule->>'causedByOutreach')::boolean
-  )
 `;
 
 export async function listPendingCauseBrands(): Promise<Array<{ orgId: string; brandId: string }>> {
@@ -136,15 +138,16 @@ export async function listPendingCauseBrands(): Promise<Array<{ orgId: string; b
   return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
 }
 
-async function loadPendingRows(brandId: string): Promise<PendingOutcomeRow[]> {
+async function loadPendingRows(orgId: string, brandId: string): Promise<PendingOutcomeRow[]> {
   const rows = (await db.execute(sql`
-    SELECT id,
+    SELECT id, event,
            CASE WHEN attribution_status = 'attributed' THEN matched_lead_id::text END AS lead_id,
            received_at, caused_by_outreach, cause_rule
     FROM conversion_events
-    WHERE brand_id = ${brandId} AND ${PENDING}
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND ${PENDING}
   `)) as unknown as Array<{
     id: string;
+    event: string;
     lead_id: string | null;
     received_at: Date | string | null;
     caused_by_outreach: boolean | null;
@@ -152,6 +155,7 @@ async function loadPendingRows(brandId: string): Promise<PendingOutcomeRow[]> {
   }>;
   return rows.map((r) => ({
     id: r.id,
+    event: r.event,
     leadId: r.lead_id,
     occurredAt: toIsoTimestamp(r.received_at),
     causedByOutreach: r.caused_by_outreach,
@@ -160,6 +164,70 @@ async function loadPendingRows(brandId: string): Promise<PendingOutcomeRow[]> {
         ? (JSON.parse(r.cause_rule) as StoredOutcomeCauseRule)
         : r.cause_rule,
   }));
+}
+
+/** Every live outcome of these leads at the brand (any source), as the cross-step rule reads them. */
+export interface PersonOutcomes {
+  steps: Map<string, PersonStep[]>;
+  /** A lead's first touch as a FINAL stored answer already states it. */
+  knownFirstTouch: Map<string, string>;
+  /** Leads holding at least one dated outcome (only those need a first touch). */
+  dated: Set<string>;
+}
+
+export async function loadPersonOutcomes(
+  orgId: string,
+  brandId: string,
+  leadIds: string[],
+  opts: { excludeCrm?: boolean } = {},
+): Promise<PersonOutcomes> {
+  const out: PersonOutcomes = { steps: new Map(), knownFirstTouch: new Map(), dated: new Set() };
+  if (leadIds.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT id, event, source, matched_lead_id::text AS lead_id, received_at,
+           stated_caused_by_outreach,
+           COALESCE(cause_rule, crm_evidence->'rule') AS rule,
+           cause_rule->>'leadId' AS rule_lead_id
+    FROM conversion_events
+    WHERE org_id = ${orgId}
+      AND brand_id = ${brandId}
+      AND attribution_status = 'attributed'
+      AND matched_lead_id = ANY(${sql.param(leadIds)}::uuid[])
+      AND withdrawn_at IS NULL
+  `)) as unknown as Array<{
+    id: string;
+    event: string;
+    source: string;
+    lead_id: string;
+    received_at: Date | string | null;
+    stated_caused_by_outreach: boolean | null;
+    rule: { reason?: string; firstDeliveredAt?: string | null } | string | null;
+    rule_lead_id: string | null;
+  }>;
+  const crmLeads = rows.filter((r) => r.source === "crm").map((r) => r.lead_id);
+  const statements = crmLeads.length > 0 ? await loadCauseStatements(brandId, Array.from(new Set(crmLeads))) : new Map();
+  for (const r of rows) {
+    if (opts.excludeCrm && r.source === "crm") continue;
+    const occurredAt = toIsoTimestamp(r.received_at);
+    const personCause =
+      r.source === "crm"
+        ? (statements.get(`${r.lead_id}:${r.event}`)?.causedByOutreach ?? null)
+        : r.stated_caused_by_outreach;
+    const list = out.steps.get(r.lead_id) ?? [];
+    list.push({ key: r.id, event: r.event, occurredAt, personCause });
+    out.steps.set(r.lead_id, list);
+    if (occurredAt !== null) out.dated.add(r.lead_id);
+    const rule = typeof r.rule === "string" ? (JSON.parse(r.rule) as { reason?: string; firstDeliveredAt?: string | null }) : r.rule;
+    if (
+      rule?.reason &&
+      FIRST_TOUCH_KNOWN_REASONS.has(rule.reason) &&
+      rule.firstDeliveredAt &&
+      (r.rule_lead_id === null || r.rule_lead_id === r.lead_id)
+    ) {
+      out.knownFirstTouch.set(r.lead_id, rule.firstDeliveredAt);
+    }
+  }
+  return out;
 }
 
 async function primaryEmails(leadIds: string[]): Promise<Map<string, string>> {
@@ -219,15 +287,24 @@ export async function applyOutcomeCauseRule(
   orgId: string,
   brandId: string,
 ): Promise<OutcomeCauseSweepResult> {
-  const rows = (await loadPendingRows(brandId)).filter((r) => !ruleIsSettled(r));
-  const leadIds = Array.from(
-    new Set(rows.filter(needsFirstDelivery).map((r) => r.leadId as string)),
-  );
-  const delivered = leadIds.length > 0 ? await firstDeliveries(orgId, brandId, leadIds) : new Map();
+  const rows = await loadPendingRows(orgId, brandId);
+  const leadIds = Array.from(new Set(rows.filter((r) => r.leadId !== null).map((r) => r.leadId as string)));
+  const person = await loadPersonOutcomes(orgId, brandId, leadIds);
+  // Only a lead holding a dated outcome needs our first touch; one a final answer already states is not asked.
+  const toAsk = leadIds.filter((id) => person.dated.has(id) && !person.knownFirstTouch.has(id));
+  const delivered: Map<string, string | null> =
+    toAsk.length > 0 ? await firstDeliveries(orgId, brandId, toAsk) : new Map();
+  for (const [id, at] of person.knownFirstTouch) delivered.set(id, at);
 
   let updated = 0;
   for (const row of rows) {
-    const rule = outcomeCauseRule(row, row.leadId ? (delivered.get(row.leadId) ?? null) : null);
+    const rule = outcomeCauseRule(
+      row,
+      row.leadId ? (delivered.get(row.leadId) ?? null) : null,
+      row.leadId
+        ? { key: row.id, event: row.event ?? "", steps: person.steps.get(row.leadId) ?? [] }
+        : undefined,
+    );
     if (row.causedByOutreach === rule.causedByOutreach && sameRule(row.causeRule, rule)) continue;
     // Guarded on nobody having answered meanwhile: a person's statement always wins.
     const res = (await db.execute(sql`
