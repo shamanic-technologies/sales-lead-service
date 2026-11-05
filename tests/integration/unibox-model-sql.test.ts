@@ -134,11 +134,13 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     for (const [label, at, campaign] of [
       ["initial_email", "2026-10-01T10:00:00Z", "camp-cold"],
       ["website_visit", "2026-10-02T10:00:00Z", "camp-cold"],
-      ["interested", "2026-10-03T10:00:00Z", "camp-cold"],
+      // DEALS-ENGAGED-POSREPLY-1106: a POSITIVE reply asking for information is labelled a question; it is Engaged all the same.
+      ["question", "2026-10-03T10:00:00Z", "camp-cold"],
     ] as const) {
+      const detail = label === "question" ? { classification: "positive" } : {};
       await db.execute(sql`
-        INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, campaign_id, label, source, source_ref, occurred_at)
-        VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${lead.id}::uuid, ${campaign}, ${label}, 'outreach', ${randomUUID()}, ${at}::timestamptz)`);
+        INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, campaign_id, label, source, source_ref, occurred_at, detail)
+        VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${lead.id}::uuid, ${campaign}, ${label}, 'outreach', ${randomUUID()}, ${at}::timestamptz, ${JSON.stringify(detail)}::jsonb)`);
     }
     await db.execute(sql`
       INSERT INTO lead_disqualification_marks (org_id, brand_id, lead_id, offer_key, source, note, stated_by_user_id)

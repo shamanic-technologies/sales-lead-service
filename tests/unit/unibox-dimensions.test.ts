@@ -8,6 +8,7 @@ import {
   lifecycleOf,
   rolesOf,
   statusOf,
+  stepOfTimelineFact,
   typesOf,
 } from "../../src/lib/unibox-dimensions.js";
 
@@ -78,6 +79,24 @@ describe("unibox dimensions", () => {
     expect(lifecycleOf(["lead_found", "website_visit", "signup", "email_sent"], ranks, ladder)).toEqual(ladder[3]);
     expect(lifecycleOf(["technical", "never_heard_of"], ranks, ladder)).toBeNull();
     expect(lifecycleOf(["paid_client", "lead_found"], ranks, ladder)?.key).toBe("paid_client");
+  });
+
+  it("DEALS-ENGAGED-POSREPLY-1106: a positive reply reaches Engaged whatever its label", () => {
+    // Beyond Logic 2026-11-02/05: two positive replies labelled "question" stayed on Contacted.
+    const steps = ["lead_found", "email_sent", stepOfTimelineFact("question", "positive")].filter((x): x is string => x !== null);
+    expect(lifecycleOf(steps, ranks, ladder)?.key).toBe("engaged");
+    expect(stepOfTimelineFact("question_answerable", "positive")).toBe("conversation");
+    expect(stepOfTimelineFact("question_to_escalate", "positive")).toBe("conversation");
+    expect(stepOfTimelineFact("referral", "positive")).toBe("conversation");
+    expect(stepOfTimelineFact("interested", null)).toBe("conversation");
+    // Not positive, or not a person's word: no step.
+    expect(stepOfTimelineFact("question", "neutral")).toBeNull();
+    expect(stepOfTimelineFact("question", null)).toBeNull();
+    expect(stepOfTimelineFact("auto_reply", "positive")).toBeNull();
+    expect(stepOfTimelineFact("opened", "positive")).toBeNull();
+    // Label steps unchanged.
+    expect(stepOfTimelineFact("signup", null)).toBe("signup");
+    expect(stepOfTimelineFact("initial_email", null)).toBe("email_sent");
   });
 
   it("Interest reads the wants-business answer", () => {
