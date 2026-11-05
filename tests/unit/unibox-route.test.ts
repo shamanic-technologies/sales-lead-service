@@ -25,6 +25,17 @@ vi.mock("../../src/lib/unibox-model.js", () => ({
   UniboxCursorError,
 }));
 
+const readUniboxLeadState = vi.fn();
+class AmbiguousBrandError extends Error {
+  constructor(readonly brandIds: string[]) {
+    super("several");
+  }
+}
+vi.mock("../../src/lib/unibox-state.js", () => ({
+  readUniboxLeadState: (...a: unknown[]) => readUniboxLeadState(...a),
+  AmbiguousBrandError,
+}));
+
 const ORG = "30000000-0000-0000-0000-000000000001";
 const BRAND = "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb";
 const HUMAN = "11111111-2222-4333-8444-555555555555";
@@ -150,5 +161,40 @@ describe("GET /orgs/leads/unibox-lead", () => {
     readUniboxLead.mockResolvedValueOnce(null);
     expect((await get(`/orgs/leads/unibox-lead?brandId=${BRAND}&humanId=${HUMAN}`)).status).toBe(404);
     expect((await get(`/orgs/leads/unibox-lead?brandId=${BRAND}&humanId=nope`)).status).toBe(400);
+  });
+});
+
+describe("GET /orgs/leads/unibox-state (AGENT-READS-LEAD-1105)", () => {
+  const LEAD = "18f32e75-2519-4312-bcd5-6e8134097f76";
+  beforeEach(() => readUniboxLeadState.mockReset());
+  it("by lead id, brand optional", async () => {
+    readUniboxLeadState.mockResolvedValue({ brandId: BRAND, waitingOnUs: false });
+    const res = await get(`/orgs/leads/unibox-state?leadId=${LEAD}`);
+    expect(res.status).toBe(200);
+    expect(res.body.waitingOnUs).toBe(false);
+    expect(readUniboxLeadState).toHaveBeenCalledWith(ORG, { brandId: null, leadId: LEAD, email: null });
+  });
+  it("by email + brand", async () => {
+    readUniboxLeadState.mockResolvedValue({ brandId: BRAND });
+    await get(`/orgs/leads/unibox-state?email=Ed@Example.com&brandId=${BRAND}`);
+    expect(readUniboxLeadState).toHaveBeenCalledWith(ORG, { brandId: BRAND, leadId: null, email: "Ed@Example.com" });
+  });
+  it("refuses: neither, both, bad ids", async () => {
+    expect((await get(`/orgs/leads/unibox-state`)).status).toBe(400);
+    expect((await get(`/orgs/leads/unibox-state?leadId=${LEAD}&email=a@b.co`)).status).toBe(400);
+    expect((await get(`/orgs/leads/unibox-state?leadId=nope`)).status).toBe(400);
+    expect((await get(`/orgs/leads/unibox-state?email=nope`)).status).toBe(400);
+    expect((await get(`/orgs/leads/unibox-state?leadId=${LEAD}&brandId=x`)).status).toBe(400);
+    expect(readUniboxLeadState).not.toHaveBeenCalled();
+  });
+  it("404 not in the Unibox; 409 several brands with their ids", async () => {
+    readUniboxLeadState.mockResolvedValueOnce(null);
+    const nf = await get(`/orgs/leads/unibox-state?leadId=${LEAD}`);
+    expect(nf.status).toBe(404);
+    expect(nf.body.code).toBe("not_in_unibox");
+    readUniboxLeadState.mockRejectedValueOnce(new AmbiguousBrandError(["a", "b"]));
+    const amb = await get(`/orgs/leads/unibox-state?leadId=${LEAD}`);
+    expect(amb.status).toBe(409);
+    expect(amb.body).toMatchObject({ code: "several_brands", brandIds: ["a", "b"] });
   });
 });
