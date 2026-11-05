@@ -4782,11 +4782,16 @@ const ConvertedLeadOutcomeSchema = z
         "event_undated",
         "never_delivered",
         "not_matched",
+        "after_step_not_ours",
+        "undated_after_our_step",
       ])
       .nullable()
       .openapi({
         description:
-          "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise.",
+          "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise. " +
+          "after_step_not_ours — dated after our first touch, but another step of the same person at the brand " +
+          "that was NOT ours happened at or before it (the client already had them in their funnel); " +
+          "undated_after_our_step — undated, and everything we know of the person at the brand came through us.",
         example: "after_first_delivery",
       }),
     source: z.enum(["tracker", "manual", "crm", "reply"]).openapi({
@@ -7186,10 +7191,25 @@ const CRM_EVIDENCED_STEP_ENUM = ["signup", "meeting_booked", "meeting_attended",
 const CrmCauseRuleSchema = z
   .object({
     causedByOutreach: z.boolean().nullable(),
-    reason: z.enum(["after_first_delivery", "before_first_delivery", "event_undated", "never_delivered"]),
+    reason: z.enum([
+      "after_first_delivery",
+      "before_first_delivery",
+      "event_undated",
+      "never_delivered",
+      "after_step_not_ours",
+      "undated_after_our_step",
+    ]).openapi({
+      description:
+        "after_step_not_ours — after our first touch, but another step of the person that was NOT ours came at or " +
+        "before it; undated_after_our_step — undated, and every other step of the person was ours.",
+    }),
     firstDeliveredAt: z.string().nullable().openapi({
       description: "Our first delivered email to this person at brand scope — the rule's other input.",
     }),
+    afterStep: z
+      .object({ event: z.string(), occurredAt: z.string().nullable() })
+      .optional()
+      .openapi({ description: "The person's step a cross-step reason leans on." }),
   })
   .openapi("CrmCauseRule", {
     description:
@@ -10507,7 +10527,7 @@ const ReachedStateSchema = z
       description:
         "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); " +
         "stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / " +
-        "before_first_delivery / never_delivered / event_undated (the ledger's date rule against our first touch of the lead at the brand, any pipe: " +
+        "before_first_delivery / never_delivered / event_undated / after_step_not_ours / undated_after_our_step (the ledger's date rule against our first touch of the lead at the brand, any pipe, read across the person's steps: " +
         "stored by the ledger for its rows, applied here to every other fact).",
     }),
   })
