@@ -116,8 +116,8 @@ describe.skipIf(!hasRealDatabase)("outcome cause rule against a real database", 
   }
 
   beforeAll(async () => {
-    for (const k of ["after", "before", "never", "manual", "stated", "undated"]) await seedLead(k);
-    for (const k of ["after", "before", "manual", "stated", "undated"]) {
+    for (const k of ["after", "before", "never", "manual", "stated", "undated", "theirs"]) await seedLead(k);
+    for (const k of ["after", "before", "manual", "stated", "undated", "theirs"]) {
       state.delivered.set(lead[k].email, DELIVERED);
     }
     state.delivered.set(lead.never.email, null);
@@ -129,6 +129,18 @@ describe.skipIf(!hasRealDatabase)("outcome cause rule against a real database", 
     await seedEvent("manual", { source: "manual", event: "meeting_attended", leadKey: "manual", at: "2026-06-01T00:00:00.000Z" });
     await seedEvent("stated", { source: "manual", event: "sale", leadKey: "stated", at: "2026-06-01T00:00:00.000Z", stated: false });
     await seedEvent("undated", { source: "tracker", event: "signup", leadKey: "undated", at: null });
+    // DIGEST-SALES-ATTRIB-1105: a CRM meeting of theirs before our first email, then a site purchase after it.
+    await db.execute(sql`
+      INSERT INTO conversion_events (
+        brand_id, org_id, event, dedupe_signature, matched_lead_id, match_method, match_confidence,
+        attribution_status, candidate_count, received_at, source, caused_by_outreach, crm_evidence
+      ) VALUES (
+        ${brandId}, ${orgId}, 'meeting_booked', ${`crm:${lead.theirs.id}:meeting_booked`}, ${lead.theirs.id},
+        'human', 'deterministic', 'attributed', 1, ${"2025-03-19T00:00:00.000Z"}, 'crm', false,
+        ${JSON.stringify({ rule: { causedByOutreach: false, reason: "before_first_delivery", firstDeliveredAt: DELIVERED } })}::jsonb
+      )
+    `);
+    await seedEvent("theirs", { source: "tracker", event: "sale", leadKey: "theirs", at: "2026-06-01T00:00:00.000Z" });
   });
 
   it("lists the brand as having unanswered outcomes", async () => {
@@ -138,7 +150,7 @@ describe.skipIf(!hasRealDatabase)("outcome cause rule against a real database", 
 
   it("answers every unanswered outcome by the date rule, and never defaults to ours", async () => {
     const result = await applyOutcomeCauseRule(orgId, brandId);
-    expect(result.updated).toBe(6);
+    expect(result.updated).toBe(7);
 
     const after = await read("after");
     expect(after.caused_by_outreach).toBe(true);
@@ -162,6 +174,14 @@ describe.skipIf(!hasRealDatabase)("outcome cause rule against a real database", 
     const stated = await read("stated");
     expect(stated.caused_by_outreach).toBe(false);
     expect(stated.cause_rule).toBeNull();
+
+    // A purchase after a CRM meeting of theirs (before our first email) is theirs, whatever its own date.
+    const theirs = await read("theirs");
+    expect(theirs.caused_by_outreach).toBe(false);
+    expect(theirs.cause_rule).toMatchObject({
+      reason: "after_step_not_ours",
+      afterStep: { event: "meeting_booked", occurredAt: "2025-03-19T00:00:00.000Z" },
+    });
   });
 
   it("does not rewrite a settled answer, and re-evaluates one that could still move", async () => {
