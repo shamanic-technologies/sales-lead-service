@@ -105,6 +105,8 @@ export const CAUSE_REASONS = [
   "before_first_delivery",
   "never_delivered",
   "event_undated",
+  "after_step_not_ours",
+  "undated_after_our_step",
 ] as const;
 export type CauseReason = (typeof CAUSE_REASONS)[number];
 
@@ -124,7 +126,15 @@ export interface LedgerCause {
   ruleReason: string | null;
 }
 
-const RULE_REASONS: ReadonlySet<string> = new Set<CrmCauseRuleReason>(["after_first_delivery", "before_first_delivery", "never_delivered", "event_undated"]);
+const RULE_REASONS: ReadonlySet<string> = new Set<CauseReason>([
+  "after_first_delivery",
+  "before_first_delivery",
+  "never_delivered",
+  "event_undated",
+  // The ledger's rule read across the person's steps (outcome-cause-coherence.ts, DIGEST-SALES-ATTRIB-1105).
+  "after_step_not_ours",
+  "undated_after_our_step",
+]);
 
 /** Whose win one piece of evidence was. Pure. */
 export function evidenceCause(input: {
@@ -137,7 +147,7 @@ export function evidenceCause(input: {
   if (ledger) {
     if (ledger.stated) return { causedByOutreach: ledger.causedByOutreach, causeReason: "stated" };
     if (ledger.ruleReason !== null && RULE_REASONS.has(ledger.ruleReason) && ledger.ruleCausedByOutreach === ledger.causedByOutreach) {
-      return { causedByOutreach: ledger.causedByOutreach, causeReason: ledger.ruleReason as CrmCauseRuleReason };
+      return { causedByOutreach: ledger.causedByOutreach, causeReason: ledger.ruleReason as CauseReason };
     }
     if (ledger.causedByOutreach === null && ledger.ruleReason === null) return { causedByOutreach: null, causeReason: "not_judged_yet" };
     return { causedByOutreach: ledger.causedByOutreach, causeReason: "recorded" };

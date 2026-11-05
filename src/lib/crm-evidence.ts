@@ -231,9 +231,12 @@ export type CrmCauseRuleReason =
 
 export interface CrmCauseRule {
   causedByOutreach: boolean | null;
-  reason: CrmCauseRuleReason;
+  /** The date rule's own reasons, or the two the person's other steps give (outcome-cause-coherence.ts). */
+  reason: CrmCauseRuleReason | "after_step_not_ours" | "undated_after_our_step";
   /** Our first delivered email to this person at brand scope — the rule's other input. */
   firstDeliveredAt: string | null;
+  /** The person's step a cross-step answer leans on (absent on the date rule's own answers). */
+  afterStep?: { event: string; occurredAt: string | null };
 }
 
 /** The owner's default rule. An undated event is never attributed to us. */

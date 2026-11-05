@@ -644,7 +644,8 @@ export interface UniboxPage {
   builtAt: string | null;
 }
 
-function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): UniboxRow {
+/** A stored `unibox_rows` row as served (the list, the card and the one-lead state read it the same way). */
+export function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung[]): UniboxRow {
   const key = (r.lifecycle_key as string | null) ?? null;
   const rung = key === null ? null : (ladder.find((x) => x.key === key) ?? { key, rank: Number(r.lifecycle_rank), label: key });
   return {

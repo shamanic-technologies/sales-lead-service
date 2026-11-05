@@ -4782,11 +4782,16 @@ const ConvertedLeadOutcomeSchema = z
         "event_undated",
         "never_delivered",
         "not_matched",
+        "after_step_not_ours",
+        "undated_after_our_step",
       ])
       .nullable()
       .openapi({
         description:
-          "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise.",
+          "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise. " +
+          "after_step_not_ours — dated after our first touch, but another step of the same person at the brand " +
+          "that was NOT ours happened at or before it (the client already had them in their funnel); " +
+          "undated_after_our_step — undated, and everything we know of the person at the brand came through us.",
         example: "after_first_delivery",
       }),
     source: z.enum(["tracker", "manual", "crm", "reply"]).openapi({
@@ -7186,10 +7191,25 @@ const CRM_EVIDENCED_STEP_ENUM = ["signup", "meeting_booked", "meeting_attended",
 const CrmCauseRuleSchema = z
   .object({
     causedByOutreach: z.boolean().nullable(),
-    reason: z.enum(["after_first_delivery", "before_first_delivery", "event_undated", "never_delivered"]),
+    reason: z.enum([
+      "after_first_delivery",
+      "before_first_delivery",
+      "event_undated",
+      "never_delivered",
+      "after_step_not_ours",
+      "undated_after_our_step",
+    ]).openapi({
+      description:
+        "after_step_not_ours — after our first touch, but another step of the person that was NOT ours came at or " +
+        "before it; undated_after_our_step — undated, and every other step of the person was ours.",
+    }),
     firstDeliveredAt: z.string().nullable().openapi({
       description: "Our first delivered email to this person at brand scope — the rule's other input.",
     }),
+    afterStep: z
+      .object({ event: z.string(), occurredAt: z.string().nullable() })
+      .optional()
+      .openapi({ description: "The person's step a cross-step reason leans on." }),
   })
   .openapi("CrmCauseRule", {
     description:
@@ -10246,6 +10266,67 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/orgs/leads/unibox-state",
+  summary:
+    "ONE lead's Unibox state, for an agent: who acted last and when, whether a word of theirs waits on us, lifecycle, tags, next follow-up date, messages each way. Fixed size whatever the thread's length: read this instead of the thread to answer 'did we answer X? what is waiting?'",
+  parameters: [
+    ...AuthHeaders,
+    { in: "query" as const, name: "leadId", required: false, schema: { type: "string" as const }, description: "The lead id. One of leadId / email is required." },
+    { in: "query" as const, name: "email", required: false, schema: { type: "string" as const }, description: "Any address of the person (case-insensitive)." },
+    {
+      in: "query" as const,
+      name: "brandId",
+      required: false,
+      schema: { type: "string" as const },
+      description: "The brand whose Unibox to read. Absent: the org's rows of the person answer when they are all one brand, else 409 several_brands.",
+    },
+  ],
+  responses: {
+    200: {
+      description: "The lead's state as the Unibox shows it",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string(),
+            leadId: z.string().nullable().openapi({ description: "The lead named, else the row's first lead (null = a Unibox person not yet a lead)." }),
+            lead: UniboxRowSchema.openapi({ description: "The Unibox row: identity, status, roles, lifecycle, steps, interest, conversation, contactability, fit, last message preview." }),
+            lastAction: z
+              .object({ side: z.enum(["ours", "theirs"]), at: z.string() })
+              .nullable()
+              .openapi({ description: "Who acted LAST and when: ours = a message of ours (sequence email, answer in the thread, any channel); theirs = a word or act of theirs. null = nothing yet." }),
+            waitingOnUs: z.boolean().openapi({ description: "true = a word of theirs is newer than our latest message and the conversation is open (lead.conversation = waiting_on_us). false = nothing waits on us." }),
+            nextFollowup: z
+              .object({
+                at: z.string().nullable().openapi({ description: "When we next follow them up; null only when follow-ups are stopped (basis stopped)." }),
+                basis: z.string().openapi({ description: "default | send | stated | served | stopped | not_yet | stop_recheck: what set the date." }),
+                reason: z.string().nullable(),
+              })
+              .nullable(),
+            nextFollowupReason: z.enum(["no_date_yet"]).nullable(),
+            messages: z
+              .object({
+                ours: z.number().int(),
+                theirs: z.number().int(),
+                sequenceEmails: z.number().int().openapi({ description: "Cold-email sequence steps sent." }),
+                emailAnswers: z.number().int().openapi({ description: "Our answers in their email thread (AI responder or a person of the brand)." }),
+                emailReplies: z.number().int().openapi({ description: "Their email replies (auto-replies included)." }),
+                otherChannelsOurs: z.number().int().openapi({ description: "Our messages on other channels (WhatsApp, LinkedIn, the brand's own mailbox...)." }),
+                otherChannelsTheirs: z.number().int(),
+              })
+              .openapi({ description: "How many messages went each way (ours = sequenceEmails + emailAnswers + otherChannelsOurs)." }),
+            builtAt: z.string().nullable().openapi({ description: "When the row was last written (a reply reaches it within about a minute)." }),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid query (leadId or email required, not both)" },
+    404: { description: "This person is not in the org's Unibox (code not_in_unibox)" },
+    409: { description: "No brandId and the person is in the Unibox of several brands (code several_brands, brandIds)" },
+  },
+});
+
 // --- Lead id resolve: which lead is this person, for this org (COST-ACCOUNTING-1023-P1, src/lib/lead-id-resolve.ts) ---
 export const LEAD_ID_RESOLVE_MAX_ITEMS = 1000;
 
@@ -10507,7 +10588,7 @@ const ReachedStateSchema = z
       description:
         "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); " +
         "stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / " +
-        "before_first_delivery / never_delivered / event_undated (the ledger's date rule against our first touch of the lead at the brand, any pipe: " +
+        "before_first_delivery / never_delivered / event_undated / after_step_not_ours / undated_after_our_step (the ledger's date rule against our first touch of the lead at the brand, any pipe, read across the person's steps: " +
         "stored by the ledger for its rows, applied here to every other fact).",
     }),
   })

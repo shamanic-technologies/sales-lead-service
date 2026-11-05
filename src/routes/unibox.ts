@@ -17,6 +17,11 @@
  *       that human's most recently active row. The lead card: the six tags + every campaign the person is part of, with the furthest step in each. 404 = not
  *       a lead of the brand.
  *
+ *   GET /orgs/leads/unibox-state?(leadId=|email=)[&brandId=]
+ *       AGENT-READS-LEAD-1105: ONE lead's Unibox state for an agent (Sophie, the MCP), fixed size whatever the thread:
+ *       the row + who acted last + waiting on us + next follow-up + message counts each way (unibox-state.ts). 404 = not
+ *       in the Unibox; no brandId and several brands = 409 `several_brands` + `brandIds`.
+ *
  * Mounted BEFORE the leads router so neither path is read as a lead id; the gateway reaches both through
  * `/v1/leads/:id` (path + query forwarded).
  */
@@ -44,6 +49,7 @@ import {
   type UniboxFilters,
 } from "../lib/unibox-model.js";
 import { resolveUniboxScope, UniboxScopeUnavailableError } from "../lib/unibox-scope.js";
+import { AmbiguousBrandError, readUniboxLeadState } from "../lib/unibox-state.js";
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
@@ -187,6 +193,38 @@ router.get("/orgs/leads/unibox-lead", apiKeyAuth, requireOrgId, acceptQuery(READ
     }
     console.error("[lead-service] unibox lead read failed:", error);
     res.status(500).json({ error: "unibox lead read failed" });
+  }
+});
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+router.get("/orgs/leads/unibox-state", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox-state"]), async (req: AuthenticatedRequest, res) => {
+  try {
+    const leadId = typeof req.query.leadId === "string" ? req.query.leadId.trim() : "";
+    const email = typeof req.query.email === "string" ? req.query.email.trim() : "";
+    const brandRaw = typeof req.query.brandId === "string" ? req.query.brandId.trim() : "";
+    if (brandRaw && !UUID_RE.test(brandRaw)) throw new BadQuery("brandId must be a uuid");
+    if (leadId && email) throw new BadQuery("name the lead by leadId OR email, not both");
+    if (!leadId && !email) throw new BadQuery("leadId (uuid) or email is required");
+    if (leadId && !UUID_RE.test(leadId)) throw new BadQuery("leadId must be a uuid");
+    if (email && !EMAIL_RE.test(email)) throw new BadQuery("email must be an email address");
+    const state = await readUniboxLeadState(req.orgId!, { brandId: brandRaw || null, leadId: leadId || null, email: email || null });
+    if (!state) {
+      res.status(404).json({ error: "this person is not in the Unibox of this org (no conversation row)", code: "not_in_unibox" });
+      return;
+    }
+    res.json(state);
+  } catch (error) {
+    if (error instanceof BadQuery) {
+      res.status(400).json({ error: messageOf(error) });
+      return;
+    }
+    if (error instanceof AmbiguousBrandError) {
+      res.status(409).json({ error: messageOf(error), code: "several_brands", brandIds: error.brandIds });
+      return;
+    }
+    console.error("[lead-service] unibox lead state read failed:", error);
+    res.status(500).json({ error: "unibox lead state read failed" });
   }
 });
 

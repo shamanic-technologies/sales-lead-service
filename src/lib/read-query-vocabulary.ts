@@ -40,6 +40,7 @@ export const READ_QUERY_PARAMS = {
   "GET /orgs/leads/unibox": [...UNIBOX_FILTERS, "limit", "cursor", "sort"],
   "GET /orgs/leads/unibox-lifecycle-counts": [...UNIBOX_FILTERS],
   "GET /orgs/leads/unibox-lead": ["brandId", "humanId", "relationKey"],
+  "GET /orgs/leads/unibox-state": ["leadId", "email", "brandId"],
   "GET /orgs/leads/awaiting-reply": ["brandId"],
   "GET /orgs/leads/disqualifications": ["brandId", "offerId"],
   "GET /orgs/leads/not-a-person": ["leadId"],

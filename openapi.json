@@ -5190,9 +5190,11 @@
               "event_undated",
               "never_delivered",
               "not_matched",
+              "after_step_not_ours",
+              "undated_after_our_step",
               null
             ],
-            "description": "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise.",
+            "description": "WHY the rule answered what it answered, when `causeBasis` is rule; null otherwise. after_step_not_ours — dated after our first touch, but another step of the same person at the brand that was NOT ours happened at or before it (the client already had them in their funnel); undated_after_our_step — undated, and everything we know of the person at the brand came through us.",
             "example": "after_first_delivery"
           },
           "source": {
@@ -8452,13 +8454,33 @@
               "after_first_delivery",
               "before_first_delivery",
               "event_undated",
-              "never_delivered"
-            ]
+              "never_delivered",
+              "after_step_not_ours",
+              "undated_after_our_step"
+            ],
+            "description": "after_step_not_ours — after our first touch, but another step of the person that was NOT ours came at or before it; undated_after_our_step — undated, and every other step of the person was ours."
           },
           "firstDeliveredAt": {
             "type": "string",
             "nullable": true,
             "description": "Our first delivered email to this person at brand scope — the rule's other input."
+          },
+          "afterStep": {
+            "type": "object",
+            "properties": {
+              "event": {
+                "type": "string"
+              },
+              "occurredAt": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "event",
+              "occurredAt"
+            ],
+            "description": "The person's step a cross-step reason leans on."
           }
         },
         "required": [
@@ -14808,9 +14830,11 @@
               "after_first_delivery",
               "before_first_delivery",
               "never_delivered",
-              "event_undated"
+              "event_undated",
+              "after_step_not_ours",
+              "undated_after_our_step"
             ],
-            "description": "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / before_first_delivery / never_delivered / event_undated (the ledger's date rule against our first touch of the lead at the brand, any pipe: stored by the ledger for its rows, applied here to every other fact)."
+            "description": "Why: our_outreach (the evidence is our own outreach: a positive reply to our email, a click of our link, a booking call we placed); stated (a person answered on the outcome ledger); recorded (the ledger row's writer stored this answer); not_judged_yet (a new ledger row the cause sweep has not judged, ~5 min); after_first_delivery / before_first_delivery / never_delivered / event_undated / after_step_not_ours / undated_after_our_step (the ledger's date rule against our first touch of the lead at the brand, any pipe, read across the person's steps: stored by the ledger for its rows, applied here to every other fact)."
           }
         },
         "required": [
@@ -26755,6 +26779,302 @@
           },
           "404": {
             "description": "Not a lead of this brand (not tagged professional to it by crm-service)"
+          }
+        }
+      }
+    },
+    "/orgs/leads/unibox-state": {
+      "get": {
+        "summary": "ONE lead's Unibox state, for an agent: who acted last and when, whether a word of theirs waits on us, lifecycle, tags, next follow-up date, messages each way. Fixed size whatever the thread's length: read this instead of the thread to answer 'did we answer X? what is waiting?'",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal user UUID from client-service"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run ID (used as parentRunId when creating this service's own run)"
+          },
+          {
+            "in": "header",
+            "name": "x-campaign-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Campaign identifier (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-brand-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand identifier(s), comma-separated for multi-brand campaigns (auto-injected by workflow-service). Example: uuid1,uuid2,uuid3"
+          },
+          {
+            "in": "header",
+            "name": "x-workflow-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Workflow slug (auto-injected by workflow-service)"
+          },
+          {
+            "in": "header",
+            "name": "x-feature-slug",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Feature slug for tracking (propagated through the call path)"
+          },
+          {
+            "in": "header",
+            "name": "x-goal",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal enum/name for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-active-goal-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Active goal identifier for the campaign activity, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-brand-profile-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Brand profile identifier for persona-scoped attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "header",
+            "name": "x-audience-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+          },
+          {
+            "in": "query",
+            "name": "leadId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The lead id. One of leadId / email is required."
+          },
+          {
+            "in": "query",
+            "name": "email",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Any address of the person (case-insensitive)."
+          },
+          {
+            "in": "query",
+            "name": "brandId",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The brand whose Unibox to read. Absent: the org's rows of the person answer when they are all one brand, else 409 several_brands."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The lead's state as the Unibox shows it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "brandId": {
+                      "type": "string"
+                    },
+                    "leadId": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "The lead named, else the row's first lead (null = a Unibox person not yet a lead)."
+                    },
+                    "lead": {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/UniboxRow"
+                        },
+                        {
+                          "description": "The Unibox row: identity, status, roles, lifecycle, steps, interest, conversation, contactability, fit, last message preview."
+                        }
+                      ]
+                    },
+                    "lastAction": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "side": {
+                          "type": "string",
+                          "enum": [
+                            "ours",
+                            "theirs"
+                          ]
+                        },
+                        "at": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "side",
+                        "at"
+                      ],
+                      "description": "Who acted LAST and when: ours = a message of ours (sequence email, answer in the thread, any channel); theirs = a word or act of theirs. null = nothing yet."
+                    },
+                    "waitingOnUs": {
+                      "type": "boolean",
+                      "description": "true = a word of theirs is newer than our latest message and the conversation is open (lead.conversation = waiting_on_us). false = nothing waits on us."
+                    },
+                    "nextFollowup": {
+                      "type": "object",
+                      "nullable": true,
+                      "properties": {
+                        "at": {
+                          "type": "string",
+                          "nullable": true,
+                          "description": "When we next follow them up; null only when follow-ups are stopped (basis stopped)."
+                        },
+                        "basis": {
+                          "type": "string",
+                          "description": "default | send | stated | served | stopped | not_yet | stop_recheck: what set the date."
+                        },
+                        "reason": {
+                          "type": "string",
+                          "nullable": true
+                        }
+                      },
+                      "required": [
+                        "at",
+                        "basis",
+                        "reason"
+                      ]
+                    },
+                    "nextFollowupReason": {
+                      "type": "string",
+                      "nullable": true,
+                      "enum": [
+                        "no_date_yet",
+                        null
+                      ]
+                    },
+                    "messages": {
+                      "type": "object",
+                      "properties": {
+                        "ours": {
+                          "type": "integer"
+                        },
+                        "theirs": {
+                          "type": "integer"
+                        },
+                        "sequenceEmails": {
+                          "type": "integer",
+                          "description": "Cold-email sequence steps sent."
+                        },
+                        "emailAnswers": {
+                          "type": "integer",
+                          "description": "Our answers in their email thread (AI responder or a person of the brand)."
+                        },
+                        "emailReplies": {
+                          "type": "integer",
+                          "description": "Their email replies (auto-replies included)."
+                        },
+                        "otherChannelsOurs": {
+                          "type": "integer",
+                          "description": "Our messages on other channels (WhatsApp, LinkedIn, the brand's own mailbox...)."
+                        },
+                        "otherChannelsTheirs": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "ours",
+                        "theirs",
+                        "sequenceEmails",
+                        "emailAnswers",
+                        "emailReplies",
+                        "otherChannelsOurs",
+                        "otherChannelsTheirs"
+                      ],
+                      "description": "How many messages went each way (ours = sequenceEmails + emailAnswers + otherChannelsOurs)."
+                    },
+                    "builtAt": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "When the row was last written (a reply reaches it within about a minute)."
+                    }
+                  },
+                  "required": [
+                    "brandId",
+                    "leadId",
+                    "lead",
+                    "lastAction",
+                    "waitingOnUs",
+                    "nextFollowup",
+                    "nextFollowupReason",
+                    "messages",
+                    "builtAt"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query (leadId or email required, not both)"
+          },
+          "404": {
+            "description": "This person is not in the org's Unibox (code not_in_unibox)"
+          },
+          "409": {
+            "description": "No brandId and the person is in the Unibox of several brands (code several_brands, brandIds)"
           }
         }
       }

@@ -7,8 +7,10 @@
  * What it proves:
  *   - only a contact human-service says IS one of our leads (its humanId) lands; a contact whose human
  *     holds no lead of the brand writes nothing, whatever a person or a judgment once said
- *   - whose win follows the date rule against our first delivered email, and an undated event is
- *     never ours
+ *   - whose win follows the date rule against our first delivered email, read across the person's
+ *     steps (DIGEST-SALES-ATTRIB-1105): a sale after a meeting that was NOT ours is not ours (Thomas
+ *     Keogh, Doc Dinners), an undated sale is ours only when every other step was ours (Daniel Bai),
+ *     else never ours; a person's word on the sale still wins
  *   - the lead then reads customer, with a closed deal whose source is `crm`, through the SAME
  *     resolver every list read uses
  *   - a CRM "never" lands per campaign row and reads as a never
@@ -163,7 +165,7 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
       received_at: unknown;
       withdrawn_at: unknown;
       lead_campaign_id: string | null;
-      crm_evidence: { rule?: { reason: string } };
+      crm_evidence: { rule?: { reason: string; afterStep?: { event: string; occurredAt: string | null } } };
     }>;
   }
 
@@ -176,10 +178,11 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     await seedLead("stated", [campaignA]);
     await seedLead("named", [campaignA]);
     await seedLead("payer", [campaignA]);
+    await seedLead("ours", [campaignA]);
     state.legByCampaign.set(campaignA, "start_to_conversation");
     state.legByCampaign.set(campaignB, "start_to_conversation");
 
-    for (const key of ["after", "before", "undated", "noshow", "stated", "payer"]) {
+    for (const key of ["after", "before", "undated", "noshow", "stated", "payer", "ours"]) {
       await pair(`c-${key}`, ids[key].leadId);
       state.delivered.set(ids[key].email, "2026-05-11T00:00:00.000Z");
     }
@@ -211,6 +214,11 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
         { step: "payment", occurredAt: "2026-06-15T00:00:00.000Z", dateBasis: "created", source: null, sourceId: "py_2",
           detail: { status: "succeeded", currency: "usd", amountMinor: 9900, amountRefunded: 0, refunded: false } },
       ] },
+      // Daniel Bai: booked AFTER our first email (ours), then a sale whose date the CRM cannot state.
+      { contactId: "c-ours", primaryEmail: null, fullName: null, events: [
+        { step: "meeting_booked", occurredAt: "2026-05-12T00:00:00.000Z", dateBasis: "booked_at", source: "appointment", sourceId: "ap3", detail: null },
+        sale(null, "opp-ours"),
+      ] },
       { contactId: "c-named", primaryEmail: null, fullName: null, events: [
         { step: "form_submitted", occurredAt: "2026-06-05T00:00:00.000Z", dateBasis: "submitted_at", source: "form", sourceId: "f1", detail: null },
         { step: "meeting_booked", occurredAt: "2026-06-06T00:00:00.000Z", dateBasis: "booked_at", source: "appointment", sourceId: "ap2", detail: null },
@@ -235,16 +243,30 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
 
   it("reflects only paired evidence, with whose-win following the date rule", async () => {
     const result = await syncCrmEvidence(orgId, brandId);
-    expect(result.pairedContacts).toBe(6);
+    expect(result.pairedContacts).toBe(7);
 
     const after = await crmOutcomes(ids.after.leadId);
     const afterSale = after.find((r) => r.event === "sale")!;
     // The EARLIEST dated sale stands for the step.
     expect(new Date(afterSale.received_at as string).toISOString()).toBe("2026-05-14T00:00:00.000Z");
-    expect(afterSale.caused_by_outreach).toBe(true);
     expect(afterSale.lead_campaign_id).toBeNull();
     // Booked in 2025, before our first email: not ours.
     expect(after.find((r) => r.event === "meeting_booked")!.caused_by_outreach).toBe(false);
+    // Thomas Keogh: the client had them in their funnel before us, so a sale dated after our email is
+    // still theirs (it used to read ours on its own date alone).
+    expect(afterSale.caused_by_outreach).toBe(false);
+    expect(afterSale.crm_evidence.rule).toMatchObject({
+      reason: "after_step_not_ours",
+      afterStep: { event: "meeting_booked", occurredAt: "2025-04-01T00:00:00.000Z" },
+    });
+
+    // Daniel Bai: booked after our email (ours); the sale is undated, nothing of theirs came before us.
+    const ours = await crmOutcomes(ids.ours.leadId);
+    expect(ours.find((r) => r.event === "meeting_booked")!.caused_by_outreach).toBe(true);
+    const oursSale = ours.find((r) => r.event === "sale")!;
+    expect(oursSale.received_at).toBeNull();
+    expect(oursSale.caused_by_outreach).toBe(true);
+    expect(oursSale.crm_evidence.rule?.reason).toBe("undated_after_our_step");
 
     expect((await crmOutcomes(ids.before.leadId))[0].caused_by_outreach).toBe(false);
 
@@ -311,15 +333,15 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     const resolver = createLeadStandingResolver({ orgId, deliveryQueried: true });
     const facts = await resolver.resolve([
       {
-        id: ids.after.rows[0],
-        leadId: ids.after.leadId,
+        id: ids.payer.rows[0],
+        leadId: ids.payer.leadId,
         campaignId: campaignA,
         brandIds: [brandId],
         status: "served",
         delivery: standingDelivery({ ...DEFAULT_STATUS, contacted: true, sent: true, delivered: true }),
       },
     ]);
-    const f = facts.get(ids.after.rows[0])!;
+    const f = facts.get(ids.payer.rows[0])!;
     expect(f.standing.state).toBe("customer");
     expect(f.closedDeal).toMatchObject({ source: "crm", causedByOutreach: true });
   });
@@ -344,6 +366,18 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     await syncCrmEvidence(orgId, brandId);
     expect((await crmOutcomes(ids.before.leadId))[0].caused_by_outreach).toBe(false);
   });
+
+  it("a person's word on a sale after a step not ours is never overridden", async () => {
+    await upsertCauseStatement({
+      orgId, brandId, leadId: ids.after.leadId, step: "sale", causedByOutreach: true, note: null, statedByUserId: "u1",
+    });
+    await syncCrmEvidence(orgId, brandId);
+    expect((await crmOutcomes(ids.after.leadId)).find((r) => r.event === "sale")!.caused_by_outreach).toBe(true);
+
+    await withdrawCauseStatement(brandId, ids.after.leadId, "sale", "u1");
+    await syncCrmEvidence(orgId, brandId);
+    expect((await crmOutcomes(ids.after.leadId)).find((r) => r.event === "sale")!.caused_by_outreach).toBe(false);
+  }, 30_000);
 
   it("sets a CRM outcome aside when a person states the step, and stands it back up when they withdraw", async () => {
     await supersedeCrmOutcome(brandId, ids.after.leadId, "sale");
