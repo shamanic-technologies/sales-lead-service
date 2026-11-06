@@ -20,11 +20,20 @@ import { sql, type SQL } from "drizzle-orm";
  * a serve states is its workflow's word (the strategy of the sourcing pipe), never a brand or campaign rule here. The
  * window also rides to human-service on every serve call (people-client `serveBody`), whose per-brand suppression
  * holds a person for the same window.
+ *
+ * A third tactic (FRESH-NEVER-1106, owner 2026-11-06, Doc Dinners: "a cold email only to people we never wrote to;
+ * people already emailed get a follow-up in their last thread"): `never` = nobody this brand EVER emailed is handed out
+ * by the serve, whatever the date. Same evidence, same pools, no time bound.
  */
-export const RECENTLY_EMAILED_WINDOWS = ["3_months", "2_months"] as const;
+export const RECENTLY_EMAILED_WINDOWS = ["3_months", "2_months", "never"] as const;
 export type RecentlyEmailedWindow = (typeof RECENTLY_EMAILED_WINDOWS)[number];
 
-const WINDOW_INTERVAL: Record<RecentlyEmailedWindow, string> = { "3_months": "3 months", "2_months": "2 months" };
+/** The Postgres interval of each window (calendar months); `null` = no bound (any date). */
+const WINDOW_INTERVAL: Record<RecentlyEmailedWindow, string | null> = {
+  "3_months": "3 months",
+  "2_months": "2 months",
+  never: null,
+};
 
 /** The window the serve asked for and the brand(s) the serve is made for. */
 export interface RecentlyEmailedScope {
@@ -38,13 +47,14 @@ export interface RecentlyEmailedScope {
  * Postgres, like the sender's own window.
  */
 export function emailedWithin(leadId: SQL, scope: RecentlyEmailedScope): SQL {
-  const interval = sql.raw(`interval '${WINDOW_INTERVAL[scope.window]}'`);
+  const bound = WINDOW_INTERVAL[scope.window];
+  const since = bound === null ? sql`` : sql`AND f_re.occurred_at > now() - ${sql.raw(`interval '${bound}'`)}`;
   return sql`EXISTS (
     SELECT 1 FROM lead_contact_methods cm_re
     JOIN outreach_facts f_re ON f_re.lead_email = lower(cm_re.value) AND f_re.type = 'email_sent'
     WHERE cm_re.lead_id = ${leadId} AND cm_re.channel = 'email'
       AND f_re.brand_ids && ${sql.param([...scope.brandIds])}::text[]
-      AND f_re.occurred_at > now() - ${interval}
+      ${since}
       AND NOT EXISTS (SELECT 1 FROM outreach_facts w_re WHERE w_re.subject_key = f_re.subject_key AND w_re.seq > f_re.seq))`;
 }
 
