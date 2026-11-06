@@ -13920,6 +13920,9 @@
           {
             "type": "object",
             "properties": {
+              "leadState": {
+                "$ref": "#/components/schemas/LeadState"
+              },
               "campaigns": {
                 "type": "array",
                 "nullable": true,
@@ -13967,11 +13970,155 @@
               }
             },
             "required": [
+              "leadState",
               "campaigns",
               "campaignsReason"
             ]
           }
         ]
+      },
+      "LeadState": {
+        "type": "object",
+        "properties": {
+          "lifecycle": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LifecycleRung"
+              },
+              {
+                "nullable": true,
+                "description": "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet."
+              }
+            ]
+          },
+          "won": {
+            "type": "boolean",
+            "description": "WON = Lifecycle on the ladder's top rung (Paid client)."
+          },
+          "hot": {
+            "type": "boolean",
+            "description": "HOT = interested, not won, not lost."
+          },
+          "lost": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "not_reachable",
+                    "wrong_fit",
+                    "not_interested"
+                  ]
+                },
+                "minItems": 1,
+                "description": "Every reason that holds, strongest first."
+              },
+              "reachable": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "unsubscribed",
+                  "bounced",
+                  "do_not_contact",
+                  null
+                ],
+                "description": "Why not reachable; null when reachable."
+              },
+              "fit": {
+                "type": "string",
+                "nullable": true,
+                "enum": [
+                  "wrong_person",
+                  "not_our_target",
+                  null
+                ],
+                "description": "The wrong fit; null when fit."
+              }
+            },
+            "required": [
+              "reasons",
+              "reachable",
+              "fit"
+            ],
+            "description": "LOST = not won, and not reachable, wrong fit or not interested; null = not lost. won, hot and lost are disjoint; none of them = open."
+          },
+          "reachable": {
+            "type": "string",
+            "enum": [
+              "contactable",
+              "unsubscribed",
+              "bounced",
+              "do_not_contact"
+            ],
+            "description": "REACHABLE: may we write?"
+          },
+          "conversation": {
+            "type": "string",
+            "enum": [
+              "waiting_on_us",
+              "waiting_on_them",
+              "no_reply_yet",
+              "closed"
+            ]
+          },
+          "fit": {
+            "type": "string",
+            "enum": [
+              "fit",
+              "wrong_person",
+              "not_our_target"
+            ]
+          },
+          "fitNote": {
+            "type": "string",
+            "nullable": true
+          },
+          "interest": {
+            "type": "string",
+            "enum": [
+              "interested",
+              "not_interested",
+              "unsure",
+              "not_asked"
+            ]
+          },
+          "clientStatus": {
+            "type": "string",
+            "enum": [
+              "prospect",
+              "customer",
+              "churned"
+            ]
+          },
+          "nextFollowupAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "The lead's ONE next follow-up date at the brand; null = no date yet (nextFollowupBasis null) or follow-ups stopped (nextFollowupBasis stopped)."
+          },
+          "nextFollowupBasis": {
+            "type": "string",
+            "nullable": true,
+            "description": "How the date was set (default, send, stated, served, not_yet, stop_recheck, stopped); null = no date row yet."
+          }
+        },
+        "required": [
+          "lifecycle",
+          "won",
+          "hot",
+          "lost",
+          "reachable",
+          "conversation",
+          "fit",
+          "fitNote",
+          "interest",
+          "clientStatus",
+          "nextFollowupAt",
+          "nextFollowupBasis"
+        ],
+        "description": "LEAD-GENERIC-1106: the ONE lead vocabulary. Replaces standing, buckets, sales-interest stage, the interest ladder and wentCold (still served on their own reads until every consumer moved)."
       },
       "UniboxRow": {
         "type": "object",
@@ -25957,7 +26104,7 @@
     "/orgs/leads/unibox": {
       "get": {
         "summary": "The brand's Unibox: its leads (people crm-service tags professional to the brand) with six tag dimensions",
-        "description": "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400. Optional scope (DEALS-LIFECYCLE-1021): `offerId` and/or `campaignId` keep only the people who are a lead on a campaign of that offer / of that campaign (a sales funnel campaign includes its pipes; both = the campaign's pipes selling the offer); each row and its Lifecycle stay the brand's. A scoped answer also carries `offerId` and `campaignId`. campaign-service unreadable = 502 (never the whole brand).",
+        "description": "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), leadVerdict (won, hot, lost: LeadState, LEAD-GENERIC-1106), interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400. Optional scope (DEALS-LIFECYCLE-1021): `offerId` and/or `campaignId` keep only the people who are a lead on a campaign of that offer / of that campaign (a sales funnel campaign includes its pipes; both = the campaign's pipes selling the offer); each row and its Lifecycle stay the brand's. A scoped answer also carries `offerId` and `campaignId`. campaign-service unreadable = 502 (never the whole brand).",
         "parameters": [
           {
             "in": "header",
@@ -26152,6 +26299,14 @@
           {
             "in": "query",
             "name": "fit",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "leadVerdict",
             "required": false,
             "schema": {
               "type": "string"
@@ -26471,6 +26626,14 @@
           },
           {
             "in": "query",
+            "name": "leadVerdict",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "q",
             "required": false,
             "schema": {
@@ -26524,6 +26687,26 @@
                         "none": 0
                       }
                     },
+                    "byVerdict": {
+                      "type": "object",
+                      "properties": {
+                        "won": {
+                          "type": "integer"
+                        },
+                        "hot": {
+                          "type": "integer"
+                        },
+                        "lost": {
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "won",
+                        "hot",
+                        "lost"
+                      ],
+                      "description": "LEAD-GENERIC-1106: people won / hot / lost (LeadState), disjoint; the rest are open, so they do not sum to total."
+                    },
                     "builtAt": {
                       "type": "string",
                       "nullable": true
@@ -26536,6 +26719,7 @@
                     "lifecycleLadder",
                     "total",
                     "byLifecycle",
+                    "byVerdict",
                     "builtAt"
                   ]
                 }
@@ -26704,6 +26888,9 @@
                     "lead": {
                       "$ref": "#/components/schemas/UniboxRow"
                     },
+                    "leadState": {
+                      "$ref": "#/components/schemas/LeadState"
+                    },
                     "campaigns": {
                       "type": "array",
                       "items": {
@@ -26772,6 +26959,7 @@
                   "required": [
                     "brandId",
                     "lead",
+                    "leadState",
                     "campaigns"
                   ]
                 }
@@ -26950,6 +27138,9 @@
                         }
                       ]
                     },
+                    "leadState": {
+                      "$ref": "#/components/schemas/LeadState"
+                    },
                     "lastAction": {
                       "type": "object",
                       "nullable": true,
@@ -27057,6 +27248,7 @@
                     "brandId",
                     "leadId",
                     "lead",
+                    "leadState",
                     "lastAction",
                     "waitingOnUs",
                     "nextFollowup",
