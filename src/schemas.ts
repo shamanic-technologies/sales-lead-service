@@ -6945,28 +6945,12 @@ const CrmPairingRowSchema = z
       }),
       ruling: CrmPairingRulingSchema.nullable(),
     }),
-    ourStanding: z
-      .object({})
-      .passthrough()
-      .nullable()
-      .openapi({
-        description:
-          "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. " +
-          "A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here.",
-      }),
     leadState: LeadStateSchema.nullable().optional().openapi({
       description:
         "LEAD-GENERIC-1106: the paired lead's ONE lead vocabulary at the brand, the same object the Unibox reads serve (lifecycle, won/hot/lost + reason, reachable, conversation, fit, interest, clientStatus, next follow-up). Null when the lead is no Unibox person of the brand (leadStateReason not_in_unibox); absent when nothing paired.",
     }),
     leadStateReason: z.enum(["not_in_unibox"]).nullable().optional().openapi({
       description: "Why leadState is null: not_in_unibox = the lead is not a Unibox person of the brand (crm-service does not tag them professional to it). Absent when nothing paired.",
-    }),
-    ourClosedDeal: ClosedDealSchema.nullable().optional().openapi({
-      description:
-        "The deal on our lead, exactly as the leads list serves it (`closedDeal`): stated by a person, " +
-        "reported by the tracker, or evidenced by their own CRM (source crm, causedByOutreach per the " +
-        "date rule unless a person overrode it via /orgs/leads/{id}/crm-attribution). Null when none; " +
-        "absent when nothing paired.",
     }),
     theirStatus: CrmTheirStatusSchema,
   })

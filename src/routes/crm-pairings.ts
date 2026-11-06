@@ -34,7 +34,6 @@ import {
   type AuthenticatedRequest,
   apiKeyAuth,
   requireOrgId,
-  getServiceContext,
 } from "../middleware/auth.js";
 import {
   addCrmPairingCounts,
@@ -72,10 +71,8 @@ import {
 import { resyncBrand } from "../lib/crm-evidence-worker.js";
 import {
   fetchPairedLeadFacts,
-  resolveStandingsForLeads,
   type PairedLeadFacts,
 } from "../lib/crm-pairing-view.js";
-import { createLeadStandingResolver } from "../lib/lead-standing-resolver.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
 import { matchesForContacts } from "../lib/crm-matching.js";
 import { acceptQuery } from "../lib/query-params.js";
@@ -290,19 +287,6 @@ async function serializePairings(
   const leads = Array.from(
     new Map(rows.filter((r) => r.lead).map((r) => [r.lead!.leadId, r.lead!])).values(),
   );
-  const standings = await resolveStandingsForLeads(
-    ctx.brandId,
-    leads,
-    createLeadStandingResolver({
-      orgId: ctx.orgId,
-      userId: req.userId ?? null,
-      runId: req.runId ?? null,
-      brandId: ctx.brandId,
-      deliveryQueried: true,
-    }),
-    getServiceContext(req),
-  );
-
   const leadStates = await readLeadStatesForLeads({ orgId: ctx.orgId, brandId: ctx.brandId }, leads.map((l) => l.leadId));
 
   return rows.map(({ contact, match, lead, judgment, ruling, verdict }) => ({
@@ -348,14 +332,10 @@ async function serializePairings(
       },
       ruling,
     },
-    ourStanding: lead ? (standings.get(lead.leadId)?.standing ?? null) : null,
     // LEAD-GENERIC-1106: the ONE lead vocabulary, as on the Unibox reads. Absent when nothing paired.
     ...(lead
       ? { leadState: leadStates.get(lead.leadId) ?? null, leadStateReason: leadStates.has(lead.leadId) ? null : ("not_in_unibox" as const) }
       : {}),
-    // The deal on our lead, off the SAME resolution the standing came from — including what their
-    // own CRM evidences for a paired lead, so the two sides of this row can finally agree.
-    ...(lead ? { ourClosedDeal: standings.get(lead.leadId)?.closedDeal ?? null } : {}),
     theirStatus: serializeOpportunities(opportunitiesByContact.get(contact.id) ?? []),
   }));
 }
