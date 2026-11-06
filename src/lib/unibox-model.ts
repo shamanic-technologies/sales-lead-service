@@ -995,6 +995,30 @@ export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters):
   return { total, byLifecycle, byVerdict, builtAt: iso(built[0]?.at ?? null) };
 }
 
+/**
+ * The ONE lead vocabulary (`leadState`, LEAD-GENERIC-1106) of the given leads at the brand, read off their Unibox rows
+ * in ONE statement (a surface listing leads by id, e.g. the CRM pairings page, never fans out per row). A lead on several
+ * rows (one human at two companies is two leads, so rarely) answers with its most recently active row. A lead on no row
+ * is absent: not a Unibox person of the brand (not tagged professional to it), never a guessed state.
+ */
+export async function readLeadStatesForLeads(scope: Scope, leadIds: readonly string[]): Promise<Map<string, LeadState>> {
+  const out = new Map<string, LeadState>();
+  if (leadIds.length === 0) return out;
+  const catalogue = await loadLifecycleCatalogue();
+  const rows = (await db.execute(sql`
+    SELECT u.*, ${nextFollowupJsonSql} AS next_followup FROM unibox_rows u
+    WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} AND u.lead_ids && ${sql.param([...leadIds])}::uuid[]
+    ORDER BY u.last_activity_at DESC, u.human_id, u.company_key
+  `)) as unknown as Array<Record<string, unknown>>;
+  const wanted = new Set(leadIds);
+  for (const r of rows) {
+    const row = toRow(r, catalogue.ladder);
+    const state = leadStateOf(row, catalogue.ladder, nextFollowupOfJson(r.next_followup));
+    for (const id of row.leadIds) if (wanted.has(id) && !out.has(id)) out.set(id, state);
+  }
+  return out;
+}
+
 export interface UniboxCampaign {
   /** The campaign the customer launched (a pipe folds into it), else the campaign itself. */
   campaignId: string;
