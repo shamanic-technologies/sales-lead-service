@@ -19,7 +19,12 @@
  * URL carries a valid marker (`parsePostTouch`, pure), resolved to the brand's lead by one of the visit's emails exactly as brand-signups.ts
  * resolves a signup (case-folded address on `lead_contact_methods` of a lead of that org + brand). Several leads =
  * ambiguous: skipped, the why kept in `post_touch_skips`, asked again every pass (an identity repair settles it).
- * No lead yet = nothing (a signup files them later; the next pass resolves the same visit).
+ * No lead yet: a click on a link naming its Unit (`dy_unit`, minted for one email to one person, e.g. a newsletter
+ * email) by a session identified by ONE address FILES that person as a lead of the brand (intake
+ * `unit-clicks:<brandId>`, `status_reason = 'unit_click'`, brand-signups.ts `fileBrandIntakePerson`) and credits the
+ * click (OUTCOME-FINEST-1106 option A). Only a HUMAN click: a tracked session, never a mail scanner's server-side hit
+ * (no `website_visit` fact). A subscriber who never clicks is never filed. A legacy `dy_post` (a post seen by many)
+ * files nobody: a signup files them later and the next pass resolves the same visit.
  *
  * THE DECLARATION mirrors instantly-service's measured click: ONCE per (org, brand, lead, Unit subject) ever
  * (`post_touch_declarations`, the claim, migration 0132; `unit_outcome_key` = the Unit's outcome, 0140), on a spend-free
@@ -41,6 +46,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { errorMessage } from "./db-error.js";
+import { fileBrandIntakePerson } from "./brand-signups.js";
 import { createRun, producedOutcomeKeysOf, updateRun } from "./runs-client.js";
 import { declarationKey, declareRunOutcomesNow, OUTCOME_SUBJECT_SERVICE, type RunOutcomeDeclaration } from "./run-outcomes.js";
 
@@ -50,6 +56,11 @@ export const POST_TOUCH_PARAM = "dy_post";
 export const UNIT_TOUCH_PARAM = "dy_unit";
 export const POST_TOUCH_TASK = "post-touch-visit";
 export const POST_TOUCH_INDEX = "idx_crm_facts_unit_visits";
+/** A clicker filed from a Unit addressed to them: the brand's own intake (no campaign of campaign-service found them). */
+export const UNIT_CLICK_SOURCE = "unit_click";
+export function unitClicksCampaignId(brandId: string): string {
+  return `unit-clicks:${brandId}`;
+}
 export const POST_TOUCH_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_SWEEP_DELAY_MS = 60_000;
 const SERVICE_NAME = "lead-service";
@@ -162,6 +173,9 @@ export interface PostVisitRow {
   occurredAt: string | null;
   /** Distinct leads of (org, brand) holding one of the visit's emails, case-folded. */
   leadIds: string[];
+  /** The visit's distinct addresses, case-folded (who the brand's tracker identified in the session). */
+  emails: string[];
+  fullName: string | null;
 }
 
 export interface PostTouch {
@@ -176,7 +190,8 @@ export interface PostTouch {
 export type PostVisitVerdict =
   | { kind: "touch"; touch: PostTouch }
   | { kind: "not_a_post_touch" }
-  | { kind: "no_lead" }
+  /** `fileEmail` = the clicker to file as a lead of the brand (a Unit addressed to them), null = wait for a filing. */
+  | { kind: "no_lead"; fileEmail: string | null }
   | { kind: "ambiguous_lead"; leadIds: string[] };
 
 /** What one visit is. PURE. */
@@ -184,7 +199,14 @@ export function postVisitVerdict(row: PostVisitRow): PostVisitVerdict {
   const post = parsePostTouch(row.firstUrl);
   if (!post) return { kind: "not_a_post_touch" };
   const leads = [...new Set(row.leadIds)].sort();
-  if (leads.length === 0) return { kind: "no_lead" };
+  // A HUMAN click (a tracked session: a mail scanner's server-side hit is no website_visit) on a link that NAMES its
+  // Unit (dy_unit: minted for one email to one person) by a person the session identified by ONE address: they are a
+  // lead of the brand from now on (OUTCOME-FINEST-1106). A legacy dy_post link names a post seen by many: no filing.
+  // Several addresses on one session = whose click is unknown, nobody is filed.
+  if (leads.length === 0) {
+    const emails = [...new Set(row.emails)];
+    return { kind: "no_lead", fileEmail: post.outcomeKey !== null && emails.length === 1 ? emails[0] : null };
+  }
   if (leads.length > 1) return { kind: "ambiguous_lead", leadIds: leads };
   return {
     kind: "touch",
@@ -221,7 +243,7 @@ export function earliestTouches(touches: readonly PostTouch[]): PostTouch[] {
 export async function loadPostVisits(scope?: { orgId: string }): Promise<PostVisitRow[]> {
   const rows = (await db.execute(sql`
     WITH visits AS (
-      SELECT f.fact_id, f.org_id, f.brand_id, f.emails, f.payload->>'firstUrl' AS first_url,
+      SELECT f.fact_id, f.org_id, f.brand_id, f.emails, f.full_name, f.payload->>'firstUrl' AS first_url,
              to_char(LEAST(f.occurred_at, now()) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS occurred_at
       FROM crm_facts f
       WHERE f.type = 'website_visit' AND (f.payload->>'firstUrl' LIKE '%dy_post=%' OR f.payload->>'firstUrl' LIKE '%dy_unit=%')
@@ -239,10 +261,11 @@ export async function loadPostVisits(scope?: { orgId: string }): Promise<PostVis
       WHERE EXISTS (SELECT 1 FROM leads_campaigns lc WHERE lc.lead_id = cm.lead_id AND lc.org_id = v.org_id AND v.brand_id = ANY(lc.brand_ids))
       GROUP BY a.fact_id
     )
-    SELECT v.fact_id, v.org_id, v.brand_id, v.first_url, v.occurred_at, COALESCE(o.lead_ids, '{}') AS lead_ids
+    SELECT v.fact_id, v.org_id, v.brand_id, v.first_url, v.occurred_at, v.full_name, COALESCE(o.lead_ids, '{}') AS lead_ids,
+           COALESCE((SELECT array_agg(a.email ORDER BY a.email) FROM addresses a WHERE a.fact_id = v.fact_id), '{}') AS emails
     FROM visits v LEFT JOIN owners o ON o.fact_id = v.fact_id
     ORDER BY v.occurred_at ASC NULLS LAST, v.fact_id
-  `)) as unknown as Array<{ fact_id: string; org_id: string; brand_id: string; first_url: string | null; occurred_at: string | null; lead_ids: string[] }>;
+  `)) as unknown as Array<{ fact_id: string; org_id: string; brand_id: string; first_url: string | null; occurred_at: string | null; lead_ids: string[]; emails: string[]; full_name: string | null }>;
   return rows.map((r) => ({
     factId: r.fact_id,
     orgId: r.org_id,
@@ -250,6 +273,8 @@ export async function loadPostVisits(scope?: { orgId: string }): Promise<PostVis
     firstUrl: r.first_url,
     occurredAt: r.occurred_at,
     leadIds: r.lead_ids ?? [],
+    emails: r.emails ?? [],
+    fullName: r.full_name ?? null,
   }));
 }
 
@@ -284,6 +309,8 @@ export interface PostTouchSweepSummary {
   noLead: number;
   /** Legacy-marker touches whose Unit outcome the ledger did not settle this pass (not on it yet / several). */
   unresolved: number;
+  /** Clickers of a Unit addressed to them, filed as leads of the brand this pass. */
+  filed: number;
 }
 
 /** Per pass: the produced outcome keys of each legacy subject, asked of runs-service once. */
@@ -414,13 +441,52 @@ async function postVisitIndexReady(): Promise<boolean> {
   return rows[0]?.valid === true;
 }
 
+/**
+ * File the clicker of a Unit addressed to them as a lead of the visit's brand (brand-signups.ts `fileBrandIntakePerson`:
+ * email-first, ONE `served` row under the brand's intake `unit-clicks:<brandId>`, dated at the click; the org's own team
+ * is never filed), and return their touch. Never throws: a failure is logged, the visit is asked again next pass.
+ */
+async function fileClicker(v: PostVisitRow, email: string, summary: PostTouchSweepSummary): Promise<PostTouch | null> {
+  const post = parsePostTouch(v.firstUrl);
+  if (!post) return null;
+  try {
+    const filing = await fileBrandIntakePerson({
+      orgId: v.orgId,
+      brandId: v.brandId,
+      email,
+      fullName: v.fullName,
+      at: v.occurredAt,
+      campaignId: unitClicksCampaignId(v.brandId),
+      source: UNIT_CLICK_SOURCE,
+    });
+    if (filing.status === "team_member") return null;
+    if (filing.status === "ambiguous_lead") {
+      summary.ambiguous++;
+      await recordSkip(v, filing.leadIds);
+      return null;
+    }
+    if (filing.status === "filed") {
+      summary.filed++;
+      console.log(
+        `[lead-service] unit click filed a lead: org=${v.orgId} brand=${v.brandId} lead=${filing.leadId} ` +
+          `unit=${post.outcomeKey}:${post.subjectService}:${post.subjectId} visit=${v.factId}`,
+      );
+    }
+    return { orgId: v.orgId, brandId: v.brandId, leadId: filing.leadId, post, visitFactId: v.factId, occurredAt: v.occurredAt };
+  } catch (err) {
+    summary.failed++;
+    console.error(`[lead-service] unit click NOT filed (asked again next pass): visit=${v.factId} org=${v.orgId} brand=${v.brandId}: ${errorMessage(err)}`);
+    return null;
+  }
+}
+
 let inFlight: Promise<PostTouchSweepSummary> | null = null;
 
 /** One pass. Concurrent calls join it. `scope` is a test / staff hook (and skips the index wait). */
 export function sweepPostTouches(scope?: { orgId: string }): Promise<PostTouchSweepSummary> {
   if (inFlight) return inFlight;
   inFlight = (async () => {
-    const summary: PostTouchSweepSummary = { visits: 0, touches: 0, delivered: 0, queued: 0, refused: 0, failed: 0, ambiguous: 0, noLead: 0, unresolved: 0 };
+    const summary: PostTouchSweepSummary = { visits: 0, touches: 0, delivered: 0, queued: 0, refused: 0, failed: 0, ambiguous: 0, noLead: 0, unresolved: 0, filed: 0 };
     const memo: LedgerMemo = new Map();
     if (!scope && !(await postVisitIndexReady())) return summary;
     const visits = await loadPostVisits(scope);
@@ -429,7 +495,11 @@ export function sweepPostTouches(scope?: { orgId: string }): Promise<PostTouchSw
     for (const v of visits) {
       const verdict = postVisitVerdict(v);
       if (verdict.kind === "touch") touches.push(verdict.touch);
-      else if (verdict.kind === "no_lead") summary.noLead++;
+      else if (verdict.kind === "no_lead") {
+        const touch = verdict.fileEmail ? await fileClicker(v, verdict.fileEmail, summary) : null;
+        if (touch) touches.push(touch);
+        else summary.noLead++;
+      }
       else if (verdict.kind === "ambiguous_lead") {
         summary.ambiguous++;
         await recordSkip(v, verdict.leadIds);
@@ -442,7 +512,7 @@ export function sweepPostTouches(scope?: { orgId: string }): Promise<PostTouchSw
       if (claim && claim.status !== "claimed") continue;
       await declareTouch(t, summary, memo);
     }
-    if (summary.delivered + summary.queued + summary.refused + summary.failed > 0) {
+    if (summary.delivered + summary.queued + summary.refused + summary.failed + summary.filed > 0) {
       console.log(`[lead-service] post touch declarations pass ${JSON.stringify(summary)}`);
     }
     return summary;
