@@ -7,6 +7,8 @@
  *       Most recent activity first; `sort=company_asc|company_desc|stage_desc|stage_asc|last_touch_asc` names another
  *       TOTAL order (PEOPLE-SORT-BY-COMPANY-1023, see UNIBOX_SORTS). Each filter is a comma list (any of); `lifecycle=none` = no rung yet. `total` is
  *       the size of the filtered set; `nextCursor` pages it. Unknown filter value / bad bound = 400.
+ *       `reachedStep=<catalogue step>[,…]` (LEAD-REACHED-STEP-1106) keeps the people who reached that step at some
+ *       point, whatever rung they stand on now (a visitor who then booked stays under Website visit); `total` counts them.
  *   GET /orgs/leads/unibox-lifecycle-counts?brandId=[&offerId=&campaignId=&<the list's filters>]
  *       DEALS-LIFECYCLE-1021: how many people of the filtered set stand on each lifecycle rung (ladder keys + `none`),
  *       the ladder beside it; the counts sum to `total`. One board column = the list filtered on its rung.
@@ -99,6 +101,8 @@ function filtersOf(req: AuthenticatedRequest, catalogue: LifecycleCatalogue): Un
     contactability: list(req.query.contactability, UNIBOX_CONTACTABILITY, "contactability"),
     fit: list(req.query.fit, UNIBOX_FIT, "fit"),
     leadVerdict: list(req.query.leadVerdict, LEAD_VERDICTS, "leadVerdict") as LeadVerdict[] | undefined,
+    // LEAD-REACHED-STEP-1106: any step of features-service's catalogue (a step declared later works with no change here).
+    reachedSteps: list(req.query.reachedStep, [...catalogue.ranks.keys()], "reachedStep"),
     q: typeof req.query.q === "string" && req.query.q.trim() ? req.query.q.trim() : undefined,
   };
 }
