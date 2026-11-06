@@ -26468,6 +26468,15 @@
           },
           {
             "in": "query",
+            "name": "reachedStep",
+            "required": false,
+            "description": "LEAD-REACHED-STEP-1106: comma list of catalogue step keys (features-service /public/catalogue/steps, any step, any of). Keeps the people who REACHED one of them at some point, whatever rung they stand on now (a visitor who then booked a meeting is still kept for website_visit). Stacks with the scope and every other filter; `total` counts them. Unknown step = 400.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
@@ -26781,6 +26790,15 @@
             "in": "query",
             "name": "q",
             "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "reachedStep",
+            "required": false,
+            "description": "LEAD-REACHED-STEP-1106: comma list of catalogue step keys (features-service /public/catalogue/steps, any step, any of). Keeps the people who REACHED one of them at some point, whatever rung they stand on now (a visitor who then booked a meeting is still kept for website_visit). Stacks with the scope and every other filter; `total` counts them. Unknown step = 400.",
             "schema": {
               "type": "string"
             }

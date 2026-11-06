@@ -10181,6 +10181,16 @@ registry.registerPath({
       required: false,
       schema: { type: "string" as const },
     })),
+    {
+      in: "query" as const,
+      name: "reachedStep",
+      required: false,
+      description:
+        "LEAD-REACHED-STEP-1106: comma list of catalogue step keys (features-service /public/catalogue/steps, any step, any of). " +
+        "Keeps the people who REACHED one of them at some point, whatever rung they stand on now (a visitor who then booked a " +
+        "meeting is still kept for website_visit). Stacks with the scope and every other filter; `total` counts them. Unknown step = 400.",
+      schema: { type: "string" as const },
+    },
     { in: "query" as const, name: "limit", required: false, schema: { type: "integer" as const, minimum: 1, maximum: 200 } },
     {
       in: "query" as const,
@@ -10243,6 +10253,16 @@ registry.registerPath({
       required: false,
       schema: { type: "string" as const },
     })),
+    {
+      in: "query" as const,
+      name: "reachedStep",
+      required: false,
+      description:
+        "LEAD-REACHED-STEP-1106: comma list of catalogue step keys (features-service /public/catalogue/steps, any step, any of). " +
+        "Keeps the people who REACHED one of them at some point, whatever rung they stand on now (a visitor who then booked a " +
+        "meeting is still kept for website_visit). Stacks with the scope and every other filter; `total` counts them. Unknown step = 400.",
+      schema: { type: "string" as const },
+    },
   ],
   responses: {
     200: {

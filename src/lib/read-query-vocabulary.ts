@@ -14,7 +14,7 @@ const LEAD_SCOPE = ["brandId", "campaignId", "offerId", "orgId", "userId", "work
 /** The six Unibox dimensions + status/type and the scope (routes/unibox.ts filtersOf/scopeOf). */
 const UNIBOX_FILTERS = [
   "brandId", "offerId", "campaignId",
-  "status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "leadVerdict", "q",
+  "status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "leadVerdict", "reachedStep", "q",
 ] as const;
 
 export const READ_QUERY_PARAMS = {
