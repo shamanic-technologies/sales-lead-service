@@ -63,7 +63,7 @@ export const RUN_TASKS = {
   "qualification-sample": { declares: ["company_researched"] },
   "qualification-preview": { declares: ["company_researched"] },
   "outcome-recording": { declares: ["website_visit", "signup", "form_submitted", "purchase", "meeting_booked", "meeting_attended", "paid_client"] },
-  // A visit through one of our posts' links (post-touch.ts): spend-free, consumes the post's `post_published`.
+  // A visit through one of our links (post-touch.ts): spend-free, consumes the Unit the link names (its own outcome).
   "post-touch-visit": { declares: ["website_visit"] },
   "qualification-suggestions": {
     support: {
