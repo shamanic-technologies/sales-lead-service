@@ -18,7 +18,7 @@ vi.mock("../../src/lib/unibox-scope.js", () => ({
 }));
 vi.mock("../../src/lib/unibox-model.js", () => ({
   UNIBOX_SORTS: ["company_asc", "company_desc", "stage_desc", "stage_asc", "last_touch_asc"],
-  loadLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map() }),
+  loadLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map([["website_visit", 3], ["newly_declared_step", null]]) }),
   readUniboxPage: (...a: unknown[]) => readUniboxPage(...a),
   readUniboxLead: (...a: unknown[]) => readUniboxLead(...a),
   readUniboxLifecycleCounts: (...a: unknown[]) => readUniboxLifecycleCounts(...a),
@@ -112,6 +112,22 @@ describe("GET /orgs/leads/unibox", () => {
     expect(readUniboxPage.mock.calls[1][2]).toEqual({ limit: 50, cursor: null });
     expect((await get(`/orgs/leads/unibox?brandId=${BRAND}&sort=activity`)).status).toBe(400);
     expect(readUniboxPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("reachedStep (LEAD-REACHED-STEP-1106): any catalogue step, a comma list, passed down with the scope; unknown = 400", async () => {
+    readUniboxPage.mockResolvedValue({ rows: [], total: 3, nextCursor: null, builtAt: null });
+    const res = await get(`/orgs/leads/unibox?brandId=${BRAND}&reachedStep=website_visit,newly_declared_step&campaignId=sfc-1`);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(3);
+    expect(readUniboxPage.mock.calls[0][1]).toMatchObject({ reachedSteps: ["website_visit", "newly_declared_step"], campaignIds: ["camp-a", "camp-b"] });
+    expect((await get(`/orgs/leads/unibox?brandId=${BRAND}`)).status).toBe(200);
+    expect(readUniboxPage.mock.calls[1][1].reachedSteps).toBeUndefined();
+    const bad = await get(`/orgs/leads/unibox?brandId=${BRAND}&reachedStep=not_a_step`);
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toMatch(/reachedStep/);
+    readUniboxLifecycleCounts.mockResolvedValue({ total: 3, byLifecycle: {}, byVerdict: { won: 0, hot: 0, lost: 0 }, builtAt: null });
+    expect((await get(`/orgs/leads/unibox-lifecycle-counts?brandId=${BRAND}&reachedStep=website_visit`)).status).toBe(200);
+    expect(readUniboxLifecycleCounts.mock.calls[0][1]).toMatchObject({ reachedSteps: ["website_visit"] });
   });
 
   it("a foreign cursor = 400; a read failure = 500 (never an empty page)", async () => {

@@ -619,6 +619,13 @@ export interface UniboxFilters {
   /** LEAD-GENERIC-1106: won / hot / lost (lead-state.ts), any of. */
   leadVerdict?: readonly LeadVerdict[];
   /**
+   * LEAD-REACHED-STEP-1106: people who REACHED one of these catalogue steps at some point (the row's stored `steps`),
+   * whatever rung they stand on now: a visitor who then booked a meeting stays under Website visit. Any of; a step
+   * key is matched as stored, never mapped (a step declared later in the catalogue works with no code change).
+   * Not implied from the rung: the top rung holds several steps (paid client, purchase, client satisfied).
+   */
+  reachedSteps?: readonly string[];
+  /**
    * The offer / campaign scope, resolved to campaign ids (`unibox-scope.ts`, DEALS-LIFECYCLE-1021): only people who are
    * a lead on one of them. Absent = the brand's whole Unibox; empty = nobody (an offer no campaign sells yet).
    */
@@ -760,6 +767,9 @@ function filterSql(scope: Scope, f: UniboxFilters, topRank: number | null) {
   if (f.contactability?.length) parts.push(sql`u.contactability = ANY(${sql.param([...f.contactability])}::text[])`);
   if (f.fit?.length) parts.push(sql`u.fit = ANY(${sql.param([...f.fit])}::text[])`);
   if (f.leadVerdict?.length) parts.push(sql`(${sql.join(f.leadVerdict.map((v) => leadVerdictSql(v, topRank)), sql` OR `)})`);
+  if (f.reachedSteps?.length) {
+    parts.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(u.steps) s WHERE s->>'step' = ANY(${sql.param([...f.reachedSteps])}::text[]))`);
+  }
   if (f.campaignIds !== undefined) {
     // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once.
     parts.push(sql`u.lead_ids && ARRAY(
