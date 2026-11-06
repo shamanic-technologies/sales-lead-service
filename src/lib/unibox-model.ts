@@ -15,6 +15,7 @@ import { db } from "../db/index.js";
 import { FEATURES_SERVICE_URL } from "../config.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { leadStateOf, leadVerdictSql, nextFollowupJsonSql, topRungRank, type LeadState, type LeadVerdict } from "./lead-state.js";
 import { paymentStands } from "./crm-evidence.js";
 import { STEP_REACHED_EVIDENCE } from "./step-reached.js";
 import { loadRelationshipsAt } from "./relationship-read.js";
@@ -38,6 +39,7 @@ import {
   interestOf,
   customerStateFrom,
   lifecycleOf,
+  lifecycleOfClient,
   rolesOf,
   statusOf,
   stepOfTimelineFact,
@@ -365,7 +367,12 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
     });
     const interest = interestOf(block?.wantsBusiness.state ?? null);
     const lastOurs = oursAt.get(k) ?? null;
-    const lifecycle = lifecycleOf(reached.keys(), catalogue.ranks, catalogue.ladder);
+    const status = (() => {
+      const st = customerStateFrom(customerFacts.get(k) ?? []);
+      return statusOf({ customer: !st.churned && ((block?.tags ?? []).includes("customer") || st.customerSign), churned: st.churned });
+    })();
+    // LEAD-GENERIC-1106: a client (paying today, or paid then churned) has reached the top rung, whatever outcome rows say.
+    const lifecycle = lifecycleOfClient(lifecycleOf(reached.keys(), catalogue.ranks, catalogue.ladder), status, catalogue.ladder);
     const relationKeys = [...(s.relation_keys ?? [])].sort();
     const who = personIdentityOf(
       s.name,
@@ -387,10 +394,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       relationKey: relationKeys[0] ?? null,
       relationKeys,
       leadIds: myLeads.sort(),
-      status: (() => {
-        const st = customerStateFrom(customerFacts.get(k) ?? []);
-        return statusOf({ customer: !st.churned && ((block?.tags ?? []).includes("customer") || st.customerSign), churned: st.churned });
-      })(),
+      status,
       roles: rolesOf(block?.tags ?? []),
       types: typesOf(block?.tags ?? []),
       lifecycle,
@@ -612,6 +616,8 @@ export interface UniboxFilters {
   contactability?: readonly string[];
   fit?: readonly string[];
   q?: string;
+  /** LEAD-GENERIC-1106: won / hot / lost (lead-state.ts), any of. */
+  leadVerdict?: readonly LeadVerdict[];
   /**
    * The offer / campaign scope, resolved to campaign ids (`unibox-scope.ts`, DEALS-LIFECYCLE-1021): only people who are
    * a lead on one of them. Absent = the brand's whole Unibox; empty = nobody (an offer no campaign sells yet).
@@ -633,6 +639,8 @@ export interface UniboxRowCampaign {
 
 /** A list row: the row plus the campaigns that reached the person (read in the page's own statement, no extra trip). */
 export interface UniboxListRow extends UniboxRow {
+  /** LEAD-GENERIC-1106: the ONE lead vocabulary (lead-state.ts): lifecycle, won / hot / lost, reachable, conversation, fit, interest, client status, next follow-up. */
+  leadState: LeadState;
   /** Most recent first; within the read's offer/campaign scope when one is given. null = campaign-service unreadable. */
   campaigns: UniboxRowCampaign[] | null;
   campaignsReason: "source_unreadable" | null;
@@ -682,6 +690,13 @@ export function toRow(r: Record<string, unknown>, ladder: readonly LifecycleRung
   };
 }
 
+/** The `next_followup` JSON a reader selected with `nextFollowupJsonSql` (null = no date row for the lead yet). */
+export function nextFollowupOfJson(v: unknown): { at: string | null; basis: string } | null {
+  if (v === null || v === undefined) return null;
+  const j = (typeof v === "string" ? JSON.parse(v) : v) as { at: Ts | null; basis: string };
+  return { at: iso(j.at), basis: String(j.basis) };
+}
+
 /**
  * Pure: the person's campaign filings at the grain the customer knows, as the lead card folds them (a pipe folds into the
  * campaign it belongs to; a filing that is no campaign, `signups:<brand>` / `unibox:<brand>`, is not listed). Most
@@ -729,7 +744,7 @@ function decodeCursor(c: string): { at: string; human: string; company: string }
   }
 }
 
-function filterSql(scope: Scope, f: UniboxFilters) {
+function filterSql(scope: Scope, f: UniboxFilters, topRank: number | null) {
   const parts = [sql`u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId}`];
   if (f.status?.length) parts.push(sql`u.status = ANY(${sql.param([...f.status])}::text[])`);
   if (f.roles?.length) parts.push(sql`u.roles && ${sql.param([...f.roles])}::text[]`);
@@ -744,6 +759,7 @@ function filterSql(scope: Scope, f: UniboxFilters) {
   if (f.conversation?.length) parts.push(sql`u.conversation = ANY(${sql.param([...f.conversation])}::text[])`);
   if (f.contactability?.length) parts.push(sql`u.contactability = ANY(${sql.param([...f.contactability])}::text[])`);
   if (f.fit?.length) parts.push(sql`u.fit = ANY(${sql.param([...f.fit])}::text[])`);
+  if (f.leadVerdict?.length) parts.push(sql`(${sql.join(f.leadVerdict.map((v) => leadVerdictSql(v, topRank)), sql` OR `)})`);
   if (f.campaignIds !== undefined) {
     // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once.
     parts.push(sql`u.lead_ids && ARRAY(
@@ -886,14 +902,14 @@ async function readPage(
   },
 ): Promise<UniboxPage> {
   const catalogue = await loadLifecycleCatalogue();
-  const where = filterSql(scope, f);
+  const where = filterSql(scope, f, topRungRank(catalogue.ladder));
   // The campaigns that reached each row's person ride the page's own statement (one trip, only the page's rows):
   // their `leads_campaigns` filings at the brand, inside the read's scope when one is given.
   const inScope = f.campaignIds === undefined ? sql`` : sql`AND lc.campaign_id = ANY(${sql.param([...f.campaignIds])}::text[])`;
   const [rows, totals, built, displays] = await Promise.all([
     db.execute(sql`
       WITH page AS (
-        SELECT u.* ${o.sortColumns} FROM unibox_rows u WHERE ${where} ${o.keyset}
+        SELECT u.*, ${nextFollowupJsonSql} AS next_followup ${o.sortColumns} FROM unibox_rows u WHERE ${where} ${o.keyset}
         ORDER BY ${o.order("u")} LIMIT ${limit + 1}
       )
       SELECT page.*, (
@@ -921,8 +937,10 @@ async function readPage(
       campaignId: String(c.campaignId),
       servedAt: iso(c.servedAt),
     }));
+    const row = toRow(r, catalogue.ladder);
     return {
-      ...toRow(r, catalogue.ladder),
+      ...row,
+      leadState: leadStateOf(row, catalogue.ladder, nextFollowupOfJson(r.next_followup)),
       campaigns: displays === null ? null : foldRowCampaigns(filings, displays),
       campaignsReason: displays === null ? "source_unreadable" : null,
     };
@@ -937,22 +955,30 @@ export interface UniboxLifecycleCounts {
   total: number;
   /** People per rung, keyed by the ladder's keys (every key present, 0 included) + `none` (no rung yet). */
   byLifecycle: Record<string, number>;
+  /** LEAD-GENERIC-1106: people won / hot / lost (lead-state.ts; disjoint, the rest are open: not a partition of `total`). */
+  byVerdict: Record<LeadVerdict, number>;
   builtAt: string | null;
 }
 
 /** How many people of the filtered set stand on each lifecycle rung (DEALS-LIFECYCLE-1021: the board's column headers). */
 export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters): Promise<UniboxLifecycleCounts> {
   const catalogue = await loadLifecycleCatalogue();
-  const where = filterSql(scope, f);
+  const topRank = topRungRank(catalogue.ladder);
+  const where = filterSql(scope, f, topRank);
   const [groups, built] = await Promise.all([
-    db.execute(sql`SELECT u.lifecycle_key AS key, count(*)::int AS n FROM unibox_rows u WHERE ${where} GROUP BY 1`) as unknown as Promise<
-      Array<{ key: string | null; n: number }>
+    db.execute(sql`SELECT u.lifecycle_key AS key, count(*)::int AS n,
+        count(*) FILTER (WHERE ${leadVerdictSql("won", topRank)})::int AS won,
+        count(*) FILTER (WHERE ${leadVerdictSql("hot", topRank)})::int AS hot,
+        count(*) FILTER (WHERE ${leadVerdictSql("lost", topRank)})::int AS lost
+      FROM unibox_rows u WHERE ${where} GROUP BY 1`) as unknown as Promise<
+      Array<{ key: string | null; n: number; won: number; hot: number; lost: number }>
     >,
     db.execute(sql`SELECT max(updated_at) AS at FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}`) as unknown as Promise<Array<{ at: Ts | null }>>,
   ]);
   const byLifecycle: Record<string, number> = {};
   for (const r of catalogue.ladder) byLifecycle[r.key] = 0;
   byLifecycle.none = 0;
+  const byVerdict: Record<LeadVerdict, number> = { won: 0, hot: 0, lost: 0 };
   let total = 0;
   for (const g of groups) {
     const key = g.key ?? "none";
@@ -961,9 +987,12 @@ export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters):
       console.error(`[lead-service] unibox counts: rung "${key}" is not on the ladder (org ${scope.orgId} brand ${scope.brandId}, ${g.n} rows)`);
     }
     byLifecycle[key] = (byLifecycle[key] ?? 0) + g.n;
+    byVerdict.won += g.won;
+    byVerdict.hot += g.hot;
+    byVerdict.lost += g.lost;
     total += g.n;
   }
-  return { total, byLifecycle, builtAt: iso(built[0]?.at ?? null) };
+  return { total, byLifecycle, byVerdict, builtAt: iso(built[0]?.at ?? null) };
 }
 
 export interface UniboxCampaign {
@@ -987,17 +1016,18 @@ export async function readUniboxLead(
   scope: Scope,
   humanId: string | null,
   relationKey: string | null = null,
-): Promise<{ lead: UniboxRow; campaigns: UniboxCampaign[] } | null> {
+): Promise<{ lead: UniboxRow; leadState: LeadState; campaigns: UniboxCampaign[] } | null> {
   const catalogue = await loadLifecycleCatalogue();
   const byHuman = humanId === null ? sql`` : sql`AND u.human_id = ${humanId}::uuid`;
   const byRelation = relationKey === null ? sql`` : sql`AND ${relationKey} = ANY(u.relation_keys)`;
   const rows = (await db.execute(sql`
-    SELECT u.* FROM unibox_rows u WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} ${byHuman} ${byRelation}
+    SELECT u.*, ${nextFollowupJsonSql} AS next_followup FROM unibox_rows u WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} ${byHuman} ${byRelation}
     ORDER BY u.last_activity_at DESC, u.company_key LIMIT 1
   `)) as unknown as Array<Record<string, unknown>>;
   if (rows.length === 0) return null;
   const lead = toRow(rows[0], catalogue.ladder);
-  if (lead.leadIds.length === 0) return { lead, campaigns: [] };
+  const leadState = leadStateOf(lead, catalogue.ladder, nextFollowupOfJson(rows[0].next_followup));
+  if (lead.leadIds.length === 0) return { lead, leadState, campaigns: [] };
   const served = (await db.execute(sql`
     SELECT campaign_id, min(served_at) AS served_at FROM leads_campaigns
     WHERE org_id = ${scope.orgId} AND ${scope.brandId} = ANY(brand_ids) AND lead_id = ANY(${sql.param(lead.leadIds)}::uuid[])
@@ -1045,5 +1075,5 @@ export async function readUniboxLead(
       .sort((a, b) => (catalogue.ranks.get(a.step) ?? 0) - (catalogue.ranks.get(b.step) ?? 0) || a.step.localeCompare(b.step)),
   }));
   campaigns.sort((a, b) => (b.furthest?.rank ?? 0) - (a.furthest?.rank ?? 0) || String(b.servedAt).localeCompare(String(a.servedAt)));
-  return { lead, campaigns };
+  return { lead, leadState, campaigns };
 }

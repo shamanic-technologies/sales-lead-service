@@ -18,6 +18,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { addressSpellings, loadLifecycleCatalogue, toRow, type UniboxRow } from "./unibox-model.js";
+import { leadStateOf, type LeadState } from "./lead-state.js";
 
 type Ts = Date | string;
 const iso = (v: Ts | null | undefined): string | null => (v === null || v === undefined ? null : toIsoTimestamp(v));
@@ -52,6 +53,8 @@ export interface UniboxLeadState {
   /** The lead named (by id), else the row's first lead. */
   leadId: string | null;
   lead: UniboxRow;
+  /** LEAD-GENERIC-1106: the ONE lead vocabulary (lead-state.ts), next follow-up included. */
+  leadState: LeadState;
   /** Who acted LAST in the conversation and when: `ours` = a message of ours, `theirs` = a word or act of theirs. */
   lastAction: { side: "ours" | "theirs"; at: string } | null;
   /** A word of theirs is newer than our latest message and the conversation is open (= `conversation: waiting_on_us`). */
@@ -151,6 +154,7 @@ export async function readUniboxLeadState(
     brandId,
     leadId: q.leadId ?? lead.leadIds[0] ?? null,
     lead,
+    leadState: leadStateOf(lead, catalogue.ladder, nextFollowup),
     lastAction: lastActionOf(lead.lastOursAt, lead.lastTheirsAt),
     waitingOnUs: lead.conversation === "waiting_on_us",
     nextFollowup,

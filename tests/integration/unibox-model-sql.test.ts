@@ -270,6 +270,39 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
     expect((await readUniboxPage(scope, { campaignIds: offer1, lifecycle: ["engaged"] }, { limit: 10, cursor: null })).rows.map((r) => r.humanId)).toEqual([ana]);
   });
 
+  it("serves the ONE lead vocabulary: won / hot / lost filter and counts match each row's leadState; next follow-up read off the lead's date (LEAD-GENERIC-1106)", async () => {
+    const page = await readUniboxPage(scope, {}, { limit: 50, cursor: null });
+    const anaRow = page.rows.find((r) => r.humanId === ana)!;
+    // Ana: interested, but marked the wrong person -> lost for that reason, never hot.
+    expect(anaRow.leadState).toMatchObject({ won: false, hot: false, lost: { reasons: ["wrong_fit"], fit: "wrong_person", reachable: null }, fit: "wrong_person" });
+    expect(anaRow.leadState.lifecycle).toEqual(anaRow.lifecycle);
+    expect(anaRow.leadState.clientStatus).toBe(anaRow.status);
+    expect(anaRow.leadState.reachable).toBe(anaRow.contactability);
+    // The SQL filter and counts are the same set as each row's leadState.
+    const counts = await readUniboxLifecycleCounts(scope, {});
+    for (const v of ["won", "hot", "lost"] as const) {
+      const filtered = await readUniboxPage(scope, { leadVerdict: [v] }, { limit: 50, cursor: null });
+      const expected = page.rows.filter((r) => (v === "lost" ? r.leadState.lost !== null : r.leadState[v])).map((r) => r.humanId).sort();
+      expect(filtered.rows.map((r) => r.humanId).sort()).toEqual(expected);
+      expect(counts.byVerdict[v]).toBe(expected.length);
+    }
+    for (const r of page.rows) expect([r.leadState.won, r.leadState.hot, r.leadState.lost !== null].filter(Boolean).length).toBeLessThanOrEqual(1);
+    // The next follow-up date is the lead's own (lead_followup_dates), none = null.
+    expect(anaRow.leadIds.length).toBeGreaterThan(0);
+    expect(anaRow.leadState.nextFollowupAt).toBeNull();
+    await db.execute(sql`
+      INSERT INTO lead_followup_dates (org_id, brand_id, lead_id, next_followup_at, basis)
+      VALUES (${orgId}, ${brandId}, ${anaRow.leadIds[0]}::uuid, '2026-12-01T09:00:00Z'::timestamptz, 'stated')
+    `);
+    try {
+      const again = (await readUniboxPage(scope, {}, { limit: 50, cursor: null })).rows.find((r) => r.humanId === ana)!;
+      expect(again.leadState).toMatchObject({ nextFollowupAt: "2026-12-01T09:00:00.000Z", nextFollowupBasis: "stated" });
+      expect((await readUniboxLead(scope, ana))!.leadState.nextFollowupAt).toBe("2026-12-01T09:00:00.000Z");
+    } finally {
+      await db.execute(sql`DELETE FROM lead_followup_dates WHERE org_id = ${orgId}`);
+    }
+  });
+
   it("the lead card names every campaign with its furthest step; a non-lead has no card", async () => {
     const card = await readUniboxLead(scope, ana);
     // At the grain the customer knows (the funnel campaign, named); a signup filing is no campaign.

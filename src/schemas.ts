@@ -10100,8 +10100,37 @@ const UniboxRowSchema = z
   })
   .openapi("UniboxRow");
 
+/** LEAD-GENERIC-1106: the ONE lead vocabulary, served beside the old ones (lead-state.ts). */
+const LeadStateSchema = z
+  .object({
+    lifecycle: LifecycleRungSchema.nullable().openapi({ description: "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet." }),
+    won: z.boolean().openapi({ description: "WON = Lifecycle on the ladder's top rung (Paid client)." }),
+    hot: z.boolean().openapi({ description: "HOT = interested, not won, not lost." }),
+    lost: z
+      .object({
+        reasons: z.array(z.enum(["not_reachable", "wrong_fit", "not_interested"])).min(1).openapi({ description: "Every reason that holds, strongest first." }),
+        reachable: z.enum(["unsubscribed", "bounced", "do_not_contact"]).nullable().openapi({ description: "Why not reachable; null when reachable." }),
+        fit: z.enum(["wrong_person", "not_our_target"]).nullable().openapi({ description: "The wrong fit; null when fit." }),
+      })
+      .nullable()
+      .openapi({ description: "LOST = not won, and not reachable, wrong fit or not interested; null = not lost. won, hot and lost are disjoint; none of them = open." }),
+    reachable: z.enum(["contactable", "unsubscribed", "bounced", "do_not_contact"]).openapi({ description: "REACHABLE: may we write?" }),
+    conversation: z.enum(["waiting_on_us", "waiting_on_them", "no_reply_yet", "closed"]),
+    fit: z.enum(["fit", "wrong_person", "not_our_target"]),
+    fitNote: z.string().nullable(),
+    interest: z.enum(["interested", "not_interested", "unsure", "not_asked"]),
+    clientStatus: z.enum(["prospect", "customer", "churned"]),
+    nextFollowupAt: z.string().nullable().openapi({ description: "The lead's ONE next follow-up date at the brand; null = no date yet (nextFollowupBasis null) or follow-ups stopped (nextFollowupBasis stopped)." }),
+    nextFollowupBasis: z.string().nullable().openapi({ description: "How the date was set (default, send, stated, served, not_yet, stop_recheck, stopped); null = no date row yet." }),
+  })
+  .openapi("LeadState", {
+    description:
+      "LEAD-GENERIC-1106: the ONE lead vocabulary. Replaces standing, buckets, sales-interest stage, the interest ladder and wentCold (still served on their own reads until every consumer moved).",
+  });
+
 /** DEALS-LIFECYCLE-1021: a LIST row also names the campaigns that reached the person (a Deals card). The card's `lead` stays UniboxRow. */
 const UniboxListRowSchema = UniboxRowSchema.extend({
+  leadState: LeadStateSchema,
   campaigns: z
     .array(
       z.object({
@@ -10127,6 +10156,7 @@ registry.registerPath({
   summary: "The brand's Unibox: its leads (people crm-service tags professional to the brand) with six tag dimensions",
   description:
     "Most recent activity first. Each filter is a comma list (any of): type, lifecycle (ladder keys, `none` = no rung yet), " +
+    "leadVerdict (won, hot, lost: LeadState, LEAD-GENERIC-1106), " +
     "interest, conversation, contactability, fit; q searches name and email. `total` = size of the filtered set. Rebuilt by the " +
     "relationship sweep every ~5 minutes (`builtAt`). Unknown filter value, bad limit or foreign cursor = 400. " +
     "Optional scope (DEALS-LIFECYCLE-1021): `offerId` and/or `campaignId` keep only the people who are a lead on a campaign of that offer / " +
@@ -10136,7 +10166,7 @@ registry.registerPath({
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
     ...UniboxScopeParams,
-    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "q", "cursor"].map((name) => ({
+    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "leadVerdict", "q", "cursor"].map((name) => ({
       in: "query" as const,
       name,
       required: false,
@@ -10198,7 +10228,7 @@ registry.registerPath({
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
     ...UniboxScopeParams,
-    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "q"].map((name) => ({
+    ...["status", "role", "type", "lifecycle", "interest", "conversation", "contactability", "fit", "leadVerdict", "q"].map((name) => ({
       in: "query" as const,
       name,
       required: false,
@@ -10219,6 +10249,9 @@ registry.registerPath({
             byLifecycle: z.record(z.string(), z.number().int()).openapi({
               description: "People per rung, keyed by the ladder's keys (lead_found, contacted, engaged, signup_or_form, meeting_booked, meeting_attended, paid_client) + `none`.",
               example: { lead_found: 120, contacted: 80, engaged: 9, signup_or_form: 2, meeting_booked: 1, meeting_attended: 0, paid_client: 0, none: 0 },
+            }),
+            byVerdict: z.object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int() }).openapi({
+              description: "LEAD-GENERIC-1106: people won / hot / lost (LeadState), disjoint; the rest are open, so they do not sum to total.",
             }),
             builtAt: z.string().nullable(),
           }),
@@ -10248,6 +10281,7 @@ registry.registerPath({
           schema: z.object({
             brandId: z.string(),
             lead: UniboxRowSchema,
+            leadState: LeadStateSchema,
             campaigns: z.array(
               z.object({
                 campaignId: z.string().openapi({ description: "The campaign the customer launched (each of its pipes folds into it), else the campaign itself." }),
@@ -10292,6 +10326,7 @@ registry.registerPath({
             brandId: z.string(),
             leadId: z.string().nullable().openapi({ description: "The lead named, else the row's first lead (null = a Unibox person not yet a lead)." }),
             lead: UniboxRowSchema.openapi({ description: "The Unibox row: identity, status, roles, lifecycle, steps, interest, conversation, contactability, fit, last message preview." }),
+            leadState: LeadStateSchema,
             lastAction: z
               .object({ side: z.enum(["ours", "theirs"]), at: z.string() })
               .nullable()
