@@ -199,6 +199,8 @@ describe("people-client stepFilter", () => {
     expect(calls[1].init.body).toBe(JSON.stringify({ basis: "basis", excludeEmailedWithin: "2_months" }));
     await revealCandidate("aud-1", "cand-1", "basis", ctx);
     expect(calls[2].init.body).toBe(JSON.stringify({ basis: "basis" }));
+    await serveNext("aud-123", { ...ctx, excludeEmailedWithin: "never" });
+    expect(calls[3].init.body).toBe(JSON.stringify({ excludeEmailedWithin: "never" }));
   });
 
   it("a 400 is a step-filter refusal only when the pipe stated one", () => {

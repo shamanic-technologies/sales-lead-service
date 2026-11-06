@@ -76,6 +76,10 @@ describe.skipIf(!hasRealDatabase)("fresh contacts only: who the brand emailed in
     await fact({ type: "email_sent", email: `seventy-${u}@itest.example`, brandIds: [brandId], daysAgo: 70 });
     await seedLead("emailed40DaysAgo", [`forty-${u}@itest.example`]);
     await fact({ type: "email_sent", email: `forty-${u}@itest.example`, brandIds: [brandId], daysAgo: 40 });
+
+    // FRESH-NEVER-1106: emailed long ago, outside every dated window.
+    await seedLead("emailedTwoYearsAgo", [`ancient-${u}@itest.example`]);
+    await fact({ type: "email_sent", email: `ancient-${u}@itest.example`, brandIds: [brandId], daysAgo: 730 });
   });
 
   afterAll(async () => {
@@ -99,6 +103,7 @@ describe.skipIf(!hasRealDatabase)("fresh contacts only: who the brand emailed in
       neverEmailed: false,
       emailed70DaysAgo: true,
       emailed40DaysAgo: true,
+      emailedTwoYearsAgo: false,
     });
   });
 
@@ -115,10 +120,36 @@ describe.skipIf(!hasRealDatabase)("fresh contacts only: who the brand emailed in
     expect(ids.has(leadIds.emailed40DaysAgo)).toBe(false);
   });
 
+  it("`never` refuses everyone the brand ever emailed, any date, and hands the others", async () => {
+    const never = { window: "never" as const, brandIds: [brandId] };
+    const hits: Record<string, boolean> = {};
+    for (const [key, id] of Object.entries(leadIds)) hits[key] = await leadRecentlyEmailed(id, never);
+    expect(hits).toEqual({
+      emailedLastWeek: true,
+      emailedFourMonthsAgo: true,
+      emailedByAnotherBrand: false,
+      sendWithdrawn: false,
+      onlyOpened: false,
+      secondAddressEmailed: true,
+      neverEmailed: false,
+      emailed70DaysAgo: true,
+      emailed40DaysAgo: true,
+      emailedTwoYearsAgo: true,
+    });
+
+    const asked = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), limit: 50, recentlyEmailed: never });
+    expect(new Set(asked.map((c) => c.leadId))).toEqual(
+      new Set([leadIds.emailedByAnotherBrand, leadIds.sendWithdrawn, leadIds.onlyOpened, leadIds.neverEmailed]),
+    );
+  });
+
   it("a pool asked with the window skips them without touching their rows; a pool not asked hands everyone out", async () => {
     const asked = await loadRetryCandidates({ orgId, campaignId, nowMs: Date.now(), limit: 50, recentlyEmailed: scope });
     expect(new Set(asked.map((c) => c.leadId))).toEqual(
-      new Set([leadIds.emailedFourMonthsAgo, leadIds.emailedByAnotherBrand, leadIds.sendWithdrawn, leadIds.onlyOpened, leadIds.neverEmailed]),
+      new Set([
+        leadIds.emailedFourMonthsAgo, leadIds.emailedByAnotherBrand, leadIds.sendWithdrawn, leadIds.onlyOpened,
+        leadIds.neverEmailed, leadIds.emailedTwoYearsAgo,
+      ]),
     );
 
     // Regression: not asked = today's pool, byte-identical population.
