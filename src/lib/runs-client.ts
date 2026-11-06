@@ -36,6 +36,28 @@ async function callRunsService(path: string, options: {
   return response.json();
 }
 
+/**
+ * The outcome keys a subject PRODUCED on the ledger (runs-service `GET /internal/outcome-occurrences`, direction
+ * produced): what Unit a link naming only a subject (legacy `dy_post`) belongs to. Throws on any failure (the caller
+ * asks again next pass), never an empty answer for an unreadable ledger.
+ */
+export async function producedOutcomeKeysOf(subjectService: string, subjectId: string): Promise<string[]> {
+  const qs = new URLSearchParams({ subjectService, subjectIds: subjectId, direction: "produced", limit: "100" });
+  const response = await fetchWithRetry(`${RUNS_SERVICE_URL}/internal/outcome-occurrences?${qs}`, {
+    method: "GET",
+    headers: { "X-API-Key": RUNS_SERVICE_API_KEY },
+    signal: AbortSignal.timeout(RUNS_SERVICE_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`Runs service outcome occurrences read failed: ${response.status} - ${await response.text()}`);
+  }
+  const body = (await response.json()) as { occurrences?: Array<{ outcomeKey?: unknown; subjectService?: unknown; subjectId?: unknown; direction?: unknown }> };
+  if (!Array.isArray(body.occurrences)) throw new Error("Runs service outcome occurrences read: no occurrences array");
+  return body.occurrences
+    .filter((o) => o.direction === "produced" && o.subjectService === subjectService && o.subjectId === subjectId && typeof o.outcomeKey === "string")
+    .map((o) => o.outcomeKey as string);
+}
+
 export async function createRun(params: {
   orgId: string;
   serviceName: string;
