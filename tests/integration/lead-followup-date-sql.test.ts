@@ -133,6 +133,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
   beforeEach(() => queued.clear());
 
   afterAll(async () => {
+    await db.execute(sql`DELETE FROM followup_actions WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM lead_followup_due_serves WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM lead_followup_dates WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
@@ -291,6 +292,59 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       WHERE lc.lead_id = ${older.leadId}::uuid AND r.cause = 'followup_due'
     `)) as unknown as Array<{ n: number }>;
     expect(repoints[0].n).toBe(2); // source row re-opened + follow-up row re-served
+  });
+
+  it("a person waiting on our answer is never parked: retried soon, backing off per failed attempt, capped (ANSWER-RETRY-1106)", async () => {
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+    const asked = await person("asked");
+    await fd.ensureLeadFollowupDates({ orgId, brandId });
+    await setDue(asked.leadId);
+    // They asked a question after our last answer (none): waiting on us. A cold step still queued must not park them 72 h.
+    await db.execute(sql`
+      INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, label, source, source_ref, occurred_at, attribution_basis)
+      VALUES (${`itest:${randomUUID()}`}, ${orgId}, ${brandId}, ${asked.leadId}::uuid, 'question', 'outreach', ${randomUUID()}, now() - interval '1 hour', 'reaction_to_our_email')`);
+    queued.add(asked.email!);
+    // The answering path holds a debt for them (instantly-service stated the reply due on their row).
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = now() - interval '1 hour' WHERE id = ${asked.rowId}::uuid`);
+    const minutesOut = async () => (new Date((await dateOf(asked.leadId)).nextFollowupAt!).getTime() - Date.now()) / 60_000;
+
+    // No attempt yet: the "Lead follow-up due" serve never hands them (the answering path's turn) and the date is minutes away.
+    expect(await serveDue()).toBeNull();
+    const first = await dateOf(asked.leadId);
+    expect(first).toMatchObject({ basis: "not_yet" });
+    expect(first.reason).toContain("in_conversation");
+    expect(await minutesOut()).toBeGreaterThan(7);
+    expect(await minutesOut()).toBeLessThanOrEqual(15.1);
+
+    // Three answering runs claimed them and none answered: 15 min x 2^3 = 2 h ceiling (equal jitter: 1 h..2 h).
+    const claim = sql`INSERT INTO followup_actions (org_id, brand_ids, lead_campaign_id, lead_id, held_by_campaign_id, acting_campaign_id, action, occurred_at)
+      VALUES (${orgId}, ARRAY[${brandId}]::text[], ${asked.rowId}::uuid, ${asked.leadId}::uuid, 'held', 'acting', 'claimed', now() - interval '30 minutes')`;
+    for (let i = 0; i < 3; i++) await db.execute(claim);
+    await setDue(asked.leadId);
+    expect(await serveDue()).toBeNull();
+    expect(await minutesOut()).toBeGreaterThan(59);
+    expect(await minutesOut()).toBeLessThanOrEqual(120.1);
+
+    // A whole night of failures never parks them beyond the 4 h cap (the 48 h of before).
+    for (let i = 0; i < 12; i++) await db.execute(claim);
+    await setDue(asked.leadId);
+    expect(await serveDue()).toBeNull();
+    expect(await minutesOut()).toBeGreaterThan(119);
+    expect(await minutesOut()).toBeLessThanOrEqual(240.1);
+
+    // Claims before our latest send are not failed attempts: an answer resets the count.
+    await db.execute(sql`UPDATE lead_followup_dates SET last_sent_at = now() - interval '1 minute' WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${asked.leadId}::uuid`);
+    expect(await fd.answeringState(db, { orgId, brandId, leadId: asked.leadId })).toEqual({ attempts: 0, pending: true });
+
+    // No answering run holds them (no debt on any row): read again at the cap, never sooner, never days.
+    await db.execute(sql`UPDATE leads_campaigns SET followup_due_at = NULL WHERE id = ${asked.rowId}::uuid`);
+    await setDue(asked.leadId);
+    expect(await serveDue()).toBeNull();
+    expect(await minutesOut()).toBeGreaterThan(119);
+    expect(await minutesOut()).toBeLessThanOrEqual(240.1);
+    expect((await dateOf(asked.leadId)).reason).toContain("no answering run holds them");
+    await db.execute(sql`DELETE FROM followup_actions WHERE org_id = ${orgId}`);
+    queued.clear();
   });
 
   it("a find no longer owed at handover is set aside and its date pushed out; never handed", async () => {
