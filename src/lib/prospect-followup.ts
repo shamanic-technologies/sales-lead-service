@@ -80,10 +80,33 @@ export const PROSPECT_FOLLOWUP_STOP_REASONS = [
 ] as const;
 export type ProspectFollowupStop = (typeof PROSPECT_FOLLOWUP_STOP_REASONS)[number];
 
+/**
+ * WAITING ON OUR ANSWER IS NEVER PARKED (ANSWER-RETRY-1106, Doc Dinners 2026-11-05: Dr. Skolnikoff asked a question at
+ * 04:27 UTC, every answering run failed, and this wait was 48 h: the person's ONE date moved to 11-07, and that same
+ * date is what stops the answering path from claiming him again, so one failed run meant two days of silence).
+ * `in_conversation` = their question / referral / proposal is newer than our latest answer: the answering path's turn,
+ * now. The date only spaces its RETRIES: truncated exponential backoff with jitter, the consensus spacing for retrying
+ * a failed call (AWS Architecture Blog, "Exponential Backoff And Jitter", M. Brooker 2015; AWS Builders' Library,
+ * "Timeouts, retries, and backoff with jitter"; Google Cloud, "Retry strategy": truncated exponential backoff; Google
+ * SRE book ch. 22 "Addressing Cascading Failures": randomized exponential backoff). First retry after
+ * ANSWER_RETRY_BASE_MS, doubling per answering attempt that left them unanswered, never beyond ANSWER_RETRY_CAP_MS;
+ * "equal jitter" (half the delay fixed, half random) so a fleet-wide outage does not retry everyone in the same minute.
+ * A running claim still holds the person for its lease (FOLLOWUP_CLAIM_LEASE_MS): never two answers.
+ */
+export const ANSWER_RETRY_BASE_MS = 15 * 60_000;
+export const ANSWER_RETRY_CAP_MS = 4 * 3_600_000;
+
+/** How long until the answering path retries a person waiting on our answer, after `attempts` attempts left them unanswered. */
+export function answerRetryDelayMs(attempts: number, random: () => number = Math.random): number {
+  const n = Math.max(0, Math.floor(attempts));
+  const ceiling = Math.min(ANSWER_RETRY_CAP_MS, ANSWER_RETRY_BASE_MS * 2 ** Math.min(n, 30));
+  return Math.round(ceiling / 2 + random() * (ceiling / 2));
+}
+
 /** The temporary reasons, and how long until the fact they wait on is worth reading again. */
 export const NOT_YET_RETRY_HOURS: Readonly<Partial<Record<ProspectFollowupStop, number>>> = {
-  // The responder answers within the day; give the conversation two days to settle.
-  in_conversation: 48,
+  // Their word waits on our answer: the answering path's turn, retried soon (ANSWER_RETRY_BASE_MS), never parked.
+  in_conversation: ANSWER_RETRY_BASE_MS / 3_600_000,
   // A cold sequence spaces its steps by days: look again after a typical step gap.
   sequence_running: 72,
   // The relationship sweep (5 min) and human-service identity resolution catch up within hours.
@@ -182,7 +205,8 @@ export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new
   if (reasons.length === 0) return { owed: true, kind: "owed", retryAfter: null, reason: null, reasons, relationshipTags };
   const waits = reasons.map((r) => NOT_YET_RETRY_HOURS[r]);
   if (waits.some((h) => h === undefined)) return { owed: false, kind: "stop", retryAfter: null, reason: reasons[0], reasons, relationshipTags };
-  const hours = Math.max(...(waits as number[]));
+  // Waiting on our answer outranks every other wait: a sequence still queued never parks a question for 72 h.
+  const hours = stops.has("in_conversation") ? (NOT_YET_RETRY_HOURS.in_conversation as number) : Math.max(...(waits as number[]));
   return { owed: false, kind: "not_yet", retryAfter: new Date(now.getTime() + hours * 3_600_000).toISOString(), reason: reasons[0], reasons, relationshipTags };
 }
 

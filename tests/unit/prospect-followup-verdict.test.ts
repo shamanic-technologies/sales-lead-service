@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideProspectFollowup, type ProspectFollowupFacts } from "../../src/lib/prospect-followup.js";
+import { ANSWER_RETRY_BASE_MS, ANSWER_RETRY_CAP_MS, answerRetryDelayMs, decideProspectFollowup, type ProspectFollowupFacts } from "../../src/lib/prospect-followup.js";
 import { pureProspectAllows } from "../../src/lib/relationship-tags.js";
 import { EMPTY_RELATIONSHIP, type RelationshipBlock } from "../../src/lib/relationship-read.js";
 
@@ -84,10 +84,11 @@ describe("prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014)", () => {
   const NOW = new Date("2026-10-14T12:00:00Z");
   it.each([
     ["sequence still sending", facts({ sender: { queued: true, unsubscribed: false, bounced: false } }), "2026-10-17T12:00:00.000Z"],
-    ["waiting on the responder", facts({ waitingOnAnswer: true }), "2026-10-16T12:00:00.000Z"],
+    ["waiting on our answer: retried soon, never parked (ANSWER-RETRY-1106)", facts({ waitingOnAnswer: true }), "2026-10-14T12:15:00.000Z"],
     ["subject never judged", facts({ relationship: rel({ subject: true }) }), "2026-10-15T12:00:00.000Z"],
     ["no human yet", facts({ relationship: null }), "2026-10-15T12:00:00.000Z"],
-    ["two temporary reasons: the later wait", facts({ waitingOnAnswer: true, sender: { queued: true, unsubscribed: false, bounced: false } }), "2026-10-17T12:00:00.000Z"],
+    ["two temporary reasons: the later wait", facts({ sender: { queued: true, unsubscribed: false, bounced: false }, relationship: null }), "2026-10-17T12:00:00.000Z"],
+    ["waiting on our answer beside a queued step: our answer's turn, never 72 h", facts({ waitingOnAnswer: true, sender: { queued: true, unsubscribed: false, bounced: false } }), "2026-10-14T12:15:00.000Z"],
   ])("%s: NOT YET, ask again later (never a dead end)", (_n, f, retryAfter) => {
     expect(decideProspectFollowup(f, NOW)).toMatchObject({ owed: false, kind: "not_yet", retryAfter });
   });
@@ -101,6 +102,19 @@ describe("prospect follow-up verdict (NEVER-NO-FOLLOWUP-1014)", () => {
     ["a stop beside a not-yet is a stop", facts({ disqualified: true, sender: { queued: true, unsubscribed: false, bounced: false } })],
   ])("%s: STOP, no retry date", (_n, f) => {
     expect(decideProspectFollowup(f, NOW)).toMatchObject({ owed: false, kind: "stop", retryAfter: null });
+  });
+
+  it("answering retries back off: 15 min doubling per unanswered attempt, capped at 4 h, equal jitter (ANSWER-RETRY-1106)", () => {
+    const top = () => 1;
+    const bottom = () => 0;
+    expect([0, 1, 2, 3, 4, 5, 9, 200].map((n) => answerRetryDelayMs(n, top) / 60_000)).toEqual([15, 30, 60, 120, 240, 240, 240, 240]);
+    expect([0, 1, 4, 9].map((n) => answerRetryDelayMs(n, bottom) / 60_000)).toEqual([7.5, 15, 120, 120]);
+    for (let n = 0; n < 12; n++) {
+      const d = answerRetryDelayMs(n);
+      expect(d).toBeGreaterThanOrEqual(ANSWER_RETRY_BASE_MS / 2);
+      expect(d).toBeLessThanOrEqual(ANSWER_RETRY_CAP_MS);
+    }
+    expect(answerRetryDelayMs(-3, top)).toBe(ANSWER_RETRY_BASE_MS);
   });
 
   it("an old question is not a stop: only a word newer than our latest answer holds them, as not-yet", () => {

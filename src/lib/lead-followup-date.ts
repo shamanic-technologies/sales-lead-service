@@ -8,7 +8,7 @@ import { relationshipClause, type RelationshipScope } from "./reach-sql.js";
 import { recentlyEmailedClause, type RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { journalistClause } from "./brand-journalists.js";
 import { disqualifiedClause, serveExclusionScopeOf, type ServeExclusionScope } from "./disqualified-sql.js";
-import { loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
+import { answerRetryDelayMs, loadProspectFollowupVerdicts, type ProspectFollowupVerdict } from "./prospect-followup.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { judgeAutomatedActs, recordTheirActs, refreshActedAt } from "./their-acts.js";
 import { CRM_NOT_THEIR_ACT, sessionlessProductEventSql } from "./crm-act-types.js";
@@ -644,16 +644,61 @@ export function dueReachClauses(
   );
 }
 
-/** A due person not owed now: the date moves to when to ask again, with every reason. */
+/**
+ * Where the answering path stands for a person waiting on our answer (ANSWER-RETRY-1106):
+ *   attempts  claims of them at the brand (any campaign, the follow-up ledger) since our latest send to them there,
+ *             within the last ANSWER_ATTEMPTS_WINDOW_DAYS. A claim that answered moved `last_sent_at` past it (the send
+ *             rule), so what is counted is attempts that did not answer.
+ *   pending   a row of theirs at the brand still holds an answering debt (a due date, not handed to a person): the
+ *             answering path will claim them once their date comes. None = no run of ours is going to answer, the date
+ *             is re-read at the backoff's cap (never sooner, never parked for days).
+ */
+const ANSWER_ATTEMPTS_WINDOW_DAYS = 7;
+export async function answeringState(
+  exec: { execute: typeof db.execute },
+  scope: { orgId: string; brandId: string; leadId: string },
+): Promise<{ attempts: number; pending: boolean }> {
+  const [r] = (await exec.execute(sql`
+    SELECT
+      (SELECT count(*)::int FROM followup_actions fa
+        WHERE fa.lead_id = ${scope.leadId}::uuid AND fa.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(fa.brand_ids) AND fa.action = 'claimed'
+          AND fa.occurred_at > GREATEST(
+            now() - ${sql.raw(`interval '${ANSWER_ATTEMPTS_WINDOW_DAYS} days'`)},
+            COALESCE((SELECT d.last_sent_at FROM lead_followup_dates d
+                      WHERE d.org_id = ${scope.orgId} AND d.brand_id = ${scope.brandId} AND d.lead_id = ${scope.leadId}::uuid), '-infinity'::timestamptz))
+      ) AS attempts,
+      EXISTS (SELECT 1 FROM leads_campaigns lc
+        WHERE lc.lead_id = ${scope.leadId}::uuid AND lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids)
+          AND lc.followup_due_at IS NOT NULL AND lc.followup_handed_at IS NULL) AS pending
+  `)) as unknown as Array<{ attempts: number; pending: boolean }>;
+  return { attempts: Number(r?.attempts ?? 0), pending: r?.pending === true };
+}
+
+/**
+ * A due person not owed now: the date moves to when to ask again, with every reason. A person waiting on OUR answer
+ * (`in_conversation`, ANSWER-RETRY-1106) is never parked: their date is the answering path's next retry
+ * (`answerRetryDelayMs`, backoff on the attempts that left them unanswered), so the claim takes them again soon.
+ */
 async function postponeDue(
   exec: { execute: typeof db.execute },
   scope: { orgId: string; brandId: string; leadId: string },
   verdict: ProspectFollowupVerdict,
 ): Promise<void> {
   const basis: FollowupBasis = verdict.kind === "not_yet" ? "not_yet" : "stop_recheck";
-  const at =
-    verdict.kind === "not_yet" && verdict.retryAfter ? sql`${verdict.retryAfter}::timestamptz` : sql`now() + ${sql.raw(`interval '${STOP_RECHECK_DAYS} days'`)}`;
-  const reason = verdict.kind === "not_yet" ? `Not yet: ${verdict.reasons.join(", ")}` : `Not owed a follow-up: ${verdict.reasons.join(", ")} (asked again then)`;
+  const waitingOnUs = verdict.kind === "not_yet" && verdict.reasons.includes("in_conversation");
+  const answering = waitingOnUs ? await answeringState(exec, scope) : null;
+  const at = answering
+    ? sql`now() + (${answerRetryDelayMs(answering.pending ? answering.attempts : Number.MAX_SAFE_INTEGER)}::double precision * interval '1 millisecond')`
+    : verdict.kind === "not_yet" && verdict.retryAfter
+      ? sql`${verdict.retryAfter}::timestamptz`
+      : sql`now() + ${sql.raw(`interval '${STOP_RECHECK_DAYS} days'`)}`;
+  const reason = answering
+    ? `Not yet: ${verdict.reasons.join(", ")} (waiting on our answer: ${
+        answering.pending ? `the answering path retries then, ${answering.attempts} attempt(s) so far` : "no answering run holds them, read again then"
+      })`
+    : verdict.kind === "not_yet"
+      ? `Not yet: ${verdict.reasons.join(", ")}`
+      : `Not owed a follow-up: ${verdict.reasons.join(", ")} (asked again then)`;
   await exec.execute(sql`
     UPDATE lead_followup_dates SET next_followup_at = ${at}, basis = ${basis}, reason = ${reason}, updated_at = now()
     WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} AND lead_id = ${scope.leadId}::uuid AND basis <> 'stopped'
