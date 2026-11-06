@@ -1,21 +1,14 @@
 /**
- * Our half of a CRM pairing row: who the lead is, and where they stand.
+ * Our half of a CRM pairing row: who the lead is (where they stand = `leadState`, read off the Unibox rows by the
+ * route: LEAD-GENERIC-1106 retired the per-page standing resolution, its last reader gone 2026-11-07).
  *
  * Bounded to the leads a PAGE names. This service has already taken itself down once by holding a
  * brand's whole lead population in one read, so nothing here takes a list of leads it did not
  * receive, and the summary path never calls in at all.
  *
- * Where a lead stands is resolved by the SAME machinery every other surface uses
- * (`createLeadStandingResolver` over the delivery overlay) — the policy is authored once, in
- * lead-standing.ts, and everything else renders it.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { checkDeliveryStatus, type StatusResult } from "./email-gateway-client.js";
-import { DEFAULT_STATUS, flattenBrandStatus, type FlattenedStatus } from "./delivery-flatten.js";
-import { standingDelivery } from "./lead-standing-index.js";
-import type { LeadStandingResolver, ResolvedLeadFacts } from "./lead-standing-resolver.js";
-import type { ServiceContext } from "../middleware/auth.js";
 
 /** The lead behind one pairing, as the surface shows it and as the judgment reads it. */
 export interface PairedLeadFacts {
@@ -126,62 +119,6 @@ export async function fetchPairedLeadFacts(
       companyDomain: row.company_domain,
       location: joinLocation(row),
     });
-  }
-  return out;
-}
-
-/**
- * Where each of these leads stands, at BRAND scope.
- *
- * One batched delivery call for the page, then the shared resolver. A lead we hold no email for is
- * never asked about (the overlay keys on the registered email), and keeps the all-false default —
- * the same rule the lead list follows.
- */
-export async function resolveStandingsForLeads(
-  brandId: string,
-  leads: PairedLeadFacts[],
-  resolver: LeadStandingResolver,
-  ctx: ServiceContext,
-): Promise<Map<string, ResolvedLeadFacts>> {
-  const out = new Map<string, ResolvedLeadFacts>();
-  if (leads.length === 0) return out;
-
-  const emails = Array.from(
-    new Set(leads.filter((l) => l.status === "served" && l.email).map((l) => l.email as string)),
-  );
-
-  const byEmail = new Map<string, StatusResult>();
-  if (emails.length > 0) {
-    const response = await checkDeliveryStatus(
-      brandId,
-      undefined,
-      emails.map((email) => ({ email })),
-      ctx,
-    );
-    for (const result of response.results) byEmail.set(result.email, result);
-  }
-
-  const deliveryByLead = new Map<string, FlattenedStatus>();
-  for (const lead of leads) {
-    const result = lead.email ? byEmail.get(lead.email) : undefined;
-    deliveryByLead.set(lead.leadId, result ? flattenBrandStatus(result) : DEFAULT_STATUS);
-  }
-
-  const facts = await resolver.resolve(
-    leads.map((lead) => ({
-      id: lead.leadCampaignId,
-      leadId: lead.leadId,
-      campaignId: lead.campaignId,
-      brandIds: lead.brandIds,
-      status: lead.status,
-      email: lead.email ?? null,
-      delivery: standingDelivery(deliveryByLead.get(lead.leadId) ?? DEFAULT_STATUS),
-    })),
-  );
-
-  for (const lead of leads) {
-    const resolved = facts.get(lead.leadCampaignId);
-    if (resolved) out.set(lead.leadId, resolved);
   }
   return out;
 }

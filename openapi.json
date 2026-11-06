@@ -8059,15 +8059,6 @@
               "ruling"
             ]
           },
-          "ourStanding": {
-            "type": "object",
-            "nullable": true,
-            "properties": {},
-            "additionalProperties": {
-              "nullable": true
-            },
-            "description": "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here."
-          },
           "leadState": {
             "type": "object",
             "nullable": true,
@@ -8213,54 +8204,6 @@
             ],
             "description": "Why leadState is null: not_in_unibox = the lead is not a Unibox person of the brand (crm-service does not tag them professional to it). Absent when nothing paired."
           },
-          "ourClosedDeal": {
-            "type": "object",
-            "nullable": true,
-            "properties": {
-              "occurredAt": {
-                "type": "string",
-                "nullable": true,
-                "description": "When the deal closed, ISO-8601 — the date the person stating it gave, not the date they typed it. Null only when genuinely undated; never fabricated.",
-                "example": "2026-08-19T14:30:00.000Z"
-              },
-              "valueCents": {
-                "type": "integer",
-                "nullable": true,
-                "description": "What the deal was worth, in cents. A sale stated from now on always carries one (the write refuses a sale with no value); null means nobody said, NOT zero.",
-                "example": 490000
-              },
-              "costCents": {
-                "type": "integer",
-                "nullable": true,
-                "description": "What the CUSTOMER states closing it cost THEM, in cents. 0 is a stated zero; null means nobody was ever asked. Never platform spend and never billed.",
-                "example": 12000
-              },
-              "causedByOutreach": {
-                "type": "boolean",
-                "nullable": true,
-                "description": "WHOSE win it was. true — the customer states OUR outreach caused this deal. false — they state something else of theirs did (a referral, a conference, their existing pipeline, another agency): the deal is REAL, it stays among the brand's own closes and in every count, it is simply not one to compute the return on our outreach from. null — NOBODY WAS ASKED, which is what every deal stated before this existed reads as, and what a tracker-reported one always reads as (a page-load tag cannot know why somebody bought). Null is never read as either answer.",
-                "example": true
-              },
-              "source": {
-                "type": "string",
-                "enum": [
-                  "tracker",
-                  "manual",
-                  "crm",
-                  "reply"
-                ],
-                "description": "manual — a human stated the deal; tracker — the website tag reported it; crm — the customer's own CRM evidences it for a lead paired with a contact of theirs; reply — the prospect's own reply says they already buy from the brand (causedByOutreach false, no value, no cost: nobody knows either)."
-              }
-            },
-            "required": [
-              "occurredAt",
-              "valueCents",
-              "costCents",
-              "causedByOutreach",
-              "source"
-            ],
-            "description": "The deal on our lead, exactly as the leads list serves it (`closedDeal`): stated by a person, reported by the tracker, or evidenced by their own CRM (source crm, causedByOutreach per the date rule unless a person overrode it via /orgs/leads/{id}/crm-attribution). Null when none; absent when nothing paired."
-          },
           "theirStatus": {
             "$ref": "#/components/schemas/CrmTheirStatus"
           }
@@ -8268,7 +8211,6 @@
         "required": [
           "crmContact",
           "pairing",
-          "ourStanding",
           "theirStatus"
         ]
       },
