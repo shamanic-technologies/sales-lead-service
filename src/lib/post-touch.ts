@@ -93,7 +93,8 @@ export function postTouchDeclaration(input: {
   return {
     orgId: input.orgId,
     runId: input.runId,
-    produced: [{ outcomeKey: "website_visit", subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: input.leadId }],
+    // LEAD-GENERIC-1106: the visit was seen by the brand's website tracker (the post's own run states the post).
+    produced: [{ outcomeKey: "website_visit", subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: input.leadId, performer: { kind: "tracker" } }],
     consumed: [{ outcomeKey: POST_PUBLISHED_OUTCOME, subjectService: input.post.subjectService, subjectId: input.post.subjectId }],
     ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
   };

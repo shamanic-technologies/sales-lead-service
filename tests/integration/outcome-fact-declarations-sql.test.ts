@@ -15,7 +15,7 @@ import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
 const { leads, conversionEvents } = await import("../../src/db/schema.js");
-const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations } = await import("../../src/lib/outcome-fact-declarations.js");
+const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers } = await import("../../src/lib/outcome-fact-declarations.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -88,6 +88,8 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await db.execute(sql`DELETE FROM outcome_fact_declarations WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM outcome_recording_runs WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM conversion_events WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM lead_timeline_facts WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     for (const id of created) await db.execute(sql`DELETE FROM leads WHERE id = ${id}::uuid`);
   });
 
@@ -98,6 +100,15 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await fact(ours, "meeting_booked", "2026-10-03T10:00:00Z"); // a second booking: still one occurrence
     await fact(ours, "meeting_attended", "2026-10-05T10:00:00Z");
     await fact(ours, "sale", "2026-10-09T10:00:00Z", { valueCents: 10000 });
+    // Our first touch: the cold email of campaign camp-ours, sent by its serve workflow (LEAD-GENERIC-1106 performer).
+    await db.execute(sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, workflow_slug)
+      VALUES (${ours}::uuid, 'camp-ours', ${orgId}, ARRAY[${brandId}]::text[], 'served', 'cold-email-v7')
+    `);
+    await db.execute(sql`
+      INSERT INTO lead_timeline_facts (id, org_id, brand_id, lead_id, campaign_id, occurred_at, label, source, source_ref)
+      VALUES (${`outreach:itest-${randomUUID()}`}, ${orgId}, ${brandId}, ${ours}::uuid, 'camp-ours', '2026-09-30T10:00:00Z', 'initial_email', 'outreach', 'itest-send')
+    `);
 
     const theirs = await newLead();
     await fact(theirs, "meeting_booked", "2026-10-02T10:00:00Z", { causedByOutreach: false });
@@ -113,17 +124,19 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     expect(first).toMatchObject({ read: 5, delivered: 5, queued: 0, refused: 0, failed: 0 });
 
     const lead = (s: string) => ({ subjectService: "lead-service", subjectId: s });
+    // WHO performed it (LEAD-GENERIC-1106): our script when its send first touched them, else the fact's attester.
+    const script = { performer: { kind: "script", workflowSlug: "cold-email-v7" } };
     const byLead = (id: string) => declared.filter((d) => d.body.produced[0].subjectId === id).map((d) => d.body);
     // Each occurrence is dated on the instant its fact happened (MEETING-DATED-OCCURRENCES-1024), the earliest booking.
     expect(byLead(ours)).toEqual([
-      { produced: [{ outcomeKey: "meeting_booked", ...lead(ours) }], consumed: [{ outcomeKey: "conversation", ...lead(ours) }], occurredAt: "2026-10-02T10:00:00.000Z" },
-      { produced: [{ outcomeKey: "meeting_attended", ...lead(ours) }], consumed: [{ outcomeKey: "meeting_booked", ...lead(ours) }], occurredAt: "2026-10-05T10:00:00.000Z" },
-      { produced: [{ outcomeKey: "paid_client", ...lead(ours) }], consumed: [{ outcomeKey: "meeting_attended", ...lead(ours) }], occurredAt: "2026-10-09T10:00:00.000Z" },
+      { produced: [{ outcomeKey: "meeting_booked", ...lead(ours), ...script }], consumed: [{ outcomeKey: "conversation", ...lead(ours) }], occurredAt: "2026-10-02T10:00:00.000Z" },
+      { produced: [{ outcomeKey: "meeting_attended", ...lead(ours), ...script }], consumed: [{ outcomeKey: "meeting_booked", ...lead(ours) }], occurredAt: "2026-10-05T10:00:00.000Z" },
+      { produced: [{ outcomeKey: "paid_client", ...lead(ours), ...script }], consumed: [{ outcomeKey: "meeting_attended", ...lead(ours) }], occurredAt: "2026-10-09T10:00:00.000Z" },
     ]);
     // A visit known only by hand is its own occurrence (LEDGER-HISTORY-1024), consuming the message our outreach sent.
     expect(byLead(visitor)).toEqual([
-      { produced: [{ outcomeKey: "website_visit", ...lead(visitor) }], consumed: [{ outcomeKey: "message_sent", ...lead(visitor) }], occurredAt: "2026-10-01T10:00:00.000Z" },
-      { produced: [{ outcomeKey: "paid_client", ...lead(visitor) }], consumed: [{ outcomeKey: "website_visit", ...lead(visitor) }], occurredAt: "2026-10-04T10:00:00.000Z" },
+      { produced: [{ outcomeKey: "website_visit", ...lead(visitor), performer: { kind: "client_team", name: "manual" } }], consumed: [{ outcomeKey: "message_sent", ...lead(visitor) }], occurredAt: "2026-10-01T10:00:00.000Z" },
+      { produced: [{ outcomeKey: "paid_client", ...lead(visitor), performer: { kind: "crm" } }], consumed: [{ outcomeKey: "website_visit", ...lead(visitor) }], occurredAt: "2026-10-04T10:00:00.000Z" },
     ]);
     // runs-service takes a past instant only from the run's own service.
     expect(new Set(declared.map((d) => d.serviceName))).toEqual(new Set(["lead-service"]));
@@ -181,10 +194,10 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     const mine = declared.slice(before);
     const subject = { subjectService: "lead-service", subjectId: buyer };
     expect(mine.map((d) => d.body)).toEqual([
-      { produced: [{ outcomeKey: "website_visit", ...subject }], consumed: [{ outcomeKey: "message_sent", ...subject }], occurredAt: "2026-09-01T08:00:00.000Z" },
-      { produced: [{ outcomeKey: "signup", ...subject }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-01T09:00:00.000Z" },
-      { produced: [{ outcomeKey: "purchase", ...subject }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
-      { produced: [{ outcomeKey: "paid_client", ...subject }], consumed: [{ outcomeKey: "purchase", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "website_visit", ...subject, performer: { kind: "client_team", name: "manual" } }], consumed: [{ outcomeKey: "message_sent", ...subject }], occurredAt: "2026-09-01T08:00:00.000Z" },
+      { produced: [{ outcomeKey: "signup", ...subject, performer: { kind: "crm" } }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-01T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "purchase", ...subject, performer: { kind: "tracker" } }], consumed: [{ outcomeKey: "website_visit", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "paid_client", ...subject, performer: { kind: "tracker" } }], consumed: [{ outcomeKey: "purchase", ...subject }], occurredAt: "2026-09-02T09:00:00.000Z" },
     ]);
     // One recording run per outcome key, never two keys on one run.
     expect(new Set(mine.map((d) => d.runId)).size).toBe(4);
@@ -238,5 +251,41 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     expect((await redateUndatedDeclarations({ orgId }, refuse)).refused).toBe(1);
     expect((await redateUndatedDeclarations({ orgId }, refuse)).read).toBe(1);
     await expect(redateUndatedDeclarations({ orgId }, async () => ({ status: 503, text: "down" }))).rejects.toThrow(/503/);
+  });
+
+  it("an occurrence declared before performers gets its performer stated once; a refusal is kept, never resent (LEAD-GENERIC-1106)", async () => {
+    const lead = await newLead();
+    await fact(lead, "meeting_booked", "2026-05-21T09:30:00Z");
+    const refusedLead = await newLead();
+    await fact(refusedLead, "meeting_booked", "2026-05-21T09:30:00Z", { source: "manual" });
+    const runId = randomUUID();
+    for (const id of [lead, refusedLead]) {
+      const [ce] = (await db.execute(sql`SELECT id::text AS id FROM conversion_events WHERE matched_lead_id = ${id}::uuid`)) as unknown as Array<{ id: string }>;
+      await db.execute(sql`
+        INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated)
+        VALUES (${orgId}, ${brandId}, ${id}::uuid, 'meeting_booked', ${ce.id}::uuid, ${runId}::uuid, 'conversation', 'no_evidence', true)
+      `);
+    }
+    // Earlier cases' rows are not this case's subject.
+    await db.execute(sql`UPDATE outcome_fact_declarations SET performer_error = 'itest: other case' WHERE org_id = ${orgId} AND performer IS NULL AND run_id <> ${runId}::uuid`);
+    const posted: Array<{ runs: Array<{ runId: string; produced: unknown[] }> }> = [];
+    const post = async (body: unknown) => {
+      const b = body as { runs: Array<{ runId: string; produced: Array<{ subjectId: string }> }> };
+      posted.push(b);
+      if (b.runs[0].produced[0].subjectId === refusedLead) return { status: 409, text: JSON.stringify({ code: "performer_conflict" }) };
+      return { status: 200, text: JSON.stringify({ performerStatedCount: 1 }) };
+    };
+    expect(await statePastPerformers({ orgId }, post)).toEqual({ read: 2, stated: 1, refused: 1 });
+    const stated = posted.find((p) => p.runs[0].produced.some((x) => (x as { subjectId: string }).subjectId === lead))!;
+    expect(stated).toEqual({
+      runs: [{ runId, produced: [{ outcomeKey: "meeting_booked", subjectService: "lead-service", subjectId: lead, performer: { kind: "crm" } }] }],
+    });
+    const rows = (await db.execute(sql`
+      SELECT lead_id::text AS lead_id, performer, performer_error FROM outcome_fact_declarations WHERE run_id = ${runId}::uuid
+    `)) as unknown as Array<{ lead_id: string; performer: unknown; performer_error: string | null }>;
+    expect(rows.find((r) => r.lead_id === lead)).toMatchObject({ performer: { kind: "crm" }, performer_error: null });
+    expect(rows.find((r) => r.lead_id === refusedLead)?.performer_error).toMatch(/^409 /);
+    // Stated once, refused once: the next pass asks nothing.
+    expect((await statePastPerformers({ orgId }, post)).read).toBe(0);
   });
 });
