@@ -8556,13 +8556,13 @@ const PersonProvenanceSchema = z
       description:
         "Every source tag of the person, sorted, deduped: the origin slug of each named source (e.g. `sourcing-apollo-cold-filters`), " +
         "`list:<kind>` for a list kind the catalogue does not name, `list:none` for an audience stating no list, plus lead-service's " +
-        "audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`. Multi: a person found by several sources carries every tag. " +
+        "audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`, `unit_click`. Multi: a person found by several sources carries every tag. " +
         "Empty = nobody recorded where the person came from.",
     }),
     sources: z.array(ProvenanceSourceSchema).openapi({ description: "Every audience of the brand that found the person (human-service memberships), the serving one first." }),
     filings: z
-      .array(z.object({ kind: z.enum(["crm_signup", "social_engagement", "stated_by_org"]), firstAt: z.string().nullable() }))
-      .openapi({ description: "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated." }),
+      .array(z.object({ kind: z.enum(["crm_signup", "social_engagement", "stated_by_org", "unit_click"]), firstAt: z.string().nullable() }))
+      .openapi({ description: "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated, a person who clicked a link of a Unit addressed to them (a newsletter email)." }),
   })
   .openapi("PersonProvenance");
 

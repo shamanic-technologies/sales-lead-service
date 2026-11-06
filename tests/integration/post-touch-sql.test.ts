@@ -355,4 +355,47 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
     }
     expect(byLead(lead.organic)).toEqual([]);
   });
+  it("a human clicker of a newsletter email who is no lead yet becomes one and is credited; a robot hit and a non-clicker are not", async () => {
+    const RECIPIENT = randomUUID();
+    const clicker = addr("nl-clicker");
+    const robot = addr("nl-robot");
+    const silent = addr("nl-silent");
+    // A HUMAN click: a tracked session whose entry URL names the Unit, identified as the subscriber.
+    await fact("website_visit", clicker, {
+      payload: { firstUrl: `https://distribute.you/?dy_unit=newsletter_email_sent:transactional-email-service:${RECIPIENT}` },
+      occurredAt: new Date("2026-10-24T09:00:00.000Z"),
+      fullName: "Nina Letter",
+    });
+    // A mail scanner: the server-side identify only, no session (no website_visit fact).
+    await fact("product_event", robot, {
+      payload: { url: null, event: "newsletter_link_identified", sessionId: null, properties: { source: "server" } },
+      occurredAt: new Date("2026-10-24T09:00:00.000Z"),
+    });
+    // A subscriber who never clicked: a CRM contact with nothing of ours.
+    await fact("product_event", silent, { payload: { event: "subscribed", sessionId: null }, occurredAt: new Date("2026-10-24T08:00:00.000Z") });
+
+    const pass = await sweepPostTouches({ orgId });
+    expect(pass).toMatchObject({ filed: 1, failed: 0 });
+    const filedRows = (await db.execute(sql`
+      SELECT lc.lead_id::text AS lead_id, lc.campaign_id, lc.status, lc.status_reason, lc.brand_ids, l.name, cm.value AS email
+      FROM leads_campaigns lc JOIN leads l ON l.id = lc.lead_id
+      JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
+      WHERE lc.org_id = ${orgId} AND lower(cm.value) IN (${clicker}, ${robot}, ${silent})
+    `)) as unknown as Array<{ lead_id: string; campaign_id: string; status: string; status_reason: string; brand_ids: string[]; name: string; email: string }>;
+    expect(filedRows.map(({ lead_id: _l, ...r }) => r)).toEqual([
+      { campaign_id: `unit-clicks:${brandId}`, status: "served", status_reason: "unit_click", brand_ids: [brandId], name: "Nina Letter", email: clicker },
+    ]);
+    const leadId = filedRows[0].lead_id;
+    createdLeads.push(leadId);
+    // Credited to the exact newsletter email it came from.
+    expect(byLead(leadId).map((d) => d.body.consumed)).toEqual([
+      [{ outcomeKey: "newsletter_email_sent", subjectService: "transactional-email-service", subjectId: RECIPIENT }],
+    ]);
+
+    // A replay files nobody twice and declares nothing twice.
+    const declaredBefore = declared.length;
+    const again = await sweepPostTouches({ orgId });
+    expect(again).toMatchObject({ filed: 0, delivered: 0 });
+    expect(declared.length).toBe(declaredBefore);
+  });
 });
