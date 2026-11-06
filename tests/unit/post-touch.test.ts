@@ -92,7 +92,7 @@ describe("unitOutcomeFrom", () => {
 });
 
 describe("postVisitVerdict", () => {
-  const row = { factId: "f1", orgId: "o", brandId: "b", firstUrl: `https://distribute.you/?dy_post=meta-service:${ID}`, occurredAt: "2026-10-28T10:00:00.000Z", leadIds: ["l1"] };
+  const row = { factId: "f1", orgId: "o", brandId: "b", firstUrl: `https://distribute.you/?dy_post=meta-service:${ID}`, occurredAt: "2026-10-28T10:00:00.000Z", leadIds: ["l1"], emails: ["a@x.io"], fullName: null };
 
   it("credits one lead of the brand", () => {
     expect(postVisitVerdict(row)).toEqual({
@@ -103,8 +103,23 @@ describe("postVisitVerdict", () => {
 
   it("skips no marker, no lead, several leads", () => {
     expect(postVisitVerdict({ ...row, firstUrl: "https://distribute.you/" })).toEqual({ kind: "not_a_post_touch" });
-    expect(postVisitVerdict({ ...row, leadIds: [] })).toEqual({ kind: "no_lead" });
+    expect(postVisitVerdict({ ...row, leadIds: [] })).toEqual({ kind: "no_lead", fileEmail: null });
     expect(postVisitVerdict({ ...row, leadIds: ["l2", "l1", "l2"] })).toEqual({ kind: "ambiguous_lead", leadIds: ["l1", "l2"] });
+  });
+});
+
+describe("postVisitVerdict: a clicker who is no lead yet", () => {
+  const unitUrl = `https://distribute.you/?dy_unit=newsletter_email_sent:transactional-email-service:${ID}`;
+  const row = { factId: "f1", orgId: "o", brandId: "b", firstUrl: unitUrl, occurredAt: "2026-10-28T10:00:00.000Z", leadIds: [], emails: ["sub@x.io"], fullName: null };
+
+  it("a link naming its Unit, one identified address: that person is filed", () => {
+    expect(postVisitVerdict(row)).toEqual({ kind: "no_lead", fileEmail: "sub@x.io" });
+  });
+
+  it("nobody is filed: no address, several addresses, a legacy post link", () => {
+    expect(postVisitVerdict({ ...row, emails: [] })).toEqual({ kind: "no_lead", fileEmail: null });
+    expect(postVisitVerdict({ ...row, emails: ["a@x.io", "b@x.io"] })).toEqual({ kind: "no_lead", fileEmail: null });
+    expect(postVisitVerdict({ ...row, firstUrl: `https://distribute.you/?dy_post=meta-service:${ID}` })).toEqual({ kind: "no_lead", fileEmail: null });
   });
 });
 
