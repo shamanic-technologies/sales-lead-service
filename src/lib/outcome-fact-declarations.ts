@@ -363,9 +363,8 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   }
   // Claim first: once per (org, brand, lead, outcome), ever.
   const claimed = (await db.execute(sql`
-    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated, performer)
-    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true,
-      ${JSON.stringify(performer)}::jsonb)
+    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated)
+    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true)
     ON CONFLICT DO NOTHING
     RETURNING 1 AS ok
   `)) as unknown as unknown[];
@@ -464,6 +463,10 @@ export interface PerformerSummary {
 }
 
 /**
+ * `performer` is recorded only once runs-service PROVED it took it (its answer counts `performerStatedCount`): a live
+ * declaration states it too, but a runs-service that does not know the field drops it silently, so this pass (same
+ * sweep, right after) is what records it, for new and old occurrences alike.
+ *
  * Occurrences declared before performers existed (LEAD-GENERIC-1106) get theirs stated ONCE through runs-service's batch
  * door: the SAME occurrence (run, outcome, lead) takes the performer (`performer_stated`), a replay is
  * `already_recorded`, a different performer already stored is a 409 kept in `performer_error` (never overwritten, never
