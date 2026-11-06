@@ -5,7 +5,14 @@ import { errorMessage } from "./db-error.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
-import { declareRunOutcomesNow, FACT_OUTCOME_KEYS, factOutcomeDeclaration, OUTCOME_SUBJECT_SERVICE, type FactOutcomeKey } from "./run-outcomes.js";
+import {
+  declareRunOutcomesNow,
+  FACT_OUTCOME_KEYS,
+  factOutcomeDeclaration,
+  OUTCOME_SUBJECT_SERVICE,
+  type FactOutcomeKey,
+  type OutcomePerformer,
+} from "./run-outcomes.js";
 
 /**
  * EVERY FACT OUR OUTREACH CAUSED IS AN OUTCOME OCCURRENCE ON THE LEDGER (COST-ACCOUNTING-1023-P1, second pass, owner
@@ -185,6 +192,8 @@ interface PendingFact {
   leadId: string;
   outcomeKey: FactOutcomeKey;
   conversionEventId: string;
+  /** Who recorded the fact on the ledger: `manual` (a person), `crm`, `tracker`, ... */
+  source: string;
   /** The fact's instant as Postgres prints it (SQL comparisons), and as ISO (runs-service), never after now. */
   at: string | null;
   occurredAt: string | null;
@@ -213,7 +222,7 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
     WITH facts AS (
       SELECT DISTINCT ON (ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key)
              ce.org_id, ce.brand_id, ce.matched_lead_id::text AS lead_id, m.outcome_key, m.rank,
-             ce.id::text AS conversion_event_id, ce.received_at
+             ce.id::text AS conversion_event_id, ce.source, ce.received_at
       FROM conversion_events ce
       JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
       WHERE ce.event = ANY(${sql.param(FACT_EVENTS)}::text[])
@@ -231,7 +240,7 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
         ${scope ? sql`AND ce.org_id = ${scope.orgId}` : sql.empty()}
       ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key, ce.received_at ASC NULLS LAST, ce.id
     )
-    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.received_at::text AS at,
+    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.source, f.received_at::text AS at,
            ${isoAt(sql.raw("f.received_at"))} AS occurred_at
     FROM facts f
     WHERE NOT EXISTS (
@@ -246,6 +255,7 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
     leadId: String(r.lead_id),
     outcomeKey: r.outcome_key as FactOutcomeKey,
     conversionEventId: String(r.conversion_event_id),
+    source: String(r.source),
     at: r.at ?? null,
     occurredAt: r.occurred_at ?? null,
   }));
@@ -292,6 +302,44 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
   };
 }
 
+/**
+ * WHO PERFORMED a fact our outreach caused (LEAD-GENERIC-1106; runs-service stores it per occurrence). Ours by the
+ * cause rule = after our first touch, so the performer is the SCRIPT whose send first touched the person at the brand
+ * (the earliest email of the timeline or non-email channel send; the workflow holding the person's row of that campaign
+ * when it went out: the latest re-point at or before the send, else the row's own serve workflow, the rule
+ * `timeline-journeys` uses for `emailSends`). No such send readable = the fact's ATTESTER: `crm` / `tracker` (named by
+ * the source), a person's statement = the client's team. Pure.
+ */
+export function performerOf(firstTouchWorkflowSlug: string | null, source: string): OutcomePerformer {
+  if (firstTouchWorkflowSlug) return { kind: "script", workflowSlug: firstTouchWorkflowSlug };
+  if (source === "crm") return { kind: "crm" };
+  if (source === "tracker") return { kind: "tracker" };
+  return { kind: "client_team", name: source };
+}
+
+/** The workflow whose send first touched the lead at the brand (null = none readable). */
+export async function loadFirstTouchWorkflow(f: { orgId: string; brandId: string; leadId: string }): Promise<string | null> {
+  const rows = (await db.execute(sql`
+    WITH sends AS (
+      SELECT t.campaign_id, t.occurred_at AS at FROM lead_timeline_facts t
+      WHERE t.org_id = ${f.orgId} AND t.brand_id = ${f.brandId} AND t.lead_id = ${f.leadId}::uuid
+        AND t.label IN ('initial_email', 'followup') AND t.withdrawn_at IS NULL AND t.campaign_id IS NOT NULL AND t.occurred_at IS NOT NULL
+      UNION ALL
+      SELECT lc.campaign_id, lc.channel_sent_at FROM leads_campaigns lc
+      WHERE lc.org_id = ${f.orgId} AND ${f.brandId} = ANY(lc.brand_ids) AND lc.lead_id = ${f.leadId}::uuid AND lc.channel_sent_at IS NOT NULL
+    ), first AS (SELECT campaign_id, at FROM sends ORDER BY at ASC, campaign_id LIMIT 1)
+    SELECT coalesce(
+      (SELECT r.workflow_slug FROM lead_campaign_run_repoints r
+        WHERE r.lead_campaign_id = lc.id AND r.repointed_at <= first.at AND r.workflow_slug IS NOT NULL
+        ORDER BY r.repointed_at DESC LIMIT 1),
+      lc.workflow_slug) AS workflow_slug
+    FROM first JOIN leads_campaigns lc ON lc.lead_id = ${f.leadId}::uuid AND lc.campaign_id = first.campaign_id AND lc.org_id = ${f.orgId}
+    LIMIT 1
+  `)) as unknown as Array<{ workflow_slug: string | null }>;
+  const slug = rows[0]?.workflow_slug ?? null;
+  return slug && slug.trim() ? slug : null;
+}
+
 export interface OutcomeFactSweepSummary {
   read: number;
   delivered: number;
@@ -303,9 +351,11 @@ export interface OutcomeFactSweepSummary {
 async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Promise<void> {
   let runId: string;
   let consumed: { outcomeKey: string; basis: ConsumedBasis };
+  let performer: OutcomePerformer;
   try {
     runId = await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date());
     consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
+    performer = performerOf(await loadFirstTouchWorkflow(f), f.source);
   } catch (err) {
     summary.failed++;
     console.error(`[lead-service] outcome fact NOT declared (asked again next pass): org=${f.orgId} brand=${f.brandId} lead=${f.leadId} ${f.outcomeKey}: ${errorMessage(err)}`);
@@ -313,14 +363,15 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   }
   // Claim first: once per (org, brand, lead, outcome), ever.
   const claimed = (await db.execute(sql`
-    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated)
-    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true)
+    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated, performer)
+    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true,
+      ${JSON.stringify(performer)}::jsonb)
     ON CONFLICT DO NOTHING
     RETURNING 1 AS ok
   `)) as unknown as unknown[];
   if (claimed.length === 0) return;
   const kind = await declareRunOutcomesNow(
-    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, occurredAt: f.occurredAt }),
+    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, occurredAt: f.occurredAt, performer }),
   );
   if (kind === "lost") {
     await db.execute(sql`
@@ -388,6 +439,7 @@ export async function redateUndatedDeclarations(scope?: { orgId: string }, post:
       leadId: String(r.lead_id),
       outcomeKey: r.outcome_key as FactOutcomeKey,
       consumedOutcomeKey: String(r.consumed_outcome_key),
+      performer: null,
     });
     const res = await post({ runs: [{ runId: d.runId, occurredAt: r.occurred_at, redate: true, produced: d.produced, consumed: d.consumed }] });
     if (res.status === 200 || res.status === 201) {
@@ -405,6 +457,60 @@ export async function redateUndatedDeclarations(scope?: { orgId: string }, post:
   return summary;
 }
 
+export interface PerformerSummary {
+  read: number;
+  stated: number;
+  refused: number;
+}
+
+/**
+ * Occurrences declared before performers existed (LEAD-GENERIC-1106) get theirs stated ONCE through runs-service's batch
+ * door: the SAME occurrence (run, outcome, lead) takes the performer (`performer_stated`), a replay is
+ * `already_recorded`, a different performer already stored is a 409 kept in `performer_error` (never overwritten, never
+ * resent). 5xx / network = the pass stops, asked again next pass.
+ */
+export async function statePastPerformers(scope?: { orgId: string }, post: RedatePost = postRedate): Promise<PerformerSummary> {
+  const rows = (await db.execute(sql`
+    SELECT d.org_id, d.brand_id, d.lead_id::text AS lead_id, d.outcome_key, d.run_id::text AS run_id, d.consumed_outcome_key,
+           coalesce(ce.source, 'manual') AS source
+    FROM outcome_fact_declarations d
+    LEFT JOIN conversion_events ce ON ce.id = d.conversion_event_id
+    WHERE d.performer IS NULL AND d.performer_error IS NULL ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
+    ORDER BY d.created_at
+    LIMIT ${SWEEP_BATCH}
+  `)) as unknown as Array<Record<string, string>>;
+  const summary: PerformerSummary = { read: rows.length, stated: 0, refused: 0 };
+  for (const r of rows) {
+    const key = sql`org_id = ${r.org_id} AND brand_id = ${r.brand_id} AND lead_id = ${r.lead_id}::uuid AND outcome_key = ${r.outcome_key}`;
+    const performer = performerOf(await loadFirstTouchWorkflow({ orgId: r.org_id, brandId: r.brand_id, leadId: r.lead_id }), r.source);
+    const d = factOutcomeDeclaration({
+      orgId: r.org_id,
+      runId: r.run_id,
+      leadId: r.lead_id,
+      outcomeKey: r.outcome_key as FactOutcomeKey,
+      consumedOutcomeKey: r.consumed_outcome_key,
+      performer,
+    });
+    const res = await post({ runs: [{ runId: d.runId, produced: d.produced }] });
+    if (res.status === 200 || res.status === 201) {
+      // A runs-service that does not know performers yet answers 200 and drops the field: its answer then carries no
+      // performer count. Never record a performer it did not take (the pass stops, asked again once it is deployed).
+      if (!("performerStatedCount" in (JSON.parse(res.text) as Record<string, unknown>))) {
+        throw new Error(`runs-service did not take the performer (no performerStatedCount): ${res.text.slice(0, 200)}`);
+      }
+      await db.execute(sql`UPDATE outcome_fact_declarations SET performer = ${JSON.stringify(performer)}::jsonb WHERE ${key}`);
+      summary.stated++;
+      continue;
+    }
+    if (res.status >= 500 || res.status === 401 || res.status === 403) throw new Error(`runs-service performer ${res.status} ${res.text.slice(0, 300)}`);
+    await db.execute(sql`UPDATE outcome_fact_declarations SET performer_error = ${`${res.status} ${res.text.slice(0, 500)}`} WHERE ${key}`);
+    summary.refused++;
+    console.error(`[lead-service] outcome performer REFUSED (kept, never resent): org=${r.org_id} run=${r.run_id} lead=${r.lead_id} ${r.outcome_key}: ${res.status} ${res.text.slice(0, 300)}`);
+  }
+  if (rows.length > 0) console.log(`[lead-service] outcome performer pass ${JSON.stringify(summary)}`);
+  return summary;
+}
+
 let inFlight: Promise<OutcomeFactSweepSummary> | null = null;
 
 /** One pass. Concurrent calls join it. `scope` is a test hook (the suite's files share one database). */
@@ -416,6 +522,7 @@ export function sweepOutcomeFactDeclarations(scope?: { orgId: string }): Promise
     for (const f of facts) await declareOne(f, summary);
     if (facts.length > 0) console.log(`[lead-service] outcome fact declarations pass ${JSON.stringify(summary)}`);
     await redateUndatedDeclarations(scope).catch((err) => console.error("[lead-service] outcome fact re-date pass failed:", err));
+    await statePastPerformers(scope).catch((err) => console.error("[lead-service] outcome performer pass failed:", err));
     return summary;
   })().finally(() => {
     inFlight = null;

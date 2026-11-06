@@ -76,7 +76,7 @@ describe("postTouchDeclaration", () => {
     expect(postTouchDeclaration({ orgId: "o", runId: "r", leadId: "l1", post: { subjectService: "meta-service", subjectId: ID }, occurredAt: "2026-10-28T10:00:00.000Z" })).toEqual({
       orgId: "o",
       runId: "r",
-      produced: [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: "l1" }],
+      produced: [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: "l1", performer: { kind: "tracker" } }],
       consumed: [{ outcomeKey: "post_published", subjectService: "meta-service", subjectId: ID }],
       occurredAt: "2026-10-28T10:00:00.000Z",
     });

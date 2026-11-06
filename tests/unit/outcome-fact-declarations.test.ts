@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 
 const { factOutcomeDeclaration, FACT_OUTCOME_KEYS } = await import("../../src/lib/run-outcomes.js");
-const { consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, FACT_SOURCES_OF_OUTCOME, utcDay } = await import("../../src/lib/outcome-fact-declarations.js");
+const { consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, FACT_SOURCES_OF_OUTCOME, performerOf, utcDay } = await import("../../src/lib/outcome-fact-declarations.js");
 
 const none = { positiveReply: false, websiteVisit: false, formSubmitted: false, declaredMeetingBooked: false, declaredMeetingAttended: false, declaredPurchase: false };
 
@@ -73,5 +73,27 @@ describe("fact outcome declarations", () => {
   it("the recording run is per UTC day", () => {
     expect(utcDay(new Date("2026-10-23T23:59:59.999Z"))).toBe("2026-10-23");
     expect(utcDay(new Date("2026-10-24T00:00:00.000Z"))).toBe("2026-10-24");
+  });
+});
+
+describe("performerOf (LEAD-GENERIC-1106): every externally attested occurrence names who performed it", () => {
+  it("our script when its send first touched the person, else the fact's attester", () => {
+    expect(performerOf("cold-email-v7", "crm")).toEqual({ kind: "script", workflowSlug: "cold-email-v7" });
+    expect(performerOf(null, "crm")).toEqual({ kind: "crm" });
+    expect(performerOf(null, "tracker")).toEqual({ kind: "tracker" });
+    expect(performerOf(null, "manual")).toEqual({ kind: "client_team", name: "manual" });
+  });
+
+  it("the declaration carries the performer on the produced occurrence only", () => {
+    const d = factOutcomeDeclaration({
+      orgId: "o",
+      runId: "r",
+      leadId: "l",
+      outcomeKey: "meeting_booked",
+      consumedOutcomeKey: "conversation",
+      performer: { kind: "crm" },
+    });
+    expect(d.produced).toEqual([{ outcomeKey: "meeting_booked", subjectService: "lead-service", subjectId: "l", performer: { kind: "crm" } }]);
+    expect(d.consumed[0]).not.toHaveProperty("performer");
   });
 });

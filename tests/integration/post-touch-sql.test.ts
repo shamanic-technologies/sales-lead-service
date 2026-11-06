@@ -179,7 +179,7 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
         runId: postRuns[0].runId,
         serviceName: "lead-service",
         body: {
-          produced: [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: leadId }],
+          produced: [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: leadId, performer: { kind: "tracker" } }],
           consumed: [{ outcomeKey: "post_published", subjectService: "meta-service", subjectId: POST }],
           occurredAt: "2026-10-20T10:00:00.000Z",
         },
@@ -199,7 +199,7 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
     const signupDecl = byLead(leadId).filter((d) => d.body.produced[0].outcomeKey === "signup");
     expect(signupDecl.map((d) => d.body)).toEqual([
       {
-        produced: [{ outcomeKey: "signup", subjectService: "lead-service", subjectId: leadId }],
+        produced: [{ outcomeKey: "signup", subjectService: "lead-service", subjectId: leadId, performer: { kind: "crm" } }],
         consumed: [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: leadId }],
         occurredAt: "2026-10-20T10:30:00.000Z",
       },
