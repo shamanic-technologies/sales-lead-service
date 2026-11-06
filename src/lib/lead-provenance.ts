@@ -16,7 +16,8 @@ import { loadOriginNamesByList, type SourcingOriginName } from "./sourcing-origi
  *      origin catalogue (the same `sources` the Leads list serves, `lead-sources.ts`);
  *   2. the filings lead-service makes with no audience: a CRM signup filed as a lead (`crm_signup`), a
  *      social engager of our post (`social_engagement`), a person the brand's own org stated
- *      (`stated_by_org`, `brand_person_statements`).
+ *      (`stated_by_org`, `brand_person_statements`), a person who clicked a link of a Unit addressed to them
+ *      (`unit_click`, post-touch.ts: e.g. a newsletter email).
  *
  * `tags` is the flat, groupable form: the origin slug of every named source, `list:<kind>` for a list
  * kind the catalogue does not name, `list:none` for an audience stating no list, plus the filing kinds.
@@ -24,7 +25,7 @@ import { loadOriginNamesByList, type SourcingOriginName } from "./sourcing-origi
  * A read only: nothing here moves who gets emailed.
  */
 
-export const LOCAL_FILING_KINDS = ["crm_signup", "social_engagement", "stated_by_org"] as const;
+export const LOCAL_FILING_KINDS = ["crm_signup", "social_engagement", "stated_by_org", "unit_click"] as const;
 export type LocalFilingKind = (typeof LOCAL_FILING_KINDS)[number];
 
 export interface LocalFiling {
@@ -98,7 +99,7 @@ export async function loadLocalFilings(
     JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
     WHERE lc.org_id = ${orgId}
       AND ${brandId} = ANY(lc.brand_ids)
-      AND lc.status_reason IN ('crm_signup', 'social_engagement')
+      AND lc.status_reason IN ('crm_signup', 'social_engagement', 'unit_click')
       AND lower(cm.value) = ANY(${sql.param(emails)}::text[])
     GROUP BY 1, 2
     UNION ALL
