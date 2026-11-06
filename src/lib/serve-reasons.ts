@@ -40,8 +40,9 @@
  *                            with its own reason `no_recent_posts`: the competitor pages it reads engagers from
  *                            hold NO post inside its window, so there was nobody to read (owner 2026-10-13, Doc
  *                            Dinners: ChiroCandy + MaxLiving had posted nothing). Not a population that ran out:
- *                            the audience fills as soon as a competitor posts. Wins over every other empty answer
- *                            of a walk that served nobody (a look found nothing to read, so not all walked out).
+ *                            the audience fills as soon as a competitor posts. In a walk over several audiences it
+ *                            is the answer only when no audience was walked to the end: a list that ran out is the
+ *                            upstream cause and answers `audience_exhausted` (STARVE-REASON-1106).
  *
  *   contacted_prospects_none_owed — a "contacted pure prospects" source run (NEVER-NO-FOLLOWUP-1014,
  *                            src/lib/prospect-followup.ts): every person the brand contacted is either already in a

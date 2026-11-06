@@ -870,6 +870,8 @@ export async function pullNext(
     const walkDeadline = startedAt + FIND_WALK_BUDGET_MS;
     let notServeable = 0;
     let noRecentPosts = 0;
+    // Audiences human-service walked to the end (nobody left in their lists).
+    let walkedOut = 0;
     // Audiences whose look did not finish (human-service `pending`, or a call that never answered): not exhaustion.
     let unfinished = 0;
     let stalled = 0;
@@ -937,6 +939,7 @@ export async function pullNext(
         }
         if (served.status === "exhausted" || !served.person) {
           walkEvent("audience_answer", { audienceId: candidateAudienceId, answer: "exhausted" });
+          walkedOut++;
           await recordEmptyAnswer({ ...walked, reason: "exhausted" });
           break;
         }
@@ -946,19 +949,23 @@ export async function pullNext(
         if (++recentlyEmailedHits >= FRESH_SERVE_ATTEMPTS) return answer(result);
       }
     }
-    // A look that did not finish (out of time, pending, a call that never answered) is never exhaustion. Then an
-    // audience with nothing to read (competitor pages posted nothing): the walk did NOT find everyone gone. Then an
-    // audience that could not be walked; only a full walk-out is exhaustion.
+    // The most upstream true cause wins. A look that did not finish (out of time, pending, a call that never
+    // answered) is never exhaustion. Then audiences walked to the end beside audiences whose competitor pages posted
+    // nothing: the lists ran out, which is the cause (STARVE-REASON-1106: Doc Dinners' 9 walked-out audiences read
+    // as « no recent posts » for days). Only when no list ran out does « nothing to read » win, then an audience
+    // that could not be walked; a full walk-out is exhaustion.
     const reason =
       unfinished > 0
         ? SERVE_TIMED_OUT_REASON
-        : noRecentPosts > 0
-          ? NO_RECENT_POSTS_REASON
-          : notServeable > 0
-            ? AUDIENCE_NOT_SERVEABLE_REASON
-            : AUDIENCE_EXHAUSTED_REASON;
+        : walkedOut > 0 && notServeable === 0
+          ? AUDIENCE_EXHAUSTED_REASON
+          : noRecentPosts > 0
+            ? NO_RECENT_POSTS_REASON
+            : notServeable > 0
+              ? AUDIENCE_NOT_SERVEABLE_REASON
+              : AUDIENCE_EXHAUSTED_REASON;
     console.log(
-      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} notServeable=${notServeable} noRecentPosts=${noRecentPosts} unfinished=${unfinished}`,
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} walkedOut=${walkedOut} notServeable=${notServeable} noRecentPosts=${noRecentPosts} unfinished=${unfinished}`,
     );
     return answer({ found: false, reason });
   }
