@@ -15,7 +15,6 @@ const withdrawRuling = vi.fn();
 const countLeadsNoCrmContactPointsAt = vi.fn();
 
 const fetchPairedLeadFacts = vi.fn();
-const resolveStandingsForLeads = vi.fn();
 
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
@@ -56,15 +55,11 @@ vi.mock("../../src/lib/crm-pairing-store.js", async (orig) => {
 
 vi.mock("../../src/lib/crm-pairing-view.js", () => ({
   fetchPairedLeadFacts: (...a: unknown[]) => fetchPairedLeadFacts(...a),
-  resolveStandingsForLeads: (...a: unknown[]) => resolveStandingsForLeads(...a),
 }));
 
 // LEAD-GENERIC-1106: each paired row carries the lead's leadState, read off the Unibox rows in one statement.
 const leadStateOf = vi.fn(async (_scope: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { won: false, hot: true, lost: null, leadId: id }])));
 vi.mock("../../src/lib/unibox-model.js", () => ({ readLeadStatesForLeads: (scope: unknown, ids: readonly string[]) => leadStateOf(scope, ids) }));
-vi.mock("../../src/lib/lead-standing-resolver.js", () => ({
-  createLeadStandingResolver: () => ({ resolve: async () => new Map() }),
-}));
 
 const BRAND = "b0000000-0000-0000-0000-000000000001";
 const LEAD = "a0000000-0000-0000-0000-000000000001";
@@ -177,7 +172,6 @@ beforeEach(() => {
     withdrawRuling,
     countLeadsNoCrmContactPointsAt,
     fetchPairedLeadFacts,
-    resolveStandingsForLeads,
   ]) {
     m.mockReset();
   }
@@ -186,7 +180,6 @@ beforeEach(() => {
   loadJudgments.mockResolvedValue(new Map());
   loadRulings.mockResolvedValue(new Map());
   fetchPairedLeadFacts.mockResolvedValue(new Map());
-  resolveStandingsForLeads.mockResolvedValue(new Map());
 });
 
 describe("GET /orgs/leads/crm-pairings", () => {
@@ -268,6 +261,9 @@ describe("GET /orgs/leads/crm-pairings", () => {
     // LEAD-GENERIC-1106: the paired lead's ONE lead vocabulary rides the row, read once for the page.
     expect(row.leadState).toMatchObject({ hot: true, leadId: LEAD });
     expect(row.leadStateReason).toBeNull();
+    // The old standing fields are gone (LEAD-GENERIC-1106: no reader left).
+    expect(row).not.toHaveProperty("ourStanding");
+    expect(row).not.toHaveProperty("ourClosedDeal");
   });
 
   // Stability: the same contact reads the same pairing twice.
