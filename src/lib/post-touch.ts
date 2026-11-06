@@ -1,24 +1,30 @@
 /**
- * A VISIT THAT CAME FROM ONE OF OUR POSTS IS CREDITED TO THAT POST'S RUN (FACTORY-P2-CONTENT-OUTCOMES, owner 2026-10-28).
+ * A VISIT THAT CAME FROM A CLICK ON ONE OF OUR LINKS IS CREDITED TO THE EXACT UNIT THE LINK CAME FROM, WHATEVER THAT
+ * UNIT'S OUTCOME (FACTORY-P2-CONTENT-OUTCOMES 2026-10-28; OUTCOME-FINEST-1106: one outcome per network and step).
  *
- * distribute.you publishes posts on its own accounts (meta-service records each main post as a `post_published`
- * occurrence on runs-service: subject `meta-service` / the publication id, on the publishing run). Each post's link
- * carries `dy_post=<subjectService>:<subjectId>`, the subject of that occurrence (the colon may arrive as `%3A`). So
- * features-service can rank content pipes by cost per signup like cold email, a visit through that link and every
- * later state of the same person must be tied to the publishing run on the ledger. GENERIC: any brand, any platform,
- * any publishing service; never a per-platform rule.
+ * A producer stamps every link to our sites with the Unit it belongs to, so a visit through it and every later state of
+ * the same person are tied to that Unit's run on the ledger (features-service ranks posts and newsletter releases by
+ * visits and signups like cold email). Two markers, read the same way:
+ *   - `dy_unit=<outcomeKey>:<subjectService>:<subjectId>` (generic: the Unit names its own outcome; transactional-email
+ *     stamps `newsletter_email_sent:transactional-email-service:<recipient id>`). THE contract for any new producer.
+ *   - `dy_post=<subjectService>:<subjectId>` (legacy, meta-service's posts): the outcome is not on the link, so it is
+ *     READ OFF THE LEDGER (runs-service `GET /internal/outcome-occurrences`, the subject's produced occurrence: old
+ *     Threads posts `post_published`, newer ones `threads_post_published`), never assumed. Not on the ledger yet = the
+ *     claim waits and is asked again next pass; several outcomes on one subject = not credited, loud, asked again.
+ * The colons may arrive as `%3A`. Several different values, a malformed marker, or two markers naming different subjects
+ * = no touch. No marker = organic (no time-window guess, owner 2026-11-06). GENERIC: never a per-outcome/platform rule.
  *
- * A POST TOUCH = a live bronze `crm_facts` `website_visit` (crm-service's mirror of the brand's PostHog sessions;
- * `payload.firstUrl` = the session's ENTRY URL with its query string) whose entry URL carries a valid `dy_post`
- * (`parsePostTouch`, pure), resolved to the brand's lead by one of the visit's emails exactly as brand-signups.ts
+ * A POST TOUCH (a "unit touch"; the names predate newsletters) = a live bronze `crm_facts` `website_visit` (crm-service's
+ * mirror of the brand's PostHog sessions; `payload.firstUrl` = the session's ENTRY URL with its query string) whose entry
+ * URL carries a valid marker (`parsePostTouch`, pure), resolved to the brand's lead by one of the visit's emails exactly as brand-signups.ts
  * resolves a signup (case-folded address on `lead_contact_methods` of a lead of that org + brand). Several leads =
  * ambiguous: skipped, the why kept in `post_touch_skips`, asked again every pass (an identity repair settles it).
  * No lead yet = nothing (a signup files them later; the next pass resolves the same visit).
  *
- * THE DECLARATION mirrors instantly-service's measured click: ONCE per (org, brand, lead, post) ever
- * (`post_touch_declarations`, the claim, migration 0132), on a spend-free run of its own (`post-touch-visit`, closed
- * `completed` at once, no cost, no child), produced `website_visit` (subject the lead), consumed `post_published`
- * (subject read off the param, verbatim), `occurredAt` = the earliest visit of that lead from that post (runs-service
+ * THE DECLARATION mirrors instantly-service's measured click: ONCE per (org, brand, lead, Unit subject) ever
+ * (`post_touch_declarations`, the claim, migration 0132; `unit_outcome_key` = the Unit's outcome, 0140), on a spend-free
+ * run of its own (`post-touch-visit`, closed `completed` at once, no cost, no child), produced `website_visit` (subject
+ * the lead), consumed the Unit (its outcome + subject, verbatim), `occurredAt` = the earliest visit of that lead from that post (runs-service
  * takes a past instant only on a spend-free run declared by its own service). One run = one produced key.
  * runs-service then ties the visit, and every later state consuming it (a signup: outcome-fact-declarations.ts), to the
  * publishing run.
@@ -28,20 +34,22 @@
  * ledger. A runs-service refusal stays loud (logged, `refused` + its error on the row, the outbox row kept), never
  * fabricated nor retried; a transient failure leaves the claim `claimed` and the next pass asks again (same run).
  *
- * Background sweep: first pass ~60 s after boot, every 5 min, in-function mutex. Reads only the visits carrying the
- * param through a partial index built after boot (read-model-search-index.ts `idx_crm_facts_post_visits`); the
+ * Background sweep: first pass ~60 s after boot, every 5 min, in-function mutex. Reads only the visits carrying a
+ * marker through a partial index built after boot (read-model-search-index.ts `idx_crm_facts_unit_visits`); the
  * unscoped pass waits for that index rather than walk the ~420 MB table.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { errorMessage } from "./db-error.js";
-import { createRun, updateRun } from "./runs-client.js";
+import { createRun, producedOutcomeKeysOf, updateRun } from "./runs-client.js";
 import { declarationKey, declareRunOutcomesNow, OUTCOME_SUBJECT_SERVICE, type RunOutcomeDeclaration } from "./run-outcomes.js";
 
+/** Legacy marker: `dy_post=<subjectService>:<subjectId>` (the outcome is read off the ledger). */
 export const POST_TOUCH_PARAM = "dy_post";
+/** Generic marker: `dy_unit=<outcomeKey>:<subjectService>:<subjectId>`. */
+export const UNIT_TOUCH_PARAM = "dy_unit";
 export const POST_TOUCH_TASK = "post-touch-visit";
-export const POST_PUBLISHED_OUTCOME = "post_published";
-export const POST_TOUCH_INDEX = "idx_crm_facts_post_visits";
+export const POST_TOUCH_INDEX = "idx_crm_facts_unit_visits";
 export const POST_TOUCH_SWEEP_INTERVAL_MS = 5 * 60_000;
 const FIRST_SWEEP_DELAY_MS = 60_000;
 const SERVICE_NAME = "lead-service";
@@ -49,30 +57,20 @@ const SERVICE_NAME = "lead-service";
 export const DECLARED_POST_TOUCH_STATUSES = ["delivered", "queued"] as const;
 
 const SUBJECT_SERVICE_RE = /^[a-z][a-z0-9-]*$/;
+/** runs-service's own outcome key shape (schemas.ts OUTCOME_KEY_RE). */
+const OUTCOME_KEY_RE = /^[a-z][a-z0-9_]{1,63}$/;
 const MAX_SUBJECT_SERVICE = 64;
 const MAX_SUBJECT_ID = 256;
 
+/** The Unit a link names: its subject, and its outcome when the link states it (`dy_unit`); null = read off the ledger. */
 export interface PostSubject {
   subjectService: string;
   subjectId: string;
+  outcomeKey: string | null;
 }
 
-/**
- * The post a visit's entry URL names, or null (no param, malformed, several different values). PURE.
- * `dy_post=<subjectService>:<subjectId>`, the colon possibly URL-encoded; subjectService `^[a-z][a-z0-9-]*$`,
- * subjectId non-empty, at most 256 characters, no surrounding whitespace.
- */
-export function parsePostTouch(url: string | null | undefined): PostSubject | null {
-  if (typeof url !== "string" || url.length === 0) return null;
-  let params: URLSearchParams;
-  try {
-    params = new URL(url).searchParams;
-  } catch {
-    return null;
-  }
-  const values = [...new Set(params.getAll(POST_TOUCH_PARAM))];
-  if (values.length !== 1) return null;
-  const value = values[0];
+/** `<subjectService>:<subjectId>`, or null. PURE. */
+function parseSubject(value: string): { subjectService: string; subjectId: string } | null {
   const colon = value.indexOf(":");
   if (colon <= 0) return null;
   const subjectService = value.slice(0, colon);
@@ -82,20 +80,75 @@ export function parsePostTouch(url: string | null | undefined): PostSubject | nu
   return { subjectService, subjectId };
 }
 
+/** One marker's values: absent, ONE valid value, or invalid (malformed / several different values). PURE. */
+function readMarker<T>(params: URLSearchParams, name: string, parse: (v: string) => T | null): { present: false } | { present: true; value: T | null } {
+  const values = [...new Set(params.getAll(name))];
+  if (values.length === 0) return { present: false };
+  if (values.length > 1) return { present: true, value: null };
+  return { present: true, value: parse(values[0]) };
+}
+
+/**
+ * The Unit a visit's entry URL names, or null (no marker, malformed, several different values, two markers naming
+ * different subjects). PURE. `dy_unit=<outcomeKey>:<subjectService>:<subjectId>` (outcomeKey `^[a-z][a-z0-9_]{1,63}$`)
+ * or legacy `dy_post=<subjectService>:<subjectId>` (outcomeKey null); colons possibly URL-encoded; subjectService
+ * `^[a-z][a-z0-9-]*$`, subjectId non-empty, at most 256 characters (everything after the subject service's colon,
+ * verbatim), no surrounding whitespace.
+ */
+export function parsePostTouch(url: string | null | undefined): PostSubject | null {
+  if (typeof url !== "string" || url.length === 0) return null;
+  let params: URLSearchParams;
+  try {
+    params = new URL(url).searchParams;
+  } catch {
+    return null;
+  }
+  const unit = readMarker(params, UNIT_TOUCH_PARAM, (v) => {
+    const colon = v.indexOf(":");
+    if (colon <= 0) return null;
+    const outcomeKey = v.slice(0, colon);
+    if (!OUTCOME_KEY_RE.test(outcomeKey)) return null;
+    const subject = parseSubject(v.slice(colon + 1));
+    return subject ? { ...subject, outcomeKey } : null;
+  });
+  const post = readMarker(params, POST_TOUCH_PARAM, parseSubject);
+  if (unit.present && unit.value === null) return null;
+  if (post.present && post.value === null) return null;
+  if (unit.present && unit.value) {
+    if (post.present && post.value && (post.value.subjectService !== unit.value.subjectService || post.value.subjectId !== unit.value.subjectId)) {
+      return null;
+    }
+    return unit.value;
+  }
+  if (post.present && post.value) return { ...post.value, outcomeKey: null };
+  return null;
+}
+
+export type UnitOutcomeResolution = { kind: "resolved"; outcomeKey: string } | { kind: "not_on_ledger" } | { kind: "ambiguous"; outcomeKeys: string[] };
+
+/** The Unit's outcome from the outcomes its subject PRODUCED on the ledger. PURE. */
+export function unitOutcomeFrom(producedKeys: readonly string[]): UnitOutcomeResolution {
+  const keys = [...new Set(producedKeys)].sort();
+  if (keys.length === 0) return { kind: "not_on_ledger" };
+  if (keys.length > 1) return { kind: "ambiguous", outcomeKeys: keys };
+  return { kind: "resolved", outcomeKey: keys[0] };
+}
+
 /** The declaration of one post touch. PURE. */
 export function postTouchDeclaration(input: {
   orgId: string;
   runId: string;
   leadId: string;
-  post: PostSubject;
+  /** The Unit consumed: its subject and its RESOLVED outcome. */
+  unit: { outcomeKey: string; subjectService: string; subjectId: string };
   occurredAt: string | null;
 }): RunOutcomeDeclaration {
   return {
     orgId: input.orgId,
     runId: input.runId,
-    // LEAD-GENERIC-1106: the visit was seen by the brand's website tracker (the post's own run states the post).
+    // LEAD-GENERIC-1106: the visit was seen by the brand's website tracker (the Unit's own run states the Unit).
     produced: [{ outcomeKey: "website_visit", subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: input.leadId, performer: { kind: "tracker" } }],
-    consumed: [{ outcomeKey: POST_PUBLISHED_OUTCOME, subjectService: input.post.subjectService, subjectId: input.post.subjectId }],
+    consumed: [{ outcomeKey: input.unit.outcomeKey, subjectService: input.unit.subjectService, subjectId: input.unit.subjectId }],
     ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
   };
 }
@@ -142,7 +195,7 @@ export function postVisitVerdict(row: PostVisitRow): PostVisitVerdict {
 const touchKey = (t: Pick<PostTouch, "orgId" | "brandId" | "leadId" | "post">) =>
   `${t.orgId}|${t.brandId}|${t.leadId}|${t.post.subjectService}|${t.post.subjectId}`;
 
-/** The earliest visit per (org, brand, lead, post); an undated visit only when none is dated. PURE. */
+/** The earliest visit per (org, brand, lead, Unit subject); an undated visit only when none is dated. PURE. */
 export function earliestTouches(touches: readonly PostTouch[]): PostTouch[] {
   const out = new Map<string, PostTouch>();
   for (const t of touches) {
@@ -152,8 +205,11 @@ export function earliestTouches(touches: readonly PostTouch[]): PostTouch[] {
       out.set(key, t);
       continue;
     }
-    if (t.occurredAt === null) continue;
-    if (cur.occurredAt === null || Date.parse(t.occurredAt) < Date.parse(cur.occurredAt)) out.set(key, t);
+    // A link that STATES the Unit's outcome (dy_unit) settles it for every visit of the same Unit.
+    const outcomeKey = cur.post.outcomeKey ?? t.post.outcomeKey;
+    const earlier = t.occurredAt !== null && (cur.occurredAt === null || Date.parse(t.occurredAt) < Date.parse(cur.occurredAt));
+    const kept = earlier ? t : cur;
+    out.set(key, kept.post.outcomeKey === outcomeKey ? kept : { ...kept, post: { ...kept.post, outcomeKey } });
   }
   return [...out.values()];
 }
@@ -168,7 +224,7 @@ export async function loadPostVisits(scope?: { orgId: string }): Promise<PostVis
       SELECT f.fact_id, f.org_id, f.brand_id, f.emails, f.payload->>'firstUrl' AS first_url,
              to_char(LEAST(f.occurred_at, now()) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS occurred_at
       FROM crm_facts f
-      WHERE f.type = 'website_visit' AND f.payload->>'firstUrl' LIKE '%dy_post=%'
+      WHERE f.type = 'website_visit' AND (f.payload->>'firstUrl' LIKE '%dy_post=%' OR f.payload->>'firstUrl' LIKE '%dy_unit=%')
         ${scope ? sql`AND f.org_id = ${scope.orgId}` : sql.empty()}
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
     ),
@@ -200,11 +256,13 @@ export async function loadPostVisits(scope?: { orgId: string }): Promise<PostVis
 interface ClaimRow {
   run_id: string | null;
   status: string;
+  unit_outcome_key: string | null;
+  error: string | null;
 }
 
 async function readClaim(t: PostTouch): Promise<ClaimRow | null> {
   const rows = (await db.execute(sql`
-    SELECT run_id::text AS run_id, status FROM post_touch_declarations
+    SELECT run_id::text AS run_id, status, unit_outcome_key, error FROM post_touch_declarations
     WHERE org_id = ${t.orgId} AND brand_id = ${t.brandId} AND lead_id = ${t.leadId}::uuid
       AND post_subject_service = ${t.post.subjectService} AND post_subject_id = ${t.post.subjectId}
   `)) as unknown as ClaimRow[];
@@ -224,7 +282,12 @@ export interface PostTouchSweepSummary {
   failed: number;
   ambiguous: number;
   noLead: number;
+  /** Legacy-marker touches whose Unit outcome the ledger did not settle this pass (not on it yet / several). */
+  unresolved: number;
 }
+
+/** Per pass: the produced outcome keys of each legacy subject, asked of runs-service once. */
+type LedgerMemo = Map<string, Promise<string[]>>;
 
 async function recordSkip(row: PostVisitRow, leadIds: string[]): Promise<void> {
   const inserted = (await db.execute(sql`
@@ -242,15 +305,48 @@ async function recordSkip(row: PostVisitRow, leadIds: string[]): Promise<void> {
 }
 
 /** Declare ONE post touch (claim, run, declaration). Never throws: a failure is counted and asked again next pass. */
-async function declareTouch(t: PostTouch, summary: PostTouchSweepSummary): Promise<void> {
+async function declareTouch(t: PostTouch, summary: PostTouchSweepSummary, memo: LedgerMemo): Promise<void> {
   try {
     await db.execute(sql`
-      INSERT INTO post_touch_declarations (org_id, brand_id, lead_id, post_subject_service, post_subject_id, visit_fact_id, visited_at)
-      VALUES (${t.orgId}, ${t.brandId}, ${t.leadId}::uuid, ${t.post.subjectService}, ${t.post.subjectId}, ${t.visitFactId}, ${t.occurredAt}::timestamptz)
+      INSERT INTO post_touch_declarations (org_id, brand_id, lead_id, post_subject_service, post_subject_id, visit_fact_id, visited_at, unit_outcome_key)
+      VALUES (${t.orgId}, ${t.brandId}, ${t.leadId}::uuid, ${t.post.subjectService}, ${t.post.subjectId}, ${t.visitFactId}, ${t.occurredAt}::timestamptz, ${t.post.outcomeKey})
       ON CONFLICT DO NOTHING
     `);
     const claim = await readClaim(t);
     if (!claim || claim.status !== "claimed") return;
+    // The Unit's outcome: stored on the claim once known (the link's own, else the ledger's), never assumed.
+    let outcomeKey = claim.unit_outcome_key ?? t.post.outcomeKey;
+    if (!outcomeKey) {
+      const subjectKey = `${t.post.subjectService}|${t.post.subjectId}`;
+      let keys = memo.get(subjectKey);
+      if (!keys) {
+        keys = producedOutcomeKeysOf(t.post.subjectService, t.post.subjectId);
+        memo.set(subjectKey, keys);
+      }
+      const resolution = unitOutcomeFrom(await keys);
+      if (resolution.kind !== "resolved") {
+        summary.unresolved++;
+        const error =
+          resolution.kind === "not_on_ledger"
+            ? "unit not on the ledger yet: no produced occurrence for this subject"
+            : `several outcomes produced on this subject (${resolution.outcomeKeys.join(", ")}): which Unit the link names is unknown`;
+        if (claim.error !== error) {
+          console.warn(
+            `[lead-service] unit touch WAITING (asked again next pass): org=${t.orgId} brand=${t.brandId} lead=${t.leadId} ` +
+              `unit=${t.post.subjectService}:${t.post.subjectId}: ${error}`,
+          );
+          await db.execute(sql`UPDATE post_touch_declarations SET error = ${error}, updated_at = now() WHERE ${claimWhere(t)} AND status = 'claimed'`);
+        }
+        return;
+      }
+      outcomeKey = resolution.outcomeKey;
+    }
+    if (claim.unit_outcome_key !== outcomeKey) {
+      await db.execute(sql`
+        UPDATE post_touch_declarations SET unit_outcome_key = ${outcomeKey}, error = NULL, updated_at = now()
+        WHERE ${claimWhere(t)} AND status = 'claimed' AND unit_outcome_key IS NULL
+      `);
+    }
     // A claim not taken yet keeps its earliest visit (a visit seen later can be earlier: the copy fills out of order).
     await db.execute(sql`
       UPDATE post_touch_declarations
@@ -268,7 +364,13 @@ async function declareTouch(t: PostTouch, summary: PostTouchSweepSummary): Promi
     const stored = (await db.execute(sql`
       SELECT to_char(visited_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at FROM post_touch_declarations WHERE ${claimWhere(t)}
     `)) as unknown as Array<{ at: string | null }>;
-    const declaration = postTouchDeclaration({ orgId: t.orgId, runId, leadId: t.leadId, post: t.post, occurredAt: stored[0]?.at ?? t.occurredAt });
+    const declaration = postTouchDeclaration({
+      orgId: t.orgId,
+      runId,
+      leadId: t.leadId,
+      unit: { outcomeKey, subjectService: t.post.subjectService, subjectId: t.post.subjectId },
+      occurredAt: stored[0]?.at ?? t.occurredAt,
+    });
     const kind = await declareRunOutcomesNow(declaration);
     if (kind === "lost") {
       summary.failed++;
@@ -289,7 +391,7 @@ async function declareTouch(t: PostTouch, summary: PostTouchSweepSummary): Promi
       summary.refused++;
       console.error(
         `[lead-service] post touch REFUSED by runs-service (kept, not re-sent): org=${t.orgId} brand=${t.brandId} lead=${t.leadId} ` +
-          `post=${t.post.subjectService}:${t.post.subjectId} run=${runId}: ${error}`,
+          `unit=${outcomeKey}:${t.post.subjectService}:${t.post.subjectId} run=${runId}: ${error}`,
       );
     }
   } catch (err) {
@@ -318,7 +420,8 @@ let inFlight: Promise<PostTouchSweepSummary> | null = null;
 export function sweepPostTouches(scope?: { orgId: string }): Promise<PostTouchSweepSummary> {
   if (inFlight) return inFlight;
   inFlight = (async () => {
-    const summary: PostTouchSweepSummary = { visits: 0, touches: 0, delivered: 0, queued: 0, refused: 0, failed: 0, ambiguous: 0, noLead: 0 };
+    const summary: PostTouchSweepSummary = { visits: 0, touches: 0, delivered: 0, queued: 0, refused: 0, failed: 0, ambiguous: 0, noLead: 0, unresolved: 0 };
+    const memo: LedgerMemo = new Map();
     if (!scope && !(await postVisitIndexReady())) return summary;
     const visits = await loadPostVisits(scope);
     summary.visits = visits.length;
@@ -337,7 +440,7 @@ export function sweepPostTouches(scope?: { orgId: string }): Promise<PostTouchSw
     for (const t of pending) {
       const claim = await readClaim(t);
       if (claim && claim.status !== "claimed") continue;
-      await declareTouch(t, summary);
+      await declareTouch(t, summary, memo);
     }
     if (summary.delivered + summary.queued + summary.refused + summary.failed > 0) {
       console.log(`[lead-service] post touch declarations pass ${JSON.stringify(summary)}`);

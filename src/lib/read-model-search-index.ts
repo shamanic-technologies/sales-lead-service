@@ -187,11 +187,12 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
-    // post-touch.ts: the visits that came through one of our posts' links (`dy_post`), every 5 min (a handful of the
-    // ~420 MB table; the unscoped pass waits for this index rather than walk it). Predicate = the read's, verbatim.
-    name: "idx_crm_facts_post_visits",
-    on: "ON crm_facts (org_id, brand_id) WHERE type = 'website_visit' AND payload->>'firstUrl' LIKE '%dy_post=%'",
-    lockKey: "7290519146308441037",
+    // post-touch.ts: the visits that came through one of our links naming a Unit (`dy_post` legacy, `dy_unit`), every
+    // 5 min (a handful of the ~420 MB table; the unscoped pass waits for this index rather than walk it). Predicate =
+    // the read's, verbatim. Replaces `idx_crm_facts_post_visits` (dy_post only; dropped by migration 0140).
+    name: "idx_crm_facts_unit_visits",
+    on: "ON crm_facts (org_id, brand_id) WHERE type = 'website_visit' AND (payload->>'firstUrl' LIKE '%dy_post=%' OR payload->>'firstUrl' LIKE '%dy_unit=%')",
+    lockKey: "7290519146308441038",
     log: "[lead-service] load index",
   },
   {

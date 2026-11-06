@@ -12,11 +12,15 @@
  *   -> the outcome fact sweep: the signup declared consuming the lead's `website_visit`.
  * Also: no param / malformed param = nothing; a replay declares nothing twice; a refusal stays loud and is no touch;
  * several leads on the visit's emails = skipped with the why.
+ * OUTCOME-FINEST-1106: the touch consumes the Unit's OWN outcome: stated by a `dy_unit` link (a newsletter email:
+ * `newsletter_email_sent`), else read off the ledger for a legacy `dy_post` link (a post declared
+ * `threads_post_published` consumes that; an old `post_published` one still credits); not on the ledger yet = waits.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 
-const state = vi.hoisted(() => ({ refusePost: new Set<string>() }));
+// `produced`: what the fake ledger says each subject PRODUCED (the legacy dy_post marker's outcome is read off it).
+const state = vi.hoisted(() => ({ refusePost: new Set<string>(), produced: new Map<string, string[]>(), ledgerReads: [] as string[] }));
 
 vi.mock("../../src/lib/email-gateway-client.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/lib/email-gateway-client.js")>();
@@ -109,6 +113,9 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
 
   beforeAll(async () => {
     resetOutcomeRecordingRunMemo();
+    // The legacy posts were declared post_published by meta-service.
+    state.produced.set(POST, ["post_published"]);
+    state.produced.set(REFUSED_POST, ["post_published"]);
     // The fact-feed copy reached its end at least once (the CRM evidence sync refuses a copy still filling).
     await db.execute(sql`
       INSERT INTO crm_feed_cursors (feed, cursor, caught_up_at) VALUES (${PEOPLE_FACTS_FEED}, '0', now())
@@ -124,6 +131,15 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
           return new Response(JSON.stringify({ id }), { status: 200 });
         }
         if (/\/v1\/runs\/[^/]+$/.test(url) && init?.method === "PATCH") return new Response("{}", { status: 200 });
+        if (url.includes("/internal/outcome-occurrences?")) {
+          const q = new URL(url).searchParams;
+          expect(q.get("direction")).toBe("produced");
+          const subjectService = q.get("subjectService")!;
+          const subjectId = q.get("subjectIds")!;
+          state.ledgerReads.push(subjectId);
+          const occurrences = (state.produced.get(subjectId) ?? []).map((outcomeKey) => ({ outcomeKey, subjectService, subjectId, direction: "produced" }));
+          return new Response(JSON.stringify({ occurrences, nextCursor: null }), { status: 200 });
+        }
         const m = url.match(/\/v1\/runs\/([^/]+)\/outcomes$/);
         if (m) {
           const body = JSON.parse(String(init?.body)) as Declared["body"];
@@ -272,5 +288,71 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
     // The refusal is never re-sent.
     const again = await sweepPostTouches({ orgId });
     expect(again).toMatchObject({ refused: 0, delivered: 0 });
+  });
+  it("credits the Unit's own outcome: a newsletter email (dy_unit), a Threads post declared threads_post_published (dy_post)", async () => {
+    const THREADS_POST = randomUUID();
+    const LATE_POST = randomUUID();
+    const RECIPIENT = randomUUID();
+    state.produced.set(THREADS_POST, ["threads_post_published"]);
+    const reader = addr("reader");
+    const scroller = addr("scroller");
+    const early = addr("early");
+    const organic = addr("organic");
+    const humans = { reader: randomUUID(), scroller: randomUUID(), early: randomUUID(), organic: randomUUID() };
+    await visit(reader, `https://distribute.you/?dy_sub=s1&dy_unit=newsletter_email_sent%3Atransactional-email-service%3A${RECIPIENT}`, "2026-10-23T10:00:00.000Z", humans.reader);
+    await visit(scroller, `https://distribute.you/?dy_post=meta-service:${THREADS_POST}`, "2026-10-23T10:00:00.000Z", humans.scroller);
+    // A post whose occurrence is not on the ledger yet: the touch waits, never assumes an outcome.
+    await visit(early, `https://distribute.you/?dy_post=meta-service:${LATE_POST}`, "2026-10-23T10:00:00.000Z", humans.early);
+    // No marker: organic, whatever the timing (the newsletter went out the same minute).
+    await visit(organic, "https://distribute.you/?utm_source=newsletter", "2026-10-23T10:00:00.000Z", humans.organic);
+    for (const [k, email] of Object.entries({ reader, scroller, early, organic })) await signup(email, "2026-10-23T11:00:00.000Z", humans[k as keyof typeof humans]);
+    await fileBrandSignups({ orgId, brandId });
+    const lead: Record<string, string> = {};
+    for (const [k, email] of Object.entries({ reader, scroller, early, organic })) {
+      lead[k] = await leadOf(email);
+      await db.execute(sql`UPDATE leads SET human_id = ${humans[k as keyof typeof humans]}::uuid WHERE id = ${lead[k]}::uuid`);
+    }
+
+    state.ledgerReads.length = 0;
+    const pass = await sweepPostTouches({ orgId });
+    expect(pass).toMatchObject({ delivered: 2, unresolved: 1, refused: 0, failed: 0 });
+    // The newsletter Unit is stated by its link: no ledger read for it.
+    expect(state.ledgerReads).not.toContain(RECIPIENT);
+    expect(byLead(lead.reader).map((d) => d.body.consumed)).toEqual([
+      [{ outcomeKey: "newsletter_email_sent", subjectService: "transactional-email-service", subjectId: RECIPIENT }],
+    ]);
+    expect(byLead(lead.scroller).map((d) => d.body.consumed)).toEqual([[{ outcomeKey: "threads_post_published", subjectService: "meta-service", subjectId: THREADS_POST }]]);
+    expect(byLead(lead.early)).toEqual([]);
+    expect(byLead(lead.organic)).toEqual([]);
+    const waiting = (await db.execute(sql`
+      SELECT status, unit_outcome_key, error FROM post_touch_declarations WHERE org_id = ${orgId} AND post_subject_id = ${LATE_POST}
+    `)) as unknown as Array<{ status: string; unit_outcome_key: string | null; error: string }>;
+    expect(waiting).toEqual([{ status: "claimed", unit_outcome_key: null, error: expect.stringContaining("not on the ledger") }]);
+    const stored = (await db.execute(sql`
+      SELECT post_subject_id, unit_outcome_key FROM post_touch_declarations WHERE org_id = ${orgId} AND status = 'delivered' ORDER BY post_subject_id
+    `)) as unknown as Array<{ post_subject_id: string; unit_outcome_key: string }>;
+    expect(Object.fromEntries(stored.map((r) => [r.post_subject_id, r.unit_outcome_key]))).toMatchObject({
+      [RECIPIENT]: "newsletter_email_sent",
+      [THREADS_POST]: "threads_post_published",
+      [POST]: "post_published",
+    });
+
+    // Once the post lands on the ledger, the next pass credits its own outcome; nothing else is re-sent.
+    state.produced.set(LATE_POST, ["linkedin_post_published"]);
+    const declaredBefore = declared.length;
+    const next = await sweepPostTouches({ orgId });
+    expect(next).toMatchObject({ delivered: 1, unresolved: 0 });
+    expect(declared.length).toBe(declaredBefore + 1);
+    expect(byLead(lead.early).map((d) => d.body.consumed)).toEqual([[{ outcomeKey: "linkedin_post_published", subjectService: "meta-service", subjectId: LATE_POST }]]);
+
+    // The signups consume the visit each Unit's touch produced; the organic one consumes nothing of ours.
+    await syncCrmEvidence(orgId, brandId);
+    await sweepOutcomeFactDeclarations({ orgId });
+    for (const k of ["reader", "scroller"]) {
+      expect(byLead(lead[k]).filter((d) => d.body.produced[0].outcomeKey === "signup").map((d) => d.body.consumed), k).toEqual([
+        [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: lead[k] }],
+      ]);
+    }
+    expect(byLead(lead.organic)).toEqual([]);
   });
 });
