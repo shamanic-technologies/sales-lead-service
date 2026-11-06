@@ -8068,6 +8068,151 @@
             },
             "description": "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here."
           },
+          "leadState": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "lifecycle": {
+                "$ref": "#/components/schemas/LifecycleRung"
+              },
+              "won": {
+                "type": "boolean",
+                "description": "WON = Lifecycle on the ladder's top rung (Paid client)."
+              },
+              "hot": {
+                "type": "boolean",
+                "description": "HOT = interested, not won, not lost."
+              },
+              "lost": {
+                "type": "object",
+                "nullable": true,
+                "properties": {
+                  "reasons": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "not_reachable",
+                        "wrong_fit",
+                        "not_interested"
+                      ]
+                    },
+                    "minItems": 1,
+                    "description": "Every reason that holds, strongest first."
+                  },
+                  "reachable": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "unsubscribed",
+                      "bounced",
+                      "do_not_contact",
+                      null
+                    ],
+                    "description": "Why not reachable; null when reachable."
+                  },
+                  "fit": {
+                    "type": "string",
+                    "nullable": true,
+                    "enum": [
+                      "wrong_person",
+                      "not_our_target",
+                      null
+                    ],
+                    "description": "The wrong fit; null when fit."
+                  }
+                },
+                "required": [
+                  "reasons",
+                  "reachable",
+                  "fit"
+                ],
+                "description": "LOST = not won, and not reachable, wrong fit or not interested; null = not lost. won, hot and lost are disjoint; none of them = open."
+              },
+              "reachable": {
+                "type": "string",
+                "enum": [
+                  "contactable",
+                  "unsubscribed",
+                  "bounced",
+                  "do_not_contact"
+                ],
+                "description": "REACHABLE: may we write?"
+              },
+              "conversation": {
+                "type": "string",
+                "enum": [
+                  "waiting_on_us",
+                  "waiting_on_them",
+                  "no_reply_yet",
+                  "closed"
+                ]
+              },
+              "fit": {
+                "type": "string",
+                "enum": [
+                  "fit",
+                  "wrong_person",
+                  "not_our_target"
+                ]
+              },
+              "fitNote": {
+                "type": "string",
+                "nullable": true
+              },
+              "interest": {
+                "type": "string",
+                "enum": [
+                  "interested",
+                  "not_interested",
+                  "unsure",
+                  "not_asked"
+                ]
+              },
+              "clientStatus": {
+                "type": "string",
+                "enum": [
+                  "prospect",
+                  "customer",
+                  "churned"
+                ]
+              },
+              "nextFollowupAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "The lead's ONE next follow-up date at the brand; null = no date yet (nextFollowupBasis null) or follow-ups stopped (nextFollowupBasis stopped)."
+              },
+              "nextFollowupBasis": {
+                "type": "string",
+                "nullable": true,
+                "description": "How the date was set (default, send, stated, served, not_yet, stop_recheck, stopped); null = no date row yet."
+              }
+            },
+            "required": [
+              "lifecycle",
+              "won",
+              "hot",
+              "lost",
+              "reachable",
+              "conversation",
+              "fit",
+              "fitNote",
+              "interest",
+              "clientStatus",
+              "nextFollowupAt",
+              "nextFollowupBasis"
+            ],
+            "description": "LEAD-GENERIC-1106: the paired lead's ONE lead vocabulary at the brand, the same object the Unibox reads serve (lifecycle, won/hot/lost + reason, reachable, conversation, fit, interest, clientStatus, next follow-up). Null when the lead is no Unibox person of the brand (leadStateReason not_in_unibox); absent when nothing paired."
+          },
+          "leadStateReason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "not_in_unibox",
+              null
+            ],
+            "description": "Why leadState is null: not_in_unibox = the lead is not a Unibox person of the brand (crm-service does not tag them professional to it). Absent when nothing paired."
+          },
           "ourClosedDeal": {
             "type": "object",
             "nullable": true,
@@ -8156,6 +8301,27 @@
           "statedByUserId",
           "statedAt"
         ]
+      },
+      "LifecycleRung": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "rank": {
+            "type": "integer"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "rank",
+          "label"
+        ],
+        "description": "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet."
       },
       "CrmTheirStatus": {
         "type": "object",
@@ -13893,26 +14059,6 @@
           "relationshipTags"
         ]
       },
-      "LifecycleRung": {
-        "type": "object",
-        "properties": {
-          "key": {
-            "type": "string"
-          },
-          "rank": {
-            "type": "integer"
-          },
-          "label": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "key",
-          "rank",
-          "label"
-        ],
-        "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
-      },
       "UniboxListRow": {
         "allOf": [
           {
@@ -13982,15 +14128,7 @@
         "type": "object",
         "properties": {
           "lifecycle": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/LifecycleRung"
-              },
-              {
-                "nullable": true,
-                "description": "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet."
-              }
-            ]
+            "$ref": "#/components/schemas/LifecycleRung"
           },
           "won": {
             "type": "boolean",
@@ -14262,7 +14400,6 @@
                 "$ref": "#/components/schemas/LifecycleRung"
               },
               {
-                "nullable": true,
                 "description": "LIFECYCLE: the highest rung ever reached on the absolute ladder; null = none yet."
               }
             ]
@@ -26389,7 +26526,14 @@
                     "lifecycleLadder": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/LifecycleRung"
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/LifecycleRung"
+                          },
+                          {
+                            "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
+                          }
+                        ]
                       }
                     },
                     "rows": {
@@ -26682,7 +26826,14 @@
                     "lifecycleLadder": {
                       "type": "array",
                       "items": {
-                        "$ref": "#/components/schemas/LifecycleRung"
+                        "allOf": [
+                          {
+                            "$ref": "#/components/schemas/LifecycleRung"
+                          },
+                          {
+                            "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
+                          }
+                        ]
                       }
                     },
                     "total": {
@@ -26940,7 +27091,7 @@
                                 "$ref": "#/components/schemas/LifecycleRung"
                               },
                               {
-                                "nullable": true
+                                "description": "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)."
                               }
                             ]
                           },

@@ -80,6 +80,7 @@ import { watchClient, isClientGone } from "../lib/client-abort.js";
 import { matchesForContacts } from "../lib/crm-matching.js";
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
+import { readLeadStatesForLeads } from "../lib/unibox-model.js";
 
 const router = Router();
 
@@ -302,6 +303,8 @@ async function serializePairings(
     getServiceContext(req),
   );
 
+  const leadStates = await readLeadStatesForLeads({ orgId: ctx.orgId, brandId: ctx.brandId }, leads.map((l) => l.leadId));
+
   return rows.map(({ contact, match, lead, judgment, ruling, verdict }) => ({
     crmContact: {
       id: contact.id,
@@ -346,6 +349,10 @@ async function serializePairings(
       ruling,
     },
     ourStanding: lead ? (standings.get(lead.leadId)?.standing ?? null) : null,
+    // LEAD-GENERIC-1106: the ONE lead vocabulary, as on the Unibox reads. Absent when nothing paired.
+    ...(lead
+      ? { leadState: leadStates.get(lead.leadId) ?? null, leadStateReason: leadStates.has(lead.leadId) ? null : ("not_in_unibox" as const) }
+      : {}),
     // The deal on our lead, off the SAME resolution the standing came from — including what their
     // own CRM evidences for a paired lead, so the two sides of this row can finally agree.
     ...(lead ? { ourClosedDeal: standings.get(lead.leadId)?.closedDeal ?? null } : {}),

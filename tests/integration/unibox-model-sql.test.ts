@@ -73,7 +73,7 @@ const { clearRegistry, connectionTag, organizationLink, relation } = await impor
 const { readThread, toSubject } = await import("../../src/lib/relationship-subjects.js");
 const { refreshSubjects } = await import("../../src/lib/relationship-subjects.js");
 const { writeEvidence } = await import("../../src/lib/relationship-judge.js");
-const { refreshUniboxRows, readUniboxPage, readUniboxLead, readUniboxLifecycleCounts, resetLifecycleCatalogueCache } = await import("../../src/lib/unibox-model.js");
+const { refreshUniboxRows, readUniboxPage, readUniboxLead, readUniboxLifecycleCounts, resetLifecycleCatalogueCache, readLeadStatesForLeads } = await import("../../src/lib/unibox-model.js");
 const { resolveUniboxScope } = await import("../../src/lib/unibox-scope.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -287,6 +287,10 @@ describe.skipIf(!hasRealDatabase)("unibox read model", () => {
       expect(counts.byVerdict[v]).toBe(expected.length);
     }
     for (const r of page.rows) expect([r.leadState.won, r.leadState.hot, r.leadState.lost !== null].filter(Boolean).length).toBeLessThanOrEqual(1);
+    // A surface listing leads by id reads the same leadState in one statement; a lead on no row is absent.
+    const byId = await readLeadStatesForLeads(scope, [...anaRow.leadIds, randomUUID()]);
+    expect(byId.size).toBe(anaRow.leadIds.length);
+    expect(byId.get(anaRow.leadIds[0])).toEqual(anaRow.leadState);
     // The next follow-up date is the lead's own (lead_followup_dates), none = null.
     expect(anaRow.leadIds.length).toBeGreaterThan(0);
     expect(anaRow.leadState.nextFollowupAt).toBeNull();
