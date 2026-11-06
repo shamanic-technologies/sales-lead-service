@@ -224,12 +224,19 @@ describe("pullNext find mode (a source unit's own run)", () => {
     expect(insertValues).not.toHaveBeenCalled();
   });
 
-  it("real exhaustion mixed with no_recent_posts = no_recent_posts (a look found nothing to read, so not all walked out)", async () => {
+  it("real exhaustion mixed with no_recent_posts = audience_exhausted (the lists ran out: the upstream cause wins)", async () => {
     serveNext
       .mockResolvedValueOnce({ status: "exhausted", person: null })
       .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "no_recent_posts" })
       .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "pool_exhausted" });
-    await expect(pullNext(findParams(["aud-1", "aud-2", "aud-3"]))).resolves.toEqual({ found: false, reason: "no_recent_posts" });
+    await expect(pullNext(findParams(["aud-1", "aud-2", "aud-3"]))).resolves.toEqual({ found: false, reason: "audience_exhausted" });
+  });
+
+  it("a walked-out audience beside one that cannot be walked = audience_not_serveable (its people are unknown)", async () => {
+    serveNext
+      .mockRejectedValueOnce(new Error("not serveable"))
+      .mockResolvedValueOnce({ status: "exhausted", person: null, reason: "pool_exhausted" });
+    await expect(pullNext(findParams(["aud-1", "aud-2"]))).resolves.toEqual({ found: false, reason: "audience_not_serveable" });
   });
 
   it("no_recent_posts beside an audience that cannot be walked = no_recent_posts", async () => {
