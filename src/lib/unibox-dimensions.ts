@@ -190,6 +190,19 @@ export function lifecycleOf(stepsReached: Iterable<string>, ranks: StepRanks, la
 }
 
 /**
+ * A CLIENT has reached the ladder's TOP rung (LEAD-GENERIC-1106: Won = Lifecycle Paid client, and a lead whose Status is
+ * customer or churned is a client a source stated: a CRM "client" stage, a running subscription, a person's word, a
+ * judged thread). Prod 2026-11-06: 65 of 113 customers stood on a lower rung (35 at Meeting booked) because no payment
+ * row reached the paid step, so "customer" and "not won" were served side by side. The top rung is the catalogue's,
+ * never named here. Pure.
+ */
+export function lifecycleOfClient(lifecycle: LifecycleRung | null, status: UniboxStatus, ladder: readonly LifecycleRung[]): LifecycleRung | null {
+  if (status === "prospect" || ladder.length === 0) return lifecycle;
+  const top = ladder.reduce((a, b) => (b.rank > a.rank ? b : a));
+  return lifecycle !== null && lifecycle.rank >= top.rank ? lifecycle : top;
+}
+
+/**
  * Our timeline labels and crm-service fact types, in features-service's STEP vocabulary. Anything else reached by a
  * person is not a step (an open, a click on another site, a question).
  */

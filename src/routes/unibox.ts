@@ -53,6 +53,8 @@ import { AmbiguousBrandError, readUniboxLeadState } from "../lib/unibox-state.js
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 
+import { LEAD_VERDICTS, type LeadVerdict } from "../lib/lead-state.js";
+
 const router = Router();
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -96,6 +98,7 @@ function filtersOf(req: AuthenticatedRequest, catalogue: LifecycleCatalogue): Un
     conversation: list(req.query.conversation, UNIBOX_CONVERSATION, "conversation"),
     contactability: list(req.query.contactability, UNIBOX_CONTACTABILITY, "contactability"),
     fit: list(req.query.fit, UNIBOX_FIT, "fit"),
+    leadVerdict: list(req.query.leadVerdict, LEAD_VERDICTS, "leadVerdict") as LeadVerdict[] | undefined,
     q: typeof req.query.q === "string" && req.query.q.trim() ? req.query.q.trim() : undefined,
   };
 }
