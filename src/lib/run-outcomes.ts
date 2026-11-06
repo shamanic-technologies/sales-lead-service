@@ -50,7 +50,20 @@ export interface OutcomeItem {
   outcomeKey: string;
   subjectService: string;
   subjectId: string;
+  /** PRODUCED only: who performed it (runs-service v0.47.133, OUTCOME-PERFORMER-1106). */
+  performer?: OutcomePerformer;
 }
+
+/**
+ * WHO performed an occurrence (LEAD-GENERIC-1106, owner 2026-11-06: "la provenance est clé pour les stats, mais doit
+ * être stockée de façon généralisée, par outcome"). Stated on every EXTERNALLY attested occurrence we declare (a fact
+ * recorded on a spend-free recording run carries no script of its own): `script` = one of our scripts (the workflow
+ * whose send first touched the person), else the attester (`crm`, `tracker`) or the client's own team (a person's
+ * statement). runs-service stores it per occurrence; stats read it there, never off a lead-only copy.
+ */
+export type OutcomePerformer =
+  | { kind: "script"; workflowSlug: string; name?: string }
+  | { kind: "client_team" | "crm" | "tracker" | "mailbox" | "organic"; name?: string };
 
 export interface RunOutcomeDeclaration {
   orgId: string;
@@ -130,11 +143,14 @@ export function factOutcomeDeclaration(input: {
   consumedOutcomeKey: string;
   /** When the fact happened (ISO); null = undated fact, declared on time. */
   occurredAt?: string | null;
+  /** Who performed it; null = not stated on this call (a re-date of an occurrence already recorded). */
+  performer: OutcomePerformer | null;
 }): RunOutcomeDeclaration {
+  const produced = leadSubject(input.outcomeKey, input.leadId);
   return {
     orgId: input.orgId,
     runId: input.runId,
-    produced: [leadSubject(input.outcomeKey, input.leadId)],
+    produced: [input.performer ? { ...produced, performer: input.performer } : produced],
     consumed: [leadSubject(input.consumedOutcomeKey, input.leadId)],
     ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
   };
