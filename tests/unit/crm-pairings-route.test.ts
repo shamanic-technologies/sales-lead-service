@@ -59,6 +59,9 @@ vi.mock("../../src/lib/crm-pairing-view.js", () => ({
   resolveStandingsForLeads: (...a: unknown[]) => resolveStandingsForLeads(...a),
 }));
 
+// LEAD-GENERIC-1106: each paired row carries the lead's leadState, read off the Unibox rows in one statement.
+const leadStateOf = vi.fn(async (_scope: unknown, ids: readonly string[]) => new Map(ids.map((id) => [id, { won: false, hot: true, lost: null, leadId: id }])));
+vi.mock("../../src/lib/unibox-model.js", () => ({ readLeadStatesForLeads: (scope: unknown, ids: readonly string[]) => leadStateOf(scope, ids) }));
 vi.mock("../../src/lib/lead-standing-resolver.js", () => ({
   createLeadStandingResolver: () => ({ resolve: async () => new Map() }),
 }));
@@ -262,6 +265,9 @@ describe("GET /orgs/leads/crm-pairings", () => {
     });
     expect(row.pairing.judgment.status).toBe("not_needed");
     expect(fetchPairedLeadFacts).toHaveBeenCalledWith(BRAND, [LEAD]);
+    // LEAD-GENERIC-1106: the paired lead's ONE lead vocabulary rides the row, read once for the page.
+    expect(row.leadState).toMatchObject({ hot: true, leadId: LEAD });
+    expect(row.leadStateReason).toBeNull();
   });
 
   // Stability: the same contact reads the same pairing twice.

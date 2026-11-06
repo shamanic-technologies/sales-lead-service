@@ -6830,6 +6830,38 @@ const CrmPairingRulingSchema = z
   })
   .openapi("CrmPairingRuling");
 
+const LifecycleRungSchema = z
+  .object({ key: z.string(), rank: z.number().int(), label: z.string() })
+  .openapi("LifecycleRung", { description: "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)." });
+
+/** LEAD-GENERIC-1106: the ONE lead vocabulary, served beside the old ones (lead-state.ts). */
+const LeadStateSchema = z
+  .object({
+    lifecycle: LifecycleRungSchema.nullable().openapi({ description: "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet." }),
+    won: z.boolean().openapi({ description: "WON = Lifecycle on the ladder's top rung (Paid client)." }),
+    hot: z.boolean().openapi({ description: "HOT = interested, not won, not lost." }),
+    lost: z
+      .object({
+        reasons: z.array(z.enum(["not_reachable", "wrong_fit", "not_interested"])).min(1).openapi({ description: "Every reason that holds, strongest first." }),
+        reachable: z.enum(["unsubscribed", "bounced", "do_not_contact"]).nullable().openapi({ description: "Why not reachable; null when reachable." }),
+        fit: z.enum(["wrong_person", "not_our_target"]).nullable().openapi({ description: "The wrong fit; null when fit." }),
+      })
+      .nullable()
+      .openapi({ description: "LOST = not won, and not reachable, wrong fit or not interested; null = not lost. won, hot and lost are disjoint; none of them = open." }),
+    reachable: z.enum(["contactable", "unsubscribed", "bounced", "do_not_contact"]).openapi({ description: "REACHABLE: may we write?" }),
+    conversation: z.enum(["waiting_on_us", "waiting_on_them", "no_reply_yet", "closed"]),
+    fit: z.enum(["fit", "wrong_person", "not_our_target"]),
+    fitNote: z.string().nullable(),
+    interest: z.enum(["interested", "not_interested", "unsure", "not_asked"]),
+    clientStatus: z.enum(["prospect", "customer", "churned"]),
+    nextFollowupAt: z.string().nullable().openapi({ description: "The lead's ONE next follow-up date at the brand; null = no date yet (nextFollowupBasis null) or follow-ups stopped (nextFollowupBasis stopped)." }),
+    nextFollowupBasis: z.string().nullable().openapi({ description: "How the date was set (default, send, stated, served, not_yet, stop_recheck, stopped); null = no date row yet." }),
+  })
+  .openapi("LeadState", {
+    description:
+      "LEAD-GENERIC-1106: the ONE lead vocabulary. Replaces standing, buckets, sales-interest stage, the interest ladder and wentCold (still served on their own reads until every consumer moved).",
+  });
+
 const CrmPairingRowSchema = z
   .object({
     crmContact: z.object({
@@ -6922,6 +6954,13 @@ const CrmPairingRowSchema = z
           "Where WE say this person stands, resolved by the same policy every other surface renders (see LeadStanding). Null when nothing paired. " +
           "A paired lead's standing includes what THEIR CRM evidences (source crm), so a deal won there reads customer here.",
       }),
+    leadState: LeadStateSchema.nullable().optional().openapi({
+      description:
+        "LEAD-GENERIC-1106: the paired lead's ONE lead vocabulary at the brand, the same object the Unibox reads serve (lifecycle, won/hot/lost + reason, reachable, conversation, fit, interest, clientStatus, next follow-up). Null when the lead is no Unibox person of the brand (leadStateReason not_in_unibox); absent when nothing paired.",
+    }),
+    leadStateReason: z.enum(["not_in_unibox"]).nullable().optional().openapi({
+      description: "Why leadState is null: not_in_unibox = the lead is not a Unibox person of the brand (crm-service does not tag them professional to it). Absent when nothing paired.",
+    }),
     ourClosedDeal: ClosedDealSchema.nullable().optional().openapi({
       description:
         "The deal on our lead, exactly as the leads list serves it (`closedDeal`): stated by a person, " +
@@ -10011,9 +10050,6 @@ registry.registerPath({
 
 // ── Unibox read model (UNIBOX-SIX-TAGS-1017) ───────────────────────────────────────────────────────────────────
 
-const LifecycleRungSchema = z
-  .object({ key: z.string(), rank: z.number().int(), label: z.string() })
-  .openapi("LifecycleRung", { description: "One rung of features-service's lifecycle ladder (GET /public/catalogue/steps)." });
 
 /** DEALS-LIFECYCLE-1021: the offer / campaign scope of the Unibox reads. */
 const UniboxScopeParams = [
@@ -10100,33 +10136,6 @@ const UniboxRowSchema = z
   })
   .openapi("UniboxRow");
 
-/** LEAD-GENERIC-1106: the ONE lead vocabulary, served beside the old ones (lead-state.ts). */
-const LeadStateSchema = z
-  .object({
-    lifecycle: LifecycleRungSchema.nullable().openapi({ description: "LIFECYCLE: the highest rung of the ONE ladder any outcome of the lead reached (each catalogue step states its rung); null = none yet." }),
-    won: z.boolean().openapi({ description: "WON = Lifecycle on the ladder's top rung (Paid client)." }),
-    hot: z.boolean().openapi({ description: "HOT = interested, not won, not lost." }),
-    lost: z
-      .object({
-        reasons: z.array(z.enum(["not_reachable", "wrong_fit", "not_interested"])).min(1).openapi({ description: "Every reason that holds, strongest first." }),
-        reachable: z.enum(["unsubscribed", "bounced", "do_not_contact"]).nullable().openapi({ description: "Why not reachable; null when reachable." }),
-        fit: z.enum(["wrong_person", "not_our_target"]).nullable().openapi({ description: "The wrong fit; null when fit." }),
-      })
-      .nullable()
-      .openapi({ description: "LOST = not won, and not reachable, wrong fit or not interested; null = not lost. won, hot and lost are disjoint; none of them = open." }),
-    reachable: z.enum(["contactable", "unsubscribed", "bounced", "do_not_contact"]).openapi({ description: "REACHABLE: may we write?" }),
-    conversation: z.enum(["waiting_on_us", "waiting_on_them", "no_reply_yet", "closed"]),
-    fit: z.enum(["fit", "wrong_person", "not_our_target"]),
-    fitNote: z.string().nullable(),
-    interest: z.enum(["interested", "not_interested", "unsure", "not_asked"]),
-    clientStatus: z.enum(["prospect", "customer", "churned"]),
-    nextFollowupAt: z.string().nullable().openapi({ description: "The lead's ONE next follow-up date at the brand; null = no date yet (nextFollowupBasis null) or follow-ups stopped (nextFollowupBasis stopped)." }),
-    nextFollowupBasis: z.string().nullable().openapi({ description: "How the date was set (default, send, stated, served, not_yet, stop_recheck, stopped); null = no date row yet." }),
-  })
-  .openapi("LeadState", {
-    description:
-      "LEAD-GENERIC-1106: the ONE lead vocabulary. Replaces standing, buckets, sales-interest stage, the interest ladder and wentCold (still served on their own reads until every consumer moved).",
-  });
 
 /** DEALS-LIFECYCLE-1021: a LIST row also names the campaigns that reached the person (a Deals card). The card's `lead` stays UniboxRow. */
 const UniboxListRowSchema = UniboxRowSchema.extend({
