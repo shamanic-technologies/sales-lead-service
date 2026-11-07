@@ -1,10 +1,11 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
-import { CRM_POSITIVE_REPLY_STEP } from "./crm-evidence.js";
+import { CRM_POSITIVE_REPLY_STEP, crmFactLedgerOutcome } from "./crm-evidence.js";
 import { errorMessage } from "./db-error.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
 import {
   declareRunOutcomesNow,
   FACT_OUTCOME_KEYS,
@@ -47,8 +48,19 @@ import {
  * with basis `no_evidence`: runs-service then counts it as unknown provenance (never $0, never charged), which is the
  * truth (outreach caused it, the step it went through is not seen here).
  *
- * A fact our outreach did NOT lead to (`caused_by_outreach` false or null: a "theirs", an undated or never-touched
- * person, a reply-read "already a customer") is no occurrence of ours: nothing declared.
+ * EVERY UNIT, WHOEVER MADE IT (LEDGER-DECLARE-1107, owner 2026-11-07: « ON VEUT LE TOTAL ET LES STATS PAR OUTCOME …
+ * INDEPENDAMMENT DES SOURCES »; every figure is read off the ledger). A lead outcome is a STATE reached once per (org,
+ * brand, lead), dated at its FIRST reach, whoever caused it. Its cause is the first reach's (`caused_by_outreach` of the
+ * earliest live ledger row). A Unit our outreach did NOT cause (false or null: a "theirs", an undated or never-touched
+ * person, a reply-read "already a customer") is declared too, CONSUMING NOTHING (none of our cost, the doctrine: another
+ * factory made it) and naming its attester as performer (`crm` + the tool, `tracker`, a person = `client_team`), never
+ * one of our scripts. A reach the brand's CRM states that no ledger row holds yet (the contact is not paired: crm-evidence
+ * only writes paired contacts) is read off the CRM fact copy: a fact type counts as the outcome the CRM sync records it
+ * as on a paired contact (a signup, a meeting, a sale or a payment that stands; a form is a positive reply there, a
+ * session is no ledger row: neither reaches anything here), for the lead holding the fact's address at the brand, and
+ * declared the same way (its cause is unknown here: consumes nothing). A Unit declared as theirs that the cause rule later calls
+ * OURS (the earliest ledger row turns `caused_by_outreach = true`) takes its consumption and our performer on the SAME
+ * occurrence (`upgradeToOurs`, runs-service batch `correctPerformer`); never the other way (the ledger is immutable).
  *
  * DATED ON THE DAY IT HAPPENED (MEETING-DATED-OCCURRENCES-1024, owner 2026-10-24: the cost of a meeting OVER TIME is
  * read on the ledger "as of day D"): each occurrence is declared with `occurredAt` = the fact's own instant
@@ -186,14 +198,29 @@ export async function outcomeRecordingRunFor(orgId: string, brandId: string, out
   return runId;
 }
 
+/** A spend-free recording run holding ONE Unit (a Unit another factory made), created and closed at once. Throws. */
+async function ownRecordingRun(f: { orgId: string; brandId: string }): Promise<string> {
+  const run = await createRun({ orgId: f.orgId, brandId: f.brandId, serviceName: SERVICE_NAME, taskName: OUTCOME_RECORDING_TASK });
+  await updateRun(run.id, "completed", { orgId: f.orgId, brandId: f.brandId });
+  return run.id;
+}
+
 interface PendingFact {
   orgId: string;
   brandId: string;
   leadId: string;
   outcomeKey: FactOutcomeKey;
-  conversionEventId: string;
+  /** The ledger row of the first reach; null = a reach only the CRM fact copy holds (`crmFactId`). */
+  conversionEventId: string | null;
+  crmFactId: string | null;
+  /** Our outreach caused the first reach: the Unit consumes what it came from; else it consumes nothing. */
+  ours: boolean;
   /** Who recorded the fact on the ledger: `manual` (a person), `crm`, `tracker`, ... */
   source: string;
+  /** The CRM tool that stated it (`posthog`, `clerk`, `stripe`...), for a reach read off the CRM copy. */
+  toolName: string | null;
+  /** A CRM reach: every lead row of the same person (any of them already holding the Unit = no second one). */
+  personLeadIds?: string[];
   /** The fact's instant as Postgres prints it (SQL comparisons), and as ISO (runs-service), never after now. */
   at: string | null;
   occurredAt: string | null;
@@ -216,17 +243,16 @@ const OUTCOME_MAP = sql.raw(
 );
 const FACT_EVENTS = [...new Set(Object.values(FACT_EVENTS_OF_OUTCOME).flat())];
 
-/** Our facts not declared yet: the earliest live one per (org, brand, lead, outcome), booked before attended before paid. */
+/** Facts not declared yet: the earliest live one per (org, brand, lead, outcome), booked before attended before paid; its cause is that first reach's. */
 export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_BATCH): Promise<PendingFact[]> {
   const rows = (await db.execute(sql`
     WITH facts AS (
       SELECT DISTINCT ON (ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key)
              ce.org_id, ce.brand_id, ce.matched_lead_id::text AS lead_id, m.outcome_key, m.rank,
-             ce.id::text AS conversion_event_id, ce.source, ce.received_at
+             ce.id::text AS conversion_event_id, ce.source, ce.received_at, (ce.caused_by_outreach IS TRUE) AS ours
       FROM conversion_events ce
       JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
       WHERE ce.event = ANY(${sql.param(FACT_EVENTS)}::text[])
-        AND ce.caused_by_outreach IS TRUE
         AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed' AND ce.matched_lead_id IS NOT NULL
         AND NOT (m.outcome_key = 'website_visit' AND EXISTS (
           SELECT 1 FROM lead_timeline_facts t
@@ -238,9 +264,10 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
           WHERE p.org_id = ce.org_id AND p.brand_id = ce.brand_id AND p.lead_id = ce.matched_lead_id
             AND p.status IN ('delivered', 'queued')))
         ${scope ? sql`AND ce.org_id = ${scope.orgId}` : sql.empty()}
-      ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key, ce.received_at ASC NULLS LAST, ce.id
+      -- The first reach; on a tie the row our outreach caused (one instant, one Unit: ours when any reach at it is).
+      ORDER BY ce.org_id, ce.brand_id, ce.matched_lead_id, m.outcome_key, ce.received_at ASC NULLS LAST, (ce.caused_by_outreach IS TRUE) DESC, ce.id
     )
-    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.source, f.received_at::text AS at,
+    SELECT f.org_id, f.brand_id, f.lead_id, f.outcome_key, f.conversion_event_id, f.source, f.ours, f.received_at::text AS at,
            ${isoAt(sql.raw("f.received_at"))} AS occurred_at
     FROM facts f
     WHERE NOT EXISTS (
@@ -248,17 +275,203 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
       WHERE d.org_id = f.org_id AND d.brand_id = f.brand_id AND d.lead_id = f.lead_id::uuid AND d.outcome_key = f.outcome_key)
     ORDER BY f.rank, f.received_at ASC NULLS LAST
     LIMIT ${limit}
-  `)) as unknown as Array<Record<string, string | null>>;
+  `)) as unknown as Array<Record<string, string | boolean | null>>;
   return rows.map((r) => ({
     orgId: String(r.org_id),
     brandId: String(r.brand_id),
     leadId: String(r.lead_id),
     outcomeKey: r.outcome_key as FactOutcomeKey,
     conversionEventId: String(r.conversion_event_id),
+    crmFactId: null,
+    ours: r.ours === true,
     source: String(r.source),
-    at: r.at ?? null,
-    occurredAt: r.occurred_at ?? null,
+    toolName: null,
+    at: (r.at as string | null) ?? null,
+    occurredAt: (r.occurred_at as string | null) ?? null,
   }));
+}
+
+/**
+ * The outcomes a CRM fact TYPE reaches here: exactly what the CRM evidence sync records it as on a paired contact
+ * (`crmFactLedgerOutcome`: signup -> signup, meetings -> meetings, sale / payment -> sale = paid client), so a reach
+ * the copy alone holds is the SAME Unit the ledger path declares once the contact pairs. A type the sync records as
+ * another step (a form = a positive reply, whose cause is decided there) or not at all reaches nothing here.
+ */
+export const CRM_REACHED_OUTCOMES: ReadonlyArray<{ outcomeKey: FactOutcomeKey; types: readonly string[] }> = FACT_OUTCOME_KEYS.map((k) => ({
+  outcomeKey: k,
+  types: [...new Set(Object.values(STEP_REACHED_EVIDENCE).flatMap((e) => e.crmFactTypes))].filter((t) => {
+    const event = crmFactLedgerOutcome(t);
+    return event !== null && FACT_EVENTS_OF_OUTCOME[k].includes(event) && !FACT_SOURCES_OF_OUTCOME[k];
+  }),
+})).filter((o) => o.types.length > 0);
+
+export interface CrmReachRow {
+  orgId: string;
+  brandId: string;
+  /** The lead the Unit names: the lowest id of `leadIds`. */
+  leadId: string;
+  /** Every lead row of the same person (`personOfLeadRows`: rows a fact of the brand names together). */
+  leadIds: string[];
+  factId: string;
+  type: string;
+  source: string | null;
+  payload: Record<string, unknown> | null;
+  at: string | null;
+  occurredAt: string | null;
+}
+
+/**
+ * The first reach per (org, brand, lead, outcome) among CRM fact rows. A payment reaches `paid_client` only when it
+ * stands (step-reached's rule). Undated reaches come after every dated one. Pure.
+ */
+export function firstCrmReaches(rows: readonly CrmReachRow[]): PendingFact[] {
+  const best = new Map<string, PendingFact>();
+  for (const r of rows) {
+    if (!rowReaches({ emails: [], name: null, phones: [], at: r.occurredAt, type: r.type, payload: r.payload })) continue;
+    for (const o of CRM_REACHED_OUTCOMES) {
+      if (!o.types.includes(r.type)) continue;
+      const key = `${r.orgId}|${r.brandId}|${r.leadId}|${o.outcomeKey}`;
+      const prev = best.get(key);
+      const earlier = !prev || (r.occurredAt !== null && (prev.occurredAt === null || r.occurredAt < prev.occurredAt)) || (r.occurredAt === prev.occurredAt && r.factId < (prev.crmFactId ?? ""));
+      if (!earlier) continue;
+      best.set(key, {
+        personLeadIds: r.leadIds,
+        orgId: r.orgId,
+        brandId: r.brandId,
+        leadId: r.leadId,
+        outcomeKey: o.outcomeKey,
+        conversionEventId: null,
+        crmFactId: r.factId,
+        ours: false,
+        source: "crm",
+        toolName: r.source,
+        at: r.at,
+        occurredAt: r.occurredAt,
+      });
+    }
+  }
+  return [...best.values()];
+}
+
+/**
+ * Lead rows that are ONE person: a fact naming several rows' addresses links them, transitively over every fact of the
+ * brand (a later fact naming one address alone still lands on the same person). Returns each row's person = its linked
+ * rows, sorted (the Unit names the first). Pure.
+ */
+export function personOfLeadRows(factLeadSets: ReadonlyArray<readonly string[]>): (leadId: string) => string[] {
+  const parent = new Map<string, string>();
+  const find = (x: string): string => {
+    let r = x;
+    while (parent.get(r) !== undefined && parent.get(r) !== r) r = parent.get(r)!;
+    parent.set(x, r);
+    return r;
+  };
+  for (const set of factLeadSets) {
+    for (const id of set) if (!parent.has(id)) parent.set(id, id);
+    for (const id of set.slice(1)) {
+      const a = find(set[0]);
+      const b = find(id);
+      if (a !== b) parent.set(a < b ? b : a, a < b ? a : b);
+    }
+  }
+  const members = new Map<string, string[]>();
+  for (const id of parent.keys()) {
+    const root = find(id);
+    members.set(root, [...(members.get(root) ?? []), id]);
+  }
+  for (const list of members.values()) list.sort();
+  return (leadId) => members.get(find(leadId)) ?? [leadId];
+}
+
+/** Every (org, brand) holding a CRM fact: one index probe per brand (skip scan), never a scan of the copy. */
+async function listCrmFactScopes(scope?: { orgId: string }): Promise<Array<{ orgId: string; brandId: string }>> {
+  if (scope) {
+    const rows = (await db.execute(sql`SELECT DISTINCT brand_id FROM crm_facts WHERE org_id = ${scope.orgId}`)) as unknown as Array<{ brand_id: string }>;
+    return rows.map((r) => ({ orgId: scope.orgId, brandId: r.brand_id }));
+  }
+  const rows = (await db.execute(sql`
+    WITH RECURSIVE s AS (
+      (SELECT org_id, brand_id FROM crm_facts ORDER BY org_id, brand_id LIMIT 1)
+      UNION ALL
+      SELECT n.org_id, n.brand_id FROM s CROSS JOIN LATERAL (
+        SELECT f.org_id, f.brand_id FROM crm_facts f
+        WHERE (f.org_id, f.brand_id) > (s.org_id, s.brand_id)
+        ORDER BY f.org_id, f.brand_id LIMIT 1
+      ) n
+    )
+    SELECT org_id, brand_id FROM s
+  `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+  return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
+}
+
+const CRM_REACH_TYPES = [...new Set(CRM_REACHED_OUTCOMES.flatMap((o) => o.types))];
+
+/**
+ * Reaches the brand's CRM states that no declaration holds yet, for the brand's lead holding the fact's address. One
+ * fact = one person: lead rows a fact names together are ONE person (linked over every fact of the brand), the Unit
+ * names the lowest lead id, and none is declared when any of that person's rows already holds it or holds a ledger row
+ * of the outcome (live = the ledger path's; withdrawn = never brought back). A lead marked not a real person is left out (as every lead read).
+ * Ledger rows are declared first (a paired contact's reach carries its cause there), so this path only adds what the
+ * ledger does not hold.
+ */
+export async function loadPendingCrmReaches(scope?: { orgId: string }): Promise<PendingFact[]> {
+  const pending: PendingFact[] = [];
+  for (const s of await listCrmFactScopes(scope)) {
+    const rows = (await db.execute(sql`
+      WITH facts AS (
+        SELECT f.fact_id, f.type, f.source, f.payload, f.occurred_at, lower(trim(e)) AS email
+        FROM crm_facts f, unnest(f.emails) AS e
+        WHERE f.org_id = ${s.orgId} AND f.brand_id = ${s.brandId}
+          AND f.type = ANY(${sql.param(CRM_REACH_TYPES)}::text[])
+          AND trim(e) <> ''
+          AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.type = 'withdrawn' AND w.withdrawn_of = f.fact_id)
+      ), brand_leads AS (
+        SELECT DISTINCT lower(cm.value) AS email, lc.lead_id
+        FROM leads_campaigns lc
+        JOIN lead_contact_methods cm ON cm.lead_id = lc.lead_id AND cm.channel = 'email'
+        WHERE lc.org_id = ${s.orgId} AND ${s.brandId} = ANY(lc.brand_ids)
+          AND NOT EXISTS (SELECT 1 FROM not_a_person_marks npm WHERE npm.org_id = lc.org_id AND npm.lead_id = lc.lead_id AND npm.withdrawn_at IS NULL)
+      ), matched AS (
+        SELECT f.fact_id, f.type, f.source, f.payload, f.occurred_at, array_agg(DISTINCT bl.lead_id) AS lead_ids
+        FROM facts f JOIN brand_leads bl ON bl.email = f.email
+        GROUP BY f.fact_id, f.type, f.source, f.payload, f.occurred_at
+      )
+      SELECT m.fact_id, m.type, m.source, m.payload, m.occurred_at::text AS at, ${isoAt(sql.raw("m.occurred_at"))} AS occurred_at,
+             m.lead_ids::text[] AS lead_ids
+      FROM matched m
+    `)) as unknown as Array<{ fact_id: string; type: string; source: string | null; payload: Record<string, unknown> | null; at: string | null; occurred_at: string | null; lead_ids: string[] }>;
+    const person = personOfLeadRows(rows.map((r) => r.lead_ids));
+    const reach: CrmReachRow[] = rows.map((r) => {
+      const leadIds = person(r.lead_ids[0]);
+      return { orgId: s.orgId, brandId: s.brandId, leadId: leadIds[0], leadIds, factId: r.fact_id, type: r.type, source: r.source, payload: r.payload, at: r.at, occurredAt: r.occurred_at };
+    });
+    const firsts = firstCrmReaches(reach);
+    if (firsts.length === 0) continue;
+    const personIds = [...new Set(firsts.flatMap((f) => f.personLeadIds ?? [f.leadId]))];
+    const declared = (await db.execute(sql`
+      SELECT lead_id::text AS lead_id, outcome_key FROM outcome_fact_declarations
+      WHERE org_id = ${s.orgId} AND brand_id = ${s.brandId} AND lead_id = ANY(${sql.param(personIds)}::uuid[])
+    `)) as unknown as Array<{ lead_id: string; outcome_key: string }>;
+    // The ledger row is the record once one exists: a live one is declared by the ledger path, a WITHDRAWN one (a
+    // person's word, a staff test, a pairing rejected: FAKE-OUTCOMES-1022) is never brought back from the CRM copy.
+    const ledgerRows = (await db.execute(sql`
+      SELECT ce.matched_lead_id::text AS lead_id, m.outcome_key
+      FROM conversion_events ce
+      JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
+      WHERE ce.org_id = ${s.orgId} AND ce.brand_id = ${s.brandId} AND ce.matched_lead_id = ANY(${sql.param(personIds)}::uuid[])
+        AND (ce.withdrawn_at IS NOT NULL OR ce.attribution_status = 'attributed')
+    `)) as unknown as Array<{ lead_id: string; outcome_key: string }>;
+    // A person holding the Unit or a ledger row on any of their rows (or taken earlier in this pass) gets no second one.
+    const held = new Set([...declared, ...ledgerRows].map((d) => `${d.lead_id}|${d.outcome_key}`));
+    for (const f of firsts.sort((a, b) => (a.occurredAt ?? "~").localeCompare(b.occurredAt ?? "~"))) {
+      const rowsOfPerson = f.personLeadIds ?? [f.leadId];
+      if (rowsOfPerson.some((id) => held.has(`${id}|${f.outcomeKey}`))) continue;
+      for (const id of rowsOfPerson) held.add(`${id}|${f.outcomeKey}`);
+      pending.push(f);
+    }
+  }
+  const rank = (k: FactOutcomeKey) => FACT_OUTCOME_KEYS.indexOf(k);
+  return pending.sort((a, b) => rank(a.outcomeKey) - rank(b.outcomeKey) || (a.occurredAt ?? "~").localeCompare(b.occurredAt ?? "~"));
 }
 
 /** What the person reached before the fact at the brand (undated fact = ever), and what we already declared. */
@@ -310,9 +523,9 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
  * `timeline-journeys` uses for `emailSends`). No such send readable = the fact's ATTESTER: `crm` / `tracker` (named by
  * the source), a person's statement = the client's team. Pure.
  */
-export function performerOf(firstTouchWorkflowSlug: string | null, source: string): OutcomePerformer {
+export function performerOf(firstTouchWorkflowSlug: string | null, source: string, toolName: string | null = null): OutcomePerformer {
   if (firstTouchWorkflowSlug) return { kind: "script", workflowSlug: firstTouchWorkflowSlug };
-  if (source === "crm") return { kind: "crm" };
+  if (source === "crm") return toolName && toolName.trim() ? { kind: "crm", name: toolName.trim().slice(0, 128) } : { kind: "crm" };
   if (source === "tracker") return { kind: "tracker" };
   return { kind: "client_team", name: source };
 }
@@ -346,16 +559,22 @@ export interface OutcomeFactSweepSummary {
   queued: number;
   refused: number;
   failed: number;
+  /** Of the declared: Units another factory made (consuming nothing). */
+  theirs: number;
 }
 
 async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Promise<void> {
   let runId: string;
-  let consumed: { outcomeKey: string; basis: ConsumedBasis };
+  let consumed: { outcomeKey: string; basis: ConsumedBasis } | null;
   let performer: OutcomePerformer;
   try {
-    runId = await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date());
-    consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
-    performer = performerOf(await loadFirstTouchWorkflow(f), f.source);
+    // Ours on the brand's recording run of the day for the outcome; a Unit another factory made on a run of ITS OWN:
+    // runs-service splits a run's consumptions over every Unit it produced, so a theirs Unit on our run would carry part
+    // of our cost (and a later turn to ours adds the consumption to that Unit alone).
+    runId = f.ours ? await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date()) : await ownRecordingRun(f);
+    // A Unit another factory made consumes nothing and is never one of our scripts' (LEDGER-DECLARE-1107).
+    consumed = f.ours ? consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f)) : null;
+    performer = f.ours ? performerOf(await loadFirstTouchWorkflow(f), f.source) : performerOf(null, f.source, f.toolName);
   } catch (err) {
     summary.failed++;
     console.error(`[lead-service] outcome fact NOT declared (asked again next pass): org=${f.orgId} brand=${f.brandId} lead=${f.leadId} ${f.outcomeKey}: ${errorMessage(err)}`);
@@ -363,14 +582,16 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   }
   // Claim first: once per (org, brand, lead, outcome), ever.
   const claimed = (await db.execute(sql`
-    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id, consumed_outcome_key, consumed_basis, dated)
-    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${runId}::uuid, ${consumed.outcomeKey}, ${consumed.basis}, true)
+    INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, crm_fact_id, run_id,
+      consumed_outcome_key, consumed_basis, dated, caused_by_outreach, occurred_at)
+    VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${f.crmFactId}, ${runId}::uuid,
+      ${consumed?.outcomeKey ?? null}, ${consumed?.basis ?? null}, true, ${f.ours}, ${f.occurredAt}::timestamptz)
     ON CONFLICT DO NOTHING
     RETURNING 1 AS ok
   `)) as unknown as unknown[];
   if (claimed.length === 0) return;
   const kind = await declareRunOutcomesNow(
-    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, occurredAt: f.occurredAt, performer }),
+    factOutcomeDeclaration({ orgId: f.orgId, runId, leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed?.outcomeKey ?? null, occurredAt: f.occurredAt, performer }),
   );
   if (kind === "lost") {
     await db.execute(sql`
@@ -383,6 +604,79 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   if (kind === "delivered") summary.delivered++;
   else if (kind === "retry") summary.queued++;
   else summary.refused++;
+  if (!f.ours) summary.theirs++;
+}
+
+export interface UpgradeSummary {
+  read: number;
+  upgraded: number;
+  refused: number;
+}
+
+/**
+ * A Unit declared as THEIRS whose first reach the cause rule now calls OURS (the earliest live ledger row of the lead and
+ * outcome carries `caused_by_outreach = true`: outcome-cause.ts decides a new row a few minutes after it lands, a CRM
+ * reach becomes a ledger row once its contact pairs): the SAME occurrence takes its consumption and our performer
+ * (runs-service batch door, `correctPerformer`: the attester stated first is replaced, its history kept there). The
+ * reverse never happens: the ledger is immutable. A refusal is kept (`cause_error`), never resent; 5xx stops the pass.
+ */
+export async function upgradeToOurs(scope?: { orgId: string }, post: RedatePost = postRedate): Promise<UpgradeSummary> {
+  const rows = (await db.execute(sql`
+    SELECT d.org_id, d.brand_id, d.lead_id::text AS lead_id, d.outcome_key, d.run_id::text AS run_id,
+           ${isoAt(sql.raw("d.occurred_at"))} AS occurred_at, d.occurred_at::text AS at, first.source
+    FROM outcome_fact_declarations d
+    CROSS JOIN LATERAL (
+      SELECT ce.source, (ce.caused_by_outreach IS TRUE) AS ours
+      FROM conversion_events ce
+      JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
+      WHERE ce.org_id = d.org_id AND ce.brand_id = d.brand_id AND ce.matched_lead_id = d.lead_id AND m.outcome_key = d.outcome_key
+        AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed'
+      ORDER BY ce.received_at ASC NULLS LAST, (ce.caused_by_outreach IS TRUE) DESC, ce.id
+      LIMIT 1
+    ) first
+    WHERE d.caused_by_outreach = false AND d.cause_error IS NULL AND first.ours
+      ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
+    ORDER BY d.created_at
+    LIMIT ${SWEEP_BATCH}
+  `)) as unknown as Array<Record<string, string | null>>;
+  const summary: UpgradeSummary = { read: rows.length, upgraded: 0, refused: 0 };
+  for (const r of rows) {
+    const f: PendingFact = {
+      orgId: String(r.org_id),
+      brandId: String(r.brand_id),
+      leadId: String(r.lead_id),
+      outcomeKey: r.outcome_key as FactOutcomeKey,
+      conversionEventId: null,
+      crmFactId: null,
+      ours: true,
+      source: String(r.source),
+      toolName: null,
+      at: r.at,
+      occurredAt: r.occurred_at,
+    };
+    const key = sql`org_id = ${f.orgId} AND brand_id = ${f.brandId} AND lead_id = ${f.leadId}::uuid AND outcome_key = ${f.outcomeKey}`;
+    const consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
+    const performer = performerOf(await loadFirstTouchWorkflow(f), f.source);
+    const d = factOutcomeDeclaration({ orgId: f.orgId, runId: String(r.run_id), leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, performer });
+    const res = await post({
+      runs: [{ runId: d.runId, ...(f.occurredAt ? { occurredAt: f.occurredAt } : {}), correctPerformer: true, produced: d.produced, consumed: d.consumed }],
+    });
+    if (res.status === 200 || res.status === 201) {
+      await db.execute(sql`
+        UPDATE outcome_fact_declarations
+        SET caused_by_outreach = true, consumed_outcome_key = ${consumed.outcomeKey}, consumed_basis = ${consumed.basis}, performer = ${JSON.stringify(performer)}::jsonb
+        WHERE ${key}
+      `);
+      summary.upgraded++;
+      continue;
+    }
+    if (res.status >= 500 || res.status === 401 || res.status === 403) throw new Error(`runs-service cause upgrade ${res.status} ${res.text.slice(0, 300)}`);
+    await db.execute(sql`UPDATE outcome_fact_declarations SET cause_error = ${`${res.status} ${res.text.slice(0, 500)}`} WHERE ${key}`);
+    summary.refused++;
+    console.error(`[lead-service] outcome Unit NOT turned ours (refused, kept, never resent): org=${f.orgId} run=${r.run_id} lead=${f.leadId} ${f.outcomeKey}: ${res.status} ${res.text.slice(0, 300)}`);
+  }
+  if (rows.length > 0) console.log(`[lead-service] outcome cause upgrade pass ${JSON.stringify(summary)}`);
+  return summary;
 }
 
 export interface RedateSummary {
@@ -437,7 +731,7 @@ export async function redateUndatedDeclarations(scope?: { orgId: string }, post:
       runId: String(r.run_id),
       leadId: String(r.lead_id),
       outcomeKey: r.outcome_key as FactOutcomeKey,
-      consumedOutcomeKey: String(r.consumed_outcome_key),
+      consumedOutcomeKey: r.consumed_outcome_key ?? null,
       performer: null,
     });
     const res = await post({ runs: [{ runId: d.runId, occurredAt: r.occurred_at, redate: true, produced: d.produced, consumed: d.consumed }] });
@@ -475,23 +769,27 @@ export interface PerformerSummary {
 export async function statePastPerformers(scope?: { orgId: string }, post: RedatePost = postRedate): Promise<PerformerSummary> {
   const rows = (await db.execute(sql`
     SELECT d.org_id, d.brand_id, d.lead_id::text AS lead_id, d.outcome_key, d.run_id::text AS run_id, d.consumed_outcome_key,
-           coalesce(ce.source, 'manual') AS source
+           CASE WHEN d.crm_fact_id IS NOT NULL THEN 'crm' ELSE coalesce(ce.source, 'manual') END AS source,
+           cf.source AS tool_name, d.caused_by_outreach
     FROM outcome_fact_declarations d
     LEFT JOIN conversion_events ce ON ce.id = d.conversion_event_id
+    LEFT JOIN crm_facts cf ON cf.fact_id = d.crm_fact_id
     WHERE d.performer IS NULL AND d.performer_error IS NULL ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
     ORDER BY d.created_at
     LIMIT ${SWEEP_BATCH}
-  `)) as unknown as Array<Record<string, string>>;
+  `)) as unknown as Array<Record<string, string> & { tool_name: string | null; caused_by_outreach: boolean }>;
   const summary: PerformerSummary = { read: rows.length, stated: 0, refused: 0 };
   for (const r of rows) {
     const key = sql`org_id = ${r.org_id} AND brand_id = ${r.brand_id} AND lead_id = ${r.lead_id}::uuid AND outcome_key = ${r.outcome_key}`;
-    const performer = performerOf(await loadFirstTouchWorkflow({ orgId: r.org_id, brandId: r.brand_id, leadId: r.lead_id }), r.source);
+    const performer = r.caused_by_outreach
+      ? performerOf(await loadFirstTouchWorkflow({ orgId: r.org_id, brandId: r.brand_id, leadId: r.lead_id }), r.source)
+      : performerOf(null, r.source, r.tool_name ?? null);
     const d = factOutcomeDeclaration({
       orgId: r.org_id,
       runId: r.run_id,
       leadId: r.lead_id,
       outcomeKey: r.outcome_key as FactOutcomeKey,
-      consumedOutcomeKey: r.consumed_outcome_key,
+      consumedOutcomeKey: r.consumed_outcome_key ?? null,
       performer,
     });
     const res = await post({ runs: [{ runId: d.runId, produced: d.produced }] });
@@ -520,12 +818,20 @@ let inFlight: Promise<OutcomeFactSweepSummary> | null = null;
 export function sweepOutcomeFactDeclarations(scope?: { orgId: string }): Promise<OutcomeFactSweepSummary> {
   if (inFlight) return inFlight;
   inFlight = (async () => {
+    // Ledger rows first (a paired contact's reach carries its cause there), then what only the CRM copy holds.
     const facts = await loadPendingFacts(scope);
-    const summary: OutcomeFactSweepSummary = { read: facts.length, delivered: 0, queued: 0, refused: 0, failed: 0 };
+    const summary: OutcomeFactSweepSummary = { read: facts.length, delivered: 0, queued: 0, refused: 0, failed: 0, theirs: 0 };
     for (const f of facts) await declareOne(f, summary);
+    const crmReaches = await loadPendingCrmReaches(scope).catch((err) => {
+      console.error("[lead-service] outcome fact CRM reach read failed (asked again next pass):", err);
+      return [] as PendingFact[];
+    });
+    summary.read += crmReaches.length;
+    for (const f of crmReaches) await declareOne(f, summary);
     if (facts.length > 0) console.log(`[lead-service] outcome fact declarations pass ${JSON.stringify(summary)}`);
     await redateUndatedDeclarations(scope).catch((err) => console.error("[lead-service] outcome fact re-date pass failed:", err));
     await statePastPerformers(scope).catch((err) => console.error("[lead-service] outcome performer pass failed:", err));
+    await upgradeToOurs(scope).catch((err) => console.error("[lead-service] outcome cause upgrade pass failed:", err));
     return summary;
   })().finally(() => {
     inFlight = null;

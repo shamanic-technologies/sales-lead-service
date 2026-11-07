@@ -140,7 +140,8 @@ export function factOutcomeDeclaration(input: {
   runId: string;
   leadId: string;
   outcomeKey: FactOutcomeKey;
-  consumedOutcomeKey: string;
+  /** The outcome it came from; null = consumes nothing (a Unit another factory made: none of our cost, LEDGER-DECLARE-1107). */
+  consumedOutcomeKey: string | null;
   /** When the fact happened (ISO); null = undated fact, declared on time. */
   occurredAt?: string | null;
   /** Who performed it; null = not stated on this call (a re-date of an occurrence already recorded). */
@@ -151,7 +152,7 @@ export function factOutcomeDeclaration(input: {
     orgId: input.orgId,
     runId: input.runId,
     produced: [input.performer ? { ...produced, performer: input.performer } : produced],
-    consumed: [leadSubject(input.consumedOutcomeKey, input.leadId)],
+    consumed: input.consumedOutcomeKey ? [leadSubject(input.consumedOutcomeKey, input.leadId)] : [],
     ...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
   };
 }

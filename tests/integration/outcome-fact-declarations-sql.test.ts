@@ -5,7 +5,8 @@
  *
  *   - ours (caused_by_outreach = true) -> meeting_booked / meeting_attended / paid_client, subject = the lead,
  *     each consuming the outcome it came from (positive reply -> booked -> attended -> paid).
- *   - theirs (false), unasked (null) and withdrawn facts -> nothing.
+ *   - theirs (false) and unasked (null) -> ONE Unit too, consuming nothing, performer = the attester (LEDGER-DECLARE-1107);
+ *     withdrawn facts -> nothing; a reach only the CRM copy holds -> one Unit per lead and outcome (a lead paying twice = 1).
  *   - a second pass declares nothing twice; one recording run per (org, brand, day, outcome key).
  * Every pass is scoped to this file's org: the suite's files share one database.
  */
@@ -15,7 +16,7 @@ import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
 const { leads, conversionEvents } = await import("../../src/db/schema.js");
-const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers } = await import("../../src/lib/outcome-fact-declarations.js");
+const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers, upgradeToOurs } = await import("../../src/lib/outcome-fact-declarations.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -88,6 +89,8 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await db.execute(sql`DELETE FROM outcome_fact_declarations WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM outcome_recording_runs WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM conversion_events WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM crm_facts WHERE org_id = ${orgId}`);
+    await db.execute(sql`DELETE FROM lead_contact_methods WHERE lead_id = ANY(${sql.param(created)}::uuid[])`);
     await db.execute(sql`DELETE FROM lead_timeline_facts WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM leads_campaigns WHERE org_id = ${orgId}`);
     for (const id of created) await db.execute(sql`DELETE FROM leads WHERE id = ${id}::uuid`);
@@ -121,7 +124,7 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await fact(visitor, "sale", "2026-10-04T10:00:00Z");
 
     const first = await sweepOutcomeFactDeclarations({ orgId });
-    expect(first).toMatchObject({ read: 5, delivered: 5, queued: 0, refused: 0, failed: 0 });
+    expect(first).toMatchObject({ read: 7, delivered: 7, queued: 0, refused: 0, failed: 0, theirs: 2 });
 
     const lead = (s: string) => ({ subjectService: "lead-service", subjectId: s });
     // WHO performed it (LEAD-GENERIC-1106): our script when its send first touched them, else the fact's attester.
@@ -140,17 +143,30 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     ]);
     // runs-service takes a past instant only from the run's own service.
     expect(new Set(declared.map((d) => d.serviceName))).toEqual(new Set(["lead-service"]));
-    for (const id of [theirs, unasked, withdrawn]) expect(byLead(id)).toEqual([]);
+    // A Unit our outreach did not cause is still ONE Unit of the brand's total, consuming nothing (none of our cost),
+    // performed by its attester, never one of our scripts (LEDGER-DECLARE-1107).
+    expect(byLead(theirs)).toEqual([
+      { produced: [{ outcomeKey: "meeting_booked", ...lead(theirs), performer: { kind: "crm" } }], consumed: [], occurredAt: "2026-10-02T10:00:00.000Z" },
+    ]);
+    expect(byLead(unasked)).toEqual([
+      { produced: [{ outcomeKey: "paid_client", ...lead(unasked), performer: { kind: "crm" } }], consumed: [], occurredAt: "2026-10-02T10:00:00.000Z" },
+    ]);
+    expect(byLead(withdrawn)).toEqual([]);
 
     // A day with a booked meeting, an attended meeting and a paid client opens THREE recording runs, one per outcome
     // key: runs-service splits a run's consumptions over what that run produced, so a shared run would make
     // `meeting_attended` consume itself (COST-ACCOUNTING-1023-LEAD-FIX). Every declaration under the org.
     // One run per (fact's UTC day, outcome key): the two sales of 10-04 and 10-09 sit on two runs.
-    expect(runsCreated).toHaveLength(5);
+    // A Unit another factory made sits on a run of its own (2 more): a shared run would split our consumptions onto it.
+    expect(runsCreated).toHaveLength(7);
+    for (const id of [theirs, unasked]) {
+      const run = declared.find((d) => d.body.produced[0].subjectId === id)!.runId;
+      expect(declared.filter((d) => d.runId === run)).toHaveLength(1);
+    }
     expect(new Set(declared.map((d) => d.runId))).toEqual(new Set(runsCreated));
     const keysByRun = new Map<string, Set<string>>();
     for (const d of declared) for (const p of d.body.produced) keysByRun.set(d.runId, (keysByRun.get(d.runId) ?? new Set()).add(p.outcomeKey));
-    expect([...keysByRun.values()].map((k) => [...k].sort()).sort()).toEqual([["meeting_attended"], ["meeting_booked"], ["paid_client"], ["paid_client"], ["website_visit"]]);
+    expect([...keysByRun.values()].map((k) => [...k].sort()).sort()).toEqual([["meeting_attended"], ["meeting_booked"], ["meeting_booked"], ["paid_client"], ["paid_client"], ["paid_client"], ["website_visit"]]);
     const days = (await db.execute(sql`
       SELECT day::text AS day, outcome_key FROM outcome_recording_runs WHERE org_id = ${orgId} ORDER BY day, outcome_key
     `)) as unknown as Array<{ day: string; outcome_key: string }>;
@@ -171,7 +187,7 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
 
     const again = await sweepOutcomeFactDeclarations({ orgId });
     expect(again.read).toBe(0);
-    expect(declared).toHaveLength(5);
+    expect(declared).toHaveLength(7);
   });
 
   it("LEDGER-HISTORY-1024: a signup, a direct purchase and its paid client are declared; a visit our tracker measured is not", async () => {
@@ -190,8 +206,8 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     await fact(theirSignup, "signup", "2026-09-01T09:00:00Z", { causedByOutreach: false });
 
     const pass = await sweepOutcomeFactDeclarations({ orgId });
-    expect(pass).toMatchObject({ read: 4, delivered: 4, failed: 0 });
-    const mine = declared.slice(before);
+    expect(pass).toMatchObject({ read: 5, delivered: 5, failed: 0, theirs: 1 });
+    const mine = declared.slice(before).filter((d) => d.body.produced[0].subjectId === buyer);
     const subject = { subjectService: "lead-service", subjectId: buyer };
     expect(mine.map((d) => d.body)).toEqual([
       { produced: [{ outcomeKey: "website_visit", ...subject, performer: { kind: "client_team", name: "manual" } }], consumed: [{ outcomeKey: "message_sent", ...subject }], occurredAt: "2026-09-01T08:00:00.000Z" },
@@ -201,6 +217,9 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     ]);
     // One recording run per outcome key, never two keys on one run.
     expect(new Set(mine.map((d) => d.runId)).size).toBe(4);
+    expect(declared.slice(before).filter((d) => d.body.produced[0].subjectId === theirSignup).map((d) => d.body)).toEqual([
+      { produced: [{ outcomeKey: "signup", subjectService: "lead-service", subjectId: theirSignup, performer: { kind: "crm" } }], consumed: [], occurredAt: "2026-09-01T09:00:00.000Z" },
+    ]);
     await db.execute(sql`DELETE FROM lead_timeline_facts WHERE org_id = ${orgId}`);
   });
 
@@ -287,5 +306,106 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     expect(rows.find((r) => r.lead_id === refusedLead)?.performer_error).toMatch(/^409 /);
     // Stated once, refused once: the next pass asks nothing.
     expect((await statePastPerformers({ orgId }, post)).read).toBe(0);
+  });
+  it("LEDGER-DECLARE-1107: a signup and a paid client only the CRM copy holds are ONE Unit each per lead, at the first reach", async () => {
+    let seq = BigInt(Date.now()) * 1000n + BigInt(Math.floor(Math.random() * 1000));
+    const crmFact = async (email: string | string[], type: string, at: string, source: string, payload: Record<string, unknown> = {}) => {
+      const emails = Array.isArray(email) ? email : [email];
+      const id = `itest-ofd-${randomUUID()}`;
+      seq += 1n;
+      await db.execute(sql`
+        INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+        VALUES (${id}, ${seq.toString()}::bigint, ${orgId}, ${brandId}, ${`pk-${emails[0]}`}, ${sql.param(emails)}::text[], ARRAY[]::text[], ${type},
+                ${at}::timestamptz, 'occurred_at', ${source}, ${id}, ${JSON.stringify(payload)}::jsonb, '{}'::jsonb)
+      `);
+      return id;
+    };
+    const leadOfBrand = async (email: string) => {
+      const id = await newLead();
+      await db.execute(sql`
+        INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status)
+        VALUES (${id}::uuid, ${`signups:${brandId}`}, ${orgId}, ARRAY[${brandId}]::text[], 'served')
+      `);
+      await db.execute(sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${id}::uuid, 'email', ${email}, 'itest')`);
+      return id;
+    };
+    const tag = randomUUID().slice(0, 8);
+    const payer = await leadOfBrand(`payer-${tag}@example.com`);
+    await crmFact(`Payer-${tag}@Example.com`, "signup", "2026-08-01T09:00:00Z", "clerk");
+    await crmFact(`payer-${tag}@example.com`, "signup", "2026-08-03T09:00:00Z", "posthog"); // a second signup fact: one Unit
+    await crmFact(`payer-${tag}@example.com`, "payment", "2026-08-02T09:00:00Z", "stripe", { status: "failed", amountMinor: 9900 }); // refused: no reach
+    await crmFact(`payer-${tag}@example.com`, "payment", "2026-08-05T09:00:00Z", "stripe", { status: "succeeded", amountMinor: 9900 });
+    await crmFact(`payer-${tag}@example.com`, "payment", "2026-09-05T09:00:00Z", "stripe", { status: "succeeded", amountMinor: 9900 }); // paid twice: one Unit
+    const refunded = await leadOfBrand(`refunded-${tag}@example.com`);
+    await crmFact(`refunded-${tag}@example.com`, "payment", "2026-08-05T09:00:00Z", "stripe", { status: "succeeded", amountMinor: 9900, amountRefunded: 9900 });
+    await crmFact(`stranger-${tag}@example.com`, "signup", "2026-08-01T09:00:00Z", "clerk"); // not a lead of the brand: nobody to name
+    // One person, an address per lead row: ONE Unit, on the lowest lead id.
+    const twoA = await leadOfBrand(`two-a-${tag}@example.com`);
+    const twoB = await leadOfBrand(`two-b-${tag}@example.com`);
+    await crmFact([`two-b-${tag}@example.com`, `two-a-${tag}@example.com`], "signup", "2026-08-01T10:00:00Z", "clerk");
+    await crmFact(`two-b-${tag}@example.com`, "signup", "2026-08-02T10:00:00Z", "posthog");
+    const [low] = [twoA, twoB].sort();
+    // A ledger row a person WITHDREW (a staff test, a wrong attribution) is never brought back from the CRM copy.
+    const unsaid = await leadOfBrand(`unsaid-${tag}@example.com`);
+    await fact(unsaid, "signup", "2026-08-01T09:00:00Z", { withdrawnAt: new Date(), causedByOutreach: false });
+    await crmFact(`unsaid-${tag}@example.com`, "signup", "2026-08-01T09:00:00Z", "clerk");
+    const before = declared.length;
+
+    // (An earlier case's hand-stated visit became declarable once its timeline fact was deleted: not this case's subject.)
+    const pass = await sweepOutcomeFactDeclarations({ orgId });
+    expect(pass).toMatchObject({ failed: 0, theirs: 3 });
+    const subject = { subjectService: "lead-service", subjectId: payer };
+    const mine = () => declared.slice(before).filter((d) => [payer, refunded, unsaid].includes(d.body.produced[0].subjectId));
+    expect(mine().map((d) => d.body)).toEqual([
+      { produced: [{ outcomeKey: "signup", ...subject, performer: { kind: "crm", name: "clerk" } }], consumed: [], occurredAt: "2026-08-01T09:00:00.000Z" },
+      { produced: [{ outcomeKey: "paid_client", ...subject, performer: { kind: "crm", name: "stripe" } }], consumed: [], occurredAt: "2026-08-05T09:00:00.000Z" },
+    ]);
+    expect(mine().some((d) => d.body.produced[0].subjectId === refunded)).toBe(false);
+    expect(declared.slice(before).filter((d) => [twoA, twoB].includes(d.body.produced[0].subjectId)).map((d) => [d.body.produced[0].subjectId, d.body.occurredAt])).toEqual([
+      [low, "2026-08-01T10:00:00.000Z"],
+    ]);
+
+    // A later payment, a ledger row of the same reach (the contact paired): never a second Unit.
+    await crmFact(`payer-${tag}@example.com`, "payment", "2026-10-05T09:00:00Z", "stripe", { status: "succeeded", amountMinor: 9900 });
+    await fact(payer, "sale", "2026-08-05T09:00:00Z", { causedByOutreach: false });
+    expect((await sweepOutcomeFactDeclarations({ orgId })).read).toBe(0);
+    expect(mine()).toHaveLength(2);
+    // The second signup naming one address alone is still that person: never a second Unit on another pass.
+    expect(declared.slice(before).filter((d) => [twoA, twoB].includes(d.body.produced[0].subjectId))).toHaveLength(1);
+  });
+
+  it("LEDGER-DECLARE-1107: a Unit declared as theirs that the cause rule turns ours takes its consumption on the SAME occurrence, once", async () => {
+    const lead = await newLead();
+    await fact(lead, "signup", "2026-07-01T09:00:00Z", { causedByOutreach: null });
+    const before = declared.length;
+    await sweepOutcomeFactDeclarations({ orgId });
+    const first = declared.slice(before).find((d) => d.body.produced[0].subjectId === lead)!;
+    expect(first.body.consumed).toEqual([]);
+
+    await db.execute(sql`UPDATE conversion_events SET caused_by_outreach = true WHERE matched_lead_id = ${lead}::uuid`);
+    const posted: unknown[] = [];
+    const post = async (body: unknown) => {
+      posted.push(body);
+      return { status: 201, text: JSON.stringify({ recordedCount: 1, performerCorrectedCount: 1 }) };
+    };
+    // Other cases' theirs Units stay theirs (their facts are not ours): only this lead turns.
+    expect(await upgradeToOurs({ orgId }, post)).toEqual({ read: 1, upgraded: 1, refused: 0 });
+    const subject = { subjectService: "lead-service", subjectId: lead };
+    expect(posted).toEqual([
+      {
+        runs: [
+          {
+            runId: first.runId,
+            occurredAt: "2026-07-01T09:00:00.000Z",
+            correctPerformer: true,
+            produced: [{ outcomeKey: "signup", ...subject, performer: { kind: "crm" } }],
+            consumed: [{ outcomeKey: "message_sent", ...subject }],
+          },
+        ],
+      },
+    ]);
+    expect((await upgradeToOurs({ orgId }, post)).read).toBe(0);
+    // Never a second Unit.
+    expect((await sweepOutcomeFactDeclarations({ orgId })).read).toBe(0);
   });
 });

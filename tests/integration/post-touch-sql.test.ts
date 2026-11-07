@@ -272,7 +272,8 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
     const skips = (await db.execute(sql`SELECT reason, cardinality(lead_ids) AS n FROM post_touch_skips WHERE org_id = ${orgId}`)) as unknown as Array<{ reason: string; n: number }>;
     expect(skips).toEqual([{ reason: "ambiguous_lead", n: 2 }]);
 
-    // A refused touch is no touch: none of these signups is ours, nothing declared for them.
+    // A refused touch is no touch: none of these signups is ours; each is still ONE Unit of the brand, consuming nothing
+    // (LEDGER-DECLARE-1107).
     await syncCrmEvidence(orgId, brandId);
     for (const email of [plain, malformed, refused]) {
       const leadId = await leadOf(email);
@@ -283,7 +284,10 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
     }
     const declaredBefore = declared.length;
     await sweepOutcomeFactDeclarations({ orgId });
-    expect(declared.length).toBe(declaredBefore);
+    expect(declared.length).toBe(declaredBefore + 3);
+    for (const email of [plain, malformed, refused]) {
+      expect(byLead(await leadOf(email)).map((d) => ({ key: d.body.produced[0].outcomeKey, consumed: d.body.consumed })), email).toEqual([{ key: "signup", consumed: [] }]);
+    }
 
     // The refusal is never re-sent.
     const again = await sweepPostTouches({ orgId });
@@ -353,7 +357,8 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
         [{ outcomeKey: "website_visit", subjectService: "lead-service", subjectId: lead[k] }],
       ]);
     }
-    expect(byLead(lead.organic)).toEqual([]);
+    // The organic signup is still ONE Unit of the brand, consuming nothing of ours (LEDGER-DECLARE-1107).
+    expect(byLead(lead.organic).map((d) => ({ key: d.body.produced[0].outcomeKey, consumed: d.body.consumed }))).toEqual([{ key: "signup", consumed: [] }]);
   });
   it("a human clicker of a newsletter email who is no lead yet becomes one and is credited; a robot hit and a non-clicker are not", async () => {
     const RECIPIENT = randomUUID();
