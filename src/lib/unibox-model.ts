@@ -499,9 +499,11 @@ async function attachLastMessages(scope: Scope, rows: UniboxRow[]): Promise<Set<
   const asked = new Set<string>();
   if (rows.length === 0) return asked;
   const key = (h: string, c: string) => `${h}|${c}`;
+  // `human_id = ANY` lets the primary key find the rows (BOX-LOAD-1107: the concatenation alone read the brand's whole table).
   const stored = (await db.execute(sql`
     SELECT human_id::text AS human, company_key, last_message, last_message_reason, last_message_checked_at
     FROM unibox_rows WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId}
+      AND human_id = ANY(${sql.param(Array.from(new Set(rows.map((r) => r.humanId))))}::uuid[])
       AND (human_id::text || '|' || company_key) = ANY(${sql.param(rows.map((r) => key(r.humanId, r.companyKey)))}::text[])
   `)) as unknown as Array<{ human: string; company_key: string; last_message: UniboxLastMessage | null; last_message_reason: string | null; last_message_checked_at: Ts | null }>;
   const before = new Map(stored.map((s) => [key(s.human, s.company_key), s]));

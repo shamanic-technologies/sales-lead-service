@@ -70,12 +70,17 @@ export interface ProRelation {
  */
 async function liveRelations(scope: Scope, atomicHumans?: readonly string[]): Promise<{ pro: ProRelation[]; perHuman: Map<string, number> }> {
   const onlyHumans = atomicHumans === undefined ? sql`` : sql`AND f.raw->>'humanId' = ANY(${sql.param([...atomicHumans])}::text[])`;
+  // A few humans: the withdrawn check stays a per-row index probe (`OFFSET 0`, BOX-LOAD-1107); the whole brand keeps the
+  // planner's anti-join (one pass over the withdrawn index beats an index probe per relation there).
+  const notWithdrawn = atomicHumans === undefined
+    ? sql`NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)`
+    : sql`NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id OFFSET 0)`;
   const rows = (await db.execute(sql`
     SELECT CASE WHEN f.raw->>'humanId' ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human,
       f.person_key, f.full_name AS name, f.seq::text AS seq, f.payload
     FROM crm_registry_facts f
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.type = 'relation' ${onlyHumans}
-      AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+      AND ${notWithdrawn}
   `)) as unknown as Array<{ human: string | null; person_key: string; name: string | null; seq: string; payload: Record<string, unknown> }>;
   const pro: ProRelation[] = [];
   const perHuman = new Map<string, number>();
