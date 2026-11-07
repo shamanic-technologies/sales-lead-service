@@ -16,7 +16,7 @@ import { sql } from "drizzle-orm";
 
 const { db } = await import("../../src/db/index.js");
 const { leads, conversionEvents } = await import("../../src/db/schema.js");
-const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers, upgradeToOurs } = await import("../../src/lib/outcome-fact-declarations.js");
+const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers, upgradeToOurs, reverseWithdrawnUnits } = await import("../../src/lib/outcome-fact-declarations.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -407,5 +407,63 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     expect((await upgradeToOurs({ orgId }, post)).read).toBe(0);
     // Never a second Unit.
     expect((await sweepOutcomeFactDeclarations({ orgId })).read).toBe(0);
+  });
+
+  it("LEDGER-REVERSAL-1107: a Unit whose fact is taken back is reversed once, at the withdrawal; the fact coming back is a NEW Unit", async () => {
+    const lead = await newLead();
+    await fact(lead, "sale", "2026-06-10T09:00:00Z", { causedByOutreach: false, valueCents: 100 });
+    const before = declared.length;
+    await sweepOutcomeFactDeclarations({ orgId });
+    const unit = declared.slice(before).find((d) => d.body.produced[0].subjectId === lead)!;
+    const posted: unknown[] = [];
+    const post = async (body: unknown) => {
+      posted.push(body);
+      return { status: 201, text: JSON.stringify({ reversedCount: 1 }) };
+    };
+    // Still live: nothing to reverse (an absence is never evidence).
+    expect((await reverseWithdrawnUnits({ orgId }, post)).read).toBe(0);
+
+    await db.execute(sql`UPDATE conversion_events SET withdrawn_at = '2026-11-05T18:30:14Z', withdrawn_reason = 'wrong_attribution' WHERE matched_lead_id = ${lead}::uuid`);
+    expect(await reverseWithdrawnUnits({ orgId }, post)).toEqual({ read: 1, reversed: 1, refused: 0 });
+    expect(posted).toEqual([
+      {
+        reversedBy: "lead-service outcome-fact-declarations",
+        reversals: [{ runId: unit.runId, outcomeKey: "paid_client", subjectService: "lead-service", subjectId: lead, reversedAt: "2026-11-05T18:30:14.000Z", reason: "fact taken back: wrong_attribution" }],
+      },
+    ]);
+    expect((await reverseWithdrawnUnits({ orgId }, post)).read).toBe(0);
+
+    // The person undoes the withdrawal: the fact stands again, a NEW Unit on a run of its own.
+    await db.execute(sql`UPDATE conversion_events SET withdrawn_at = NULL, withdrawn_reason = NULL WHERE matched_lead_id = ${lead}::uuid`);
+    const mark = declared.length;
+    await sweepOutcomeFactDeclarations({ orgId });
+    const again = declared.slice(mark).filter((d) => d.body.produced[0].subjectId === lead);
+    expect(again).toHaveLength(1);
+    expect(again[0].runId).not.toBe(unit.runId);
+    const [row] = (await db.execute(sql`
+      SELECT reversed_at, run_id::text AS run_id FROM outcome_fact_declarations WHERE org_id = ${orgId} AND lead_id = ${lead}::uuid AND outcome_key = 'paid_client'
+    `)) as unknown as Array<{ reversed_at: string | null; run_id: string }>;
+    expect(row).toEqual({ reversed_at: null, run_id: again[0].runId });
+  });
+
+  it("a refused reversal is kept, never resent", async () => {
+    const lead = await newLead();
+    await fact(lead, "signup", "2026-06-11T09:00:00Z", { causedByOutreach: false });
+    await sweepOutcomeFactDeclarations({ orgId });
+    await db.execute(sql`UPDATE conversion_events SET withdrawn_at = now() WHERE matched_lead_id = ${lead}::uuid`);
+    const refuse = async () => ({ status: 422, text: JSON.stringify({ error: "invalid_reversals" }) });
+    // Earlier cases' withdrawn Units are not this case's subject: only this lead is asked.
+    const first = await reverseWithdrawnUnits({ orgId }, refuse);
+    expect(first.refused).toBeGreaterThanOrEqual(1);
+    expect((await reverseWithdrawnUnits({ orgId }, refuse)).read).toBe(0);
+    await expect(
+      (async () => {
+        const l2 = await newLead();
+        await fact(l2, "signup", "2026-06-12T09:00:00Z", { causedByOutreach: false });
+        await sweepOutcomeFactDeclarations({ orgId });
+        await db.execute(sql`UPDATE conversion_events SET withdrawn_at = now() WHERE matched_lead_id = ${l2}::uuid`);
+        await reverseWithdrawnUnits({ orgId }, async () => ({ status: 503, text: "down" }));
+      })(),
+    ).rejects.toThrow(/503/);
   });
 });
