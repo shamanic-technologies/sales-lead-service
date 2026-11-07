@@ -325,6 +325,24 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect(gatewayCalls).toEqual([]);
   });
 
+  it("a second scope of the org reuses the round another model asked and states THAT round's age (BOX-LOAD-1107)", async () => {
+    await model.ensureReadModel(scope);
+    // The brand model's round of answers, asked a minute ago.
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '60 seconds' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayCalls = [];
+    const other = model.readModelScopeFor(
+      { orgId, brandId, statuses: ["buffered", "claimed", "served", "skipped"] },
+      brandId,
+      true,
+    );
+    const built = await model.ensureReadModel(other);
+    expect(gatewayCalls).toEqual([]);
+    // Its evidence is as old as the answers it used, not as old as its own start.
+    expect(built.evidenceAt.getTime()).toBeLessThanOrEqual(Date.now() - 55_000);
+    expect(built.evidenceAt.getTime()).toBeGreaterThan(Date.now() - 90_000);
+  });
+
   it("refreshes a model past its bound IN PLACE instead of serving it, asking everyone again", async () => {
     const before = await model.ensureReadModel(scope);
     await sql`

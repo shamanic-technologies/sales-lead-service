@@ -113,6 +113,13 @@ export function planSweep(
   return { refresh, retire };
 }
 
+/** The refresh order: grouped by org, then brand, so the models sharing evidence run together. */
+export function refreshOrder(models: ReadonlyMap<string, ReadModelScope>): Array<[string, ReadModelScope]> {
+  return [...models].sort(([ka, a], [kb, b]) =>
+    a.orgId.localeCompare(b.orgId) || (a.brandId ?? "").localeCompare(b.brandId ?? "") || ka.localeCompare(kb),
+  );
+}
+
 let sweeping = false;
 
 export async function sweepReadModels(): Promise<void> {
@@ -133,7 +140,9 @@ export async function sweepReadModels(): Promise<void> {
       `;
     }
 
-    for (const [key, scope] of toRefresh) {
+    // One org's models back to back: the first asks email-gateway, the others reuse that round of
+    // answers inside EVIDENCE_REUSE_MS instead of asking again (BOX-LOAD-1107).
+    for (const [key, scope] of refreshOrder(toRefresh)) {
       try {
         await refreshReadModel(scope);
       } catch (error) {

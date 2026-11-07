@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { ReadModelScope } from "../../src/lib/lead-read-model.js";
 
-const { planSweep, REFRESH_IF_READ_WITHIN_MS, IDLE_PINNED_REFRESH_AFTER_MS } = await import(
+const { planSweep, refreshOrder, REFRESH_IF_READ_WITHIN_MS, IDLE_PINNED_REFRESH_AFTER_MS } = await import(
   "../../src/lib/lead-read-model-worker.js"
 );
 
@@ -54,5 +54,21 @@ describe("planSweep (DB-LOAD-1014)", () => {
     );
     expect([...refresh.keys()].sort()).toEqual(["idle-old", "not-built", "read-fresh"]);
     expect(retire).toEqual([]);
+  });
+});
+
+describe("refreshOrder (BOX-LOAD-1107)", () => {
+  it("runs one org's models back to back, brand by brand, so they share one round of evidence", () => {
+    const s = (orgId: string, brandId: string | null) => ({ orgId, brandId }) as unknown as ReadModelScope;
+    const order = refreshOrder(
+      new Map([
+        ["k1", s("org-b", "brand-1")],
+        ["k2", s("org-a", "brand-2")],
+        ["k3", s("org-b", null)],
+        ["k4", s("org-a", "brand-1")],
+        ["k5", s("org-b", "brand-1")],
+      ]),
+    ).map(([key]) => key);
+    expect(order).toEqual(["k4", "k2", "k3", "k1", "k5"]);
   });
 });
