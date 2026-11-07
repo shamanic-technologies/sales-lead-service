@@ -178,12 +178,14 @@ async function loadBlocks(
       SELECT human_id::text AS human, company_key, probabilities, judged_at FROM relationship_judgments
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND human_id = ANY(${sql.param(humans)}::uuid[])
     `) as unknown as Promise<Array<{ human: string; company_key: string; probabilities: Record<string, number>; judged_at: Ts }>>,
+    // `OFFSET 0` keeps the withdrawn check a per-row index probe (BOX-LOAD-1107): pulled up into an anti-join,
+    // the planner merge-joined the WHOLE withdrawn_of index (715k rows, ~620k buffers) for a few hundred humans.
     db.execute(sql`
       SELECT f.raw->>'humanId' AS human, f.brand_id, f.payload->>'tag' AS tag, min(f.received_at) AS at
       FROM crm_registry_facts f
       WHERE f.org_id = ${orgId} AND f.type = 'connection_tag' AND f.raw->>'humanId' = ANY(${sql.param(atomicAll)}::text[])
         AND (f.brand_id = ${brandId} OR f.payload->>'tag' LIKE 'personal%')
-        AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+        AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id OFFSET 0)
       GROUP BY 1, 2, 3
     `) as unknown as Promise<Array<{ human: string; brand_id: string; tag: string; at: Ts }>>,
     // Journalist evidence (brand-journalists.ts): a lead of the human the brand reached ONLY through a press pitch.
@@ -241,7 +243,7 @@ async function loadBlocks(
       const rel = (await db.execute(sql`
         SELECT f.payload->>'relationKey' AS key, f.payload->'tags' AS tags FROM crm_registry_facts f
         WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId} AND f.type = 'relation' AND f.payload->>'relationKey' = ANY(${sql.param(keys)}::text[])
-          AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)
+          AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id OFFSET 0)
       `)) as unknown as Array<{ key: string; tags: Array<{ tag?: unknown }> | null }>;
       for (const r of rel) tagsOfRelation.set(r.key, (r.tags ?? []).map((t) => t?.tag).filter((t): t is string => typeof t === "string"));
     }
