@@ -82,9 +82,9 @@ import {
  * delivered nor queued releases its claim and is asked again next pass. A replay of the same run is
  * `already_recorded` at runs-service.
  *
- * WITHDRAWN AFTER IT WAS DECLARED: the occurrence stays. runs-service's ledger is immutable (no withdrawal); the
- * withdrawal lives in `conversion_events` and every count here keeps honouring it. A fact that turns ours later (a
- * person states the cause) is declared on that day's run.
+ * WITHDRAWN AFTER IT WAS DECLARED: the occurrence is REVERSED (`reverseWithdrawnUnits`, a counter-entry dated at the
+ * withdrawal; runs-service's ledger stays immutable, history kept). A fact that turns ours later (a person states the
+ * cause) takes its consumption on the same occurrence (`upgradeToOurs`).
  *
  * Never on a write path: a background sweep (every 5 min, first pass ~60 s after boot), sequential (tens of facts).
  */
@@ -272,7 +272,8 @@ export async function loadPendingFacts(scope?: { orgId: string }, limit = SWEEP_
     FROM facts f
     WHERE NOT EXISTS (
       SELECT 1 FROM outcome_fact_declarations d
-      WHERE d.org_id = f.org_id AND d.brand_id = f.brand_id AND d.lead_id = f.lead_id::uuid AND d.outcome_key = f.outcome_key)
+      WHERE d.org_id = f.org_id AND d.brand_id = f.brand_id AND d.lead_id = f.lead_id::uuid AND d.outcome_key = f.outcome_key
+        AND d.reversed_at IS NULL)
     ORDER BY f.rank, f.received_at ASC NULLS LAST
     LIMIT ${limit}
   `)) as unknown as Array<Record<string, string | boolean | null>>;
@@ -450,7 +451,7 @@ export async function loadPendingCrmReaches(scope?: { orgId: string }): Promise<
     const personIds = [...new Set(firsts.flatMap((f) => f.personLeadIds ?? [f.leadId]))];
     const declared = (await db.execute(sql`
       SELECT lead_id::text AS lead_id, outcome_key FROM outcome_fact_declarations
-      WHERE org_id = ${s.orgId} AND brand_id = ${s.brandId} AND lead_id = ANY(${sql.param(personIds)}::uuid[])
+      WHERE org_id = ${s.orgId} AND brand_id = ${s.brandId} AND lead_id = ANY(${sql.param(personIds)}::uuid[]) AND reversed_at IS NULL
     `)) as unknown as Array<{ lead_id: string; outcome_key: string }>;
     // The ledger row is the record once one exists: a live one is declared by the ledger path, a WITHDRAWN one (a
     // person's word, a staff test, a pairing rejected: FAKE-OUTCOMES-1022) is never brought back from the CRM copy.
@@ -571,7 +572,15 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
     // Ours on the brand's recording run of the day for the outcome; a Unit another factory made on a run of ITS OWN:
     // runs-service splits a run's consumptions over every Unit it produced, so a theirs Unit on our run would carry part
     // of our cost (and a later turn to ours adds the consumption to that Unit alone).
-    runId = f.ours ? await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date()) : await ownRecordingRun(f);
+    // A Unit reversed earlier and reached again is a NEW Unit on a new run (the reversed occurrence stays reversed).
+    const reversed = (await db.execute(sql`
+      SELECT 1 FROM outcome_fact_declarations
+      WHERE org_id = ${f.orgId} AND brand_id = ${f.brandId} AND lead_id = ${f.leadId}::uuid AND outcome_key = ${f.outcomeKey} AND reversed_at IS NOT NULL
+    `)) as unknown as unknown[];
+    runId =
+      f.ours && reversed.length === 0
+        ? await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date())
+        : await ownRecordingRun(f);
     // A Unit another factory made consumes nothing and is never one of our scripts' (LEDGER-DECLARE-1107).
     consumed = f.ours ? consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f)) : null;
     performer = f.ours ? performerOf(await loadFirstTouchWorkflow(f), f.source) : performerOf(null, f.source, f.toolName);
@@ -586,7 +595,12 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
       consumed_outcome_key, consumed_basis, dated, caused_by_outreach, occurred_at)
     VALUES (${f.orgId}, ${f.brandId}, ${f.leadId}::uuid, ${f.outcomeKey}, ${f.conversionEventId}::uuid, ${f.crmFactId}, ${runId}::uuid,
       ${consumed?.outcomeKey ?? null}, ${consumed?.basis ?? null}, true, ${f.ours}, ${f.occurredAt}::timestamptz)
-    ON CONFLICT DO NOTHING
+    ON CONFLICT (org_id, brand_id, lead_id, outcome_key) DO UPDATE SET
+      conversion_event_id = EXCLUDED.conversion_event_id, crm_fact_id = EXCLUDED.crm_fact_id, run_id = EXCLUDED.run_id,
+      consumed_outcome_key = EXCLUDED.consumed_outcome_key, consumed_basis = EXCLUDED.consumed_basis, dated = true,
+      caused_by_outreach = EXCLUDED.caused_by_outreach, occurred_at = EXCLUDED.occurred_at, performer = NULL,
+      performer_error = NULL, cause_error = NULL, reversed_at = NULL, reversal_error = NULL, created_at = now()
+      WHERE outcome_fact_declarations.reversed_at IS NOT NULL
     RETURNING 1 AS ok
   `)) as unknown as unknown[];
   if (claimed.length === 0) return;
@@ -605,6 +619,72 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
   else if (kind === "retry") summary.queued++;
   else summary.refused++;
   if (!f.ours) summary.theirs++;
+}
+
+export interface ReversalSummary {
+  read: number;
+  reversed: number;
+  refused: number;
+}
+
+/**
+ * A Unit whose fact was TAKEN BACK is reversed at runs-service (LEDGER-REVERSAL-1107: a counter-entry dated at the
+ * withdrawal, the occurrence kept; runs-service `POST /v1/platform-runs/outcomes/reversals`). Taken back = positive
+ * evidence, never an absence: the lead holds no live attributed ledger row of the outcome any more AND one of its rows
+ * of the outcome was withdrawn (a person's word, a staff test set aside, a rejected pairing), or the Unit was read off a
+ * CRM fact that a `withdrawn` fact now names and the lead holds no live ledger row of it. Dated at that withdrawal (never
+ * before the Unit's own instant, never after now). One call per Unit (runs-service refuses a batch whole); 200 / 201 = taken
+ * (`reversed_at`), 403 / 422 = kept in `reversal_error`, never resent; 5xx stops the pass. A fact that comes back is a
+ * new Unit on a new run (`declareOne`).
+ */
+export async function reverseWithdrawnUnits(scope?: { orgId: string }, post: RedatePost = postReversal): Promise<ReversalSummary> {
+  const live = sql`EXISTS (
+    SELECT 1 FROM conversion_events ce
+    JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
+    WHERE ce.org_id = d.org_id AND ce.brand_id = d.brand_id AND ce.matched_lead_id = d.lead_id AND m.outcome_key = d.outcome_key
+      AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed')`;
+  const rows = (await db.execute(sql`
+    SELECT d.org_id, d.brand_id, d.lead_id::text AS lead_id, d.outcome_key, d.run_id::text AS run_id,
+           ${isoAt(sql.raw("GREATEST(w.at, d.occurred_at)"))} AS reversed_at, w.reason
+    FROM outcome_fact_declarations d
+    CROSS JOIN LATERAL (
+      SELECT max(x.at) AS at, (array_agg(x.reason ORDER BY x.at DESC))[1] AS reason FROM (
+        SELECT ce.withdrawn_at AS at, coalesce(ce.withdrawn_reason, 'withdrawn') AS reason
+        FROM conversion_events ce
+        JOIN ${OUTCOME_MAP} ON m.event = ce.event AND (m.source IS NULL OR m.source = ce.source)
+        WHERE ce.org_id = d.org_id AND ce.brand_id = d.brand_id AND ce.matched_lead_id = d.lead_id AND m.outcome_key = d.outcome_key
+          AND ce.withdrawn_at IS NOT NULL
+        UNION ALL
+        SELECT w.received_at, 'crm_fact_withdrawn' FROM crm_facts w
+        WHERE d.crm_fact_id IS NOT NULL AND w.type = 'withdrawn' AND w.withdrawn_of = d.crm_fact_id
+      ) x
+    ) w
+    WHERE d.reversed_at IS NULL AND d.reversal_error IS NULL AND w.at IS NOT NULL AND NOT ${live}
+      ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
+    ORDER BY d.created_at
+    LIMIT ${SWEEP_BATCH}
+  `)) as unknown as Array<Record<string, string>>;
+  const summary: ReversalSummary = { read: rows.length, reversed: 0, refused: 0 };
+  for (const r of rows) {
+    const key = sql`org_id = ${r.org_id} AND brand_id = ${r.brand_id} AND lead_id = ${r.lead_id}::uuid AND outcome_key = ${r.outcome_key}`;
+    const res = await post({
+      reversedBy: "lead-service outcome-fact-declarations",
+      reversals: [
+        { runId: r.run_id, outcomeKey: r.outcome_key, subjectService: OUTCOME_SUBJECT_SERVICE, subjectId: r.lead_id, reversedAt: r.reversed_at, reason: `fact taken back: ${r.reason}` },
+      ],
+    });
+    if (res.status === 200 || res.status === 201) {
+      await db.execute(sql`UPDATE outcome_fact_declarations SET reversed_at = ${r.reversed_at}::timestamptz WHERE ${key}`);
+      summary.reversed++;
+      continue;
+    }
+    if (res.status >= 500 || res.status === 401) throw new Error(`runs-service reversal ${res.status} ${res.text.slice(0, 300)}`);
+    await db.execute(sql`UPDATE outcome_fact_declarations SET reversal_error = ${`${res.status} ${res.text.slice(0, 500)}`} WHERE ${key}`);
+    summary.refused++;
+    console.error(`[lead-service] outcome Unit NOT reversed (refused, kept, never resent): org=${r.org_id} run=${r.run_id} lead=${r.lead_id} ${r.outcome_key}: ${res.status} ${res.text.slice(0, 300)}`);
+  }
+  if (rows.length > 0) console.log(`[lead-service] outcome Unit reversal pass ${JSON.stringify(summary)}`);
+  return summary;
 }
 
 export interface UpgradeSummary {
@@ -634,7 +714,7 @@ export async function upgradeToOurs(scope?: { orgId: string }, post: RedatePost 
       ORDER BY ce.received_at ASC NULLS LAST, (ce.caused_by_outreach IS TRUE) DESC, ce.id
       LIMIT 1
     ) first
-    WHERE d.caused_by_outreach = false AND d.cause_error IS NULL AND first.ours
+    WHERE d.caused_by_outreach = false AND d.cause_error IS NULL AND d.reversed_at IS NULL AND first.ours
       ${scope ? sql`AND d.org_id = ${scope.orgId}` : sql.empty()}
     ORDER BY d.created_at
     LIMIT ${SWEEP_BATCH}
@@ -691,6 +771,16 @@ export type RedatePost = (body: unknown) => Promise<{ status: number; text: stri
 
 const postRedate: RedatePost = async (body) => {
   const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/platform-runs/outcomes/batch`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-service-name": OUTCOME_SUBJECT_SERVICE },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  return { status: res.status, text: await res.text() };
+};
+
+const postReversal: RedatePost = async (body) => {
+  const res = await fetchWithRetry(`${RUNS_SERVICE_URL}/v1/platform-runs/outcomes/reversals`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-api-key": RUNS_SERVICE_API_KEY, "x-service-name": OUTCOME_SUBJECT_SERVICE },
     body: JSON.stringify(body),
@@ -832,6 +922,7 @@ export function sweepOutcomeFactDeclarations(scope?: { orgId: string }): Promise
     await redateUndatedDeclarations(scope).catch((err) => console.error("[lead-service] outcome fact re-date pass failed:", err));
     await statePastPerformers(scope).catch((err) => console.error("[lead-service] outcome performer pass failed:", err));
     await upgradeToOurs(scope).catch((err) => console.error("[lead-service] outcome cause upgrade pass failed:", err));
+    await reverseWithdrawnUnits(scope).catch((err) => console.error("[lead-service] outcome Unit reversal pass failed:", err));
     return summary;
   })().finally(() => {
     inFlight = null;
