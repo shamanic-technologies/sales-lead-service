@@ -90,6 +90,12 @@ const CRM_STEP_MAP: Record<string, { kind: CrmEvidenceKind; step: CrmEvidencedSt
 };
 
 /** crm-service's fact for money a person paid the customer — its own token, verbatim. */
+/** The ledger outcome event a crm fact TYPE is recorded as on a paired contact (null = none, or a never). */
+export function crmFactLedgerOutcome(type: string): string | null {
+  const mapped = Object.prototype.hasOwnProperty.call(CRM_STEP_MAP, type) ? CRM_STEP_MAP[type] : null;
+  return mapped && mapped.kind === "outcome" ? mapped.step : null;
+}
+
 export const CRM_PAYMENT_EVENT = "payment" as const;
 
 function minor(v: unknown): number | null {
