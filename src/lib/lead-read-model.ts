@@ -66,6 +66,7 @@ import {
 import {
   EvidenceUnavailableError,
   readDeliveryEvidence,
+  type EvidenceAsOf,
   type EvidenceRequest,
 } from "./lead-delivery-evidence.js";
 import { enrichLeadIndex, type EngagementContext } from "./lead-engagement.js";
@@ -90,9 +91,9 @@ import {
 /**
  * The ENFORCED bound on how old anything a model was built from may be. A model older than this
  * is rebuilt before it is read — never served. Five minutes: long enough that the worker's
- * three-minute refresh, plus the 30s of evidence reuse, plus a refresh of the largest brand under
- * load (~16s measured), lands well inside it, so a read waits only when the worker has fallen
- * behind.
+ * three-minute refresh (counted from the model's TRUE evidence age, its oldest answer used, see
+ * EVIDENCE_REUSE_MS) plus a refresh of the largest brand under load lands inside it, so a read
+ * waits only when the worker has fallen behind.
  */
 export const READ_MODEL_MAX_EVIDENCE_AGE_MS = 5 * 60_000;
 /**
@@ -122,9 +123,18 @@ export const READ_MODEL_SERVE_ON_OUTAGE_MS = 24 * 60 * 60_000;
 export const READ_MODEL_REFRESH_AFTER_MS = 3 * 60_000;
 /**
  * A build reuses delivery evidence asked at most this long before it started — which is what lets
- * the brand model and a campaign model of the same brand share one round of questions.
+ * the brand model, the org model and the campaign models of one org share ONE round of questions
+ * (the worker refreshes an org's models back to back). The model then states the age of the oldest
+ * answer it actually used (`evidenceAsOf`), so a model that reused an older answer is due again
+ * with the model that asked it: the bound above is unchanged and true (BOX-LOAD-1107: at 30s every
+ * scope re-asked its whole population, each address ~3.4 times per 5 min at instantly-service).
  */
-const EVIDENCE_REUSE_MS = 30_000;
+const EVIDENCE_REUSE_MS = 90_000;
+
+/** The evidence age a pass states: its oldest answer, never later than the pass started. */
+function evidenceAsOf(asOf: EvidenceAsOf, startedAt: number): Date {
+  return new Date(Math.min(asOf.oldestMs ?? startedAt, startedAt));
+}
 /** How many people one build step holds. Bounds the process's heap whatever the scope's size. */
 const BUILD_CHUNK_SIZE = 1_000;
 /** How many people one incremental recompute step holds. */
@@ -297,6 +307,7 @@ export async function readModelDelivery(
   requests: readonly EvidenceRequest[],
   acceptFetchedSince: Date,
   changedAt?: ReadonlyMap<string, Date>,
+  asOf?: EvidenceAsOf,
 ): Promise<Map<string, StatusResult>> {
   if (!scope.deliveryQueried || requests.length === 0) return new Map();
   try {
@@ -305,6 +316,7 @@ export async function readModelDelivery(
       campaignId: statusCampaignIdOf(scope),
       acceptFetchedSince,
       changedAt,
+      asOf,
       context: { orgId: scope.orgId },
     });
   } catch (error) {
@@ -353,6 +365,7 @@ async function deriveRows(
   resolver: Resolver,
   acceptFetchedSince: Date,
   changedAt?: ReadonlyMap<string, Date>,
+  asOf?: EvidenceAsOf,
 ): Promise<DerivedRow[]> {
   if (rows.length === 0) return [];
   const delivery = await readModelDelivery(
@@ -360,6 +373,7 @@ async function deriveRows(
     evidenceRequests(rows),
     acceptFetchedSince,
     changedAt,
+    asOf,
   );
   const enriched = await enrichLeadIndex(rows, engagementOf(scope), true, delivery);
   try {
@@ -519,7 +533,8 @@ async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
   // Taken BEFORE any row is read, exactly as for a build: a change from a transaction still open
   // now is re-applied by the next catch-up.
   const xmin = await currentXmin();
-  const evidenceAt = new Date(startedAt - EVIDENCE_REUSE_MS);
+  const acceptSince = new Date(startedAt - EVIDENCE_REUSE_MS);
+  const asOf: EvidenceAsOf = { oldestMs: null };
   const resolver = resolverFor(scope);
   const seen: string[] = [];
   for await (const chunk of walkLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
@@ -528,7 +543,7 @@ async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
     // chunk is derived AND written under the lock, so a catch-up never lands between a chunk's
     // derivation and its write (which would overwrite a person's fresh row with an older one).
     const ids = await withScopeLock(SCOPE_LOCK, model.scopeKey, async () => {
-      const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
+      const derived = await deriveRows(scope, chunk, resolver, acceptSince, undefined, asOf);
       const chunkIds = derived.map((r) => r.id);
       await sql.begin(async (rawTx) => {
         const tx = asSql(rawTx);
@@ -545,6 +560,7 @@ async function refreshModelInPlace(model: ReadModel): Promise<ReadModel> {
     });
     for (const id of ids) seen.push(id);
   }
+  const evidenceAt = evidenceAsOf(asOf, startedAt);
   await withScopeLock(SCOPE_LOCK, model.scopeKey, async () => {
     // Whoever is still held and was not re-derived has left the scope — except a person a catch-up
     // recomputed while this pass ran (a change at or after `xmin`): that row is fresher than the
@@ -592,7 +608,9 @@ async function buildModel(
     // Taken BEFORE any row is read: every change from a transaction that was still open now is
     // re-applied by the next catch-up, so nothing that lands during the build is lost.
     const xmin = await currentXmin();
-    const evidenceAt = new Date(startedAt - EVIDENCE_REUSE_MS);
+    const acceptSince = new Date(startedAt - EVIDENCE_REUSE_MS);
+    const asOf: EvidenceAsOf = { oldestMs: null };
+    let evidenceAt = new Date(startedAt);
     const created = await sql<Array<{ id: string }>>`
       INSERT INTO lead_read_models (org_id, scope, applied_xmin)
       VALUES (${scope.orgId}, ${JSON.stringify(scope)}::jsonb, ${xmin}::xid8)
@@ -603,10 +621,11 @@ async function buildModel(
     try {
       const resolver = resolverFor(scope);
       for await (const chunk of walkLeadIndex(listScopeOf(scope), BUILD_CHUNK_SIZE)) {
-        const derived = await deriveRows(scope, chunk, resolver, evidenceAt);
+        const derived = await deriveRows(scope, chunk, resolver, acceptSince, undefined, asOf);
         await writeRows(sql, modelId, derived);
         people += derived.length;
       }
+      evidenceAt = evidenceAsOf(asOf, startedAt);
       await withScopeLock(SCOPE_LOCK, key, () => sql.begin(async (rawTx) => {
         const tx = asSql(rawTx);
         await tx`
