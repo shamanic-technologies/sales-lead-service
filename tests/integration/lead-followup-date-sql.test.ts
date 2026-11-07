@@ -181,7 +181,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       VALUES (${nextSeq()}::bigint, ${`s:${randomUUID()}`}, 'email_sent', '2026-10-10T10:00:00Z', ${emailed.email!.toUpperCase()}, ${orgId}, ARRAY[${brandId}]::text[], '{}'::jsonb)`);
     await db.execute(sql`
       INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${randomUUID()}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, ${`phone:${randomUUID()}`}, 'Wa Two', '{}', ARRAY['+33699887766']::text[],
+      VALUES (${randomUUID()}, GREATEST(${nextSeq()}::bigint, (SELECT COALESCE(max(seq), 0) + 1 FROM crm_facts)), ${orgId}, ${brandId}, ${`phone:${randomUUID()}`}, ${`phone:${randomUUID()}`}, 'Wa Two', '{}', ARRAY['+33699887766']::text[],
         'message_out', '2026-10-11T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
     await fd.syncSendFeeds(30_000);
 
@@ -245,7 +245,8 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     const waFact = randomUUID();
     await db.execute(sql`
       INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, contact_point, full_name, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
-      VALUES (${waFact}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, ${waPoint}, ${waPoint}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
+      -- Above every seq in the shared table: another suite's higher seq would carry the feed cursor past this fact.
+      VALUES (${waFact}, GREATEST(${nextSeq()}::bigint, (SELECT COALESCE(max(seq), 0) + 1 FROM crm_facts)), ${orgId}, ${brandId}, ${waPoint}, ${waPoint}, 'Wa Only', '{}', ARRAY['+33655443322']::text[],
         'message_in', '2026-10-01T08:00:00Z', 'sent_at', 'matrix', ${randomUUID()}, '{"channel":"whatsapp"}'::jsonb, '{}'::jsonb)`);
     await toBrandSubject(waOnly.humanId, [waPoint]);
     await judgedHuman(waFact);
