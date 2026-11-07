@@ -95,6 +95,13 @@ vi.mock("../../src/lib/outcome-triggers.js", () => ({
   noteLeadFound: (...args: unknown[]) => noteLeadFound(...args),
 }));
 
+// Due follow-ups served first (FOLLOWUP-JIT-1107): the SQL has its own integration suite; here only the ORDER.
+const claimDueFollowupLead = vi.fn();
+vi.mock("../../src/lib/lead-followup-date.js", () => ({
+  claimDueFollowupLead: (...args: unknown[]) => claimDueFollowupLead(...args),
+  dueVerdict: vi.fn(),
+}));
+
 const insertValues = vi.fn();
 vi.mock("../../src/db/index.js", () => ({
   db: {
@@ -156,6 +163,8 @@ describe("pullNext (audience serve-next flow)", () => {
     // Default: nobody in the already-paid pool, so the serve-next path is exercised
     // exactly as it was before the pool existed.
     pickRetryCandidate.mockResolvedValue(null);
+    // Default: nobody of the brand due a follow-up.
+    claimDueFollowupLead.mockResolvedValue(null);
     // Default: an offer-less campaign — the goal read stays brand-scoped, byte-identically.
     fetchCampaign.mockResolvedValue({ id: "campaign-1", offerId: null });
     offerChecks.mockResolvedValue([]);
@@ -1002,5 +1011,47 @@ describe("pullNext with the tactic \"Fresh contacts only\" (FRESH-CONTACTS-1015)
     const result = await withServeWalk(walk, () => pullNext(baseParams));
     expect(result).toEqual({ found: false, reason: "audience_exhausted" });
     expect(walk.steps).toEqual([{ type: "event", seq: 1, what: "audience_answer", detail: { audienceId: "aud-1", answer: "exhausted" } }]);
+  });
+  describe("due follow-ups before any fresh lead (FOLLOWUP-JIT-1107)", () => {
+    it("a proactive serve hands its brand's due person, filed on this campaign, and buys nobody", async () => {
+      claimDueFollowupLead.mockResolvedValueOnce({ leadId: "lead-due", leadCampaignId: "row-due", email: "kevin+due@distribute.you", phone: null, dueAt: "2026-11-01T00:00:00.000Z" });
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-due" });
+      const result = await pullNext(baseParams);
+      expect(result).toMatchObject({ found: true, lead: { leadId: "lead-due", email: "kevin+due@distribute.you", audienceId: null, buyingSignal: null } });
+      expect(result.lead).not.toHaveProperty("phone");
+      expect(serveNext).not.toHaveBeenCalled();
+      expect(noteLeadFound).not.toHaveBeenCalled();
+      expect(claimDueFollowupLead).toHaveBeenCalledWith(
+        expect.objectContaining({ orgId: "org-1", brandId: "brand-1", sourceCampaignId: "campaign-1", fileAs: "outreach", reachableBy: ["email"], acceptedEmails: "as_found", recentlyEmailed: null }),
+      );
+    });
+
+    it("the paid-pool retry still goes first; nobody due = the fresh serve as before", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person });
+      upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+      registerServedEmail.mockResolvedValueOnce("lead-1");
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+      const result = await pullNext(baseParams);
+      expect(result.lead?.leadId).toBe("lead-1");
+      expect(pickRetryCandidate.mock.invocationCallOrder[0]).toBeLessThan(claimDueFollowupLead.mock.invocationCallOrder[0]);
+      expect(claimDueFollowupLead.mock.invocationCallOrder[0]).toBeLessThan(serveNext.mock.invocationCallOrder[0]);
+    });
+
+    it("a pipe stating a CRM step filter never takes a due person (nothing here vouches for their steps)", async () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person });
+      upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+      registerServedEmail.mockResolvedValueOnce("lead-1");
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+      await pullNext({ ...baseParams, stepFilter: { reached: ["form_submission"] } });
+      expect(claimDueFollowupLead).not.toHaveBeenCalled();
+    });
+
+    it("a phone pipe states its reach, and a phone-only due person comes out with their phone", async () => {
+      claimDueFollowupLead.mockResolvedValueOnce({ leadId: "lead-wa", leadCampaignId: "row-wa", email: null, phone: "+33611223344", dueAt: null });
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-wa" });
+      const result = await pullNext({ ...baseParams, reachableBy: ["phone"] });
+      expect(result.lead).toMatchObject({ leadId: "lead-wa", email: null, phone: "+33611223344" });
+      expect(claimDueFollowupLead).toHaveBeenCalledWith(expect.objectContaining({ reachableBy: ["phone"] }));
+    });
   });
 });

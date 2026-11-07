@@ -41,6 +41,7 @@ vi.mock("../../src/lib/audience-fit-client.js", () => ({
 
 const getCurrentGoal = vi.fn();
 vi.mock("../../src/lib/released-pool.js", () => ({ claimReleasedLead: vi.fn(async () => null) }));
+vi.mock("../../src/lib/lead-followup-date.js", () => ({ claimDueFollowupLead: vi.fn(async () => null), dueVerdict: vi.fn() }));
 vi.mock("../../src/lib/sourcing-origin.js", () => ({
   fetchAudienceOfferId: vi.fn(async () => null),
   AudienceOfferMismatchError: class extends Error {},
