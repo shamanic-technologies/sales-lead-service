@@ -59,6 +59,23 @@ export interface EvidenceReadOptions {
    */
   changedAt?: ReadonlyMap<string, Date>;
   context: EvidenceContext;
+  /**
+   * Filled with WHEN the oldest answer this read used was asked (ms; a stored answer's confirmed or
+   * fetched instant, a fresh one's ask), never later than it was: a read model states this as its
+   * evidence age, so models of one org that reuse the same round of answers stay in phase and the
+   * age they state is the true one (BOX-LOAD-1107). Untouched when nothing was read.
+   */
+  asOf?: EvidenceAsOf;
+}
+
+/** The oldest answer a read used (`EvidenceReadOptions.asOf`). */
+export interface EvidenceAsOf {
+  oldestMs: number | null;
+}
+
+function noteAnswerAt(asOf: EvidenceAsOf | undefined, atMs: number): void {
+  if (!asOf) return;
+  if (asOf.oldestMs === null || atMs < asOf.oldestMs) asOf.oldestMs = atMs;
 }
 
 async function mapWithConcurrency<T>(
@@ -189,6 +206,7 @@ export async function readDeliveryEvidence(
       const changedAt = options.changedAt?.get(row.email.toLowerCase());
       if (changedAt && fetchedAt < changedAt.getTime()) continue;
       fresh.add(row.email);
+      noteAnswerAt(options.asOf, fetchedAt);
       if (row.result) out.set(row.email, row.result);
     }
     const missing = emails.filter((e) => !fresh.has(e));
@@ -214,6 +232,7 @@ export async function readDeliveryEvidence(
     } catch (error) {
       throw new EvidenceUnavailableError(errorMessage(error));
     }
+    noteAnswerAt(options.asOf, Date.parse(askedAt));
     const answered = new Map<string, StatusResult>();
     for (const result of response.results) answered.set(result.email, result);
     for (const [email, result] of answered) out.set(email, result);
