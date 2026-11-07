@@ -160,6 +160,11 @@ interface PullNextParams {
  * a journalist of the brand.
  */
 export const FRESH_SERVE_ATTEMPTS = 5;
+/**
+ * A proactive serve looks at most this many batches of due people (50 each) before serving fresh leads: a due person
+ * not owed now has their date moved out, so a backlog drains over a few serves instead of holding one serve.
+ */
+export const OUTREACH_DUE_MAX_PASSES = 2;
 /** A fresh serve that bought someone it cannot hand out keeps them filed and buys the next. */
 const BUY_NEXT_REASONS: ReadonlySet<string> = new Set([RECENTLY_EMAILED_REASON, JOURNALIST_REASON, DISQUALIFIED_REASON]);
 
@@ -455,6 +460,67 @@ export async function pullNext(
         qualification,
       },
     };
+  }
+
+  if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+
+  // DUE FOLLOW-UPS FIRST (FOLLOWUP-JIT-1107, owner 2026-11-07 option B: the framework's Pull rule, open work nearest the
+  // Target moves first, then new subjects). A proactive outreach campaign hands its brand's leads whose next follow-up
+  // date passed (we wrote to them or they acted, still owed per the verdict) BEFORE buying or handing anyone new, inside
+  // the same budget: the follow-up is written that day by this pipe's writer, which reads the person's whole Unibox
+  // thread, and the sender continues their last thread from its mailbox. No campaign of its own, no channel branch: the
+  // pipe's own reach decides who it can write to. A pipe stating a step filter skips it (nothing here vouches for a
+  // person's CRM steps, like the released pool). Fresh-contacts windows are a COLD tactic: never applied to a follow-up.
+  if (!finding && !params.stepFilter) {
+    const due = await claimDueFollowupLead({
+      orgId: params.orgId,
+      brandId: params.brandId,
+      brandIds: params.brandIds,
+      sourceCampaignId: params.campaignId,
+      fileAs: "outreach",
+      maxPasses: OUTREACH_DUE_MAX_PASSES,
+      featureSlug: params.featureSlug,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+      reachableBy: pipeMethods(params.reachableBy),
+      // The people were already written to: the pipe's own word, else as they were when we wrote to them.
+      acceptedEmails: params.acceptedEmails ?? "as_found",
+      relationships,
+      recentlyEmailed: null,
+      offerId,
+      signal,
+    });
+    if (due) {
+      const dueLead = await buildFullLead(due.leadId);
+      const qualification = await writerChecks(dueLead);
+      console.log(
+        `[lead-service] pullNext found=true source=followup-due campaign=${params.campaignId} email=${due.email} phone=${due.phone} leadId=${due.leadId} row=${due.leadCampaignId} dueAt=${due.dueAt}`,
+      );
+      return {
+        found: true,
+        lead: {
+          leadId: due.leadId,
+          email: due.email,
+          ...(due.email ? {} : { phone: due.phone }),
+          data: dueLead,
+          brandIds: params.brandIds,
+          orgId: params.orgId,
+          userId: params.userId ?? null,
+          apolloPersonId: dueLead.apolloPersonId ?? null,
+          goal,
+          activeGoalId: params.activeGoalId ?? null,
+          brandProfileId: params.brandProfileId ?? null,
+          audienceId: null,
+          buyingSignal: null,
+          qualification,
+        },
+      };
+    }
   }
 
   if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };

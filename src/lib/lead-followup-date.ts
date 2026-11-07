@@ -304,7 +304,8 @@ export async function applySends(sends: readonly ObservedSend[]): Promise<number
  *   - crm-service's fact copy (the Unibox threads, every channel): any fact that is not ours (`message_out`) nor a
  *     record about them nobody acted (CRM_NOT_THEIR_ACT: corrections, CRM bookkeeping, a no-show), recorded here as
  *     `last_action_at` (it moves no date).
- * A person we only sent to, or never contacted, is cold: "Lead follow-up due" never serves them until they act.
+ * Since FOLLOWUP-JIT-1107 (2026-11-07) "Lead follow-up due" also serves a person we only wrote to
+ * (`followupEligibleSql`); only a person we never wrote to and who never acted stays out.
  */
 export { CRM_NOT_THEIR_ACT };
 
@@ -339,6 +340,18 @@ export function actedTowardUsSql(d: SQL): SQL {
       AND NOT (t_x.source = 'outreach' AND EXISTS (
         SELECT 1 FROM outreach_facts o_x
         WHERE o_x.subject_key = t_x.source_ref AND o_x.type = 'link_clicked' AND o_x.raw->>'transport' IS DISTINCT FROM 'smtp'))))`;
+}
+
+/**
+ * SQL: who "Lead follow-up due" may serve (FOLLOWUP-JIT-1107, owner 2026-11-07 « élargir », lifting the 2026-10-16
+ * "a lead we only wrote to is cold"): a person we WROTE to at the brand (any channel: `last_sent_at`, moved by every
+ * send we observe) OR who did something toward the brand. A follow-up is now written on its due day instead of with
+ * the first email, so a prospect who never answered must still get theirs. A person we never wrote to and who never
+ * acted is not owed a follow-up (it would be a cold first message). Every stop (opted out, unsubscribed, bounced,
+ * positive reply, client, personal contact...) stays the verdict's (`decideProspectFollowup`).
+ */
+export function followupEligibleSql(d: SQL): SQL {
+  return sql`(${d}.last_sent_at IS NOT NULL OR ${actedTowardUsSql(d)})`;
 }
 
 async function readCursor(feed: string): Promise<bigint | null> {
@@ -738,7 +751,17 @@ export async function claimDueFollowupLead(p: {
   orgId: string;
   brandId: string;
   brandIds: readonly string[];
+  /**
+   * The campaign asking. `fileAs: "source"` (default) = a "Lead follow-up due" source unit's own run: the find is filed
+   * under it (`source_found`) for the pipe it feeds. `fileAs: "outreach"` (FOLLOWUP-JIT-1107, owner 2026-11-07 option B,
+   * the framework's Pull rule: open work nearest the Target first, then new subjects) = a PROACTIVE outreach campaign of
+   * the brand serving its due follow-ups before any fresh lead: the person is filed (or re-served) on that campaign and
+   * the round is handed at once.
+   */
   sourceCampaignId: string;
+  fileAs?: "source" | "outreach";
+  /** At most this many batches of DUE_BATCH looked at (default DUE_MAX_PASSES). */
+  maxPasses?: number;
   featureSlug: string;
   runId: string | null;
   parentRunId: string | null;
@@ -756,12 +779,12 @@ export async function claimDueFollowupLead(p: {
   signal?: AbortSignal;
 }): Promise<DueFollowupFind | null> {
   const skipped: string[] = [];
-  for (let pass = 0; pass < DUE_MAX_PASSES; pass++) {
+  for (let pass = 0; pass < (p.maxPasses ?? DUE_MAX_PASSES); pass++) {
     if (p.signal?.aborted) return null;
     const candidates = (await db.execute(sql`
       SELECT d.lead_id::text AS lead_id FROM lead_followup_dates d
       WHERE d.org_id = ${p.orgId} AND d.brand_id = ${p.brandId} AND d.next_followup_at <= now()
-        AND ${actedTowardUsSql(sql`d`)}
+        AND ${followupEligibleSql(sql`d`)}
         AND d.lead_id <> ALL(${sql.param(skipped)}::uuid[])
         AND NOT EXISTS (
           SELECT 1 FROM lead_followup_due_serves ds WHERE ds.org_id = d.org_id AND ds.brand_id = d.brand_id AND ds.lead_id = d.lead_id
@@ -787,7 +810,7 @@ export async function claimDueFollowupLead(p: {
         await postponeDue(db, { orgId: p.orgId, brandId: p.brandId, leadId: c.lead_id }, v);
         continue;
       }
-      const found = await fileDueFind(p, c.lead_id);
+      const found = p.fileAs === "outreach" ? await fileDueOnOutreach(p, c.lead_id) : await fileDueFind(p, c.lead_id);
       walked.check("filed", { filed: found !== null }, found !== null);
       if (found) {
         walked.serve();
@@ -805,7 +828,7 @@ async function fileDueFind(p: Parameters<typeof claimDueFollowupLead>[0], leadId
     const [due] = (await tx.execute(sql`
       SELECT next_followup_at FROM lead_followup_dates
       WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid AND next_followup_at <= now()
-        AND ${actedTowardUsSql(sql`lead_followup_dates`)}
+        AND ${followupEligibleSql(sql`lead_followup_dates`)}
       FOR UPDATE SKIP LOCKED
     `)) as unknown as Array<{ next_followup_at: Ts }>;
     if (!due) return null;
@@ -855,6 +878,63 @@ async function fileDueFind(p: Parameters<typeof claimDueFollowupLead>[0], leadId
   });
 }
 
+/**
+ * FOLLOWUP-JIT-1107: file a due person on the asking OUTREACH campaign itself, in ONE transaction: the row is filed, or
+ * RE-SERVED when the campaign already holds the person (the run now holding it recorded, cause `followup_due`, so the
+ * send is attributed to the workflow that wrote it), the round is recorded HANDED on that row (never taken by the
+ * paid-pool retry: the next round comes from the date) and the date moves like any due serve. null = another run took
+ * the person first.
+ */
+async function fileDueOnOutreach(p: Parameters<typeof claimDueFollowupLead>[0], leadId: string): Promise<DueFollowupFind | null> {
+  return db.transaction(async (tx) => {
+    const [due] = (await tx.execute(sql`
+      SELECT next_followup_at FROM lead_followup_dates
+      WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid AND next_followup_at <= now()
+        AND ${followupEligibleSql(sql`lead_followup_dates`)}
+      FOR UPDATE SKIP LOCKED
+    `)) as unknown as Array<{ next_followup_at: Ts }>;
+    if (!due) return null;
+    const contact = await contactOf(tx, leadId);
+    if (!contact.email && !contact.phone) throw new Error(`[lead-followup-date] due lead ${leadId} carries neither an email nor a phone`);
+    const brandIds = sql.join(p.brandIds.map((b) => sql`${b}`), sql`, `);
+    const details = `Lead follow-up due (FOLLOWUP-JIT-1107), served by its brand's proactive campaign before any fresh lead, due ${iso(due.next_followup_at)}, ${contact.email ? `email=${contact.email}` : `phone=${contact.phone}`}, leadId=${leadId}, campaign=${p.sourceCampaignId}`;
+    const [row] = (await tx.execute(sql`
+      INSERT INTO leads_campaigns (
+        lead_id, campaign_id, org_id, brand_ids, status, status_reason, status_details, served_at,
+        parent_run_id, run_id, push_run_id, user_id, workflow_slug, feature_slug, goal, active_goal_id, brand_profile_id
+      ) VALUES (
+        ${leadId}, ${p.sourceCampaignId}, ${p.orgId}, ARRAY[${brandIds}]::text[], 'served', 'served', ${details},
+        now(), ${p.parentRunId}, ${p.runId}, ${p.runId}, ${p.userId}, ${p.workflowSlug}, ${p.featureSlug},
+        ${p.goal}, ${p.activeGoalId}, ${p.brandProfileId}
+      )
+      ON CONFLICT (lead_id, campaign_id) DO UPDATE SET
+        status = 'served', status_details = EXCLUDED.status_details, served_at = now(),
+        parent_run_id = EXCLUDED.parent_run_id, run_id = EXCLUDED.run_id, push_run_id = EXCLUDED.push_run_id,
+        user_id = EXCLUDED.user_id, workflow_slug = EXCLUDED.workflow_slug, goal = EXCLUDED.goal,
+        active_goal_id = EXCLUDED.active_goal_id, brand_profile_id = EXCLUDED.brand_profile_id, updated_at = now()
+      RETURNING id::text AS id, (xmax <> 0) AS reserved
+    `)) as unknown as Array<{ id: string; reserved: boolean }>;
+    if (row.reserved) {
+      await tx.execute(sql`
+        INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
+        VALUES (${row.id}::uuid, ${p.runId}, ${p.workflowSlug}, now(), 'followup_due')
+      `);
+    }
+    await tx.execute(sql`
+      INSERT INTO lead_followup_due_serves (org_id, brand_id, lead_id, source_campaign_id, lead_campaign_id, due_at, handed_at, handed_to_campaign_id, handed_lead_campaign_id)
+      VALUES (${p.orgId}, ${p.brandId}, ${leadId}::uuid, ${p.sourceCampaignId}, ${row.id}::uuid, ${iso(due.next_followup_at)}::timestamptz,
+        now(), ${p.sourceCampaignId}, ${row.id}::uuid)
+    `);
+    await tx.execute(sql`
+      UPDATE lead_followup_dates SET next_followup_at = now() + ${gap}, basis = 'served',
+        reason = ${`Served to its brand's proactive campaign as a due follow-up; nobody sent or stated a date since (asked again in ${DEFAULT_GAP_DAYS} days)`},
+        last_served_at = now(), served_count = served_count + 1, updated_at = now()
+      WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid
+    `);
+    return { leadId, leadCampaignId: row.id, email: contact.email, phone: contact.phone, dueAt: iso(due.next_followup_at) };
+  });
+}
+
 /** The open due serve a stocked source row came from, or null (the row is not a "Lead follow-up due" find). */
 export async function openDueServeOfSourceRow(
   exec: { execute: typeof db.execute },
@@ -895,9 +975,9 @@ export async function dueVerdict(
 ): Promise<ProspectFollowupVerdict> {
   const v = (await loadProspectFollowupVerdicts({ ...scope, leadIds: [scope.leadId], context, contactedRequired: false })).get(scope.leadId);
   if (!v) throw new Error(`[lead-followup-date] no verdict for lead ${scope.leadId} (brand ${scope.brandId})`);
-  // No action of theirs toward the brand (only our sends, or nothing) = a follow-up would be cold: not owed until one.
+  // Never written to and no action of theirs toward the brand = a follow-up would be a cold first message: not owed.
   const [x] = (await db.execute(sql`
-    SELECT ${actedTowardUsSql(sql`d`)} AS exchanged FROM lead_followup_dates d
+    SELECT ${followupEligibleSql(sql`d`)} AS exchanged FROM lead_followup_dates d
     WHERE d.org_id = ${scope.orgId} AND d.brand_id = ${scope.brandId} AND d.lead_id = ${scope.leadId}::uuid
   `)) as unknown as Array<{ exchanged: boolean }>;
   if (x?.exchanged) return v;
