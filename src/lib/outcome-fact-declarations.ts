@@ -634,7 +634,7 @@ export interface ReversalSummary {
  * of the outcome was withdrawn (a person's word, a staff test set aside, a rejected pairing), or the Unit was read off a
  * CRM fact that a `withdrawn` fact now names and the lead holds no live ledger row of it. Dated at that withdrawal (never
  * before the Unit's own instant, never after now). One call per Unit (runs-service refuses a batch whole); 200 / 201 = taken
- * (`reversed_at`), 403 / 422 = kept in `reversal_error`, never resent; 5xx stops the pass. A fact that comes back is a
+ * (`reversed_at`), 403 / 422 = kept in `reversal_error`, never resent; 5xx / 404 (door not served yet) stops the pass. A fact that comes back is a
  * new Unit on a new run (`declareOne`).
  */
 export async function reverseWithdrawnUnits(scope?: { orgId: string }, post: RedatePost = postReversal): Promise<ReversalSummary> {
@@ -678,7 +678,8 @@ export async function reverseWithdrawnUnits(scope?: { orgId: string }, post: Red
       summary.reversed++;
       continue;
     }
-    if (res.status >= 500 || res.status === 401) throw new Error(`runs-service reversal ${res.status} ${res.text.slice(0, 300)}`);
+    // 404 = the reversal door is not served (runs-service mid-deploy): asked again next pass, never a refusal.
+    if (res.status >= 500 || res.status === 401 || res.status === 404) throw new Error(`runs-service reversal ${res.status} ${res.text.slice(0, 300)}`);
     await db.execute(sql`UPDATE outcome_fact_declarations SET reversal_error = ${`${res.status} ${res.text.slice(0, 500)}`} WHERE ${key}`);
     summary.refused++;
     console.error(`[lead-service] outcome Unit NOT reversed (refused, kept, never resent): org=${r.org_id} run=${r.run_id} lead=${r.lead_id} ${r.outcome_key}: ${res.status} ${res.text.slice(0, 300)}`);

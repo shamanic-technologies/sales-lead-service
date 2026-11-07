@@ -465,5 +465,8 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
         await reverseWithdrawnUnits({ orgId }, async () => ({ status: 503, text: "down" }));
       })(),
     ).rejects.toThrow(/503/);
+    // The door not served yet (404) is not a refusal: asked again next pass.
+    await expect(reverseWithdrawnUnits({ orgId }, async () => ({ status: 404, text: JSON.stringify({ error: "Not found" }) }))).rejects.toThrow(/404/);
+    expect((await reverseWithdrawnUnits({ orgId }, async () => ({ status: 201, text: "{}" }))).reversed).toBeGreaterThanOrEqual(1);
   });
 });
