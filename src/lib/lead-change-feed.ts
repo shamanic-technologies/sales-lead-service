@@ -431,7 +431,7 @@ export async function catchUpFeed(feed: ChangeFeed): Promise<number> {
       FROM lead_read_changes
       WHERE org_id = ${feed.orgId} AND txid >= ${feed.appliedXmin}::xid8
         AND kind IN ('lead', 'evidence')
-      ORDER BY seq
+      ORDER BY lead_read_changes.seq
     `;
   const changes = window.filter((change) => !seen.has(change.seq));
   let changed = 0;
@@ -594,7 +594,10 @@ export async function readChangeFeed(
           SELECT id::text AS id, payload FROM lead_change_feed_rows
           WHERE feed_id = ${feed.id}::uuid AND payload IS NOT NULL AND version <= ${top}::bigint
             ${after ? sql`AND id > ${after}::uuid` : sql``}
-          ORDER BY id
+          -- The COLUMN, never the id::text alias: ordered by the text the planner cannot walk the primary key and
+          -- re-read + sorted the whole scope for every chunk (967 ms a chunk on a 7k-row feed vs 25 ms, DASH-SPEED-1110);
+          -- the keyset (id > uuid) compares uuids, so the order must be the uuid's too.
+          ORDER BY lead_change_feed_rows.id
           LIMIT ${READ_CHUNK_SIZE}
         `;
         if (rows.length === 0) return;
@@ -610,7 +613,7 @@ export async function readChangeFeed(
       >`
         SELECT id::text AS id, payload, version::text AS version FROM lead_change_feed_rows
         WHERE feed_id = ${feed.id}::uuid AND version > ${after}::bigint AND version <= ${top}::bigint
-        ORDER BY version
+        ORDER BY lead_change_feed_rows.version
         LIMIT ${READ_CHUNK_SIZE}
       `;
       if (rows.length === 0) return;
