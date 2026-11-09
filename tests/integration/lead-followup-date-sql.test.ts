@@ -226,12 +226,12 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     expect(await dateOf(p.leadId)).toMatchObject({ basis: "stopped", nextFollowupAt: null, reason: "Please stop writing to me" });
   });
 
-  it("serves a due person, most overdue first, again each time the date passes again; never a client or a personal conversation", async () => {
+  it("serves a due person, most overdue first, again each time the date passes again; never an opted-out person or a personal conversation", async () => {
     // Everyone of the earlier tests is pushed out: only the people of this test can be due.
     await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
     const older = await person("older");
     const waOnly = await person("waonly", { email: false, phone: "+33 6 55 44 33 22" });
-    const client = await person("client");
+    const client = await person("optedout");
     const friend = await person("friend");
     await fd.ensureLeadFollowupDates({ orgId, brandId });
     await setDue(older.leadId, "2026-01-01T00:00:00Z");
@@ -252,9 +252,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     await judgedHuman(waFact);
     await fd.syncSendFeeds(30_000);
     await refreshActedAt({ orgId, brandId });
-    await db.execute(sql`
-      INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
-      VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
+    await db.execute(sql`INSERT INTO human_fact_copies (fact_id, human_id, kind, event_id) VALUES (${randomUUID()}::uuid, ${client.humanId}::uuid, 'opt_out', 1)`);
     await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, has_direct) VALUES (${orgId}, ${brandId}, ${friend.humanId}::uuid, true)`);
     await db.execute(sql`
       INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
@@ -269,9 +267,9 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     expect(second).toMatchObject({ leadId: waOnly.leadId, email: null, phone: "+33 6 55 44 33 22" });
     expect(await serveDue()).toBeNull();
 
-    // The client and the friend were never served: their dates moved out with the reason.
+    // The opted-out person and the friend were never served: their dates moved out with the reason.
     expect(await dateOf(client.leadId)).toMatchObject({ basis: "stop_recheck" });
-    expect((await dateOf(client.leadId)).reason).toContain("customer");
+    expect((await dateOf(client.leadId)).reason).toContain("opted_out");
     expect((await dateOf(friend.leadId)).reason).toContain("not_pure_prospect");
     // Served = 7 days out until the writer sends or states.
     const served = await dateOf(older.leadId);
@@ -511,7 +509,8 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       expect(new Date((await dateOf(silent.leadId)).nextFollowupAt!).getTime()).toBeLessThan(Date.now());
       // Emailed by another campaign of the brand: filed on this one.
       const other = await emailedOn(null, "othercampaign");
-      // Stops: unsubscribed, bounced, positive reply, client.
+      // Stops: unsubscribed, bounced, a true relationship (investor). A positive reply and a paying client are FUNNEL
+      // STAGES, never a stop (FOLLOWUP-FUNNEL-STAGE-1109): they are served, the campaign decides.
       const unsub = await emailedOn(null, "unsub");
       unsubscribed.add(unsub.email!);
       const bounce = await emailedOn(null, "bounce");
@@ -524,6 +523,11 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       await db.execute(sql`
         INSERT INTO conversion_events (org_id, brand_id, event, match_confidence, attribution_status, matched_lead_id, source)
         VALUES (${orgId}, ${brandId}, 'sale', 'exact', 'attributed', ${client.leadId}::uuid, 'manual')`);
+      const investor = await emailedOn(null, "investor");
+      await db.execute(sql`INSERT INTO relationship_subjects (org_id, brand_id, human_id, has_direct) VALUES (${orgId}, ${brandId}, ${investor.humanId}::uuid, true)`);
+      await db.execute(sql`
+        INSERT INTO relationship_judgments (org_id, brand_id, human_id, probabilities, thread_seq, model, run_id)
+        VALUES (${orgId}, ${brandId}, ${investor.humanId}::uuid, ${JSON.stringify({ investor: 0.9, prospect: 0.9 })}::jsonb, 1, 'jev', 'run')`);
       // Emailed yesterday: their date is 6 days ahead.
       const recent = await person("recent");
       await fd.ensureLeadFollowupDates({ orgId, brandId });
@@ -532,11 +536,14 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       const runId = `run-${randomUUID()}`;
       const first = await serveOnCold(runId);
       const second = await serveOnCold();
-      expect([first?.leadId, second?.leadId].sort()).toEqual([silent.leadId, other.leadId].sort());
+      const third = await serveOnCold();
+      const fourth = await serveOnCold();
+      expect([first?.leadId, second?.leadId, third?.leadId, fourth?.leadId].sort()).toEqual([silent.leadId, other.leadId, positive.leadId, client.leadId].sort());
       expect(await serveOnCold()).toBeNull();
 
       // The campaign that already held the person RE-SERVES its own row (the run now holding it recorded).
-      const silentServe = first?.leadId === silent.leadId ? first : second;
+      const served4 = [first, second, third, fourth];
+      const silentServe = served4.find((x) => x?.leadId === silent.leadId);
       expect(silentServe?.leadCampaignId).toBe(silent.rowId);
       const [row] = (await db.execute(sql`SELECT campaign_id, status, run_id FROM leads_campaigns WHERE id = ${silent.rowId}::uuid`)) as unknown as Array<{
         campaign_id: string;
@@ -548,7 +555,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       const [rp] = (await db.execute(sql`SELECT count(*)::int AS n FROM lead_campaign_run_repoints WHERE lead_campaign_id = ${silent.rowId}::uuid AND cause = 'followup_due'`)) as unknown as Array<{ n: number }>;
       expect(rp.n).toBe(1);
       // Another campaign's person is filed on this one.
-      const otherServe = first?.leadId === other.leadId ? first : second;
+      const otherServe = served4.find((x) => x?.leadId === other.leadId);
       const [filed] = (await db.execute(sql`SELECT campaign_id FROM leads_campaigns WHERE id = ${otherServe!.leadCampaignId}::uuid`)) as unknown as Array<{ campaign_id: string }>;
       expect(filed.campaign_id).toBe(coldCampaignId);
       // Each round is handed at once on the row it was served on: the paid-pool retry never takes it back.
@@ -556,17 +563,19 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
         SELECT lead_id::text AS lead_id, handed_to_campaign_id, handed_lead_campaign_id::text AS handed FROM lead_followup_due_serves
         WHERE org_id = ${orgId} AND source_campaign_id = ${coldCampaignId} ORDER BY served_at
       `)) as unknown as Array<{ lead_id: string; handed_to_campaign_id: string; handed: string }>;
-      expect(rounds).toHaveLength(2);
+      expect(rounds).toHaveLength(4);
       for (const r of rounds) expect(r.handed_to_campaign_id).toBe(coldCampaignId);
-      expect(rounds.map((r) => r.handed).sort()).toEqual([silent.rowId, otherServe!.leadCampaignId].sort());
+      expect(rounds.map((r) => r.handed).sort()).toEqual(served4.map((x) => x!.leadCampaignId).sort());
       // Served = asked again in 7 days unless the writer sends or states a date.
       expect(await dateOf(silent.leadId)).toMatchObject({ basis: "served", servedCount: 1 });
 
       // Never served: the stops (dates moved out with the reason) and the future date (untouched).
       expect((await dateOf(unsub.leadId)).reason).toContain("unsubscribed");
       expect((await dateOf(bounce.leadId)).reason).toContain("bounced");
-      expect((await dateOf(positive.leadId)).reason).toContain("positive_reply");
-      expect((await dateOf(client.leadId)).reason).toContain("customer");
+      expect((await dateOf(investor.leadId)).reason).toContain("not_pure_prospect");
+      // The funnel stages were served like anyone due (FOLLOWUP-FUNNEL-STAGE-1109).
+      expect(await dateOf(positive.leadId)).toMatchObject({ basis: "served", servedCount: 1 });
+      expect(await dateOf(client.leadId)).toMatchObject({ basis: "served", servedCount: 1 });
       expect(await dateOf(recent.leadId)).toMatchObject({ basis: "send" });
       expect(new Date((await dateOf(recent.leadId)).nextFollowupAt!).getTime()).toBeGreaterThan(Date.now() + 5 * 86_400_000);
     });

@@ -57,6 +57,17 @@ export const BUSINESS_ONLY_EXCLUDED: readonly RelationshipTag[] = ["personal", "
  */
 export const PURE_PROSPECT_EXCLUDED: readonly RelationshipTag[] = RELATIONSHIP_TAGS.filter((t) => t !== "prospect");
 
+/**
+ * A FUNNEL STAGE is never a relationship that ends the follow-ups (FOLLOWUP-FUNNEL-STAGE-1109, owner 2026-11-09: "On
+ * garde cette liste mais : La liste : relation perso, investor, etc. Mais 'meeting booké, meeting tenu, réponse
+ * positive, client' -> C'EST OK!!! Ça dépend de la campaign!!"). `customer` says where the person stands in the brand's
+ * funnel, not who they are to it: a due follow-up still hands them to every campaign, which reads the Unibox and
+ * decides. Every other non-prospect tag (personal, investor, team, advisor, supplier, partner, other_professional,
+ * journalist) still stops.
+ */
+export const FUNNEL_STAGE_TAGS: readonly RelationshipTag[] = ["customer"];
+export const PROSPECT_FOLLOWUP_EXCLUDED: readonly RelationshipTag[] = PURE_PROSPECT_EXCLUDED.filter((t) => !FUNNEL_STAGE_TAGS.includes(t));
+
 export const JUDGED_YES = 0.5;
 /** Below this a judgment is a no; from it up to JUDGED_YES it is unsure. */
 export const JUDGED_NO = 0.4;
@@ -152,6 +163,16 @@ export function pureProspectAllows(block: {
   if (block.notBrandLead) return false;
   if (block.subject && block.hasDirect && block.judgedAt === null) return false;
   return !PURE_PROSPECT_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
+}
+
+/**
+ * May the brand follow this person up (the prospect follow-up verdict, prospect-followup.ts)? `pureProspectAllows`
+ * with a funnel-stage tag (`customer`) allowed (FOLLOWUP-FUNNEL-STAGE-1109): only a true relationship holds them back.
+ */
+export function prospectFollowupAllows(block: Parameters<typeof pureProspectAllows>[0]): boolean {
+  if (block.notBrandLead) return false;
+  if (block.subject && block.hasDirect && block.judgedAt === null) return false;
+  return !PROSPECT_FOLLOWUP_EXCLUDED.some((t) => block.tags.includes(t) || block.unsureTags.includes(t));
 }
 
 /**

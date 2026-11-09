@@ -22,6 +22,7 @@ import {
   levelOf,
   policyAllows,
   pureProspectAllows,
+  prospectFollowupAllows,
   notBrandLeadOf,
   type NotBrandLead,
   tagsIn,
@@ -62,9 +63,10 @@ export interface RelationshipBlock {
   notBrandLead: NotBrandLead | null;
   /**
    * May a pipe stating each policy hand this person out? The one answer every server of people reads.
-   * `pure_prospect`: no tag but prospect (NEVER-NO-FOLLOWUP-1014, src/lib/prospect-followup.ts).
+   * `pure_prospect`: no tag but prospect (NEVER-NO-FOLLOWUP-1014). `prospect_followup`: the same with a funnel-stage
+   * tag (`customer`) allowed, read by the prospect follow-up verdict (FOLLOWUP-FUNNEL-STAGE-1109, src/lib/prospect-followup.ts).
    */
-  policies: { business_only: boolean; pure_prospect: boolean };
+  policies: { business_only: boolean; pure_prospect: boolean; prospect_followup: boolean };
   /** Every merge stated from here that made this person (judge or person): undo one with its `linkId`. */
   merges: SettledMerge[];
   /** Did the person write to the brand (a message on any mirrored channel, a signup, a form, a meeting, a payment, a reply to our outreach)? */
@@ -95,7 +97,7 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
   subject: false,
   connectionTags: [],
   notBrandLead: null,
-  policies: { business_only: false, pure_prospect: false },
+  policies: { business_only: false, pure_prospect: false, prospect_followup: false },
   merges: [],
   wroteToUs: false,
   lastInboundAt: null,
@@ -327,6 +329,7 @@ async function loadBlocks(
       policies: {
         business_only: policyAllows("business_only", { subject: isSubject, hasDirect, tags, unsureTags, judgedAt }),
         pure_prospect: pureProspectAllows({ subject: isSubject, hasDirect, tags, unsureTags, judgedAt, notBrandLead }),
+        prospect_followup: prospectFollowupAllows({ subject: isSubject, hasDirect, tags, unsureTags, judgedAt, notBrandLead }),
       },
       merges: mergesOf.get(h) ?? [],
       wroteToUs,
@@ -358,6 +361,7 @@ async function loadBlocks(
       policies: {
         business_only: blocks.every((b) => b.policies.business_only),
         pure_prospect: blocks.every((b) => b.policies.pure_prospect),
+        prospect_followup: blocks.every((b) => b.policies.prospect_followup),
       },
       wroteToUs: blocks.some((b) => b.wroteToUs),
       notBrandLead: blocks.find((b) => b.notBrandLead)?.notBrandLead ?? null,
