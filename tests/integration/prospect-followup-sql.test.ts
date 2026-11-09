@@ -129,9 +129,11 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
     expect(v.get(pure.leadId)).toMatchObject({ owed: true, reasons: [] });
     expect(v.get(optedOut.leadId)?.reason).toBe("opted_out");
     expect(v.get(disq.leadId)?.reason).toBe("disqualified");
-    expect(v.get(positive.leadId)?.reason).toBe("positive_reply");
-    expect(v.get(booked.leadId)?.reason).toBe("meeting_booked");
-    for (const [tag, leadId] of Object.entries(tagged)) expect(v.get(leadId)).toMatchObject({ owed: false, reason: "not_pure_prospect", relationshipTags: [tag] });
+    // A funnel stage is never a stop (FOLLOWUP-FUNNEL-STAGE-1109): a positive reply, a booked meeting, a customer tag are owed.
+    expect(v.get(positive.leadId)).toMatchObject({ owed: true, reasons: [] });
+    expect(v.get(booked.leadId)).toMatchObject({ owed: true, reasons: [] });
+    expect(v.get(tagged.customer)).toMatchObject({ owed: true, reasons: [] });
+    for (const tag of ["personal", "investor"]) expect(v.get(tagged[tag])).toMatchObject({ owed: false, reason: "not_pure_prospect", relationshipTags: [tag] });
     expect(v.get(unjudged.leadId)?.reason).toBe("relationship_not_judged");
     expect(v.get(neverSent.leadId)?.reason).toBe("not_contacted");
 
@@ -151,27 +153,30 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
   });
 
   it("serves owed people oldest-contacted first, each once per brand, never an excluded one; then says none owed", async () => {
-    // A fresh brand view: only the people of the previous test exist; the owed one there is `pure`.
+    // A fresh brand view: only the people of the previous test exist; the owed ones there are `pure` and the funnel
+    // stages (positive reply, booked meeting, customer tag: never a stop, FOLLOWUP-FUNNEL-STAGE-1109).
     const older = await person("older", { sentAt: "2026-08-01T10:00:00Z" });
     const midSequence = await person("midseq", { sentAt: "2026-07-01T10:00:00Z" });
     queued.add(midSequence.email);
 
     const first = await serve();
     expect(first?.leadId).toBe(older.leadId);
-    const second = await serve();
-    expect(second).not.toBeNull();
-    expect(second!.leadId).not.toBe(older.leadId);
-    expect(second!.leadId).not.toBe(midSequence.leadId);
-    expect(await serve()).toBeNull();
+    const rest: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      const next = await serve();
+      if (!next) break;
+      rest.push(next.leadId);
+    }
+    expect(rest).toHaveLength(4);
+    expect(rest).not.toContain(older.leadId);
+    expect(rest).not.toContain(midSequence.leadId);
+    expect(new Set(rest).size).toBe(4);
 
     const rows = (await db.execute(sql`
       SELECT lc.status, lc.status_reason, lc.audience_id, h.lead_id::text AS handed
       FROM leads_campaigns lc JOIN prospect_followup_handouts h ON h.lead_campaign_id = lc.id
       WHERE lc.campaign_id = ${sourceCampaignId} ORDER BY lc.created_at`)) as unknown as Array<Record<string, unknown>>;
-    expect(rows).toEqual([
-      { status: "served", status_reason: "source_found", audience_id: null, handed: older.leadId },
-      { status: "served", status_reason: "source_found", audience_id: null, handed: second!.leadId },
-    ]);
+    expect(rows).toEqual([older.leadId, ...rest].map((handed) => ({ status: "served", status_reason: "source_found", audience_id: null, handed })));
     expect(await handoutOfSourceRow(first!.leadCampaignId)).toEqual({ orgId, brandId, leadId: older.leadId });
 
     // The sequence finished: the mid-sequence person is owed now, and served once.
