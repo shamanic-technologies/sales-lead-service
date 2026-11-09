@@ -14,6 +14,7 @@
  * Without `brandId`, the org's rows holding the lead/address answer when they are all one brand; several brands =
  * `AmbiguousBrandError` (the caller names one). Gateway: `/v1/leads/unibox-state` (the `/v1/leads/:id` passthrough).
  */
+import { WRITER_ROW_SEPARATOR } from "./message-participants.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
@@ -115,7 +116,7 @@ export async function readUniboxLeadState(
   const lead = toRow(raw, catalogue.ladder);
   const points = (raw.contact_points as string[] | null) ?? [];
 
-  const [followups, outreach, crm] = await Promise.all([
+  const [followups, outreach, crm, writtenInOthersThreads] = await Promise.all([
     lead.leadIds.length === 0
       ? Promise.resolve([] as Array<{ next_followup_at: Ts | null; basis: string; reason: string | null }>)
       : (db.execute(sql`
@@ -147,6 +148,15 @@ export async function readUniboxLeadState(
             AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
           GROUP BY 1
         `) as unknown as Promise<Array<{ type: string; n: number }>>),
+    // Replies this person wrote in ANOTHER lead's outreach thread (EVERY-PERSON-ON-THE-THREAD-1109: Markus answering
+    // our email to his colleague Thomas): filed under Thomas by the outreach copy, their word on their own lead here.
+    lead.leadIds.length === 0
+      ? Promise.resolve([] as Array<{ n: number }>)
+      : (db.execute(sql`
+          SELECT count(*)::int AS n FROM lead_timeline_facts f
+          WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId} AND f.lead_id = ANY(${sql.param(lead.leadIds)}::uuid[])
+            AND f.withdrawn_at IS NULL AND f.source = 'reply' AND strpos(f.id, ${WRITER_ROW_SEPARATOR}) > 0
+        `) as unknown as Promise<Array<{ n: number }>>),
   ]);
   const count = (rs: Array<{ type: string; n: number }>, t: string) => rs.find((r) => r.type === t)?.n ?? 0;
   const nextFollowup = nextFollowupOf(followups);
@@ -162,7 +172,7 @@ export async function readUniboxLeadState(
     messages: messageCountsOf({
       sequenceEmails: count(outreach, "email_sent"),
       emailAnswers: count(outreach, "reply_sent"),
-      emailReplies: count(outreach, "reply"),
+      emailReplies: count(outreach, "reply") + (writtenInOthersThreads[0]?.n ?? 0),
       otherChannelsOurs: count(crm, "message_out"),
       otherChannelsTheirs: count(crm, "message_in"),
     }),

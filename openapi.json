@@ -10144,7 +10144,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Every source tag of the person, sorted, deduped: the origin slug of each named source (e.g. `sourcing-apollo-cold-filters`), `list:<kind>` for a list kind the catalogue does not name, `list:none` for an audience stating no list, plus lead-service's audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`, `unit_click`. Multi: a person found by several sources carries every tag. Empty = nobody recorded where the person came from."
+            "description": "Every source tag of the person, sorted, deduped: the origin slug of each named source (e.g. `sourcing-apollo-cold-filters`), `list:<kind>` for a list kind the catalogue does not name, `list:none` for an audience stating no list, plus lead-service's audience-less filings `crm_signup`, `social_engagement`, `stated_by_org`, `unit_click`, `came_through` (they wrote in the thread of another lead of the brand). Multi: a person found by several sources carries every tag. Empty = nobody recorded where the person came from."
           },
           "sources": {
             "type": "array",
@@ -10164,7 +10164,8 @@
                     "crm_signup",
                     "social_engagement",
                     "stated_by_org",
-                    "unit_click"
+                    "unit_click",
+                    "came_through"
                   ]
                 },
                 "firstAt": {
@@ -10177,14 +10178,40 @@
                 "firstAt"
               ]
             },
-            "description": "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated, a person who clicked a link of a Unit addressed to them (a newsletter email)."
+            "description": "lead-service's own filings with no audience: a CRM signup filed as a lead, a social engager of our post, a person the brand's org stated, a person who clicked a link of a Unit addressed to them (a newsletter email), a person who wrote in the thread of another lead (`came_through`)."
+          },
+          "cameThrough": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "email": {
+                  "type": "string"
+                },
+                "firstAt": {
+                  "type": "string",
+                  "nullable": true
+                }
+              },
+              "required": [
+                "leadId",
+                "email",
+                "firstAt"
+              ]
+            },
+            "description": "Every lead of the brand whose email thread this person wrote in (EVERY-PERSON-ON-THE-THREAD-1109: Markus replying to our email to his colleague Thomas came through Thomas), earliest first. Multi, never the first only. Empty = none."
           }
         },
         "required": [
           "email",
           "tags",
           "sources",
-          "filings"
+          "filings",
+          "cameThrough"
         ]
       },
       "ProvenanceSource": {
