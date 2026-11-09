@@ -2,7 +2,7 @@ import { sql as dsql } from "drizzle-orm";
 import { walkCandidate } from "./serve-walk.js";
 import type { RecentlyEmailedScope } from "./recently-emailed-sql.js";
 import { db } from "../db/index.js";
-import { checkDeliveryStatus } from "./email-gateway-client.js";
+import { checkDeliveryStatus, isGatewayEmail } from "./email-gateway-client.js";
 import { toIsoTimestamp } from "./basic-leads.js";
 import { loadHumanFacts, type LeadHumanBlock } from "./human-opt-out-read.js";
 import { loadLeadAndCompanyMarks } from "./lead-disqualification.js";
@@ -318,6 +318,11 @@ export async function loadProspectFollowupVerdicts(input: {
     for (const e of emailRows) {
       if (e.lead_id !== leadId) continue;
       const s = senderByEmail.get(e.email);
+      // An address email-gateway refuses is never asked (checkDeliveryStatus skips it, loudly): nothing can have been
+      // sent to it, so "no sender evidence" is the TRUE answer, never a missing one. Throwing here failed the whole
+      // serve for the brand on every pass, as long as that person stayed a candidate (a customer.io unsubscribe
+      // address filed as a lead's email took every "Lead follow-up due" serve of distribute.you down, 2026-11-06..09).
+      if (!s && !isGatewayEmail(e.email)) continue;
       if (!s) throw new Error(`[prospect-followup] email-gateway answered nothing for ${e.email} (lead ${leadId}, brand ${brandId})`);
       sender.queued ||= s.queued;
       sender.unsubscribed ||= s.unsubscribed;
