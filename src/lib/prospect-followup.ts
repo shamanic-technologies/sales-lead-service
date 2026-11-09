@@ -7,7 +7,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { loadHumanFacts, type LeadHumanBlock } from "./human-opt-out-read.js";
 import { loadLeadAndCompanyMarks } from "./lead-disqualification.js";
 import { loadRelationships, type RelationshipBlock } from "./relationship-read.js";
-import { PURE_PROSPECT_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
+import { PROSPECT_FOLLOWUP_EXCLUDED, type RelationshipTag } from "./relationship-tags.js";
 import { reachClauses } from "./reach-sql.js";
 import { serveExclusionScopeOf } from "./disqualified-sql.js";
 import { isMemberAddress, loadOrgMemberKeys } from "./org-members.js";
@@ -36,14 +36,22 @@ import type { PoolEmailPolicy } from "./email-policy.js";
  *   unsubscribed     a live `unsubscribed` / `tagged_as_spam` fact, or the sender's brand/global status.
  *   bounced          a live `bounced` fact, or the sender's brand/global status.
  *   disqualified     any live disqualification mark of the lead or of its company at the brand, any offer.
- *   positive reply / meeting / customer   live outcomes (`conversion_events`) and the timeline's reply labels.
  *   in conversation  their latest question / referral / proposal / hand-over came AFTER our latest answer (an outreach
  *                    `reply_sent`, or a person's "answered outside" statement): waiting on the responder, not on us.
  *   sequence running the sender still holds a step to send this person for the brand (`queued`): never two emails
  *                    racing each other; owed once the sequence is done.
- *   relationship     `policies.pure_prospect` (relationship-tags.ts `pureProspectAllows`).
- * A plain "no thanks" (`not_interested`) is NOT a stop: the owner's list names unsubscribe, unqualified, opt-out and
- * a positive reply only.
+ *   relationship     `policies.prospect_followup` (relationship-tags.ts `prospectFollowupAllows`): a true relationship
+ *                    (personal, investor, team, advisor, supplier, partner, other professional, journalist).
+ * A plain "no thanks" (`not_interested`) is NOT a stop.
+ *
+ * A FUNNEL STAGE IS NEVER A STOP (FOLLOWUP-FUNNEL-STAGE-1109, owner 2026-11-09, verbatim: "On garde cette liste mais :
+ * La liste : relation perso, investor, etc. Mais 'meeting booké, meeting tenu, réponse positive, client' -> C'EST
+ * OK!!! Ça dépend de la campaign!!"). A positive reply, a meeting booked or held, a sale, a `customer` tag: the person
+ * is still owed when their date falls due, and every campaign serving follow-ups gets them, reads the Unibox and
+ * decides (write now, or state a new date). Lukas (Distribute.you, meeting held 2026-10-22, asked "follow up in 1-2
+ * weeks") was parked 30 days on "meeting_attended, meeting_booked, positive_reply, not_pure_prospect": 18 days of
+ * silence on a hot lead. The 10-14 rule's "sauf ... si on a une réponse positive d'ici là" is superseded by it, for
+ * both populations below: one verdict, one rule.
  *
  * A "no" is either a STOP (the owner's list, plus never emailed / not a pure prospect: for good) or a NOT YET (the
  * person is owed, just not now: a sequence still sending, a conversation waiting on the responder, a relationship or
@@ -61,10 +69,7 @@ export const PROSPECT_FOLLOWUP_STOP_REASONS = [
   "unsubscribed",
   "bounced",
   "disqualified",
-  "customer",
-  "meeting_attended",
-  "meeting_booked",
-  "positive_reply",
+  // A true relationship (personal, investor...), never a funnel stage (FOLLOWUP-FUNNEL-STAGE-1109).
   "not_pure_prospect",
   // LEADS-JUDGE-BRAND-1021: the judge or crm-service says they are not the brand's lead (relationship-tags.ts notBrandLeadOf).
   "not_brand_lead",
@@ -138,28 +143,14 @@ const LABEL_STOPS: ReadonlyArray<[string, ProspectFollowupStop]> = [
   ["unsubscribed", "unsubscribed"],
   ["tagged_as_spam", "unsubscribed"],
   ["bounced", "bounced"],
-  ["paid_client", "customer"],
-  ["meeting_attended", "meeting_attended"],
-  ["meeting_booked", "meeting_booked"],
-  ["interested", "positive_reply"],
 ];
 /** A reply that waits on an ANSWER of ours: not yet while it is newer than our latest answer. */
 export const CONVERSATION_LABELS = ["question_answerable", "question_to_escalate", "question", "referral", "other_proposal", "hand_over"] as const;
 export const STOP_LABELS: readonly string[] = LABEL_STOPS.map(([l]) => l);
-/** Live outcomes (conversion_events.event) that stop it. */
-const OUTCOME_STOPS: ReadonlyArray<[string, ProspectFollowupStop]> = [
-  ["sale", "customer"],
-  ["purchase", "customer"],
-  ["meeting_attended", "meeting_attended"],
-  ["meeting_booked", "meeting_booked"],
-  ["positive_reply", "positive_reply"],
-];
 
 export interface ProspectFollowupFacts {
   /** Live timeline labels of the person at the brand (any offer). */
   labels: ReadonlySet<string>;
-  /** Live, attributed outcomes of the person at the brand. */
-  outcomes: ReadonlySet<string>;
   human: LeadHumanBlock | null;
   disqualified: boolean;
   /** The sender's brand + global status of the person's addresses (one email-gateway read). */
@@ -187,12 +178,11 @@ export function decideProspectFollowup(f: ProspectFollowupFacts, now: Date = new
   if (f.sender.unsubscribed) stops.add("unsubscribed");
   if (f.sender.bounced) stops.add("bounced");
   for (const [label, stop] of LABEL_STOPS) if (f.labels.has(label)) stops.add(stop);
-  for (const [event, stop] of OUTCOME_STOPS) if (f.outcomes.has(event)) stops.add(stop);
   if (f.disqualified) stops.add("disqualified");
   let relationshipTags: RelationshipTag[] = [];
   if (!f.relationship) stops.add("identity_unresolved");
-  else if (!f.relationship.policies.pure_prospect) {
-    relationshipTags = PURE_PROSPECT_EXCLUDED.filter((t) => f.relationship!.tags.includes(t) || f.relationship!.unsureTags.includes(t));
+  else if (!f.relationship.policies.prospect_followup) {
+    relationshipTags = PROSPECT_FOLLOWUP_EXCLUDED.filter((t) => f.relationship!.tags.includes(t) || f.relationship!.unsureTags.includes(t));
     if (relationshipTags.length > 0) stops.add("not_pure_prospect");
     else if (f.relationship.notBrandLead) stops.add("not_brand_lead");
     else if (f.relationship.subject && f.relationship.judgedAt === null) stops.add("relationship_not_judged");
@@ -228,19 +218,12 @@ export async function loadProspectFollowupVerdicts(input: {
   const { orgId, brandId } = input;
   const ids = dsql.param(leadIds);
 
-  const [labelRows, outcomeRows, emailRows, humanRows, humans, marks] = await Promise.all([
+  const [labelRows, emailRows, humanRows, humans, marks] = await Promise.all([
     db.execute(dsql`
       SELECT lead_id::text AS lead_id, array_agg(DISTINCT label) AS labels FROM lead_timeline_facts
       WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ANY(${ids}::uuid[]) AND withdrawn_at IS NULL
       GROUP BY lead_id
     `) as unknown as Promise<Array<{ lead_id: string; labels: string[] }>>,
-    db.execute(dsql`
-      SELECT matched_lead_id::text AS lead_id, array_agg(DISTINCT event) AS events FROM conversion_events
-      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND matched_lead_id = ANY(${ids}::uuid[])
-        AND attribution_status = 'attributed' AND withdrawn_at IS NULL
-        AND event = ANY(${dsql.param(OUTCOME_STOPS.map(([e]) => e))}::text[])
-      GROUP BY matched_lead_id
-    `) as unknown as Promise<Array<{ lead_id: string; events: string[] }>>,
     db.execute(dsql`
       SELECT lead_id::text AS lead_id, lower(trim(value)) AS email FROM lead_contact_methods
       WHERE lead_id = ANY(${ids}::uuid[]) AND channel = 'email'
@@ -312,7 +295,6 @@ export async function loadProspectFollowupVerdicts(input: {
   }
 
   const labelsOf = new Map(labelRows.map((r) => [r.lead_id, new Set(r.labels)]));
-  const outcomesOf = new Map(outcomeRows.map((r) => [r.lead_id, new Set(r.events)]));
   for (const leadId of leadIds) {
     const sender = { queued: false, unsubscribed: false, bounced: false };
     for (const e of emailRows) {
@@ -337,7 +319,6 @@ export async function loadProspectFollowupVerdicts(input: {
       leadId,
       decideProspectFollowup({
         labels: labelsOf.get(leadId) ?? new Set(),
-        outcomes: outcomesOf.get(leadId) ?? new Set(),
         human: humans.get(leadId) ?? null,
         disqualified,
         sender,

@@ -35,10 +35,14 @@ import { CRM_NOT_THEIR_ACT, notCopiedSendSql, sessionlessProductEventSql } from 
  *             person's own words: no date at all, the follow-ups end until a writer states a date again.
  *   served    the "Lead follow-up due" serve hands the person to the follow-up pipe and moves the date to
  *             now + DEFAULT_GAP_DAYS, so a pipe that never writes cannot hand the same person every day.
- *   not_yet / stop_recheck   the serve asked the verdict (prospect-followup.ts, same stops: client, personal and other
- *             relationships, opted out, unsubscribed, bounced, disqualified, booked, positive reply) and it said "not
- *             now" (date = its retry time) or "no" (date = now + STOP_RECHECK_DAYS, re-asked then: a stop is a fact
- *             about today, never a tombstone). A follow-up worker's CLAIM is a `not_yet` too (`claimFollowup`,
+ *   not_yet / stop_recheck   the serve asked the verdict (prospect-followup.ts, same stops: personal and other true
+ *             relationships, opted out, do not contact, unsubscribed, bounced, disqualified, team member, not the
+ *             brand's lead) and it said "not now" (date = its retry time) or "no" (date = now + STOP_RECHECK_DAYS,
+ *             re-asked then: a stop is a fact about today, never a tombstone). A FUNNEL STAGE is never a stop
+ *             (FOLLOWUP-FUNNEL-STAGE-1109, owner 2026-11-09, verbatim: "On garde cette liste mais : La liste : relation
+ *             perso, investor, etc. Mais 'meeting booké, meeting tenu, réponse positive, client' -> C'EST OK!!! Ça
+ *             dépend de la campaign!!"): a person with a positive reply, a meeting booked or held, or a sale is served
+ *             when due like anyone, and every campaign serving follow-ups reads the Unibox and decides. A follow-up worker's CLAIM is a `not_yet` too (`claimFollowup`,
  *             ONE-FOLLOWUP-PER-LEAD-1103): the date moves to the claim lease's end, so no other row of theirs is claimed
  *             meanwhile; the worker's `acted` states the next one.
  */

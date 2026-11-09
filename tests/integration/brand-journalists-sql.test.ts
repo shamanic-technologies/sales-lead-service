@@ -106,7 +106,7 @@ describe.skipIf(!hasRealDatabase)("brand journalists", () => {
     const ty = blocks.get(people.ty.human)!;
     expect(ty.tags).toContain("journalist");
     expect(ty.details.find((d) => d.tag === "journalist")).toMatchObject({ basis: "evidence", evidence: "press_pitch_only", state: "yes" });
-    expect(ty.policies).toEqual({ business_only: false, pure_prospect: false });
+    expect(ty.policies).toEqual({ business_only: false, pure_prospect: false, prospect_followup: false });
     expect(blocks.get(people.mia.human)!.tags).not.toContain("journalist");
     expect(blocks.get(people.pat.human)!.policies.pure_prospect).toBe(true);
 
