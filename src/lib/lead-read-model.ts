@@ -768,7 +768,7 @@ async function unseenChanges(model: ReadModel, seen: ReadonlySet<string>): Promi
       FROM lead_read_changes
       WHERE org_id = ${model.orgId} AND txid >= ${model.appliedXmin}::xid8
         AND kind IN ('statement', 'evidence')
-      ORDER BY seq
+      ORDER BY lead_read_changes.seq
     `;
   return { changes: window.filter((change) => !seen.has(change.seq)), window };
 }

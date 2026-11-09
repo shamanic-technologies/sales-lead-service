@@ -114,6 +114,17 @@ function toBrandPointsCte(scope: ActScope | null): SQL {
     )`;
 }
 
+/**
+ * SQL predicate: the act `a` happened on one of `to_brand_points`. Written as a double `NOT IN` so the planner keeps it a
+ * HASHED subplan (DASH-SPEED-1110): a plain `IN` is pulled up into a semi-join, and with the CTE estimated at one row
+ * the planner probed `lead_crm_acts` once per point (25k index scans, 280k buffers, 2-50 s a pass on the largest scope)
+ * instead of reading the scope's acts once (49k buffers). Null-safe: points are never null here, a null
+ * `contact_point` answers false both ways.
+ */
+const onToBrandPoint = sql`NOT ((a.org_id, a.brand_id, a.contact_point) NOT IN (
+        SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p WHERE p.cp IS NOT NULL
+      ))`;
+
 type MessageToJudge = { fact_id: string; subject: string | null; text: string | null; channel: string | null; source: string; at: Date | string };
 
 /**
@@ -148,7 +159,7 @@ async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<Messag
     todo AS (
       SELECT DISTINCT a.fact_id, max(a.at) AS at FROM lead_crm_acts a
       WHERE a.type = 'message_in' AND ${scoped(sql`a`, scope)}
-        AND (a.org_id, a.brand_id, a.contact_point) IN (SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p)
+        AND ${onToBrandPoint}
         AND NOT EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id)
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
       GROUP BY a.fact_id
@@ -214,7 +225,7 @@ export function countedActsSql(scope: ActScope | null): SQL {
       SELECT a.org_id, a.brand_id, a.lead_id, max(a.at) AS at
       FROM lead_crm_acts a
       WHERE ${scoped(sql`a`, scope)}
-        AND (a.org_id, a.brand_id, a.contact_point) IN (SELECT p.org_id, p.brand_id, p.cp FROM to_brand_points p)
+        AND ${onToBrandPoint}
         AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = a.fact_id)
         AND (a.type <> 'message_in' OR EXISTS (SELECT 1 FROM crm_act_judgments j WHERE j.fact_id = a.fact_id AND NOT j.automated))
       GROUP BY a.org_id, a.brand_id, a.lead_id

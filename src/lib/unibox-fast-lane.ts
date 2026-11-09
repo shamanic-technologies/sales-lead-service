@@ -66,7 +66,7 @@ const scopeKey = (s: Scope) => `${s.orgId}|${s.brandId}`;
 /** The seq of the newest row received before `cutoff`: a backward walk of the seq index over the few rows newer. */
 async function seqBefore(table: "crm_facts" | "outreach_facts", cutoff: Date): Promise<bigint> {
   const rows = (await db.execute(sql`
-    SELECT seq::text AS seq FROM ${sql.raw(table)} WHERE received_at < ${cutoff.toISOString()}::timestamptz ORDER BY seq DESC LIMIT 1
+    SELECT seq::text AS seq FROM ${sql.raw(table)} WHERE received_at < ${cutoff.toISOString()}::timestamptz ORDER BY ${sql.raw(table)}.seq DESC LIMIT 1
   `)) as unknown as Array<{ seq: string }>;
   return rows[0] ? BigInt(rows[0].seq) : 0n;
 }
@@ -102,7 +102,7 @@ async function outreachReplyKeys(after: bigint, t: FastLaneTestScope): Promise<{
   const rows = (await db.execute(sql`
     SELECT seq::text AS seq, type, subject_key FROM outreach_facts
     WHERE seq > ${after.toString()}::bigint ${orgFilter(t, "org_id")}
-    ORDER BY seq LIMIT ${ROWS_PER_STEP}
+    ORDER BY outreach_facts.seq LIMIT ${ROWS_PER_STEP}
   `)) as unknown as Array<{ seq: string; type: string; subject_key: string }>;
   return {
     last: rows.length ? BigInt(rows[rows.length - 1].seq) : null,
