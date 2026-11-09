@@ -9,17 +9,22 @@ import { sql } from "drizzle-orm";
 
 const queued = new Set<string>();
 let gatewayDown = false;
-vi.mock("../../src/lib/email-gateway-client.js", () => ({
+vi.mock("../../src/lib/email-gateway-client.js", async (importActual) => {
+  const actual = await importActual<typeof import("../../src/lib/email-gateway-client.js")>();
+  return {
+  ...actual,
   checkDeliveryStatus: vi.fn(async (_brandId: string, _campaignId: string | undefined, items: Array<{ email: string }>) => {
     if (gatewayDown) throw new Error("email-gateway 503");
+    // Like the real client: an address email-gateway refuses (z.string().email()) is never asked, so no row for it.
     return {
-      results: items.map(({ email }) => ({
+      results: items.filter(({ email }) => actual.isGatewayEmail(email)).map(({ email }) => ({
         email,
         broadcast: { brand: { queued: queued.has(email), unsubscribed: false, bounced: false }, global: { email: { unsubscribed: false, bounced: false } } },
       })),
     };
   }),
-}));
+  };
+});
 
 const { db } = await import("../../src/db/index.js");
 const { clearRegistry, connectionTag } = await import("../helpers/crm-registry.js");
@@ -217,5 +222,16 @@ describe.skipIf(!hasRealDatabase)("prospect follow-up (NEVER-NO-FOLLOWUP-1014)",
     expect(stopped.lead).toBeNull();
     expect(await handoutOfSourceRow(again!.leadCampaignId)).toEqual({ orgId, brandId, leadId: later.leadId });
     expect(await serve()).toBeNull();
+  });
+
+  it("answers a person whose address email-gateway refuses, and keeps the others of the batch (customer.io unsubscribe address)", async () => {
+    const malformed = await person("malformed");
+    const refused = "32.mrtvistno5kueqkng5lxqukqjuyxgvkeifng2z2mfvxwy3ckpjghuwkpnjcvgx2jjztt2pi=@unsubscribe2.customer.io";
+    await db.execute(sql`UPDATE lead_contact_methods SET value = ${refused} WHERE lead_id = ${malformed.leadId}::uuid`);
+    const fine = await person("fine");
+    const v = await loadProspectFollowupVerdicts({ orgId, brandId, leadIds: [malformed.leadId, fine.leadId] });
+    // Nothing was ever sent to a refused address: no sender evidence, the verdict reads every other fact.
+    expect(v.get(malformed.leadId)).toBeDefined();
+    expect(v.get(fine.leadId)).toMatchObject({ kind: "owed" });
   });
 });
