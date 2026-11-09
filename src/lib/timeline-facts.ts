@@ -21,6 +21,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchOrgCampaignOffers } from "./campaign-leg-client.js";
 import { getBrandSite } from "./brand-client.js";
 import { loadOutreachFeedState } from "./outreach-fact-feed.js";
+import { otherWritersOf, WRITER_ROW_SEPARATOR, writerRowId } from "./message-participants.js";
 import {
   effectiveLeadOrCompanyMark,
   loadLeadAndCompanyMarks,
@@ -200,6 +201,60 @@ async function readLeadEmails(emails: readonly string[]): Promise<Map<string, st
   return new Map(rows.map((r) => [r.email, r.lead_id]));
 }
 
+/**
+ * Leads OF THE BRAND (a `leads_campaigns` row at org + brand) registered on these addresses (lower-cased): the only
+ * addresses a reply's other writer gets a row for. An address of nobody at the brand (a no-reply robot, our own team,
+ * a colleague crm-service has not handed over yet) writes nothing; it is written once they are a lead.
+ */
+async function readBrandLeadEmails(orgId: string, brandId: string, emails: readonly string[]): Promise<Map<string, string>> {
+  if (emails.length === 0) return new Map();
+  const rows = (await sql`
+    SELECT DISTINCT ON (lower(cm.value)) lower(cm.value) AS email, cm.lead_id::text AS lead_id
+    FROM lead_contact_methods cm
+    WHERE cm.channel = 'email' AND lower(cm.value) IN (SELECT jsonb_array_elements_text(${JSON.stringify(emails)}::jsonb))
+      AND EXISTS (SELECT 1 FROM leads_campaigns lc WHERE lc.lead_id = cm.lead_id AND lc.org_id = ${orgId} AND lc.brand_ids @> ARRAY[${brandId}]::text[])
+    ORDER BY lower(cm.value), cm.lead_id
+  `) as unknown as Array<{ email: string; lead_id: string }>;
+  return new Map(rows.map((r) => [r.email, r.lead_id]));
+}
+
+/**
+ * EVERY PERSON ON THE THREAD (EVERY-PERSON-ON-THE-THREAD-1109): a reply written by someone OTHER than the thread's lead
+ * (Markus answering our email to his colleague Thomas) is that writer's word too. The thread's row stays on the
+ * thread's lead (the message is on their thread; "is this address Thomas?" is human-service's, never decided here)
+ * and states who wrote it (`detail.writtenBy`); each other writer who is a lead of the brand gets the SAME labelled
+ * row on their OWN lead (`<subject>#writer:<lead>`), naming the thread it came through (`detail.thread`). Their
+ * Unibox, steps, wants-business and follow-up eligibility then read their own word; nothing of the thread's lead moves.
+ */
+export async function writerRows(
+  orgId: string,
+  brandId: string,
+  facts: ReadonlyArray<{ fact: OutreachFactRow; row: TimelineFactRow; threadLeadId: string | null }>,
+): Promise<TimelineFactRow[]> {
+  const writers = facts.map((f) => ({ ...f, emails: otherWritersOf(f.fact.type, f.fact.raw, f.fact.lead_email) }));
+  const leadOf = await readBrandLeadEmails(orgId, brandId, [...new Set(writers.flatMap((w) => w.emails))]);
+  const out: TimelineFactRow[] = [];
+  for (const w of writers) {
+    for (const email of w.emails) {
+      const leadId = leadOf.get(email);
+      if (!leadId || leadId === w.threadLeadId) continue;
+      out.push({
+        ...w.row,
+        id: writerRowId(w.fact.subject_key, leadId),
+        lead_id: leadId,
+        detail: { ...w.row.detail, writtenBy: email, thread: { leadId: w.threadLeadId, email: w.fact.lead_email.toLowerCase() } },
+      });
+    }
+  }
+  return out;
+}
+
+/** The writer a reply states when it is not the thread lead's own address, for `detail.writtenBy` (null = the lead). */
+function writtenByOf(fact: OutreachFactRow): string | null {
+  const others = otherWritersOf(fact.type, fact.raw, fact.lead_email);
+  return others.length > 0 ? others.join(", ") : null;
+}
+
 interface OutreachFactRow {
   seq: string;
   subject_key: string;
@@ -295,6 +350,7 @@ export async function outreachRow(
           classification: verdict?.classification ?? null,
           proposalType: obj(obj(reply.judgments)?.proposalType)?.value ?? null,
           escalation: reply.escalation ?? null,
+          ...(writtenByOf(fact) ? { writtenBy: writtenByOf(fact) } : {}),
         },
       };
     }
@@ -318,6 +374,7 @@ async function outreachRows(
     return site;
   };
   const rows: TimelineFactRow[] = [];
+  const written: Array<{ fact: OutreachFactRow; row: TimelineFactRow; threadLeadId: string | null }> = [];
   const withdrawn: string[] = [];
   let unjudged = 0;
   let unplaced = 0;
@@ -327,12 +384,17 @@ async function outreachRows(
       continue;
     }
     const leadId = leadByEmail.get(fact.lead_email);
-    if (!leadId) continue;
-    const row = await outreachRow(orgId, brandId, fact, leadId, offers, siteHosts);
+    const writers = otherWritersOf(fact.type, fact.raw, fact.lead_email);
+    if (!leadId && writers.length === 0) continue;
+    const row = await outreachRow(orgId, brandId, fact, leadId ?? "", offers, siteHosts);
     if (row === "unjudged") unjudged++;
     else if (row === "unplaced") unplaced++;
-    else rows.push(row);
+    else {
+      if (leadId) rows.push(row);
+      if (writers.length > 0) written.push({ fact, row, threadLeadId: leadId ?? null });
+    }
   }
+  rows.push(...(await writerRows(orgId, brandId, written)));
   return { rows, unjudged, unplaced, withdrawn };
 }
 
@@ -361,14 +423,21 @@ export async function syncRepliesNow(subjectKeys: readonly string[]): Promise<Ar
   const touched: Array<{ orgId: string; brandId: string; email: string }> = [];
   for (const f of replies) {
     const leadId = leadByEmail.get(f.lead_email);
-    if (!leadId) continue;
+    const writers = otherWritersOf(f.type, f.raw, f.lead_email);
+    if (!leadId && writers.length === 0) continue;
     if (!offersByOrg.has(f.org_id)) offersByOrg.set(f.org_id, fetchOrgCampaignOffers({ orgId: f.org_id }));
     const offers = await offersByOrg.get(f.org_id)!;
     for (const brandId of f.brand_ids) {
-      const row = await outreachRow(f.org_id, brandId, f, leadId, offers, noSite);
+      const row = await outreachRow(f.org_id, brandId, f, leadId ?? "", offers, noSite);
       if (row === "unjudged" || row === "unplaced") continue;
-      rows.push(row);
-      touched.push({ orgId: f.org_id, brandId, email: f.lead_email.toLowerCase() });
+      if (leadId) {
+        rows.push(row);
+        touched.push({ orgId: f.org_id, brandId, email: f.lead_email.toLowerCase() });
+      }
+      // Every other writer of the reply (EVERY-PERSON-ON-THE-THREAD-1109) reaches their own Unibox row in the same pass.
+      const theirs = await writerRows(f.org_id, brandId, [{ fact: f, row, threadLeadId: leadId ?? null }]);
+      rows.push(...theirs);
+      for (const r of theirs) touched.push({ orgId: f.org_id, brandId, email: String(r.detail.writtenBy) });
     }
   }
   await upsertTimelineFacts(rows);
@@ -381,7 +450,9 @@ async function markWithdrawn(orgId: string, brandId: string, subjectKeys: readon
   const result = await sql`
     UPDATE lead_timeline_facts SET withdrawn_at = now(), updated_at = now()
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND withdrawn_at IS NULL
-      AND id IN (SELECT jsonb_array_elements_text(${JSON.stringify(subjectKeys)}::jsonb))
+      AND (id IN (SELECT jsonb_array_elements_text(${JSON.stringify(subjectKeys)}::jsonb))
+        OR (strpos(id, ${WRITER_ROW_SEPARATOR}) > 0
+          AND split_part(id, ${WRITER_ROW_SEPARATOR}, 1) IN (SELECT jsonb_array_elements_text(${JSON.stringify(subjectKeys)}::jsonb))))
   `;
   return result.count;
 }

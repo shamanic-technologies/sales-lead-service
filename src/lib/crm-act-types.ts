@@ -7,6 +7,9 @@ import { sql, type SQL } from "drizzle-orm";
  */
 export const CRM_NOT_THEIR_ACT = [
   "message_out",
+  // A person COPIED (To/Cc/Bcc) on a message someone else wrote to us (crm-service, our sending mailboxes,
+  // EVERY-PERSON-ON-THE-THREAD-1109): the message sits on their thread as context; they did not write it.
+  "message_copied",
   "withdrawn",
   "person_merged",
   "person_split",
@@ -39,4 +42,20 @@ export function isSessionlessProductEvent(type: string, payload: Record<string, 
 /** SQL twin of `isSessionlessProductEvent` on a `crm_facts` row alias. */
 export function sessionlessProductEventSql(f: SQL): SQL {
   return sql`(${f}.type = ${PRODUCT_EVENT_TYPE} AND ${f}.payload ? 'sessionId' AND ${f}.payload->>'sessionId' IS NULL)`;
+}
+
+/**
+ * A message of ours on which this person is only COPIED (crm-service states `payload.role` = `cc`/`bcc` for each address
+ * of what we sent, EVERY-PERSON-ON-THE-THREAD-1109): context on their thread, never a send TO them, so it never moves
+ * their follow-up date. A fact stating no role (every channel but the sending mailboxes) is a send to them, unchanged.
+ */
+export const COPIED_SEND_ROLES = ["cc", "bcc"] as const;
+
+export function isCopiedSend(type: string, payload: Record<string, unknown> | null | undefined): boolean {
+  return type === "message_out" && typeof payload?.role === "string" && (COPIED_SEND_ROLES as readonly string[]).includes(payload.role);
+}
+
+/** SQL twin of NOT `isCopiedSend` on a `crm_facts` row alias. */
+export function notCopiedSendSql(f: SQL): SQL {
+  return sql`COALESCE(${f}.payload->>'role', '') <> ALL(${sql.param([...COPIED_SEND_ROLES])}::text[])`;
 }
