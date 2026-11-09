@@ -17,7 +17,10 @@ import { loadOriginNamesByList, type SourcingOriginName } from "./sourcing-origi
  *   2. the filings lead-service makes with no audience: a CRM signup filed as a lead (`crm_signup`), a
  *      social engager of our post (`social_engagement`), a person the brand's own org stated
  *      (`stated_by_org`, `brand_person_statements`), a person who clicked a link of a Unit addressed to them
- *      (`unit_click`, post-touch.ts: e.g. a newsletter email).
+ *      (`unit_click`, post-touch.ts: e.g. a newsletter email);
+ *   3. the people this person CAME THROUGH (`came_through`, EVERY-PERSON-ON-THE-THREAD-1109): they wrote in the thread of
+ *      another lead of the brand (Markus answering our email to his colleague Thomas), read off their own timeline rows
+ *      (timeline-facts.ts `writerRows`). Every lead they came through is listed, never the first only.
  *
  * `tags` is the flat, groupable form: the origin slug of every named source, `list:<kind>` for a list
  * kind the catalogue does not name, `list:none` for an audience stating no list, plus the filing kinds.
@@ -25,7 +28,7 @@ import { loadOriginNamesByList, type SourcingOriginName } from "./sourcing-origi
  * A read only: nothing here moves who gets emailed.
  */
 
-export const LOCAL_FILING_KINDS = ["crm_signup", "social_engagement", "stated_by_org", "unit_click"] as const;
+export const LOCAL_FILING_KINDS = ["crm_signup", "social_engagement", "stated_by_org", "unit_click", "came_through"] as const;
 export type LocalFilingKind = (typeof LOCAL_FILING_KINDS)[number];
 
 export interface LocalFiling {
@@ -39,11 +42,21 @@ export interface ProvenanceSource extends LeadSource {
   foundAt: string | null;
 }
 
+/** One lead of the brand whose thread this person wrote in. */
+export interface CameThrough {
+  leadId: string | null;
+  email: string;
+  /** First message of theirs in that thread, ISO-8601; null when undated. */
+  firstAt: string | null;
+}
+
 export interface PersonProvenance {
   email: string;
   tags: string[];
   sources: ProvenanceSource[];
   filings: LocalFiling[];
+  /** Every lead of the brand whose thread this person wrote in (`came_through` filing), earliest first. */
+  cameThrough: CameThrough[];
 }
 
 /** Max addresses per call: keeps the body under the app's 100KB JSON cap and the SQL key set bounded. */
@@ -66,6 +79,7 @@ export function toPersonProvenance(
   memberships: BrandMembership[],
   filings: LocalFiling[],
   originsByList: Map<string, SourcingOriginName>,
+  cameThrough: CameThrough[] = [],
 ): PersonProvenance {
   const joinedAt = new Map(memberships.map((m) => [m.audienceId, m.joinedAt ?? null]));
   const sources = toLeadSources(memberships, originsByList).map((s) => ({
@@ -76,7 +90,40 @@ export function toPersonProvenance(
   const tags = new Set<string>();
   for (const s of sources) tags.add(sourceTag(s));
   for (const f of orderedFilings) tags.add(f.kind);
-  return { email, tags: [...tags].sort(), sources, filings: orderedFilings };
+  return { email, tags: [...tags].sort(), sources, filings: orderedFilings, cameThrough };
+}
+
+interface CameThroughRow {
+  email: string;
+  thread_lead_id: string | null;
+  thread_email: string;
+  first_at: Date | string | null;
+}
+
+/**
+ * The leads each address came through at (org, brand): its lead's live writer rows on the timeline (a reply it wrote
+ * in another lead's thread), one entry per thread lead, earliest first. Pure read of our own rows.
+ */
+export async function loadCameThrough(orgId: string, brandId: string, emails: string[]): Promise<Map<string, CameThrough[]>> {
+  const out = new Map<string, CameThrough[]>();
+  if (emails.length === 0) return out;
+  const rows = (await db.execute(sql`
+    SELECT lower(cm.value) AS email, f.detail->'thread'->>'leadId' AS thread_lead_id, f.detail->'thread'->>'email' AS thread_email,
+      min(f.occurred_at) AS first_at
+    FROM lead_contact_methods cm
+    JOIN lead_timeline_facts f ON f.lead_id = cm.lead_id AND f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      AND f.withdrawn_at IS NULL AND f.detail ? 'thread'
+    WHERE cm.channel = 'email' AND lower(cm.value) = ANY(${sql.param(emails)}::text[])
+    GROUP BY 1, 2, 3
+    ORDER BY 1, min(f.occurred_at) NULLS LAST, 3
+  `)) as unknown as CameThroughRow[];
+  for (const r of rows) {
+    if (typeof r.thread_email !== "string" || r.thread_email.length === 0) continue;
+    const list = out.get(r.email) ?? [];
+    list.push({ leadId: r.thread_lead_id ?? null, email: r.thread_email, firstAt: toIsoTimestamp(r.first_at) });
+    out.set(r.email, list);
+  }
+  return out;
 }
 
 interface FilingRow {
@@ -147,12 +194,16 @@ export async function readLeadProvenanceByEmail(
 ): Promise<PersonProvenance[]> {
   const emails = [...new Set(rawEmails.map(normalizeProvenanceEmail).filter((e) => e.length > 0))];
   if (emails.length === 0) return [];
-  const [originsByList, memberships, filings] = await Promise.all([
+  const [originsByList, memberships, filings, cameThrough] = await Promise.all([
     loadOriginNamesByList(),
     loadMemberships(brandId, emails, orgId),
     loadLocalFilings(orgId, brandId, emails),
+    loadCameThrough(orgId, brandId, emails),
   ]);
-  return emails.map((email) =>
-    toPersonProvenance(email, memberships.get(email) ?? [], filings.get(email) ?? [], originsByList),
-  );
+  return emails.map((email) => {
+    const through = cameThrough.get(email) ?? [];
+    const own = filings.get(email) ?? [];
+    const withThrough: LocalFiling[] = through.length === 0 ? own : [...own, { kind: "came_through", firstAt: through[0].firstAt }];
+    return toPersonProvenance(email, memberships.get(email) ?? [], withThrough, originsByList, through);
+  });
 }

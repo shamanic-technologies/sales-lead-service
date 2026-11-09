@@ -40,7 +40,14 @@ describe("toPersonProvenance (LEAD-SOURCE-AT-SEND-1016)", () => {
   });
 
   it("a person nobody recorded a source for answers empty tags, not a default", () => {
-    expect(toPersonProvenance("x@y.com", [], [], ORIGINS)).toEqual({ email: "x@y.com", tags: [], sources: [], filings: [] });
+    expect(toPersonProvenance("x@y.com", [], [], ORIGINS)).toEqual({ email: "x@y.com", tags: [], sources: [], filings: [], cameThrough: [] });
+  });
+
+  it("a person who wrote in another lead's thread is tagged came_through, every such lead listed", () => {
+    const through = [{ leadId: "L1", email: "thomas@m.ch", firstAt: "2026-11-09T15:28:51.000Z" }, { leadId: "L2", email: "anna@m.ch", firstAt: null }];
+    const p = toPersonProvenance("markus@m.ch", [], [{ kind: "came_through", firstAt: "2026-11-09T15:28:51.000Z" }], ORIGINS, through);
+    expect(p.tags).toEqual(["came_through"]);
+    expect(p.cameThrough).toEqual(through);
   });
 });
 
