@@ -19,6 +19,7 @@ vi.mock("../../src/lib/qualification-judge.js", async (importOriginal) => ({
 
 const { db, sql: raw } = await import("../../src/db/index.js");
 const acts = await import("../../src/lib/their-acts.js");
+const { settleOpenTransactions } = await import("../helpers/settle-transactions.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -33,6 +34,10 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
   const leadIds: string[] = [];
   const point = `gmail:p-${randomUUID().slice(0, 6)}@distribute.you`;
   const humanId = randomUUID();
+  // Every fleet pass of this file walks only its own org: another file's passes and scopes never meet ours.
+  const fleet = { onlyOrgId: orgId };
+  /** Every transaction open now has ended: the next pass's xmin is above every write this test made. */
+  const settle = () => settleOpenTransactions(db);
 
   afterAll(async () => {
     for (const t of ["lead_crm_acts", "lead_followup_dates", "relationship_subjects", "crm_facts", "crm_registry_facts", "acted_scope_passes", "acted_input_changes"]) {
@@ -83,7 +88,7 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
 
   /** Every lead's value after the fleet pass, then after a FORCED re-derivation of the scope: must be the same. */
   async function passAndCompare(): Promise<Array<string | null>> {
-    await acts.refreshActedAt(null);
+    await acts.refreshActedAt(null, fleet);
     const afterPass = await Promise.all(leadIds.map(lastActionAt));
     await db.execute(sql`UPDATE lead_followup_dates SET last_action_at = NULL WHERE org_id = ${orgId}`);
     await acts.refreshActedAt(scope);
@@ -103,16 +108,18 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
     expect(await passAndCompare()).toEqual(["2026-10-01T08:00:00.000Z"]);
 
     // Passed, nothing moved: the pass skips the scope (proof: a value tampered behind its back stays as it is).
-    await acts.refreshActedAt(null);
+    await settle();
+    await acts.refreshActedAt(null, fleet);
     expect(await moved()).toBe(false);
     await db.execute(sql`UPDATE lead_followup_dates SET last_action_at = '2001-01-01T00:00:00Z' WHERE org_id = ${orgId}`);
-    const pass = await acts.refreshActedAt(null);
+    const pass = await acts.refreshActedAt(null, fleet);
     expect(await lastActionAt(a)).toBe("2001-01-01T00:00:00.000Z");
     expect(pass.skipped).toBeGreaterThanOrEqual(1);
     await acts.refreshActedAt(scope);
 
     // A busy column that is no input (the date itself) leaves the scope alone.
-    await acts.refreshActedAt(null);
+    await settle();
+    await acts.refreshActedAt(null, fleet);
     await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '3 days', basis = 'send' WHERE org_id = ${orgId}`);
     await db.execute(sql`UPDATE relationship_subjects SET has_direct = false WHERE org_id = ${orgId}`);
     expect(await moved()).toBe(false);
@@ -140,14 +147,15 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
       b = row.id;
       // Recorded before the date row exists: the act alone moves the scope, the pass dates nobody yet.
       await message(b, "2026-10-07T08:00:00Z");
-      await acts.refreshActedAt(null);
+      await acts.refreshActedAt(null, fleet);
       leadIds.push(b);
       await db.execute(sql`INSERT INTO lead_followup_dates (org_id, brand_id, lead_id, next_followup_at, basis) VALUES (${orgId}, ${brandId}, ${b}::uuid, now(), 'default')`);
     }, ["2026-10-01T08:00:00.000Z", "2026-10-07T08:00:00.000Z"]]);
     steps.push(["an act removed", () => db.execute(sql`DELETE FROM lead_crm_acts WHERE org_id = ${orgId} AND fact_id = ${first}`), [null, "2026-10-07T08:00:00.000Z"]]);
 
     for (const [what, write, want] of steps) {
-      await acts.refreshActedAt(null);
+      await settle();
+      await acts.refreshActedAt(null, fleet);
       expect(await moved(), `${what}: settled before`).toBe(false);
       await write();
       expect(await moved(), `${what}: moves the scope`).toBe(true);
@@ -156,7 +164,8 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
   });
 
   it("a write still open during a pass re-derives the scope once it commits", async () => {
-    await acts.refreshActedAt(null);
+    await settle();
+    await acts.refreshActedAt(null, fleet);
     expect(await moved()).toBe(false);
     const a = leadIds[0];
     let release!: () => void;
@@ -174,12 +183,12 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
     await begun;
     // The scope moves for another reason meanwhile; the pass reads it while the late write is still open.
     await db.execute(sql`INSERT INTO acted_input_changes (org_id, brand_id) VALUES (${orgId}, ${brandId})`);
-    await acts.refreshActedAt(null);
+    await acts.refreshActedAt(null, fleet);
     expect(await lastActionAt(a)).not.toBe("2026-11-01T00:00:00.000Z");
     release();
     await open;
     expect(await moved()).toBe(true);
-    await acts.refreshActedAt(null);
+    await acts.refreshActedAt(null, fleet);
     expect(await lastActionAt(a)).toBe("2026-11-01T00:00:00.000Z");
   });
 
@@ -188,21 +197,22 @@ describe.skipIf(!hasRealDatabase)("their-acts passes skip unchanged scopes (DASH
     // A message on a point that is no subject's: never countable, so never judged; asked once, then left alone.
     await message(a, "2026-11-02T00:00:00Z", { judged: false, on: "gmail:nobody@distribute.you" });
     judged.length = 0;
+    await settle();
     const judgedXmin = async () => {
       const [pass] = (await db.execute(sql`SELECT judged_xmin::text AS x FROM acted_scope_passes WHERE org_id = ${orgId} AND brand_id = ${brandId}`)) as unknown as Array<{ x: string | null }>;
       return pass?.x ?? null;
     };
-    await acts.judgeAutomatedActs(5);
+    await acts.judgeAutomatedActs(5, fleet);
     const asked = await judgedXmin();
     expect(asked).not.toBeNull();
     expect(judged).toEqual([]);
     // Nothing moved: not asked again (a scope asked and found empty records a NEW xmin).
     await db.execute(sql`SELECT pg_sleep(0.01)`);
-    await acts.judgeAutomatedActs(5);
+    await acts.judgeAutomatedActs(5, fleet);
     expect(await judgedXmin()).toBe(asked);
     // A countable unjudged message: the scope moved, it is asked and judged.
     const fresh = await message(a, "2026-11-03T00:00:00Z", { judged: false });
-    await acts.judgeAutomatedActs(5);
+    await acts.judgeAutomatedActs(5, fleet);
     expect(judged).toEqual([`hello ${fresh}`]);
   });
 });
