@@ -377,8 +377,8 @@ export async function syncCrmEvidence(orgId: string, brandId: string): Promise<C
     }
   }
 
-  const withdrawnOutcomes = await withdrawStaleCrmOutcomes(brandId, keepSignatures);
-  const withdrawnNevers = await withdrawStaleCrmNevers(brandId, keepNevers);
+  const withdrawnOutcomes = await withdrawStaleCrmOutcomes(orgId, brandId, keepSignatures);
+  const withdrawnNevers = await withdrawStaleCrmNevers(orgId, brandId, keepNevers);
 
   return {
     brandId,

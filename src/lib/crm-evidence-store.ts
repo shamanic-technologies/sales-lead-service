@@ -83,14 +83,18 @@ export async function upsertCrmOutcome(w: CrmOutcomeWrite): Promise<void> {
 }
 
 /**
- * Set aside every live CRM-evidenced outcome of this brand whose signature is not in `keep`.
- * Returns how many were set aside.
+ * Set aside every live CRM-evidenced outcome of this ORG's brand whose signature is not in `keep`.
+ * Returns how many were set aside. Org-scoped: a brand is a shared identity (one domain, several
+ * orgs), and each org's sync only knows its own pairings. Brand-only, the pass of an org holding
+ * no pairing set aside every row of the other org, whose next pass stood them back up: each
+ * flicker reversed and re-declared the same outcome at runs-service (LEDGER-REDECLARE-CHURN-1110).
  */
-export async function withdrawStaleCrmOutcomes(brandId: string, keep: string[]): Promise<number> {
+export async function withdrawStaleCrmOutcomes(orgId: string, brandId: string, keep: string[]): Promise<number> {
   const rows = (await db.execute(sql`
     UPDATE conversion_events
     SET withdrawn_at = now()
-    WHERE brand_id = ${brandId}
+    WHERE org_id = ${orgId}
+      AND brand_id = ${brandId}
       AND source = 'crm'
       AND withdrawn_at IS NULL
       AND NOT (dedupe_signature = ANY(${sql.param(keep)}::text[]))
@@ -214,12 +218,13 @@ export async function upsertCrmNever(w: CrmNeverWrite): Promise<string | null> {
   return rows[0]?.id ?? null;
 }
 
-/** Set aside every live CRM "never" of this brand not in `keep`. Returns how many. */
-export async function withdrawStaleCrmNevers(brandId: string, keep: string[]): Promise<number> {
+/** Set aside every live CRM "never" of this ORG's brand not in `keep` (org-scoped, as outcomes). Returns how many. */
+export async function withdrawStaleCrmNevers(orgId: string, brandId: string, keep: string[]): Promise<number> {
   const rows = (await db.execute(sql`
     UPDATE lead_step_disqualifications
     SET withdrawn_at = now(), updated_at = now()
-    WHERE brand_id = ${brandId}
+    WHERE org_id = ${orgId}
+      AND brand_id = ${brandId}
       AND source = 'crm'
       AND withdrawn_at IS NULL
       AND NOT (id = ANY(${sql.param(keep)}::uuid[]))
