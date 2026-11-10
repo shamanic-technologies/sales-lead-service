@@ -30,6 +30,9 @@ export type EvidenceContext = Parameters<typeof checkDeliveryStatus>[3];
 const EMAILS_PER_REQUEST = 100;
 const REQUEST_CONCURRENCY = 6;
 
+/** From how many addresses the stored read tests membership with a hash instead of an `ANY` list. */
+export const HASHED_MEMBERSHIP_FROM = 1000;
+
 /** Raised when the delivery layer could not be asked. The caller answers 502, never a zero. */
 export class EvidenceUnavailableError extends Error {
   constructor(message: string) {
@@ -184,13 +187,22 @@ export async function readDeliveryEvidence(
 
   for (const [brandId, emailSet] of byBrand) {
     const emails = [...emailSet];
+    // Many addresses: membership is a HASHED subplan (`NOT (email NOT IN (...))`, addresses are never
+    // null), never `email = ANY($4)`: with a whole brand's addresses (20k) the ANY was re-checked
+    // linearly per row on the bitmap heap scan, 4.1 s on the largest scope; the hashed form walks the
+    // scope's key prefix once, 88 ms, same rows (DASH-SPEED-1110-LEAD-R2). A few addresses (a page
+    // overlay) keep the per-address primary-key probes: a prefix walk would read the whole scope.
+    const membership =
+      emails.length > HASHED_MEMBERSHIP_FROM
+        ? sql`NOT (email NOT IN (SELECT unnest(${emails}::text[])))`
+        : sql`email = ANY(${emails}::text[])`;
     const stored = await sql<StoredEvidence[]>`
       SELECT email, result, fetched_at
       FROM lead_delivery_evidence
       WHERE org_id = ${options.orgId}
         AND brand_id = ${brandId}
         AND campaign_id = ${campaignKey}
-        AND email = ANY(${emails}::text[])
+        AND ${membership}
     `;
     const fresh = new Set<string>();
     for (const row of stored) {
