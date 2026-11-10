@@ -196,6 +196,16 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // awaiting-reply-read `readConversationFacts` (a brand's current reply / answer / unsubscribe facts) and
+    // meeting-attribution's answers (`reply_sent`): a few thousand rows of the ~270 MB table. Without it the brand
+    // read fetched every fact of the org (30k heap blocks, mostly sends) to keep ~170: 17.5 s cold on the largest
+    // brand (DASH-SPEED-1110-LEAD-R2). Predicate = the readers' type lists (a subset implies it).
+    name: "idx_outreach_facts_conversation",
+    on: "ON outreach_facts (org_id) WHERE type IN ('reply', 'reply_sent', 'unsubscribed', 'withdrawn')",
+    lockKey: "7290519146308441037",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
