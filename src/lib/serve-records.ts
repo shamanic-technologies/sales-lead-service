@@ -1,5 +1,6 @@
 import { sql } from "../db/index.js";
 import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 /**
  * EVERY SERVE of a brand: which `lead-serve` run handed out which person, every campaign, no dedup.
@@ -110,7 +111,7 @@ export async function* streamServeRecords(
   brandId: string,
   chunkSize: number,
 ): AsyncGenerator<ServeRecord[]> {
-  for await (const rows of serveRecordQuery(orgId, brandId).cursor(Math.max(1, chunkSize))) {
+  for await (const rows of withCursorSlot(() => serveRecordQuery(orgId, brandId).cursor(Math.max(1, chunkSize)))) {
     if (rows.length === 0) continue;
     yield rows.map(toServeRecord);
   }

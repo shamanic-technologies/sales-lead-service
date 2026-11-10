@@ -6,9 +6,52 @@ import { fetchOrgCampaignOffers } from "../lib/campaign-leg-client.js";
 import { loadOutreachFeedState } from "../lib/outreach-fact-feed.js";
 import { ResponseWriter } from "../lib/stream-writer.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
-import { cachedJourneys, journeysCacheKey, journeysSnapshotXmin, rememberJourneys } from "../lib/brand-journeys-cache.js";
+import {
+  cachedJourneys,
+  journeysCacheKey,
+  journeysSnapshotXmin,
+  rememberJourneys,
+  withJourneysKey,
+  type LeadJourneys,
+} from "../lib/brand-journeys-cache.js";
+import { acceptsGzip, recordingGzip, replayGzipBody } from "../lib/gzip-body-cache.js";
 
 const router = Router();
+
+/** Add one journey (as written) to its lead's kept journeys; `order` = leads in body order (the stream's). */
+function noteLeadJourney(
+  leads: Map<string, LeadJourneys>,
+  order: string[],
+  leadId: string,
+  json: string,
+  facts: number,
+): void {
+  const held = leads.get(leadId);
+  if (held) {
+    held.json += "," + json;
+    held.count += 1;
+    held.facts += facts;
+  } else {
+    leads.set(leadId, { json, count: 1, facts });
+    order.push(leadId);
+  }
+}
+
+/** Some leads' journeys, re-read by the same statement narrowed to them. */
+async function readLeadJourneys(
+  orgId: string,
+  brandId: string,
+  offers: ReadonlyMap<string, string | null>,
+  leadIds: readonly string[],
+): Promise<Map<string, LeadJourneys>> {
+  const leads = new Map<string, LeadJourneys>();
+  const order: string[] = [];
+  for await (const chunk of streamBrandJourneys(orgId, brandId, offers, CHUNK_SIZE, leadIds)) {
+    for (const journey of chunk)
+      noteLeadJourney(leads, order, journey.leadId, JSON.stringify(journey), journey.facts.length);
+  }
+  return leads;
+}
 
 const CHUNK_SIZE = Math.max(1, Number(process.env.LEADS_STREAM_CHUNK_SIZE) || 500);
 
@@ -48,16 +91,21 @@ router.get(
       offers = await fetchOrgCampaignOffers({ orgId, brandId });
     } catch (error) {
       console.error(`[lead-service] timeline-journeys campaign offers unreadable for brand ${brandId}:`, error);
-      res.status(502).json({ error: "campaign_offers_unavailable", message: errorMessage(error) });
+      res.status(502).json({
+        error: "campaign_offers_unavailable",
+        message: errorMessage(error),
+      });
       return;
     }
 
     const writer = new ResponseWriter(res);
     const client = watchClient(req, res);
     let streamingStarted = false;
-    // The exact bytes written, kept to answer the next identical read while nothing it read has moved
-    // (brand-journeys-cache.ts, BOX-DB-LOAD-1027-LEAD-2).
+    // Each lead's journeys as written, kept to bring the next identical read up to date from the leads that moved
+    // (brand-journeys-cache.ts, BOX-DB-LOAD-1027-LEAD-2, DASH-SPEED-1110-LEAD-R4).
     const parts: string[] = [];
+    const leads = new Map<string, LeadJourneys>();
+    const order: string[] = [];
     const emit = async (text: string) => {
       parts.push(text);
       await writer.write(text);
@@ -70,31 +118,45 @@ router.get(
     };
     try {
       const cacheKey = journeysCacheKey(orgId, brandId, offers);
-      const held = await cachedJourneys(cacheKey);
-      if (held !== null) {
-        res.setHeader("Content-Type", "application/json");
-        streamingStarted = true;
-        await writer.write(held);
-        await writer.end();
-        return;
-      }
-      // Taken BEFORE the read: a write still open now carries a txid at or above it.
-      const xmin = await journeysSnapshotXmin();
-      let count = 0;
-      let factCount = 0;
-      for await (const chunk of streamBrandJourneys(orgId, brandId, offers, CHUNK_SIZE)) {
-        client.stopIfGone(count);
-        await open();
-        for (const journey of chunk) {
-          await emit((count === 0 ? "" : ",") + JSON.stringify(journey));
-          count += 1;
-          factCount += journey.facts.length;
+      // Identical reads one after the other: the first brings the answer up to date, the next find it held.
+      await withJourneysKey(cacheKey, async () => {
+        const held = await cachedJourneys(cacheKey, (leadIds) => readLeadJourneys(orgId, brandId, offers, leadIds));
+        if (held !== null) {
+          streamingStarted = true;
+          if (acceptsGzip(req)) {
+            // The same body, gzipped once and replayed (~20M characters on the largest brand).
+            const gzKey = `${cacheKey}:${held.bodyKey}`;
+            if (await replayGzipBody(gzKey, res)) return;
+            const gz = new ResponseWriter(recordingGzip(gzKey, res));
+            await gz.write(held.body);
+            await gz.end();
+            return;
+          }
+          res.setHeader("Content-Type", "application/json");
+          await writer.write(held.body);
+          await writer.end();
+          return;
         }
-      }
-      await open();
-      await emit(`],"count":${count},"factCount":${factCount}}`);
-      await writer.end();
-      rememberJourneys(cacheKey, orgId, xmin, parts.join(""));
+        // Taken BEFORE the read: a write still open now carries a txid at or above it.
+        const xmin = await journeysSnapshotXmin();
+        let count = 0;
+        let factCount = 0;
+        for await (const chunk of streamBrandJourneys(orgId, brandId, offers, CHUNK_SIZE)) {
+          client.stopIfGone(count);
+          await open();
+          for (const journey of chunk) {
+            const json = JSON.stringify(journey);
+            await emit((count === 0 ? "" : ",") + json);
+            noteLeadJourney(leads, order, journey.leadId, json, journey.facts.length);
+            count += 1;
+            factCount += journey.facts.length;
+          }
+        }
+        await open();
+        await emit(`],"count":${count},"factCount":${factCount}}`);
+        await writer.end();
+        rememberJourneys(cacheKey, orgId, brandId, xmin, leads, order, parts.join(""));
+      });
     } catch (error) {
       if (isClientGone(error)) {
         console.warn(`[lead-service] timeline-journeys read abandoned by the caller: ${error.message}`);

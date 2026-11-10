@@ -66,6 +66,7 @@ import {
 } from "./lead-read-model.js";
 import { prefetchOne } from "./prefetch.js";
 import { scopeLockBusy, withScopeLock } from "./scope-lock.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 /** A feed somebody reads is fully reconciled this often by the worker. */
 export const FEED_RECONCILE_AFTER_MS = READ_MODEL_REFRESH_AFTER_MS;
@@ -732,7 +733,7 @@ export function readFeedAsList(
       -- The COLUMNS, never the ::text aliases (a text sort is not the keyset's order).
       ORDER BY k.created_at ASC, k.id ASC
     `;
-    for await (const rows of statement.cursor(Math.max(1, chunkSize))) {
+    for await (const rows of withCursorSlot(() => statement.cursor(Math.max(1, chunkSize)))) {
       if (rows.length === 0) continue;
       if (total === null && rows[0].total !== null) total = Number(rows[0].total);
       yield rows.map((r) => ({ id: r.id, createdAt: r.created_at, payload: r.payload }));

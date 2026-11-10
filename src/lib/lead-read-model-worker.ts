@@ -167,6 +167,14 @@ export async function sweepReadModels(): Promise<void> {
     await sql`
       DELETE FROM journey_input_changes WHERE created_at < now() - ${CHANGE_LOG_RETENTION}::interval
     `;
+    // The their-acts and crm-relation change logs (their-acts.ts, crm-live-relations.ts): a scope whose last pass is
+    // older than the retention is re-derived whatever the log says, a kept relation list is re-read within the hour.
+    await sql`
+      DELETE FROM acted_input_changes WHERE created_at < now() - ${CHANGE_LOG_RETENTION}::interval
+    `;
+    await sql`
+      DELETE FROM crm_registry_fact_changes WHERE created_at < now() - ${CHANGE_LOG_RETENTION}::interval
+    `;
   } finally {
     sweeping = false;
   }
