@@ -506,8 +506,8 @@ async function createFeed(scope: ReadModelScope, key: string): Promise<ChangeFee
  */
 export async function openChangeFeed(scope: ReadModelScope): Promise<ChangeFeed> {
   const key = changeFeedKey(scope);
-  const current = await loadFeedBy("scope_key", key);
-  if (current && withinBound(current, Date.now()) && (await scopeLockBusy(FEED_LOCK, key))) {
+  const { feed: current, pending } = await loadFeedWithPending(key);
+  if (current && withinBound(current, Date.now()) && (!pending || (await scopeLockBusy(FEED_LOCK, key)))) {
     await touch(current);
     return current;
   }
@@ -522,6 +522,50 @@ export async function openChangeFeed(scope: ReadModelScope): Promise<ChangeFeed>
       await catchUpFeed(feed);
     }
     await touch(feed);
+    return feed;
+  });
+}
+
+/**
+ * The feed, and whether any change it has not applied is waiting (the catch-up's own window,
+ * `txid >= applied_xmin`). Nothing waiting = the feed is already what a catch-up would leave: a read
+ * within the bound answers without the lock or a write. Two statements on purpose: correlated with
+ * the feed row, the EXISTS was planned as a seq scan of the whole change log betting on an early hit
+ * that never comes (48k rows, 193-462 ms); with the values bound it walks `idx_lrc_org_txid` (9 ms).
+ */
+async function loadFeedWithPending(key: string): Promise<{ feed: ChangeFeed | null; pending: boolean }> {
+  const feed = await loadFeedBy("scope_key", key);
+  if (!feed) return { feed: null, pending: false };
+  const rows = await sql<Array<{ pending: boolean }>>`
+    SELECT EXISTS (
+      SELECT 1 FROM lead_read_changes c
+      WHERE c.org_id = ${feed.orgId} AND c.txid >= ${feed.appliedXmin}::xid8 AND c.kind IN ('lead', 'evidence')
+    ) AS pending
+  `;
+  return { feed, pending: rows[0]?.pending === true };
+}
+
+/**
+ * The scope's feed IF one is already kept current — exists and was reconciled within its enforced
+ * bound — caught up with every change it has not seen; otherwise null, and nothing is created,
+ * reconciled or kept warm (DASH-SPEED-1110-LEAD-R3). For a read that can answer either way (the
+ * plain compact walk): a feed somebody reads is reconciled every 3 min for 30 min, so a one-shot
+ * read opening one would buy ~10 whole-scope walks to save one (features-service BOX-LOAD-1028
+ * routes only repeat reads through /changes for that reason). Never touches `last_read_at`: a feed's
+ * warmth stays owned by its /changes readers.
+ */
+export async function openWarmChangeFeed(scope: ReadModelScope): Promise<ChangeFeed | null> {
+  const key = changeFeedKey(scope);
+  // The common path: the feed, and whether any change it has not applied is waiting. Nothing
+  // waiting = the feed is already what a catch-up would leave, answered without the lock or a write.
+  const { feed: current, pending } = await loadFeedWithPending(key);
+  if (!current || !withinBound(current, Date.now())) return null;
+  if (!pending) return current;
+  if (await scopeLockBusy(FEED_LOCK, key)) return current;
+  return withKeyLock(key, async () => {
+    const feed = await loadFeedBy("scope_key", key);
+    if (!feed || !withinBound(feed, Date.now())) return null;
+    await catchUpFeed(feed);
     return feed;
   });
 }
@@ -556,7 +600,7 @@ export async function feedById(feedId: string): Promise<ChangeFeed | null> {
 // ── reading a feed ───────────────────────────────────────────────────────────────────────────
 
 /** The committed version: nothing at or below it can still be in flight. */
-async function committedVersion(feed: ChangeFeed): Promise<string> {
+export async function committedVersion(feed: ChangeFeed): Promise<string> {
   const rows = await sql<Array<{ version: string }>>`
     SELECT version::text AS version FROM lead_change_feeds WHERE id = ${feed.id}::uuid
   `;
@@ -626,6 +670,88 @@ export async function readChangeFeed(
     }
   }
   return { position, chunks: chunks() };
+}
+
+// ── a feed read as the LIST (`GET /orgs/leads?view=compact`) ────────────────────────────────
+
+/** One row of a list-ordered feed read: the stored compact payload and its keyset position. */
+export interface FeedListRow {
+  id: string;
+  createdAt: string;
+  payload: string;
+}
+
+/** What a list-ordered feed read hands back: the rows, a chunk at a time, and the page's total. */
+export interface FeedListRead {
+  chunks: AsyncGenerator<FeedListRow[]>;
+  /** How many live rows the scope holds (asked only when `wantsTotal`); resolved once the walk ends. */
+  total: () => Promise<number | null>;
+}
+
+/**
+ * The scope's compact rows in the LIST's order — `(leads_campaigns.created_at, id)`, the keyset the
+ * compact walk pages on — bounded exactly like it (`limit`, keyset `cursor` or `offset`), off the
+ * payloads the feed already stores (DASH-SPEED-1110-LEAD-R3). Each payload is what `view=compact`
+ * emits for that row (same query, same overlay, same flatten: the feed's own contract, asserted by
+ * tests/integration/lead-change-feed-routes.test.ts); the read only re-orders them, so a stored
+ * answer replaces the live email-gateway fan-out the walk used to pay per chunk.
+ *
+ * The order key is read off the row itself (`created_at` never moves), so it is joined, never
+ * copied into the feed. A row whose `leads_campaigns` row is gone (requeued) drops out here as it
+ * would from the live walk. ONE statement, streamed by cursor; never holds the population.
+ */
+export function readFeedAsList(
+  feed: ChangeFeed,
+  page: { limit: number | null; cursor: { createdAt: string; id: string } | null; offset: number | null },
+  wantsTotal: boolean,
+  chunkSize = READ_CHUNK_SIZE,
+): FeedListRead {
+  let total: number | null = null;
+  async function* chunks(): AsyncGenerator<FeedListRow[]> {
+    // Only the KEYS are sorted and cut (the payloads, ~4.5 MB on the largest brand, would spill the
+    // sort); the page's payloads are then read by primary key. The window count is taken over the
+    // whole set BEFORE the keyset / offset / limit cut it, so `total` is the scope's size whatever
+    // page is read.
+    const statement = sql<Array<{ id: string; created_at: string; payload: string; total: string | null }>>`
+      SELECT k.id::text AS id, k.created_at::text AS created_at, r.payload, k.total::text AS total
+      FROM (
+        SELECT a.id, a.created_at, a.total
+        FROM (
+          SELECT lc.id, lc.created_at,
+                 ${wantsTotal ? sql`count(*) OVER ()` : sql`NULL::bigint`} AS total
+          FROM lead_change_feed_rows f
+          JOIN leads_campaigns lc ON lc.id = f.id
+          WHERE f.feed_id = ${feed.id}::uuid AND f.payload IS NOT NULL
+        ) a
+        ${page.cursor ? sql`WHERE (a.created_at, a.id) > (${page.cursor.createdAt}::timestamptz, ${page.cursor.id}::uuid)` : sql``}
+        ORDER BY a.created_at ASC, a.id ASC
+        ${page.limit == null ? sql`` : sql`LIMIT ${page.limit}`}
+        ${page.offset == null || page.offset === 0 ? sql`` : sql`OFFSET ${page.offset}`}
+      ) k
+      JOIN lead_change_feed_rows r ON r.feed_id = ${feed.id}::uuid AND r.id = k.id
+      -- The COLUMNS, never the ::text aliases (a text sort is not the keyset's order).
+      ORDER BY k.created_at ASC, k.id ASC
+    `;
+    for await (const rows of statement.cursor(Math.max(1, chunkSize))) {
+      if (rows.length === 0) continue;
+      if (total === null && rows[0].total !== null) total = Number(rows[0].total);
+      yield rows.map((r) => ({ id: r.id, createdAt: r.created_at, payload: r.payload }));
+    }
+  }
+  return {
+    chunks: chunks(),
+    total: async () => {
+      if (!wantsTotal) return null;
+      if (total !== null) return total;
+      // No row read (an offset or a cursor past the end, or an empty scope): count on its own.
+      const rows = await sql<Array<{ n: string }>>`
+        SELECT count(*)::text AS n
+        FROM lead_change_feed_rows r JOIN leads_campaigns lc ON lc.id = r.id
+        WHERE r.feed_id = ${feed.id}::uuid AND r.payload IS NOT NULL
+      `;
+      return Number(rows[0]?.n ?? 0);
+    },
+  };
 }
 
 // ── worker ───────────────────────────────────────────────────────────────────────────────────
