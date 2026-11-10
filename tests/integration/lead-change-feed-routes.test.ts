@@ -41,7 +41,7 @@ const { leads, leadContactMethods, leadsCampaigns, leadsOrganizations, organizat
   "../../src/db/schema.js"
 );
 const feedLib = await import("../../src/lib/lead-change-feed.js");
-const { noteEvidenceChanged, readModelScopeFor } = await import("../../src/lib/lead-read-model.js");
+const { ensureReadModel, noteEvidenceChanged, readModelScopeFor } = await import("../../src/lib/lead-read-model.js");
 const leadsRoutes = (await import("../../src/routes/leads.js")).default;
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -81,8 +81,34 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     people[key] = { leadId: lead.id, rowId: row.id };
   }
 
+  /**
+   * The LIVE walk, the oracle the feed is held to. A plain compact read of a scope whose feed is
+   * current is served FROM that feed (DASH-SPEED-1110-LEAD-R3), which would make the comparison
+   * tautological, so the scope's feeds are put out of their bound for this one read and restored.
+   */
+  async function asLive<T>(read: () => Promise<T>): Promise<T> {
+    const held = await sql<Array<{ id: string; at: string | null }>>`
+      SELECT id::text AS id, reconciled_at::text AS at FROM lead_change_feeds WHERE org_id = ${orgId}
+    `;
+    const models = await sql<Array<{ id: string; at: string | null }>>`
+      SELECT id::text AS id, evidence_at::text AS at FROM lead_read_models WHERE org_id = ${orgId}
+    `;
+    await sql`UPDATE lead_change_feeds SET reconciled_at = now() - interval '1 day' WHERE org_id = ${orgId}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '1 day' WHERE org_id = ${orgId}`;
+    try {
+      return await read();
+    } finally {
+      for (const h of held) {
+        await sql`UPDATE lead_change_feeds SET reconciled_at = ${h.at}::timestamptz WHERE id = ${h.id}::uuid`;
+      }
+      for (const m of models) {
+        await sql`UPDATE lead_read_models SET evidence_at = ${m.at}::timestamptz WHERE id = ${m.id}::uuid`;
+      }
+    }
+  }
+
   async function fullCompact(): Promise<Map<string, Row>> {
-    const res = await get(`/orgs/leads?view=compact&brandId=${brandId}`);
+    const res = await asLive(() => get(`/orgs/leads?view=compact&brandId=${brandId}`));
     expect(res.status).toBe(200);
     return new Map((res.body.leads as Row[]).map((r) => [r.id, r]));
   }
@@ -117,6 +143,7 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
 
   afterAll(async () => {
     await sql`DELETE FROM lead_change_feeds WHERE org_id = ${orgId}`;
+    await sql`DELETE FROM lead_read_models WHERE org_id = ${orgId}`;
     await sql`DELETE FROM lead_read_changes WHERE org_id = ${orgId}`;
     await sql`DELETE FROM lead_delivery_evidence WHERE org_id = ${orgId}`;
     await db.delete(leadsCampaigns).where(eq(leadsCampaigns.orgId, orgId));
@@ -256,6 +283,79 @@ describe.skipIf(!hasRealDatabase)("the lead change feed against a real database"
     copy = apply(copy, res.body);
     cursor = res.body.cursor;
     expect(sorted(copy)).toEqual(sorted(await fullCompact()));
+  });
+
+  it("serves a plain compact walk from a current feed: byte for byte the live walk, paged, counted and cursored the same", async () => {
+    await seed("Lin", "lin@feed.test", campaignA, "2026-01-05T00:00:00Z");
+    cursor = (await changes(cursor)).body.cursor;
+    const base = `/orgs/leads?view=compact&brandId=${brandId}`;
+    const pages = ["", "&limit=2", "&limit=4", "&limit=2&offset=1", "&limit=3&offset=3", "&limit=5&offset=9"];
+    for (const q of pages) {
+      const live = await asLive(() => get(base + q));
+      gatewayCalls = 0;
+      const served = await get(base + q);
+      expect(served.status).toBe(200);
+      expect(gatewayCalls).toBe(0);
+      expect(served.text).toBe(live.text);
+    }
+    // A keyset walk, page by page, lands on the same rows and the same cursors.
+    let next: string | null = null;
+    let seen = 0;
+    do {
+      const q = `&limit=2${next ? `&cursor=${encodeURIComponent(next)}` : ""}`;
+      const live = await asLive(() => get(base + q));
+      const served = await get(base + q);
+      expect(served.text).toBe(live.text);
+      seen += (served.body.leads as Row[]).length;
+      next = served.body.nextCursor;
+    } while (next);
+    expect(seen).toBe((await fullCompact()).size);
+    // The same read at the same feed version replays the kept gzipped body; any write moves the
+    // version, so the next read is served fresh, never the kept body.
+    const first = await get(base);
+    expect(first.headers["x-lead-compact-source"]).toBe("feed");
+    expect(first.headers["content-encoding"]).toBe("gzip");
+    expect((await get(base)).text).toBe(first.text);
+    const snapshot = await changes();
+    expect((await changes()).text).toBe(snapshot.text);
+    await db.update(leads).set({ lastName: "Renamed" }).where(eq(leads.id, people.Lin.leadId));
+    const after = await get(base);
+    expect(after.text).not.toBe(first.text);
+    expect(after.text).toBe((await asLive(() => get(base))).text);
+    expect((await changes()).text).not.toBe(snapshot.text);
+    cursor = (await changes(cursor)).body.cursor;
+  });
+
+  it("serves a plain compact walk of a scope with no current feed from its current read model, byte for byte the live walk", async () => {
+    const feeds = await sql<Array<{ id: string; at: string | null }>>`
+      SELECT id::text AS id, reconciled_at::text AS at FROM lead_change_feeds WHERE org_id = ${orgId}
+    `;
+    await sql`UPDATE lead_change_feeds SET reconciled_at = now() - interval '1 day' WHERE org_id = ${orgId}`;
+    try {
+      await ensureReadModel(readModelScopeFor({ orgId, brandId, statuses: ["buffered", "claimed", "served"] }, brandId, true));
+      const base = `/orgs/leads?view=compact&brandId=${brandId}`;
+      for (const q of ["", "&limit=2", "&limit=4", "&limit=2&offset=1", "&limit=5&offset=9"]) {
+        const live = await asLive(() => get(base + q));
+        gatewayCalls = 0;
+        const served = await get(base + q);
+        expect(served.status).toBe(200);
+        expect(served.headers["x-lead-evidence-at"]).toBeDefined();
+        expect(gatewayCalls).toBe(0);
+        expect(served.text).toBe(live.text);
+      }
+      let next: string | null = null;
+      do {
+        const q = `&limit=2${next ? `&cursor=${encodeURIComponent(next)}` : ""}`;
+        const live = await asLive(() => get(base + q));
+        const served = await get(base + q);
+        expect(served.text).toBe(live.text);
+        next = served.body.nextCursor;
+      } while (next);
+    } finally {
+      for (const f of feeds) {
+        await sql`UPDATE lead_change_feeds SET reconciled_at = ${f.at}::timestamptz WHERE id = ${f.id}::uuid`;
+      }
+    }
   });
 
   it("tells a caller its position is gone, and answers the whole scope instead", async () => {

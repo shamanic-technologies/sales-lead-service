@@ -13,7 +13,18 @@
  * full. Peak buffered bytes is then the high-water mark plus one batch, whatever the response's
  * total size.
  */
-import type { ServerResponse } from "node:http";
+/**
+ * What the writer writes into: the response itself, or a stream piped to it (a gzip stream whose
+ * output is kept, gzip-body-cache.ts). Both say `drain` when they take more and `close` when gone.
+ */
+export interface WritableSink {
+  write(chunk: string): boolean;
+  end(): unknown;
+  on(event: "drain", listener: () => void): unknown;
+  once(event: "close" | "error", listener: () => void): unknown;
+  readonly destroyed: boolean;
+  readonly writableEnded: boolean;
+}
 
 /** How many bytes are batched before a write, and the ceiling the socket is allowed to hold. */
 const BATCH_BYTES = 64 * 1024;
@@ -38,7 +49,7 @@ export class ResponseWriter {
   /** Resolves the wait in progress, if any. */
   private wake: (() => void) | null = null;
 
-  constructor(private readonly res: ServerResponse) {
+  constructor(private readonly res: WritableSink) {
     const wake = () => {
       const resolve = this.wake;
       this.wake = null;
