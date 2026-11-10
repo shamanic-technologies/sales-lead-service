@@ -185,9 +185,11 @@ describe.skipIf(!hasRealDatabase)("unibox fast lane (UNIBOX-REPLY-LAG-1031)", ()
     expect(await row(richard)).toMatchObject({ interest: "not_asked", conversation: "no_reply_yet", last_theirs_at: null });
     resetFastLaneCursors(await maxSeqs());
 
-    // The full round starts, then Richard answers (21:57) and the copy receives it.
+    // The full round starts, then Richard answers (21:57) and the copy receives it. The round asks no wants-business
+    // question of its own (`intent: 0`): its pick runs after its subjects refresh, and under a loaded CI it could take
+    // Richard first (LEAD-CI-FLAKY-1110), so "the fast lane judged him" would depend on which loop got there first.
     let roundDone = false;
-    const round = sweepScope(scope).then((t) => {
+    const round = sweepScope(scope, { intent: 0 }).then((t) => {
       roundDone = true;
       return t;
     });

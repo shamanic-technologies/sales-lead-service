@@ -41,6 +41,7 @@ describe.skipIf(!hasRealDatabase)("lead identity sweep", () => {
   const humanOf = new Map<string, string>();
   const leadIds: string[] = [];
   const orgIds: string[] = [];
+  // Every pass walks only the rows this file created (LEAD-CI-FLAKY-1110: unscoped, it rewrote other files' leads).
 
   beforeEach(() => {
     resolveHuman.mockReset();
@@ -99,29 +100,29 @@ describe.skipIf(!hasRealDatabase)("lead identity sweep", () => {
     const lBad = await lead(`bad-${tag}@x.com`, null);
 
     // Before the employers are resolved, the leads working there wait; the employer-less ones go.
-    await resolveLeads(10_000);
+    await resolveLeads(10_000, { leadIds });
     expect((await leadRow(l1)).identity_resolved_at).toBeNull();
     expect((await leadRow(l3)).human_id).not.toBeNull();
 
-    await resolveEmployers(1000);
+    await resolveEmployers(1000, { organizationIds: orgIds });
     const [ra] = (await db.execute(sql`SELECT company_id::text, company_unresolved_reason FROM organizations WHERE id = ${a}`)) as unknown as Array<{ company_id: string; company_unresolved_reason: string | null }>;
     expect(ra).toEqual({ company_id: companyA, company_unresolved_reason: null });
     const [rn] = (await db.execute(sql`SELECT company_id, company_unresolved_reason FROM organizations WHERE id = ${nameOnly}`)) as unknown as Array<{ company_id: string | null; company_unresolved_reason: string }>;
     expect(rn).toEqual({ company_id: null, company_unresolved_reason: "no_safe_identity" });
 
-    await pushEmployerFacts(1000);
+    await pushEmployerFacts(1000, { organizationIds: orgIds });
     const pushedFor = writeCompanyFacts.mock.calls.flatMap((c) => (c[0] as Array<{ brandId: string; facts: Record<string, unknown> }>));
     expect(pushedFor.find((w) => w.brandId === companyA)?.facts).toMatchObject({ name: "A", industry: "x" });
     writeCompanyFacts.mockClear();
-    await pushEmployerFacts(1000);
+    await pushEmployerFacts(1000, { organizationIds: orgIds });
     expect(writeCompanyFacts.mock.calls.flatMap((c) => c[0] as Array<{ brandId: string }>).some((w) => w.brandId === companyA)).toBe(false);
     // The row changes: its facts are written again.
     await db.execute(sql`UPDATE organizations SET industry = 'y', updated_at = now() + interval '1 second' WHERE id = ${a}`);
-    await pushEmployerFacts(1000);
+    await pushEmployerFacts(1000, { organizationIds: orgIds });
     expect(writeCompanyFacts.mock.calls.flatMap((c) => c[0] as Array<{ brandId: string }>).some((w) => w.brandId === companyA)).toBe(true);
 
     const changesBefore = (await db.execute(sql`SELECT count(*)::int AS n FROM lead_read_changes WHERE lead_id = ANY(${sql.param([l1, l2])}::uuid[])`)) as unknown as Array<{ n: number }>;
-    await resolveLeads(10_000);
+    await resolveLeads(10_000, { leadIds });
     const r1 = await leadRow(l1);
     expect(r1.human_id).toBe(humanOf.get(`one-${tag}@a.com`));
     expect(r1.company_id).toBe(companyA);
@@ -137,14 +138,14 @@ describe.skipIf(!hasRealDatabase)("lead identity sweep", () => {
 
     // Idempotent: nothing left for these leads.
     resolveHuman.mockClear();
-    await resolveLeads(10_000);
+    await resolveLeads(10_000, { leadIds });
     expect(resolveHuman.mock.calls.some((c) => (c[0] as { emails?: string[] }).emails?.[0]?.includes(tag))).toBe(false);
   });
 
   it("leaves a lead pending (retried) when human-service is unreachable", async () => {
     const l = await lead(`down-${tag}@x.com`, null);
     resolveHuman.mockRejectedValue(new HumanIdentityError("503", 503));
-    const r = await resolveLeads(10_000);
+    const r = await resolveLeads(10_000, { leadIds });
     expect(r.failed).toBeGreaterThan(0);
     expect((await leadRow(l)).identity_resolved_at).toBeNull();
   });

@@ -142,6 +142,19 @@ async function scopesWithUnjudgedMessages(): Promise<ActScope[]> {
   return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
 }
 
+/**
+ * TESTS ONLY (LEAD-CI-FLAKY-1110): a fleet pass narrowed to one org. The integration files share one database and run
+ * at once; an unscoped pass of one file judged and recorded passes over another file's scopes mid-assertion. The
+ * worker never states it (whole fleet).
+ */
+export interface FleetPassScope {
+  onlyOrgId?: string;
+}
+
+function inFleetScope(scopes: ActScope[], fleet: FleetPassScope): ActScope[] {
+  return fleet.onlyOrgId === undefined ? scopes : scopes.filter((s) => s.orgId === fleet.onlyOrgId);
+}
+
 /** The scopes whose `last_action_at` may move: every scope holding an act, or a date carrying one (a scope can lose its last act). */
 export async function actScopes(): Promise<ActScope[]> {
   const rows = (await db.execute(sql`
@@ -232,9 +245,9 @@ async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<Messag
  * statement (each scope's newest `limit`, then the newest `limit` of those), asked only of scopes holding one whose
  * inputs moved since a pass found nothing to judge there (`judgedScopeClean`). A scope answering nothing is recorded
  * clean as of the snapshot xmin taken before it was asked. */
-async function messagesToJudge(limit: number): Promise<MessageToJudge[]> {
+async function messagesToJudge(limit: number, fleet: FleetPassScope): Promise<MessageToJudge[]> {
   const all: MessageToJudge[] = [];
-  for (const scope of await scopesWithUnjudgedMessages()) {
+  for (const scope of inFleetScope(await scopesWithUnjudgedMessages(), fleet)) {
     if (await judgedScopeClean(scope)) continue;
     const xmin = await snapshotXmin();
     const found = await messagesToJudgeIn(scope, limit);
@@ -260,8 +273,8 @@ export function automatedState(m: { subject: string | null; text: string | null;
 }
 
 /** Judge the next inbound messages that would count, frozen per fact. One failure stops the pass (logged by the caller). */
-export async function judgeAutomatedActs(limit = ACT_JUDGMENTS_PER_TICK): Promise<{ judged: number; automated: number }> {
-  const todo = await messagesToJudge(limit);
+export async function judgeAutomatedActs(limit = ACT_JUDGMENTS_PER_TICK, fleet: FleetPassScope = {}): Promise<{ judged: number; automated: number }> {
+  const todo = await messagesToJudge(limit, fleet);
   let judged = 0;
   let automated = 0;
   for (const m of todo) {
@@ -303,11 +316,11 @@ export function countedActsSql(scope: ActScope | null): SQL {
  * statement reads its brand through the (org, brand) indexes instead of scanning every subject and registry fact. And
  * only the scopes whose inputs moved since their last pass (`scopesToRederive`): an unchanged scope runs no CTE.
  */
-export async function refreshActedAt(scope: ActScope | null): Promise<{ changed: number; scopes?: number; skipped?: number }> {
+export async function refreshActedAt(scope: ActScope | null, fleet: FleetPassScope = {}): Promise<{ changed: number; scopes?: number; skipped?: number }> {
   if (scope === null) {
     let changed = 0;
     let scopes = 0;
-    const all = await actScopes();
+    const all = inFleetScope(await actScopes(), fleet);
     for (const s of await scopesToRederive(all)) {
       // Taken BEFORE the scope is read: a write still open now carries a txid at or above it.
       const xmin = await snapshotXmin();

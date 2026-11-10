@@ -32,6 +32,7 @@ const { upsertTimelineFacts } = await import("../../src/lib/timeline-facts.js");
 const cache = await import("../../src/lib/brand-journeys-cache.js");
 const journeys = await import("../../src/lib/brand-journeys.js");
 const routes = (await import("../../src/routes/brand-journeys.js")).default;
+const { settleOpenTransactions } = await import("../helpers/settle-transactions.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -65,7 +66,13 @@ describe.skipIf(!hasRealDatabase)("timeline-journeys answer cache against a real
     } as never;
   }
 
-  const get = async () => {
+  /**
+   * A read of the route. By default every transaction open before it has ended first (another file's included), so the
+   * answer it holds remembers an xmin above every write this test made: "nothing moved since" is then a fact, not a race.
+   * `settle: false` = read while a write of OURS is still open (the test of that case).
+   */
+  const get = async ({ settle = true }: { settle?: boolean } = {}) => {
+    if (settle) await settleOpenTransactions(db);
     const res = await request(app).get(`/internal/brands/${brandId}/timeline-journeys`).set("x-api-key", "test-api-key").set("x-org-id", orgId).buffer(true).parse((r, cb) => {
       let data = "";
       r.on("data", (c: Buffer) => (data += c.toString()));
@@ -200,7 +207,7 @@ describe.skipIf(!hasRealDatabase)("timeline-journeys answer cache against a real
       await gate;
     });
     await begun;
-    const before = await get(); // read while the writer is still open: its fact is not in the answer
+    const before = await get({ settle: false }); // read while the writer is still open: its fact is not in the answer
     expect(before).not.toContain(p);
     release();
     await open;
