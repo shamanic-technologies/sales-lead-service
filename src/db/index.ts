@@ -2,6 +2,7 @@ import net from "node:net";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
+import { POOL_MAX, positiveInt } from "./pool-size.js";
 
 const connectionString = process.env.LEAD_SERVICE_DATABASE_URL;
 
@@ -20,16 +21,6 @@ if (!connectionString) {
 // see brand-service#389.
 net.setDefaultAutoSelectFamilyAttemptTimeout(5_000);
 
-function positiveInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`[lead-service] ${name} must be a positive number, got '${raw}'`);
-  }
-  return Math.floor(parsed);
-}
-
 /**
  * How many database connections this service may hold, stated HERE rather than inherited.
  *
@@ -42,7 +33,7 @@ function positiveInt(name: string, fallback: number): number {
  * it is now a number in code, next to the two timeouts that bound how long one connection may be
  * held, so the three can be read together.
  */
-export const POOL_MAX = positiveInt("LEAD_DB_POOL_MAX", 20);
+export { POOL_MAX };
 
 /**
  * Per-SESSION statement timeouts, sent in the startup packet, so they apply to lead-service's own

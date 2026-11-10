@@ -27,6 +27,7 @@ import {
   type LeadListScope,
 } from "./lead-list-query.js";
 import { canonicalizeStepOutcome, type LeadStepOutcomeName } from "./step-statements.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 /** One person in the scoped population, as narrow as the questions asked of it allow. */
 export interface LeadIndexRow {
@@ -153,7 +154,7 @@ export async function* streamLeadIndex(
   chunkSize: number,
 ): AsyncGenerator<LeadIndexRow[]> {
   const size = Math.max(1, chunkSize);
-  for await (const rows of leadIndexStatement(scope).cursor(size)) {
+  for await (const rows of withCursorSlot(() => leadIndexStatement(scope).cursor(size))) {
     if (rows.length === 0) continue;
     yield rows.map(mapIndexRow);
   }

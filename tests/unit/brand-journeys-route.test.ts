@@ -22,8 +22,9 @@ describe("GET /internal/brands/:brandId/timeline-journeys", () => {
     vi.doMock("../../src/lib/brand-journeys-cache.js", () => ({
       journeysCacheKey: (o: string, b: string) => `${o}|${b}`,
       journeysSnapshotXmin: async () => "1",
-      cachedJourneys: async (key: string) => (moved ? null : held.get(key) ?? null),
-      rememberJourneys: (key: string, _o: string, _x: string, body: string) => void held.set(key, body),
+      cachedJourneys: async (key: string) => (moved || !held.has(key) ? null : { body: held.get(key)!, bodyKey: "v1" }),
+      withJourneysKey: async <T,>(_k: string, fn: () => Promise<T>) => fn(),
+      rememberJourneys: (key: string, _o: string, _b: string, _x: string, _l: unknown, _ord: unknown, body: string) => void held.set(key, body),
     }));
     vi.doMock("../../src/lib/outreach-fact-feed.js", () => ({
       loadOutreachFeedState: async () => ({ cursor: "1", caughtUp: opts.caughtUp ?? true }),

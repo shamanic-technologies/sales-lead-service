@@ -13,6 +13,7 @@ import {
   type SourceScreeningRow,
   type SourceServeRow,
 } from "./source-people.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 /**
  * IO for `GET /orgs/campaigns/{campaignId}/sourcing-stats` (the pure derivation is source-people.ts).
@@ -89,7 +90,7 @@ async function loadBrandServes(orgId: string, brandId: string): Promise<SourceSe
     ) org ON true
     WHERE lc.org_id = ${orgId} AND ${brandId} = ANY(lc.brand_ids)
   `;
-  for await (const rows of query.cursor(1000)) {
+  for await (const rows of withCursorSlot(() => query.cursor(1000))) {
     for (const r of rows) {
       out.push({
         leadId: r.lead_id,

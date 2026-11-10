@@ -11,6 +11,7 @@ import {
   type LeadListPage,
   type LeadListScope,
 } from "./lead-list-query.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 // Slim per-lead shape for `?view=basic` — the SAME object the route's toSlimLead
 // produced, but assembled in ONE flat SQL pass instead of hydrating the full lead
@@ -418,7 +419,7 @@ export async function* streamBasicLeadChunks(
   page: LeadListPage = UNBOUNDED_LEAD_PAGE,
 ): AsyncGenerator<BasicLeadRow[]> {
   const size = Math.max(1, chunkSize);
-  for await (const rows of basicLeadQuery(f, page.cursor, page.limit, page.offset).cursor(size)) {
+  for await (const rows of withCursorSlot(() => basicLeadQuery(f, page.cursor, page.limit, page.offset).cursor(size))) {
     if (rows.length === 0) continue;
     yield rows.map(mapRow);
   }

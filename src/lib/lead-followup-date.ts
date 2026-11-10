@@ -1030,7 +1030,7 @@ export function startLeadFollowupDatesWorker(beforeDates: () => Promise<unknown>
       const acted = await refreshActedAt(null);
       if (ensured.inserted > 0 || synced.batches > 1 || judged.judged > 0 || acted.changed > 0) {
         console.log(
-          `[lead-service] lead follow-up dates: dated=${ensured.inserted} sendBatches=${synced.batches} actsJudged=${judged.judged} automated=${judged.automated} actedChanged=${acted.changed}`,
+          `[lead-service] lead follow-up dates: dated=${ensured.inserted} sendBatches=${synced.batches} actsJudged=${judged.judged} automated=${judged.automated} actedChanged=${acted.changed} actedScopes=${acted.scopes ?? 0}/${(acted.scopes ?? 0) + (acted.skipped ?? 0)}`,
         );
       }
     } catch (err) {

@@ -1,6 +1,7 @@
 import { sql } from "../db/index.js";
 import { EMAIL_SEND_WORKFLOW_SOURCES, type EmailSendWorkflowSource } from "./repoint-causes.js";
 import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
+import { withCursorSlot } from "./cursor-slots.js";
 
 /**
  * EVERY JOURNEY of a brand, read off the silver timeline (`lead_timeline_facts`) in one statement:
@@ -180,7 +181,15 @@ function offersJson(offers: ReadonlyMap<string, string | null>): string {
   return JSON.stringify(o);
 }
 
-function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string, string | null>) {
+function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string, string | null>, leadIds?: readonly string[]) {
+  // Some leads only (a held answer brought up to date, brand-journeys-cache.ts): the same statement narrowed to their
+  // facts, acts and their facts' outreach subjects; every journey is one lead's, so theirs come out identical.
+  const ids = leadIds === undefined ? null : [...leadIds];
+  const onFactLeads = ids === null ? sql`` : sql`AND t.lead_id = ANY(${ids}::uuid[])`;
+  const onActLeads = ids === null ? sql`` : sql`AND fa.lead_id = ANY(${ids}::uuid[])`;
+  const onSubjects = ids === null
+    ? sql``
+    : sql`AND x.subject_key IN (SELECT s.id FROM lead_timeline_facts s WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId} AND s.lead_id = ANY(${ids}::uuid[]))`;
   return sql<RawJourney[]>`
     WITH offers AS (
       SELECT key AS campaign_id, value #>> '{}' AS offer_id FROM jsonb_each(${offersJson(offers)}::jsonb)
@@ -196,10 +205,10 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
       LEFT JOIN (
         SELECT DISTINCT ON (x.subject_key) x.subject_key, x.type, x.raw->>'transport' AS transport
         FROM outreach_facts x
-        WHERE x.org_id = ${orgId} AND x.type <> 'withdrawn'
+        WHERE x.org_id = ${orgId} AND x.type <> 'withdrawn' ${onSubjects}
         ORDER BY x.subject_key, x.seq DESC
       ) o ON t.source IN ('outreach', 'reply') AND o.subject_key = t.id
-      WHERE t.org_id = ${orgId} AND t.brand_id = ${brandId} AND t.withdrawn_at IS NULL
+      WHERE t.org_id = ${orgId} AND t.brand_id = ${brandId} AND t.withdrawn_at IS NULL ${onFactLeads}
     ),
     facts AS (
       SELECT lead_id, offer_id,
@@ -220,7 +229,7 @@ function journeyQuery(orgId: string, brandId: string, offers: ReadonlyMap<string
       SELECT fa.lead_id, o.offer_id, fa.acting_campaign_id, 'followup'::text, fa.occurred_at
       FROM followup_actions fa
       LEFT JOIN offers o ON o.campaign_id = fa.acting_campaign_id
-      WHERE fa.org_id = ${orgId} AND ${brandId} = ANY(fa.brand_ids) AND fa.action = 'acted'
+      WHERE fa.org_id = ${orgId} AND ${brandId} = ANY(fa.brand_ids) AND fa.action = 'acted' ${onActLeads}
     ),
     acts AS (
       SELECT lead_id, offer_id,
@@ -289,8 +298,9 @@ export async function* streamBrandJourneys(
   brandId: string,
   offers: ReadonlyMap<string, string | null>,
   chunkSize: number,
+  leadIds?: readonly string[],
 ): AsyncGenerator<BrandJourney[]> {
-  for await (const rows of journeyQuery(orgId, brandId, offers).cursor(Math.max(1, chunkSize))) {
+  for await (const rows of withCursorSlot(() => journeyQuery(orgId, brandId, offers, leadIds).cursor(Math.max(1, chunkSize)))) {
     if (rows.length === 0) continue;
     yield rows.map(toBrandJourney);
   }

@@ -12,6 +12,7 @@
  * our outreach did and heard on its addresses. Never the human's other relations (a friend's personal chat never
  * reaches their professional row).
  */
+import { liveRelationRows } from "./crm-live-relations.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
@@ -69,19 +70,18 @@ export interface ProRelation {
  * `professional_to_brand` are subjects; every relation of a human (personal included) counts for `shares_human`.
  */
 async function liveRelations(scope: Scope, atomicHumans?: readonly string[]): Promise<{ pro: ProRelation[]; perHuman: Map<string, number> }> {
-  const onlyHumans = atomicHumans === undefined ? sql`` : sql`AND f.raw->>'humanId' = ANY(${sql.param([...atomicHumans])}::text[])`;
-  // A few humans: the withdrawn check stays a per-row index probe (`OFFSET 0`, BOX-LOAD-1107); the whole brand keeps the
-  // planner's anti-join (one pass over the withdrawn index beats an index probe per relation there).
-  const notWithdrawn = atomicHumans === undefined
-    ? sql`NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id)`
-    : sql`NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id OFFSET 0)`;
-  const rows = (await db.execute(sql`
+  // The whole brand: the list kept per brand and brought up to date from what was copied since (crm-live-relations.ts,
+  // DASH-SPEED-1110-LEAD-R4). A few humans: the withdrawn check stays a per-row index probe (`OFFSET 0`, BOX-LOAD-1107).
+  const rows = atomicHumans === undefined
+    ? await liveRelationRows(scope.orgId, scope.brandId)
+    : ((await db.execute(sql`
     SELECT CASE WHEN f.raw->>'humanId' ~* '^[0-9a-f-]{36}$' THEN f.raw->>'humanId' END AS human,
       f.person_key, f.full_name AS name, f.seq::text AS seq, f.payload
     FROM crm_registry_facts f
-    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.type = 'relation' ${onlyHumans}
-      AND ${notWithdrawn}
-  `)) as unknown as Array<{ human: string | null; person_key: string; name: string | null; seq: string; payload: Record<string, unknown> }>;
+    WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.type = 'relation'
+      AND f.raw->>'humanId' = ANY(${sql.param([...atomicHumans])}::text[])
+      AND NOT EXISTS (SELECT 1 FROM crm_registry_facts w WHERE w.withdrawn_of = f.fact_id OFFSET 0)
+  `)) as unknown as Array<{ human: string | null; person_key: string; name: string | null; seq: string; payload: Record<string, unknown> }>);
   const pro: ProRelation[] = [];
   const perHuman = new Map<string, number>();
   for (const r of rows) {
