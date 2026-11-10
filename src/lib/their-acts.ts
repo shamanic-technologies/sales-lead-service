@@ -152,6 +152,63 @@ export async function actScopes(): Promise<ActScope[]> {
   return rows.map((r) => ({ orgId: r.org_id, brandId: r.brand_id }));
 }
 
+/**
+ * A scope's derivation is kept until one of its inputs moves (DASH-SPEED-1110-LEAD-R4): every write to `lead_crm_acts`,
+ * the subjects' contact points, a crm conversation tag (or its withdrawal), a withdrawal of an act's crm fact, a
+ * person-or-machine judgment, or a follow-up date row appearing/leaving notes the (org, brand) it can move in
+ * `acted_input_changes`, inside the writer's transaction (migration 0144). A pass records the snapshot xmin it took
+ * BEFORE reading the scope; the scope is unchanged since iff no change of it carries `txid >= xmin` (a transaction open
+ * when the pass read has a txid at or above that xmin, so a late commit is never missed). Positive evidence only: a
+ * scope never passed, or passed longer ago than the change log is kept, is re-derived.
+ */
+export const SCOPE_PASS_MAX_AGE = "12 hours";
+
+async function snapshotXmin(): Promise<string> {
+  const rows = (await db.execute(sql`SELECT pg_snapshot_xmin(pg_current_snapshot())::text AS xmin`)) as unknown as Array<{ xmin: string }>;
+  return rows[0].xmin;
+}
+
+async function recordScopePass(scope: ActScope, kind: "acted" | "judged", xmin: string): Promise<void> {
+  if (kind === "acted") {
+    await db.execute(sql`
+      INSERT INTO acted_scope_passes (org_id, brand_id, acted_xmin, acted_at) VALUES (${scope.orgId}, ${scope.brandId}, ${xmin}::xid8, now())
+      ON CONFLICT (org_id, brand_id) DO UPDATE SET acted_xmin = EXCLUDED.acted_xmin, acted_at = EXCLUDED.acted_at
+    `);
+  } else {
+    await db.execute(sql`
+      INSERT INTO acted_scope_passes (org_id, brand_id, judged_xmin, judged_at) VALUES (${scope.orgId}, ${scope.brandId}, ${xmin}::xid8, now())
+      ON CONFLICT (org_id, brand_id) DO UPDATE SET judged_xmin = EXCLUDED.judged_xmin, judged_at = EXCLUDED.judged_at
+    `);
+  }
+}
+
+/** The scopes among `scopes` whose `last_action_at` must be re-derived: never passed, passed too long ago, or moved since. */
+export async function scopesToRederive(scopes: readonly ActScope[]): Promise<ActScope[]> {
+  if (scopes.length === 0) return [];
+  const rows = (await db.execute(sql`
+    SELECT s.org_id, s.brand_id
+    FROM unnest(${sql.param(scopes.map((x) => x.orgId))}::text[], ${sql.param(scopes.map((x) => x.brandId))}::text[]) AS s(org_id, brand_id)
+    LEFT JOIN acted_scope_passes p ON p.org_id = s.org_id AND p.brand_id = s.brand_id
+    WHERE p.acted_xmin IS NULL OR p.acted_at < now() - ${SCOPE_PASS_MAX_AGE}::interval
+      OR EXISTS (SELECT 1 FROM acted_input_changes c WHERE c.org_id = s.org_id AND c.brand_id = s.brand_id AND c.txid >= p.acted_xmin)
+  `)) as unknown as Array<{ org_id: string; brand_id: string }>;
+  const moved = new Set(rows.map((r) => `${r.org_id}\u0000${r.brand_id}`));
+  return scopes.filter((x) => moved.has(`${x.orgId}\u0000${x.brandId}`));
+}
+
+/** true = a pass found nothing to judge in the scope and none of its inputs moved since. */
+async function judgedScopeClean(scope: ActScope): Promise<boolean> {
+  const rows = (await db.execute(sql`
+    SELECT EXISTS (
+      SELECT 1 FROM acted_scope_passes p
+      WHERE p.org_id = ${scope.orgId} AND p.brand_id = ${scope.brandId} AND p.judged_xmin IS NOT NULL
+        AND p.judged_at >= now() - ${SCOPE_PASS_MAX_AGE}::interval
+        AND NOT EXISTS (SELECT 1 FROM acted_input_changes c WHERE c.org_id = p.org_id AND c.brand_id = p.brand_id AND c.txid >= p.judged_xmin)
+    ) AS clean
+  `)) as unknown as Array<{ clean: boolean }>;
+  return rows[0].clean === true;
+}
+
 /** One scope's inbound messages that would count but nobody judged yet, newest first. */
 async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<MessageToJudge[]> {
   return (await db.execute(sql`
@@ -172,10 +229,18 @@ async function messagesToJudgeIn(scope: ActScope, limit: number): Promise<Messag
 }
 
 /** The fleet's inbound messages that would count but nobody judged yet, newest first: the same set as one fleet-wide
- * statement (each scope's newest `limit`, then the newest `limit` of those), asked only of scopes holding one. */
+ * statement (each scope's newest `limit`, then the newest `limit` of those), asked only of scopes holding one whose
+ * inputs moved since a pass found nothing to judge there (`judgedScopeClean`). A scope answering nothing is recorded
+ * clean as of the snapshot xmin taken before it was asked. */
 async function messagesToJudge(limit: number): Promise<MessageToJudge[]> {
   const all: MessageToJudge[] = [];
-  for (const scope of await scopesWithUnjudgedMessages()) all.push(...(await messagesToJudgeIn(scope, limit)));
+  for (const scope of await scopesWithUnjudgedMessages()) {
+    if (await judgedScopeClean(scope)) continue;
+    const xmin = await snapshotXmin();
+    const found = await messagesToJudgeIn(scope, limit);
+    if (found.length === 0) await recordScopePass(scope, "judged", xmin);
+    all.push(...found);
+  }
   const ms = (at: Date | string) => new Date(at).getTime();
   const seen = new Set<string>();
   return all
@@ -235,13 +300,22 @@ export function countedActsSql(scope: ActScope | null): SQL {
 /**
  * Re-derive `last_action_at` for every lead date of the scope (all, unscoped) from the acts that count now. Unscoped
  * walks the scopes one by one (`actScopes`, BOX-OVERLOAD-1026): the same rows move as one fleet statement, but each
- * statement reads its brand through the (org, brand) indexes instead of scanning every subject and registry fact.
+ * statement reads its brand through the (org, brand) indexes instead of scanning every subject and registry fact. And
+ * only the scopes whose inputs moved since their last pass (`scopesToRederive`): an unchanged scope runs no CTE.
  */
-export async function refreshActedAt(scope: ActScope | null): Promise<{ changed: number }> {
+export async function refreshActedAt(scope: ActScope | null): Promise<{ changed: number; scopes?: number; skipped?: number }> {
   if (scope === null) {
     let changed = 0;
-    for (const s of await actScopes()) changed += (await refreshActedAt(s)).changed;
-    return { changed };
+    let scopes = 0;
+    const all = await actScopes();
+    for (const s of await scopesToRederive(all)) {
+      // Taken BEFORE the scope is read: a write still open now carries a txid at or above it.
+      const xmin = await snapshotXmin();
+      changed += (await refreshActedAt(s)).changed;
+      await recordScopePass(s, "acted", xmin);
+      scopes++;
+    }
+    return { changed, scopes, skipped: all.length - scopes };
   }
   const rows = (await db.execute(sql`
     ${countedActsSql(scope)},
