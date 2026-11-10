@@ -166,7 +166,7 @@ describe.skipIf(!hasRealDatabase)("tag levels: human / lead / company", () => {
     resolveCompanies.mockImplementation(async (inputs: Array<{ domain: string }>) =>
       inputs.map((c, index) => ({ index, ref: null, brandId: c.domain === "obra.example" ? obra : randomUUID(), domain: c.domain, matchedBy: "domain", created: false, unresolvedReason: null })),
     );
-    await resolveEmailCompanies(100_000);
+    await resolveEmailCompanies(100_000, { leadIds: [work, free] });
     const rows = (await db.execute(sql`SELECT id::text, company_id::text, email_company_checked_at FROM leads WHERE id = ANY(${sql.param([work, free])}::uuid[])`)) as unknown as Array<{
       id: string;
       company_id: string | null;

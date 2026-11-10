@@ -26,7 +26,7 @@
  */
 import { messageOf } from "./db-error.js";
 import { errorMessage } from "./db-error.js";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { resolveHuman, HumanIdentityError } from "./human-identity-client.js";
 import { resolveCompanies, writeCompanyFacts, CompanyServiceError, MAX_COMPANIES_PER_REQUEST } from "./company-client.js";
@@ -75,11 +75,24 @@ const ORG_COLUMNS = sql`
 `;
 
 /** Pass 1: resolve up to 1000 never-resolved CURRENT employers. Returns how many were resolved. */
-export async function resolveEmployers(limit = MAX_COMPANIES_PER_REQUEST): Promise<number> {
+/**
+ * TESTS ONLY (LEAD-CI-FLAKY-1110): a pass narrowed to the rows a test created. The integration files share one database
+ * and run at once: an unscoped `resolveLeads` of one file nulled the employer of another file's fresh leads (no
+ * `leads_organizations` row) mid-assertion. The worker never states it (every row).
+ */
+export interface IdentitySweepScope {
+  leadIds?: readonly string[];
+  organizationIds?: readonly string[];
+}
+
+const onlyRows = (column: SQL, ids: readonly string[] | undefined): SQL =>
+  ids === undefined ? sql`` : sql`AND ${column} = ANY(${sql.param([...ids])}::uuid[])`;
+
+export async function resolveEmployers(limit = MAX_COMPANIES_PER_REQUEST, only: IdentitySweepScope = {}): Promise<number> {
   const orgs = (await db.execute(sql`
     SELECT ${ORG_COLUMNS}
     FROM organizations o
-    WHERE o.company_resolved_at IS NULL
+    WHERE o.company_resolved_at IS NULL ${onlyRows(sql`o.id`, only.organizationIds)}
       AND EXISTS (SELECT 1 FROM leads_organizations lo WHERE lo.organization_id = o.id AND lo.current = true)
     ORDER BY o.id
     LIMIT ${limit}
@@ -115,11 +128,11 @@ async function markFactsPushed(rows: Array<{ id: string; updated_at_text: string
 }
 
 /** Pass 2: write the firmographics of up to 1000 resolved employers whose row changed since. */
-export async function pushEmployerFacts(limit = MAX_COMPANIES_PER_REQUEST): Promise<number> {
+export async function pushEmployerFacts(limit = MAX_COMPANIES_PER_REQUEST, only: IdentitySweepScope = {}): Promise<number> {
   const orgs = (await db.execute(sql`
     SELECT ${ORG_COLUMNS}, o.company_id::text AS company_id, o.updated_at::text AS updated_at_text
     FROM organizations o
-    WHERE o.company_id IS NOT NULL
+    WHERE o.company_id IS NOT NULL ${onlyRows(sql`o.id`, only.organizationIds)}
       AND (o.company_facts_pushed_at IS NULL OR o.updated_at > o.company_facts_pushed_at)
     ORDER BY o.id
     LIMIT ${limit}
@@ -162,7 +175,7 @@ interface PendingLead extends LeadKeyRow {
 }
 
 /** Pass 3: resolve up to `limit` leads whose employer (if any) is resolved. */
-export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: number; failed: number }> {
+export async function resolveLeads(limit = LEAD_BATCH, only: IdentitySweepScope = {}): Promise<{ resolved: number; failed: number }> {
   const rows = (await db.execute(sql`
     SELECT l.id::text AS lead_id, l.apollo_person_id, l.metadata->>'provider' AS provider, l.linkedin_url,
       (SELECT array_agg(c.value ORDER BY c.created_at, c.value) FROM lead_contact_methods c
@@ -175,7 +188,7 @@ export async function resolveLeads(limit = LEAD_BATCH): Promise<{ resolved: numb
     FROM leads l
     LEFT JOIN LATERAL (${CURRENT_ORG}) cur ON true
     LEFT JOIN organizations o ON o.id = cur.organization_id
-    WHERE l.identity_resolved_at IS NULL
+    WHERE l.identity_resolved_at IS NULL ${onlyRows(sql`l.id`, only.leadIds)}
       AND (cur.organization_id IS NULL OR o.company_resolved_at IS NOT NULL)
     ORDER BY l.created_at, l.id
     LIMIT ${limit}
@@ -280,13 +293,13 @@ export async function adoptResolvedCompanies(limit = 5000): Promise<number> {
  * person): brand-service resolves the address's domain, once per lead (`email_company_checked_at`). A
  * free-mail address names no company: checked, nothing set.
  */
-export async function resolveEmailCompanies(limit = MAX_COMPANIES_PER_REQUEST): Promise<number> {
+export async function resolveEmailCompanies(limit = MAX_COMPANIES_PER_REQUEST, only: IdentitySweepScope = {}): Promise<number> {
   const rows = (await db.execute(sql`
     SELECT l.id::text AS lead_id,
       (SELECT c.value FROM lead_contact_methods c WHERE c.lead_id = l.id AND c.channel = 'email'
         ORDER BY c.created_at, c.value LIMIT 1) AS email
     FROM leads l
-    WHERE l.identity_resolved_at IS NOT NULL AND l.email_company_checked_at IS NULL
+    WHERE l.identity_resolved_at IS NOT NULL AND l.email_company_checked_at IS NULL ${onlyRows(sql`l.id`, only.leadIds)}
       AND l.company_id IS NULL AND l.organization_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM leads_organizations lo WHERE lo.lead_id = l.id AND lo.current = true)
     ORDER BY l.id

@@ -432,7 +432,7 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
     // The worker's fleet pass (BOX-OVERLOAD-1026) walks the scopes one by one and lands on the same answer.
     await db.execute(sql`UPDATE lead_followup_dates SET last_action_at = NULL WHERE org_id = ${orgId} AND brand_id = ${brandId}`);
-    await refreshActedAt(null);
+    await refreshActedAt(null, { onlyOrgId: orgId });
     expect(await dateOf(emailedOnly.leadId)).toMatchObject({ actedTowardUs: true, lastActionAt: "2026-10-02T08:00:00.000Z" });
     // The relationship sweep's scope list (a skip scan) is the DISTINCT it replaced, in the same order.
     await db.execute(sql`

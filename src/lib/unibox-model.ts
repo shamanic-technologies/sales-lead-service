@@ -439,10 +439,14 @@ export async function refreshUniboxRows(
   const subjects = team.length === 0 ? all : all.filter((s) => !team.includes(s));
   let written = 0;
   for (let i = 0; i < subjects.length; i += CHUNK) {
+    // A whole-brand round (the sweep) never writes a row back over one written after this chunk began deriving:
+    // the fast lane refreshed that person meanwhile from newer facts (LEAD-CI-FLAKY-1110: Richard's positive reply,
+    // shown by the fast lane, was overwritten by the round's older read until the round ended and the next pass ran).
+    const derivedFrom = opts.humans === undefined ? await dbNow() : null;
     const rows = await deriveUniboxRows(scope, subjects.slice(i, i + CHUNK), catalogue);
     await nameCompanies(rows);
     const asked = await attachLastMessages(scope, rows);
-    await writeRows(scope, rows, asked);
+    await writeRows(scope, rows, asked, derivedFrom);
     written += rows.length;
   }
   const removed = (await db.execute(sql`
@@ -536,7 +540,17 @@ async function attachLastMessages(scope: Scope, rows: UniboxRow[]): Promise<Set<
   return asked;
 }
 
-async function writeRows(scope: Scope, rows: readonly UniboxRow[], asked: ReadonlySet<string> = new Set()): Promise<void> {
+/** The database's clock (rows' `updated_at` is its `now()`), as text. */
+async function dbNow(): Promise<string> {
+  const rows = (await db.execute(sql`SELECT clock_timestamp()::text AS at`)) as unknown as Array<{ at: string }>;
+  return rows[0].at;
+}
+
+/**
+ * `derivedFrom` (a whole-brand round): when the chunk began deriving. A row written since (`updated_at` at or after
+ * it) holds a newer derivation and is left as it is; the round's own re-check (`noteScopeSwept`) refreshes it again.
+ */
+async function writeRows(scope: Scope, rows: readonly UniboxRow[], asked: ReadonlySet<string> = new Set(), derivedFrom: string | null = null): Promise<void> {
   if (rows.length === 0) return;
   const data = JSON.stringify(
     rows.map((r) => ({
@@ -596,14 +610,15 @@ async function writeRows(scope: Scope, rows: readonly UniboxRow[], asked: Readon
       last_activity_at = excluded.last_activity_at, connection_tags = excluded.connection_tags, search_text = excluded.search_text,
       last_message = excluded.last_message, last_message_reason = excluded.last_message_reason,
       last_message_checked_at = COALESCE(excluded.last_message_checked_at, unibox_rows.last_message_checked_at), updated_at = now()
-    WHERE excluded.last_message_checked_at IS NOT NULL OR (unibox_rows.last_message, unibox_rows.last_message_reason, unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.first_name, unibox_rows.last_name, unibox_rows.title, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
+    WHERE (${derivedFrom}::timestamptz IS NULL OR unibox_rows.updated_at < ${derivedFrom}::timestamptz)
+      AND (excluded.last_message_checked_at IS NOT NULL OR (unibox_rows.last_message, unibox_rows.last_message_reason, unibox_rows.company_name, unibox_rows.company_domain, unibox_rows.name, unibox_rows.first_name, unibox_rows.last_name, unibox_rows.title, unibox_rows.emails, unibox_rows.phones, unibox_rows.person_keys, unibox_rows.relation_keys, unibox_rows.lead_ids, unibox_rows.status, unibox_rows.roles, unibox_rows.types,
            unibox_rows.lifecycle_key, unibox_rows.steps, unibox_rows.interest, unibox_rows.conversation, unibox_rows.contactability,
            unibox_rows.fit, unibox_rows.fit_note, unibox_rows.last_theirs_at, unibox_rows.last_ours_at, unibox_rows.last_activity_at,
            unibox_rows.connection_tags)
       IS DISTINCT FROM (excluded.last_message, excluded.last_message_reason, excluded.company_name, excluded.company_domain, excluded.name, excluded.first_name, excluded.last_name, excluded.title, excluded.emails, excluded.phones, excluded.person_keys, excluded.relation_keys, excluded.lead_ids, excluded.status, excluded.roles, excluded.types,
            excluded.lifecycle_key, excluded.steps, excluded.interest, excluded.conversation, excluded.contactability,
            excluded.fit, excluded.fit_note, excluded.last_theirs_at, excluded.last_ours_at, excluded.last_activity_at,
-           excluded.connection_tags)
+           excluded.connection_tags))
   `);
 }
 
