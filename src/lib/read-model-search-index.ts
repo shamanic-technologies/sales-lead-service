@@ -206,6 +206,15 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // personal-messages-memo: a brand's crm facts by arrival order, so the kept "who is waiting on us" answer reads
+    // only what arrived since (the brand's own max seq, then a range), never the brand's 94.5k messages
+    // (DASH-SPEED-1110-LEAD-R3).
+    name: "idx_crm_facts_brand_seq",
+    on: "ON crm_facts (org_id, brand_id, seq)",
+    lockKey: "7290519146308441039",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",

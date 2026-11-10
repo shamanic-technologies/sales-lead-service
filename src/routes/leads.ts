@@ -36,6 +36,7 @@ import {
 import { parseLeadSearch } from "../lib/lead-search.js";
 import { watchClient, isClientGone } from "../lib/client-abort.js";
 import { ResponseWriter } from "../lib/stream-writer.js";
+import { acceptsGzip, recordingGzip, replayGzipBody } from "../lib/gzip-body-cache.js";
 import { leadExportHeader, leadExportLine } from "../lib/lead-export.js";
 import { parseLeadBucket, zeroBucketCounts, type LeadBucket } from "../lib/lead-buckets.js";
 import { countLeadListRows } from "../lib/lead-index.js";
@@ -44,6 +45,7 @@ import { standingDelivery } from "../lib/lead-standing-index.js";
 import { parseLeadSort, type LeadSortOrder } from "../lib/lead-page-plan.js";
 import {
   ensureReadModel,
+  openCurrentReadModel,
   noteEvidenceChanged,
   readModelBucketCounts,
   readModelPageDelivery,
@@ -62,6 +64,8 @@ import {
   FeedPositionError,
   openChangeFeed,
   readChangeFeed,
+  readFeedAsList,
+  openWarmChangeFeed,
   type ChangeFeed,
   type FeedPosition,
 } from "../lib/lead-change-feed.js";
@@ -1030,7 +1034,94 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAM
         page.limit !== null ||
         page.offset !== null ||
         page.cursor !== null);
-    const total = wantsTotal ? (plan ? plan.total : await countLeadListRows(scope)) : null;
+    // A plain compact walk (no search, bucket, standing, stage or order: `indexed` is false) of a
+    // scope whose CHANGE FEED is already kept current is served from the feed's stored rows, which
+    // are exactly what this view emits (lead-change-feed.ts), caught up first: no live email-gateway
+    // call per chunk, no whole-scope dedup per page (DASH-SPEED-1110-LEAD-R3: 4.0 s p50 / 11.3 s p95
+    // on the largest brand). Its total comes off the same stored rows. No current feed = the live
+    // walk below, unchanged (opening a feed for a one-shot read costs ~10 whole-scope walks).
+    let warmFeed: ChangeFeed | null = null;
+    if (compact && !indexed) {
+      try {
+        warmFeed = await openWarmChangeFeed(readModelScopeFor(scope, brandIdStr, hasScopeForStatus));
+      } catch (error) {
+        if (error instanceof ReadModelUnavailableError) {
+          console.error(
+            `[lead-service] a compact read is refused: its change feed could not be caught up: ${messageOf(error)}`,
+          );
+          throw new LeadReadRefused(502, "email-gateway unavailable");
+        }
+        throw error;
+      }
+    }
+    // No current feed: a plain compact walk of a scope whose READ MODEL is current takes its page
+    // from the model (same winners, `(created_at, id)` order, stored evidence) and hydrates only
+    // those ids, instead of re-deduping the scope and asking email-gateway per chunk. Its
+    // `nextCursor` keeps the live walk's rule (a full page names a cursor), below.
+    let plainModelWalk = false;
+    if (compact && !indexed && !warmFeed && hasScopeForStatus) {
+      const current = await openCurrentReadModel(readModelScopeFor(scope, brandIdStr, hasScopeForStatus));
+      if (current) {
+        model = current;
+        stateModelEvidence(res, model);
+        plan = await readModelPage(model, {
+          tokens: null,
+          bucket: null,
+          standings: null,
+          stages: null,
+          sort: "created",
+          page,
+        });
+        plainModelWalk = true;
+        res.setHeader("x-lead-compact-source", "model");
+      }
+    }
+    if (compact && !indexed && !warmFeed && !plainModelWalk) res.setHeader("x-lead-compact-source", "live");
+    const total = wantsTotal && !warmFeed ? (plan ? plan.total : await countLeadListRows(scope)) : null;
+
+    if (warmFeed) {
+      const feed = warmFeed;
+      // The answer is a function of the feed's committed version and the page: the same read at
+      // the same version replays the gzipped bytes kept from the last one (gzip-body-cache.ts).
+      // `feed.version` is the committed counter as read (or as the catch-up left it).
+      const version = feed.version;
+      const cacheKey =
+        `compact:${feed.id}:${version}:${page.limit ?? ""}:${page.offset ?? ""}:` +
+        `${page.cursor ? encodeLeadCursor(page.cursor) : ""}:${wantsTotal}`;
+      res.setHeader("x-lead-compact-source", "feed");
+      const gzip = acceptsGzip(req);
+      if (gzip && (await replayGzipBody(cacheKey, res))) {
+        streamingStarted = true;
+        return;
+      }
+      const out = new ResponseWriter(gzip ? recordingGzip(cacheKey, res) : res);
+      const read = readFeedAsList(feed, page, wantsTotal);
+      if (!gzip) res.setHeader("Content-Type", "application/json");
+      await out.write('{"leads":[');
+      streamingStarted = true;
+      let rowCount = 0;
+      let lastPosition: LeadListCursor | null = null;
+      for await (const rows of read.chunks) {
+        client.stopIfGone(rowCount);
+        for (const row of rows) {
+          await out.write((rowCount === 0 ? "" : ",") + row.payload);
+          rowCount += 1;
+        }
+        const last = rows[rows.length - 1];
+        if (last) lastPosition = { createdAt: last.createdAt, id: last.id };
+      }
+      const feedTotal = await read.total();
+      await out.write(
+        `],"nextCursor":${JSON.stringify(nextCursorFor(page, rowCount, lastPosition))}` +
+          (feedTotal === null ? "" : `,"total":${feedTotal}`) +
+          "}",
+      );
+      await out.end();
+      if (req.runId) {
+        traceEvent(req.runId, { service: "lead-service", event: "leads-query-done", detail: `count=${rowCount}`, data: { count: rowCount } }, req.headers).catch(() => {});
+      }
+      return;
+    }
 
     // `?view=basic` => slim per-lead payload. Anything else (incl. absent) => full
     // FullLead, the existing default. No Zod default: a missing param is full.
@@ -1225,7 +1316,7 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAM
       if (format === "csv") {
         await writer.end();
       } else {
-        const nextCursor = plan ? plan.nextCursor : nextCursorFor(page, rowCount, lastPosition);
+        const nextCursor = plan && !plainModelWalk ? plan.nextCursor : nextCursorFor(page, rowCount, lastPosition);
         await writer.write(
           `],"nextCursor":${JSON.stringify(nextCursor)}` +
             (total === null ? "" : `,"total":${total}`) +
@@ -1715,9 +1806,19 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, acceptQuery(READ_QUE
       throw error;
     }
 
-    res.setHeader("Content-Type", "application/json");
+    // A whole snapshot is a function of (feed, committed version, reason): the same snapshot read
+    // again replays the gzipped bytes kept from the last one (gzip-body-cache.ts). A delta is small
+    // and names the caller's own position: never kept.
+    const gzip = since === null && acceptsGzip(req);
+    const cacheKey = `changes:${read.position}:${reason}`;
+    if (gzip && (await replayGzipBody(cacheKey, res))) {
+      streamingStarted = true;
+      return;
+    }
+    const out = gzip ? new ResponseWriter(recordingGzip(cacheKey, res)) : writer;
+    if (!gzip) res.setHeader("Content-Type", "application/json");
     streamingStarted = true;
-    await writer.write(
+    await out.write(
       `{"full":${since === null},"reason":${JSON.stringify(reason)},"cursor":${JSON.stringify(read.position)},"leads":[`,
     );
     const removed: string[] = [];
@@ -1725,13 +1826,13 @@ router.get("/orgs/leads/changes", apiKeyAuth, requireOrgId, acceptQuery(READ_QUE
     for await (const chunk of read.chunks) {
       client.stopIfGone(wrote);
       for (const payload of chunk.put) {
-        await writer.write((wrote === 0 ? "" : ",") + payload);
+        await out.write((wrote === 0 ? "" : ",") + payload);
         wrote += 1;
       }
       removed.push(...chunk.removed);
     }
-    await writer.write(`],"removed":${JSON.stringify(removed)}}`);
-    await writer.end();
+    await out.write(`],"removed":${JSON.stringify(removed)}}`);
+    await out.end();
   } catch (error) {
     if (isClientGone(error)) {
       console.warn(`[lead-service] lead changes: caller left mid-stream (${error.message})`);

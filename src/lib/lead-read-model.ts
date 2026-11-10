@@ -884,6 +884,26 @@ export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel>
   return model;
 }
 
+/**
+ * The scope's read model IF one is already kept current (exists, evidence within its enforced
+ * bound), caught up with every pending change; otherwise null, and nothing is built, refreshed or
+ * kept warm (DASH-SPEED-1110-LEAD-R3). For a read that can answer either way (the plain compact
+ * walk, whose live path is the fallback): building a model for a one-shot read would cost more than
+ * the read. A catch-up a sibling outage refuses answers null too: the live path then states that
+ * outage itself. Never touches `last_read_at` (the worker's warmth stays owned by the page reads).
+ */
+export async function openCurrentReadModel(scope: ReadModelScope): Promise<ReadModel | null> {
+  const held = await loadModel(readModelKey(scope));
+  if (!held || !isWithinBound(held, Date.now())) return null;
+  try {
+    await catchUpModel(held);
+  } catch (error) {
+    if (error instanceof ReadModelUnavailableError) return null;
+    throw error;
+  }
+  return held;
+}
+
 function servableWithoutWait(model: ReadModel, now: number): boolean {
   return model.evidenceAt.getTime() >= now - READ_MODEL_SERVE_WITHOUT_WAIT_MS;
 }

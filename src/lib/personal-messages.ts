@@ -153,6 +153,10 @@ export async function readPersonalMessages(orgId: string, brandId: string): Prom
     JOIN live ON live.fact_id = named.fact_id
   `) as unknown as RawMessageRow[];
 
+  return sortMessages(toMessages(rows));
+}
+
+function toMessages(rows: readonly RawMessageRow[]): PersonalMessage[] {
   const out: PersonalMessage[] = [];
   for (const r of rows) {
     const at = toIsoTimestamp(r.occurred_at);
@@ -166,7 +170,98 @@ export async function readPersonalMessages(orgId: string, brandId: string): Prom
       text: r.text,
     });
   }
+  return out;
+}
+
+function sortMessages(out: PersonalMessage[]): PersonalMessage[] {
   return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.factId.localeCompare(b.factId));
+}
+
+/**
+ * `readPersonalMessages` restricted to these FACTS: each one's leads of the brand, found from the fact's own
+ * addresses (indexed lookups), never the brand's whole contact list. Same rules: live, dated, this source.
+ */
+export async function readPersonalMessagesOfFacts(orgId: string, brandId: string, factIds: readonly string[]): Promise<PersonalMessage[]> {
+  if (factIds.length === 0) return [];
+  const rows = (await sql`
+    WITH live AS (
+      SELECT f.fact_id, f.type, f.occurred_at, f.emails, f.phones, f.payload
+      FROM crm_facts f
+      WHERE f.fact_id = ANY(${[...factIds]}::text[])
+        AND f.org_id = ${orgId} AND f.brand_id = ${brandId}
+        AND f.source = ${PERSONAL_MESSAGES_SOURCE}
+        AND f.type IN ('message_in', 'message_out')
+        AND f.occurred_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM crm_facts w
+          WHERE w.withdrawn_of = f.fact_id AND w.org_id = ${orgId} AND w.brand_id = ${brandId} AND w.type = 'withdrawn'
+        )
+    ), named AS (
+      SELECT l.fact_id, 'email'::text AS channel, lower(e) AS v FROM live l, unnest(l.emails) e
+      UNION
+      SELECT l.fact_id, 'phone'::text, p FROM live l, unnest(l.phones) p
+    ), matched AS (
+      SELECT n.fact_id, cm.lead_id FROM named n
+      JOIN lead_contact_methods cm ON cm.channel = 'email' AND lower(cm.value) = n.v
+      WHERE n.channel = 'email'
+      UNION
+      SELECT n.fact_id, cm.lead_id FROM named n
+      JOIN lead_contact_methods cm ON cm.channel = 'phone' AND cm.value = n.v
+      WHERE n.channel = 'phone'
+    )
+    SELECT DISTINCT live.fact_id, m.lead_id::text AS lead_id, live.type, live.occurred_at,
+           live.payload->>'channel' AS channel, live.payload->>'text' AS text
+    FROM matched m
+    JOIN live ON live.fact_id = m.fact_id
+    WHERE EXISTS (
+      SELECT 1 FROM leads_campaigns lc
+      WHERE lc.lead_id = m.lead_id AND lc.org_id = ${orgId} AND lc.brand_ids @> ARRAY[${brandId}]::text[]
+    )
+  `) as unknown as RawMessageRow[];
+  return toMessages(rows);
+}
+
+/**
+ * `readPersonalMessages` restricted to these LEADS: every live message of the brand naming one of their
+ * addresses. The facts are found through the post-boot GIN indexes on the normalized addresses
+ * (`crm_fact_emails_norm` / `crm_fact_phones_norm`, a superset), then held to the full read's exact match.
+ */
+export async function readPersonalMessagesOfLeads(orgId: string, brandId: string, leadIds: readonly string[]): Promise<PersonalMessage[]> {
+  if (leadIds.length === 0) return [];
+  const rows = (await sql`
+    WITH brand_leads AS (
+      SELECT DISTINCT lead_id FROM leads_campaigns
+      WHERE org_id = ${orgId} AND brand_ids @> ARRAY[${brandId}]::text[] AND lead_id = ANY(${[...leadIds]}::uuid[])
+    ), brand_ids AS (
+      SELECT DISTINCT cm.lead_id, cm.channel,
+             CASE WHEN cm.channel = 'email' THEN lower(cm.value) ELSE cm.value END AS v
+      FROM lead_contact_methods cm
+      JOIN brand_leads bl ON bl.lead_id = cm.lead_id
+      WHERE cm.channel IN ('email', 'phone')
+    )
+    SELECT DISTINCT f.fact_id, b.lead_id::text AS lead_id, f.type, f.occurred_at,
+           f.payload->>'channel' AS channel, f.payload->>'text' AS text
+    FROM brand_ids b
+    CROSS JOIN LATERAL (
+      SELECT f.fact_id, f.type, f.occurred_at, f.payload, f.source FROM crm_facts f
+      WHERE b.channel = 'email' AND f.org_id = ${orgId} AND f.brand_id = ${brandId}
+        AND crm_fact_emails_norm(f.emails) @> ARRAY[btrim(b.v)]
+        AND b.v = ANY(ARRAY(SELECT lower(e) FROM unnest(f.emails) e))
+      UNION ALL
+      SELECT f.fact_id, f.type, f.occurred_at, f.payload, f.source FROM crm_facts f
+      WHERE b.channel = 'phone' AND f.org_id = ${orgId} AND f.brand_id = ${brandId}
+        AND crm_fact_phones_norm(f.phones) @> ARRAY[regexp_replace(b.v, '[[:space:]()./-]', '', 'g')]
+        AND b.v = ANY(f.phones)
+    ) f
+    WHERE f.source = ${PERSONAL_MESSAGES_SOURCE}
+      AND f.type IN ('message_in', 'message_out')
+      AND f.occurred_at IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM crm_facts w
+        WHERE w.withdrawn_of = f.fact_id AND w.org_id = ${orgId} AND w.brand_id = ${brandId} AND w.type = 'withdrawn'
+      )
+  `) as unknown as RawMessageRow[];
+  return toMessages(rows);
 }
 
 /** Frozen verdicts at the brand, by fact id. */

@@ -14,7 +14,7 @@
 # Properties: dry-run by default (prints counts, writes nothing), APPLY=1 writes; idempotent (skips rows that hold a
 # repoint already); reversible: DELETE FROM lead_campaign_run_repoints WHERE recorded_by = 'backfill';
 #
-# Usage, on the box (root@167.233.196.79):
+# Usage, on the box (root@62.83.93.230):
 #   bash backfill-lead-campaign-run-repoints.sh          # dry run
 #   APPLY=1 bash backfill-lead-campaign-run-repoints.sh  # write
 set -euo pipefail

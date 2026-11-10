@@ -21,11 +21,11 @@ import { checkOutsideAnswers, readJudgedAnswers, type OutsideCheckContext, type 
 import {
   judgeUnansweredPersonalMessages,
   personalFeedCaughtUp,
-  readPersonalMessages,
   readPersonalMessageVerdicts,
   verdictEvent,
   type PersonalMessagesReport,
 } from "./personal-messages.js";
+import { readPersonalMessagesKept } from "./personal-messages-memo.js";
 
 export class OutreachCopyNotReadyError extends Error {
   constructor() {
@@ -191,7 +191,7 @@ export async function readAwaitingReplyWithReport(input: {
     readStatements(orgId, brandId),
     readJudgedAnswers(orgId, brandId),
     personalFeedCaughtUp(),
-    readPersonalMessages(orgId, brandId),
+    readPersonalMessagesKept(orgId, brandId),
     readPersonalMessageVerdicts(orgId, brandId),
   ]);
   const leadByEmail = await readLeadsByEmail([...new Set(facts.map((f) => f.lead_email.toLowerCase()))]);
