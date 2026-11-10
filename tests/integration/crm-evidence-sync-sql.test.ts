@@ -95,6 +95,7 @@ const { supersedeCrmOutcome, upsertCauseStatement, withdrawCauseStatement } = aw
   "../../src/lib/crm-evidence-store.js"
 );
 const { createLeadStandingResolver } = await import("../../src/lib/lead-standing-resolver.js");
+const { reverseWithdrawnUnits, loadPendingFacts } = await import("../../src/lib/outcome-fact-declarations.js");
 const { DEFAULT_STATUS } = await import("../../src/lib/delivery-flatten.js");
 const { standingDelivery } = await import("../../src/lib/lead-standing-index.js");
 
@@ -401,4 +402,48 @@ describe.skipIf(!hasRealDatabase)("CRM evidence sync against a real database", (
     expect(result.withdrawnNevers).toBe(2);
     expect((await crmOutcomes(ids.after.leadId)).every((r) => r.withdrawn_at !== null)).toBe(true);
   });
+  // LEDGER-REDECLARE-CHURN-1110: a brand is a shared identity. The sync of ANOTHER org of the same brand, holding no
+  // pairing, used to set aside every CRM row of this org (brand-only scope); this org's next pass stood them back up,
+  // and each flicker reversed then re-declared the same Unit at runs-service (126 Units, 7 times in 3 days).
+  it("another org's sync of the same brand never sets this org's CRM evidence aside, so its Unit is never reversed", async () => {
+    const otherOrg = randomUUID();
+    const contacts = state.contacts;
+    await syncCrmEvidence(orgId, brandId);
+    const [signup] = (await db.execute(sql`
+      SELECT id::text AS id, received_at FROM conversion_events
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND matched_lead_id = ${ids.payer.leadId}::uuid AND source = 'crm' AND event = 'signup'
+    `)) as unknown as Array<{ id: string; received_at: string }>;
+    expect(signup).toBeDefined();
+    // The Unit already declared for it, as the outcome sweep writes it.
+    await db.execute(sql`
+      INSERT INTO outcome_fact_declarations (org_id, brand_id, lead_id, outcome_key, conversion_event_id, run_id,
+        consumed_outcome_key, consumed_basis, dated, caused_by_outreach, occurred_at)
+      VALUES (${orgId}, ${brandId}, ${ids.payer.leadId}::uuid, 'signup', ${signup.id}::uuid, ${randomUUID()}::uuid,
+        NULL, NULL, true, false, ${"2026-05-12T00:00:00.000Z"}::timestamptz)
+      ON CONFLICT DO NOTHING
+    `);
+    const reversals: unknown[] = [];
+    const post = async (body: unknown) => {
+      reversals.push(body);
+      return { status: 201, text: "{}" };
+    };
+    for (let pass = 0; pass < 3; pass++) {
+      state.contacts = [];
+      const other = await syncCrmEvidence(otherOrg, brandId);
+      expect(other.withdrawnOutcomes).toBe(0);
+      expect((await crmOutcomes(ids.payer.leadId)).every((r) => r.withdrawn_at === null)).toBe(true);
+      await reverseWithdrawnUnits({ orgId }, post);
+      state.contacts = contacts;
+      await syncCrmEvidence(orgId, brandId);
+      await reverseWithdrawnUnits({ orgId }, post);
+      const pending = await loadPendingFacts({ orgId });
+      expect(pending.filter((f) => f.leadId === ids.payer.leadId && f.outcomeKey === "signup")).toEqual([]);
+    }
+    expect(reversals).toEqual([]);
+    const decl = (await db.execute(sql`
+      SELECT reversed_at FROM outcome_fact_declarations
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${ids.payer.leadId}::uuid AND outcome_key = 'signup'
+    `)) as unknown as Array<{ reversed_at: unknown }>;
+    expect(decl).toEqual([{ reversed_at: null }]);
+  }, 60_000);
 });
