@@ -785,7 +785,9 @@ function filterSql(scope: Scope, f: UniboxFilters, topRank: number | null) {
   if (f.fit?.length) parts.push(sql`u.fit = ANY(${sql.param([...f.fit])}::text[])`);
   if (f.leadVerdict?.length) parts.push(sql`(${sql.join(f.leadVerdict.map((v) => leadVerdictSql(v, topRank)), sql` OR `)})`);
   if (f.reachedSteps?.length) {
-    parts.push(sql`EXISTS (SELECT 1 FROM jsonb_array_elements(u.steps) s WHERE s->>'step' = ANY(${sql.param([...f.reachedSteps])}::text[]))`);
+    // Through the post-boot GIN index on `unibox_reached_steps(steps)` (migration 0145, MON-PAGE-SPEED-1111): the brand's
+    // rows that reached the step, never every row's steps unpacked (2.6 s cold for the count on the largest brand).
+    parts.push(sql`unibox_reached_steps(u.steps) && ${sql.param([...f.reachedSteps])}::text[]`);
   }
   if (f.campaignIds !== undefined) {
     // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once.

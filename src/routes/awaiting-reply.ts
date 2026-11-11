@@ -27,8 +27,26 @@ import {
 } from "../lib/awaiting-reply-read.js";
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
+import { invalidateAndRebuild, invalidateSnapshots, readThroughSnapshot } from "../lib/read-snapshots.js";
 
 const router = Router();
+
+/**
+ * "Who is waiting on us" is a brand-wide read (the brand's personal-channel messages + both Gmail mirrors per person
+ * waiting: 10-13 s cold on the largest brand): with the request's identity it is served from its stored answer and
+ * recomputed in the background, with that identity, once 10 s old: each read still pays the computation it paid before,
+ * off its path (read-snapshots.ts, MON-PAGE-SPEED-1111). A new message shows on the read after the one that started its
+ * rebuild. The "answered outside" statement invalidates it before answering. A read without identity computes as before (its
+ * mirrors cannot be read, so its answer is not the one stored).
+ */
+const AWAITING_REVALIDATE_AFTER_MS = 10_000;
+
+function awaitingBody(orgId: string, brandId: string, mailboxCheck: { userId: string; runId: string }) {
+  return async () => {
+    const { people, outsideAnswers, personalMessages } = await readAwaitingReplyWithReport({ orgId, brandId, mailboxCheck });
+    return JSON.stringify({ brandId, total: people.length, people, outsideAnswers, personalMessages });
+  };
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -50,6 +68,17 @@ router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, acceptQuery(R
     }
     // Every person still waiting has the Gmail mirrors (the org's own, and staff's) read for a later
     // email of ours, judged once by Jev, billed to this request's org (outside-answers.ts).
+    if (req.userId && req.runId) {
+      const body = await readThroughSnapshot({
+        kind: "awaiting_reply",
+        orgId: req.orgId!,
+        brandId,
+        revalidateAfterMs: AWAITING_REVALIDATE_AFTER_MS,
+        compute: awaitingBody(req.orgId!, brandId, { userId: req.userId, runId: req.runId }),
+      });
+      res.type("application/json").send(body);
+      return;
+    }
     const { people, outsideAnswers, personalMessages } = await readAwaitingReplyWithReport({
       orgId: req.orgId!,
       brandId,
@@ -98,6 +127,11 @@ router.post("/orgs/leads/:id/answered-outside", apiKeyAuth, requireOrgId, async 
       statedByUserId: req.userId,
     });
     const after = await readAwaitingReply({ orgId: req.orgId!, brandId, leadIds: [row.lead_id] });
+    if (req.runId) {
+      await invalidateAndRebuild({ kind: "awaiting_reply", orgId: req.orgId!, brandId, compute: awaitingBody(req.orgId!, brandId, { userId: req.userId, runId: req.runId }) });
+    } else {
+      await invalidateSnapshots("awaiting_reply", req.orgId!, brandId);
+    }
     res.status(201).json({
       statement: { id: statement.id, leadId: row.lead_id, brandId, statedByUserId: req.userId, statedAt: statement.statedAt },
       awaitingReply: after.length > 0,

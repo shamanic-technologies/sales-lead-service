@@ -215,6 +215,14 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // unibox-model `filterSql` `reachedStep=`: the rows of a brand that reached a step (MON-PAGE-SPEED-1111). Without it
+    // the list and its count unpacked the steps of every row of the brand (13.6k rows of the ~1 GB table, 2.6 s cold).
+    name: "idx_unibox_rows_reached_steps",
+    on: "ON unibox_rows USING gin (unibox_reached_steps(steps))",
+    lockKey: "7290519146308441040",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",
