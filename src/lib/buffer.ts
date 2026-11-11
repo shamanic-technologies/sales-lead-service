@@ -220,6 +220,15 @@ interface PullNextResult {
   };
 }
 
+/** The campaign-offer read on the serve path: long enough to ride out a campaign-service recreate. */
+const CAMPAIGN_OFFER_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * The offer each campaign named on its last successful read, by campaign id. Read only
+ * when campaign-service cannot answer; a live answer always wins and refreshes it.
+ */
+const lastSeenCampaignOffer = new Map<string, string | null>();
+
 /**
  * Return the next real person to contact for the audience the campaign selected:
  *   1. Use the audience id the campaign passed in (x-audience-id header).
@@ -322,16 +331,32 @@ export async function pullNext(
   // hard dependency to the serve path — because the goal read itself is the loud
   // guard: without an offer on a multi-offer brand it surfaces the brand-service
   // SEVERAL_OFFERS 409 verbatim, and single-offer brands are byte-identical.
+  //
+  // MON-RUNTIME-CONTEXT-409-1111: campaign-service redeploys many times a day, and a
+  // recreate gap longer than the 5s default dropped the offer 9 times in 24 h, each a
+  // certain 409 on a multi-offer brand (the brand-scoped fallback has no single answer
+  // there). So this read gets a 30s budget (the goal read after it allows 300s), and a
+  // read that still fails uses the offer this process last saw for the campaign.
   let offerId: string | null = null;
   try {
-    const campaign = await fetchCampaign(params.campaignId, params.orgId, baseCtx);
+    const campaign = await fetchCampaign(params.campaignId, params.orgId, baseCtx, CAMPAIGN_OFFER_READ_TIMEOUT_MS);
     offerId = campaign?.offerId ?? null;
+    if (campaign) lastSeenCampaignOffer.set(params.campaignId, offerId);
   } catch (err) {
-    console.warn(
-      `[lead-service] campaign offer unresolved for campaign=${params.campaignId} — ` +
-        `the goal read falls back to brand scope, which brand-service refuses on a multi-offer brand: ` +
-        (errorMessage(err)),
-    );
+    const known = lastSeenCampaignOffer.get(params.campaignId);
+    if (known !== undefined) {
+      offerId = known;
+      console.warn(
+        `[lead-service] campaign offer read failed for campaign=${params.campaignId}; ` +
+          `using its last-seen offer=${known}: ${errorMessage(err)}`,
+      );
+    } else {
+      console.warn(
+        `[lead-service] campaign offer unresolved for campaign=${params.campaignId} — ` +
+          `the goal read falls back to brand scope, which brand-service refuses on a multi-offer brand: ` +
+          (errorMessage(err)),
+      );
+    }
   }
   const goal = await getCurrentGoal(params.brandId, params.orgId, baseCtx, offerId);
   const ctx: ServiceContext = { ...baseCtx, goal };
