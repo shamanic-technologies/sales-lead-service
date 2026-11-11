@@ -4,6 +4,7 @@
  */
 import { messageOf } from "../lib/db-error.js";
 import { Router, type Response } from "express";
+import compression from "compression";
 import { z } from "zod";
 import { apiKeyAuth, requireOrgId, type AuthenticatedRequest } from "../middleware/auth.js";
 import { CompanyServiceError } from "../lib/company-client.js";
@@ -17,6 +18,7 @@ import { sql } from "drizzle-orm";
 import { isRelationshipTag } from "../lib/relationship-tags.js";
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
+import { invalidateAndRebuild, readThroughSnapshot } from "../lib/read-snapshots.js";
 
 const router = Router();
 /** A tag, or the `wants_business` answer a person of the org may state (HOT-INBOUND-UNANSWERED-1016). */
@@ -36,6 +38,19 @@ export const CompanyBody = z.union([
   z.object({ name: z.string().min(1).max(200) }).strict(),
   z.object({ none: z.literal(true) }).strict(),
 ]);
+
+/**
+ * The review is a brand-wide read (10-25 s cold on the largest brand): served from its stored answer, recomputed in
+ * the background once 30 s old (read-snapshots.ts, MON-PAGE-SPEED-1111). The judges' sweeps change it slowly;
+ * a person's statement below invalidates it before answering, so the read after a click is never the state before it.
+ */
+const REVIEW_REVALIDATE_AFTER_MS = 30_000;
+const reviewBody = (orgId: string, brandId: string) => async () => JSON.stringify(await readReview(orgId, brandId));
+
+/** A person's statement changed the review: every brand of the org (a person-level tag is org-wide), this one rebuilt now. */
+async function reviewChanged(orgId: string, brandId: string): Promise<void> {
+  await invalidateAndRebuild({ kind: "relationship_review", orgId, brandId, orgWide: true, compute: reviewBody(orgId, brandId) });
+}
 
 function brandOf(req: AuthenticatedRequest, res: Response): string | null {
   const brandId = String(req.params.brandId ?? "");
@@ -81,11 +96,19 @@ router.post("/internal/brands/:brandId/relationships/query", apiKeyAuth, require
   }
 });
 
-router.get("/orgs/brands/:brandId/relationships/review", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/relationships/review"]), async (req: AuthenticatedRequest, res: Response) => {
+// ~2.4 MB of JSON on the largest brand: gzipped on the wire when the caller accepts it.
+router.get("/orgs/brands/:brandId/relationships/review", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/brands/:brandId/relationships/review"]), compression(), async (req: AuthenticatedRequest, res: Response) => {
   const brandId = brandOf(req, res);
   if (!brandId) return;
   try {
-    res.json(await readReview(req.orgId!, brandId));
+    const body = await readThroughSnapshot({
+      kind: "relationship_review",
+      orgId: req.orgId!,
+      brandId,
+      revalidateAfterMs: REVIEW_REVALIDATE_AFTER_MS,
+      compute: reviewBody(req.orgId!, brandId),
+    });
+    res.type("application/json").send(body);
   } catch (err) {
     fail(res, "relationships review", err);
   }
@@ -119,7 +142,9 @@ router.post(
       return;
     }
     try {
-      res.json(await answerMergeQuestion({ orgId: req.orgId!, brandId, questionId, same: parsed.data.same, userId }));
+      const answered = await answerMergeQuestion({ orgId: req.orgId!, brandId, questionId, same: parsed.data.same, userId });
+      await reviewChanged(req.orgId!, brandId);
+      res.json(answered);
     } catch (err) {
       if (err instanceof MergeQuestionNotFoundError) {
         res.status(404).json({ error: "merge_question_not_found" });
@@ -140,7 +165,9 @@ router.post("/orgs/brands/:brandId/relationships/merges/:linkId/undo", apiKeyAut
   const userId = userOf(req, res);
   if (!userId) return;
   try {
-    res.json(await undoMerge({ orgId: req.orgId!, brandId, linkId: String(req.params.linkId), userId }));
+    const undone = await undoMerge({ orgId: req.orgId!, brandId, linkId: String(req.params.linkId), userId });
+    await reviewChanged(req.orgId!, brandId);
+    res.json(undone);
   } catch (err) {
     if (err instanceof MergeQuestionNotFoundError) {
       res.status(404).json({ error: "merge_not_found" });
@@ -164,6 +191,7 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAuth,
   }
   try {
     await stateTag({ orgId: req.orgId!, brandId, humanId, tag, state: parsed.data.state, userId, companyKey: companyKeyOf(req) });
+    await reviewChanged(req.orgId!, brandId);
     const block = (await loadRelationships(req.orgId!, brandId, [humanId])).get(humanId) ?? { ...EMPTY_RELATIONSHIP, humanId };
     res.json({ relationship: block });
   } catch (err) {
@@ -184,6 +212,7 @@ router.delete("/orgs/brands/:brandId/relationships/:humanId/tags/:tag", apiKeyAu
   }
   try {
     const withdrawn = await withdrawTag({ orgId: req.orgId!, brandId, humanId, tag, userId, companyKey: companyKeyOf(req) });
+    await reviewChanged(req.orgId!, brandId);
     const block = (await loadRelationships(req.orgId!, brandId, [humanId])).get(humanId) ?? { ...EMPTY_RELATIONSHIP, humanId };
     res.json({ withdrawn, relationship: block });
   } catch (err) {
@@ -204,6 +233,7 @@ router.put("/orgs/brands/:brandId/relationships/:humanId/company", apiKeyAuth, r
   }
   try {
     const company = await stateCompany({ orgId: req.orgId!, humanId, userId, ...parsed.data });
+    await reviewChanged(req.orgId!, brandId);
     res.json({ company });
   } catch (err) {
     if (err instanceof CompanyStatementError) {

@@ -12,6 +12,12 @@ import { sql } from "drizzle-orm";
 
 const judged: string[] = [];
 let judgeFails = false;
+// The route's stored answer (read-snapshots.ts, MON-PAGE-SPEED-1111) is tested on its own: here every read computes.
+vi.mock("../../src/lib/read-snapshots.js", () => ({
+  readThroughSnapshot: (input: { compute: () => Promise<string> }) => input.compute(),
+  invalidateAndRebuild: async () => undefined,
+  invalidateSnapshots: async () => 0,
+}));
 vi.mock("../../src/lib/qualification-judge.js", () => ({
   judgeYesNo: async () => {
     throw new Error("not used");

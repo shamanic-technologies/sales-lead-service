@@ -18,6 +18,12 @@ const mailbox = vi.hoisted(() => ({
 }));
 const judge = vi.hoisted(() => ({ calls: [] as unknown[], p: new Map<string, number>() }));
 
+// The route's stored answer (read-snapshots.ts, MON-PAGE-SPEED-1111) is tested on its own: here every read computes.
+vi.mock("../../src/lib/read-snapshots.js", () => ({
+  readThroughSnapshot: (input: { compute: () => Promise<string> }) => input.compute(),
+  invalidateAndRebuild: async () => undefined,
+  invalidateSnapshots: async () => 0,
+}));
 vi.mock("../../src/lib/mailbox-client.js", () => ({
   fetchMailboxConversation: vi.fn(async (email: string) => mailbox.org.get(email) ?? { ok: true, data: null }),
   fetchStaffMailboxConversation: vi.fn(async (email: string) => mailbox.staff.get(email) ?? { ok: true, data: null }),

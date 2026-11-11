@@ -106,6 +106,18 @@ export const EMPTY_RELATIONSHIP: RelationshipBlock = {
 };
 
 type Ts = Date | string;
+
+/** Rows grouped by a key, each group in the rows' own order. */
+function groupBy<T>(rows: readonly T[], key: (row: T) => string): Map<string, T[]> {
+  const out = new Map<string, T[]>();
+  for (const r of rows) {
+    const k = key(r);
+    const list = out.get(k);
+    if (list) list.push(r);
+    else out.set(k, [r]);
+  }
+  return out;
+}
 const iso = (v: Ts | null | undefined): string | null => (v === null || v === undefined ? null : toIsoTimestamp(v));
 
 /** Every atomic human this org folds into each of `humans` (its own links, fleet merges), the human itself excluded. */
@@ -230,13 +242,20 @@ async function loadBlocks(
     for (const h of new Set([linkedCanon.get(r.a) ?? r.a, linkedCanon.get(r.b) ?? r.b])) mergesOf.set(h, [...(mergesOf.get(h) ?? []), merge]);
   }
   type SubjectRow = (typeof subjects)[number];
-  const subjectsOf = new Map<string, SubjectRow[]>();
-  for (const r of subjects) subjectsOf.set(r.human, [...(subjectsOf.get(r.human) ?? []), r]);
+  const subjectsOf = groupBy(subjects, (r) => r.human);
   const canonOfAtomic = new Map<string, string>();
   for (const h of humans) {
     canonOfAtomic.set(h, h);
     for (const a of atomicByCanon.get(h) ?? []) canonOfAtomic.set(a, h);
   }
+  // Each read's rows per human, in read order (MON-PAGE-SPEED-1111): `blockOf` runs once per human and used to scan
+  // every row of every read for its own (6k humans x 6k rows on the largest brand = 3 s of CPU per review read).
+  const statementsByHuman = groupBy(statements, (s) => s.human);
+  const evidenceByHuman = groupBy(evidence, (e) => e.human);
+  const judgmentsByHuman = groupBy(judgments, (j) => j.human);
+  const intentsByHuman = groupBy(intents, (i) => i.human);
+  const pressOnlyByHuman = groupBy(pressOnly, (p) => p.human);
+  const connectionsByCanon = groupBy(connections.filter((c) => canonOfAtomic.has(c.human)), (c) => canonOfAtomic.get(c.human)!);
   // A relation's own tags (crm's relation fact): the connection tags of ITS points only (PERSON-RELATIONS-1017).
   const tagsOfRelation = new Map<string, string[]>();
   if (relationKeys !== null) {
@@ -271,7 +290,7 @@ async function loadBlocks(
   const blockOf = (h: string, key: string, subj: SubjectRow | null, relationScoped: boolean): RelationshipBlock => {
     const statementsOf = new Map<RelationshipTag, { state: "yes" | "no"; at: string }>();
     let wantsStatement: { state: "yes" | "no"; at: string } | null = null;
-    for (const s of statements) {
+    for (const s of statementsByHuman.get(h) ?? []) {
       if (s.human === h && s.tag === WANTS_BUSINESS && s.brand_id === brandId && s.company_key === key) {
         wantsStatement = { state: s.state, at: iso(s.stated_at)! };
         continue;
@@ -282,8 +301,8 @@ async function loadBlocks(
       statementsOf.set(s.tag, { state: s.state, at: iso(s.stated_at)! });
     }
     const evidenceOf = new Map<RelationshipTag, { evidence: string; at: string }>();
-    for (const e of evidence) if (e.human === h && e.company_key === key && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
-    const pitched = pressOnly.find((x) => x.human === h);
+    for (const e of evidenceByHuman.get(h) ?? []) if (e.human === h && e.company_key === key && isRelationshipTag(e.tag)) evidenceOf.set(e.tag, { evidence: e.evidence, at: iso(e.at)! });
+    const pitched = (pressOnlyByHuman.get(h) ?? []).find((x) => x.human === h);
     if (pitched) evidenceOf.set(JOURNALIST_TAG, { evidence: PRESS_ONLY_EVIDENCE, at: iso(pitched.at)! });
     let connectionTags: string[];
     if (relationScoped) {
@@ -291,12 +310,12 @@ async function loadBlocks(
       const personal = connectionTags.find((t) => t.startsWith("personal"));
       if (personal) evidenceOf.set("personal", { evidence: `crm:${personal}`, at: iso(subj?.updated_at ?? null) ?? new Date(0).toISOString() });
     } else {
-      const mine = connections.filter((c) => canonOfAtomic.get(c.human) === h);
+      const mine = (connectionsByCanon.get(h) ?? []).filter((c) => canonOfAtomic.get(c.human) === h);
       connectionTags = Array.from(new Set(mine.map((c) => c.tag))).sort();
       const personalTag = mine.filter((c) => c.tag.startsWith("personal")).sort((a, b) => String(a.at).localeCompare(String(b.at)))[0];
       if (personalTag) evidenceOf.set("personal", { evidence: `crm:${personalTag.tag}`, at: iso(personalTag.at)! });
     }
-    const j = judgments.find((x) => x.human === h && x.company_key === key);
+    const j = (judgmentsByHuman.get(h) ?? []).find((x) => x.human === h && x.company_key === key);
     let judgment: { probabilities: Partial<Record<RelationshipTag, number>>; at: string } | null = null;
     if (j) {
       const probabilities: Partial<Record<RelationshipTag, number>> = {};
@@ -315,7 +334,7 @@ async function loadBlocks(
     const wroteToUs = subj?.wrote_to_us === true;
     const lead = decideLead(details);
     const notBrandLead = notBrandLeadOf({ subject: isSubject, leadState: lead.state, connectionTags });
-    const intent = intents.find((x) => x.human === h && x.company_key === key);
+    const intent = (intentsByHuman.get(h) ?? []).find((x) => x.human === h && x.company_key === key);
     return {
       humanId: h,
       company,
