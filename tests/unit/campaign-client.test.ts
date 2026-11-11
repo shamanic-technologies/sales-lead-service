@@ -31,6 +31,20 @@ describe("campaign-client", () => {
     expect(opts.signal).toBeInstanceOf(AbortSignal);
   });
 
+  it("fetchCampaign honours a caller's longer budget", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ campaign: { id: "c1", offerId: "offer-1" } }),
+    });
+    const { fetchCampaign } = await import("../../src/lib/campaign-client.js");
+
+    await fetchCampaign("c1", "org-1", undefined, 30_000);
+
+    expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+    timeoutSpy.mockRestore();
+  });
+
   // The serve path names the campaign's offer on its brand-service goal read, so a
   // sibling mid-restart resetting the connection must not silently cost the offer —
   // a multi-offer brand's serve would then fail on SEVERAL_OFFERS again.

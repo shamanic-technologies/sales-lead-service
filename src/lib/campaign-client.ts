@@ -34,7 +34,9 @@ export async function fetchCampaign(
     activeGoalId?: string | null;
     brandProfileId?: string | null;
     audienceId?: string | null;
-  }
+  },
+  /** Abort budget for the whole read, retries included. Default 5s. */
+  timeoutMs = 5_000,
 ): Promise<CampaignDetails | null> {
   try {
     const headers: Record<string, string> = {
@@ -64,7 +66,7 @@ export async function fetchCampaign(
     // so an exhausted budget degrades to exactly today's behaviour.
     const response = await fetchWithRetry(`${CAMPAIGN_SERVICE_URL}/campaigns/${campaignId}`, {
       headers,
-      signal: AbortSignal.timeout(5_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) {
