@@ -305,7 +305,44 @@ describe("pullNext (audience serve-next flow)", () => {
     // Fail-soft on the offer resolution — campaign-service must not become a new hard
     // dependency of the serve path — because the loud guard is the goal read itself:
     // without an offer, brand-service answers 409 SEVERAL_OFFERS verbatim.
+    // A campaign this process never read: no last-seen offer to stand in.
     fetchCampaign.mockRejectedValueOnce(new Error("campaign-service unreachable"));
+    serveNext.mockResolvedValueOnce({ status: "served", person });
+    upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+    recordEmploymentHistory.mockResolvedValueOnce(undefined);
+    registerServedEmail.mockResolvedValueOnce("lead-1");
+    buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+
+    await pullNext({ ...baseParams, campaignId: "campaign-never-read" });
+
+    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), null);
+  });
+
+  // MON-RUNTIME-CONTEXT-409-1111: a campaign-service recreate timed the offer read out 9
+  // times in 24 h, and each brand-scoped fallback was a certain 409 on a multi-offer brand.
+  it("uses the campaign's last-seen offer when campaign-service cannot answer", async () => {
+    const serveOnce = () => {
+      serveNext.mockResolvedValueOnce({ status: "served", person });
+      upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
+      recordEmploymentHistory.mockResolvedValueOnce(undefined);
+      registerServedEmail.mockResolvedValueOnce("lead-1");
+      buildFullLead.mockResolvedValueOnce({ leadId: "lead-1" });
+    };
+    const params = { ...baseParams, campaignId: "campaign-recreate" };
+
+    fetchCampaign.mockResolvedValueOnce({ id: "campaign-recreate", offerId: "offer-r" });
+    serveOnce();
+    await pullNext(params);
+
+    fetchCampaign.mockRejectedValueOnce(new Error("The operation was aborted due to timeout"));
+    serveOnce();
+    await pullNext(params);
+
+    expect(getCurrentGoal).toHaveBeenLastCalledWith("brand-1", "org-1", expect.any(Object), "offer-r");
+  });
+
+  it("gives the campaign-offer read a 30s budget, long enough to ride out a campaign-service recreate", async () => {
+    fetchCampaign.mockResolvedValueOnce({ id: "campaign-1", offerId: "offer-1" });
     serveNext.mockResolvedValueOnce({ status: "served", person });
     upsertLeadFromPerson.mockResolvedValueOnce("lead-1");
     recordEmploymentHistory.mockResolvedValueOnce(undefined);
@@ -314,7 +351,7 @@ describe("pullNext (audience serve-next flow)", () => {
 
     await pullNext(baseParams);
 
-    expect(getCurrentGoal).toHaveBeenCalledWith("brand-1", "org-1", expect.any(Object), null);
+    expect(fetchCampaign).toHaveBeenCalledWith("campaign-1", "org-1", expect.any(Object), 30_000);
   });
 
   it("returns found=false when serve-next reports the audience exhausted", async () => {
