@@ -13,6 +13,7 @@ import {
   bigint,
   doublePrecision,
   bigserial,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import type { BuyingSignal } from "../lib/buying-signal.js";
@@ -385,6 +386,20 @@ export const answeredOutsideStatements = pgTable(
     statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [index("idx_answered_outside_brand_lead").on(table.orgId, table.brandId, table.leadId, table.statedAt)],
+);
+
+// --- A slow brand-wide read's last answer (src/lib/read-snapshots.ts, migration 0145, MON-PAGE-SPEED-1111) ---
+export const readSnapshots = pgTable(
+  "read_snapshots",
+  {
+    kind: text("kind").notNull(),
+    orgId: text("org_id").notNull(),
+    brandId: text("brand_id").notNull(),
+    body: text("body").notNull(),
+    builtAt: timestamp("built_at", { withTimezone: true }).notNull(),
+    invalidatedAt: timestamp("invalidated_at", { withTimezone: true }),
+  },
+  (table) => [primaryKey({ columns: [table.kind, table.orgId, table.brandId] })],
 );
 
 // --- "Disqualified": its own mark beside the step tags (src/lib/lead-disqualification.ts, migration 0075) ---
