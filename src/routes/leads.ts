@@ -1505,6 +1505,15 @@ router.get("/orgs/leads", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAM
 });
 
 /**
+ * `x-lead-read-keep-warm: false` = a background fingerprint read (MON-DB-HOT-1112): answered from
+ * the model like any count, but it does not keep the model on the worker's 3-minute refresh. Absent
+ * or any other value = an ordinary read, unchanged.
+ */
+function keepWarmOf(req: AuthenticatedRequest): boolean {
+  return req.headers["x-lead-read-keep-warm"] !== "false";
+}
+
+/**
  * GET /orgs/leads/bucket-counts — how many people are in each engagement bucket, and no rows.
  *
  * The customer's Leads page labels a tab per bucket and states the page's population. It used to
@@ -1562,6 +1571,7 @@ router.get("/orgs/leads/bucket-counts", apiKeyAuth, requireOrgId, acceptQuery(RE
     try {
       model = await ensureReadModel(
         readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
+        { keepWarm: keepWarmOf(req) },
       );
       stateModelEvidence(res, model);
     } catch (error) {
@@ -1686,6 +1696,7 @@ router.get("/orgs/leads/standing-counts", apiKeyAuth, requireOrgId, acceptQuery(
     try {
       model = await ensureReadModel(
         readModelScopeFor(resolved.scope, brandId, resolved.hasScopeForStatus),
+        { keepWarm: keepWarmOf(req) },
       );
       stateModelEvidence(res, model);
     } catch (error) {
