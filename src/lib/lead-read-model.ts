@@ -102,10 +102,18 @@ export const READ_MODEL_MAX_EVIDENCE_AGE_MS = 5 * 60_000;
  * whole refresh: 78s for Distribute.you's 59k people right after a deploy, so crm-service's Unibox
  * build (30s per page) failed every 15 minutes for two hours and ~9,100 people showed no standing.
  * Past the bound the worker is behind (a deploy restarted it, a sibling blipped); the background
- * thread refreshes any model read within the hour, so the next read is fresh again. Older than this
- * (a model nobody read for an hour, which the worker stopped refreshing) a read still rebuilds first.
+ * thread refreshes any model read within the hour, so the next read is fresh again.
+ *
+ * 20 hours, not 1 (MON-PAGE-SPEED-1111, 2026-11-12): a model nobody read for an hour (an offer's,
+ * 211 campaigns, read by crm-service's outcomes warm pass with a 30 s timeout) made EVERY read queue
+ * a rebuild on the HTTP thread; each caller left at 30 s, the queued rebuilds piled up behind the
+ * build slots and never finished in 11 h (771 abandoned reads), so `last_read_at` never moved and
+ * the worker never took the model back: a read that could never answer. Served at once instead,
+ * caught up with every statement and pushed evidence change since (the change log keeps a day, so
+ * the bound stays under it), the read touches `last_read_at` and the worker refreshes the model
+ * on its next sweep. Older than this a read still rebuilds first.
  */
-export const READ_MODEL_SERVE_WITHOUT_WAIT_MS = 60 * 60_000;
+export const READ_MODEL_SERVE_WITHOUT_WAIT_MS = 20 * 60 * 60_000;
 /**
  * When a rebuild FAILS because a sibling is down (email-gateway, instantly-service), the model
  * already held is served if it is younger than this, rather than taking the whole list down with a

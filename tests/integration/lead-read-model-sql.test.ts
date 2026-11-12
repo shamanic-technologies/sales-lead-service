@@ -346,7 +346,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
   it("refreshes a model past its bound IN PLACE instead of serving it, asking everyone again", async () => {
     const before = await model.ensureReadModel(scope);
     await sql`
-      UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${before.id}
+      UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${before.id}
     `;
     // What the model was built from is as old as the model: nothing recent enough to reuse.
     await sql`
@@ -387,9 +387,29 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     expect(fresh.servedStale).toBeUndefined();
   });
 
+  it("a model nobody read for hours is still served AT ONCE, caught up, and marked read for the worker (MON-PAGE-SPEED-1111)", async () => {
+    const before = await model.ensureReadModel(scope);
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '11 hours', last_read_at = now() - interval '11 hours' WHERE id = ${before.id}`;
+    await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '11 hours' WHERE org_id = ${orgId}`;
+    evidence.resetEvidenceConfirmations();
+    gatewayCalls = [];
+    const served = await model.ensureReadModel(scope);
+    // The read did not rebuild: nobody was asked again.
+    expect(gatewayCalls).toEqual([]);
+    expect(served.id).toBe(before.id);
+    expect(served.servedStale).toBe("refresh_behind");
+    expect((await model.readModelBucketCounts(served, null)).total).toBe(4);
+    // Read now, so the worker (models read within the hour) refreshes it on its next sweep.
+    const read = await sql<Array<{ recent: boolean }>>`
+      SELECT last_read_at > now() - interval '1 minute' AS recent FROM lead_read_models WHERE id = ${before.id}
+    `;
+    expect(read[0].recent).toBe(true);
+    await model.refreshReadModel(scope);
+  });
+
   it("a model older than serve-without-wait whose rebuild hits a DOWN sibling is served, not refused", async () => {
     const before = await model.ensureReadModel(scope);
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${before.id}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${before.id}`;
     await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
     evidence.resetEvidenceConfirmations();
     gatewayDown = true;
@@ -457,7 +477,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
       `;
     const rowsBefore = await rowVersions();
     const evidenceBefore = await evidenceVersions();
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${m.id}`;
     await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
     const evidenceStaled = await evidenceVersions();
     evidence.resetEvidenceConfirmations();
@@ -486,7 +506,7 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const adaBefore = await version(people[3].rowId);
     const janeBefore = await version(people[0].rowId);
     statusByEmail["ada@engines.test"] = { contacted: true, sent: true, firstSentAt: "2026-02-04T00:00:00.000Z" };
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${m.id}`;
     await sql`UPDATE lead_delivery_evidence SET fetched_at = now() - interval '61 minutes' WHERE org_id = ${orgId}`;
     evidence.resetEvidenceConfirmations();
     const after = await model.ensureReadModel(scope);
@@ -500,14 +520,14 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     const m = await model.ensureReadModel(scope);
     await db.update(leadsCampaigns).set({ status: "skipped" }).where(eq(leadsCampaigns.id, people[2].rowId));
     try {
-      await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+      await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${m.id}`;
       const after = await model.ensureReadModel(scope);
       expect(after.id).toBe(m.id);
       expect((await model.readModelBucketCounts(after, null)).total).toBe(3);
     } finally {
       await db.update(leadsCampaigns).set({ status: "served" }).where(eq(leadsCampaigns.id, people[2].rowId));
     }
-    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '61 minutes' WHERE id = ${m.id}`;
+    await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${m.id}`;
     expect((await model.readModelBucketCounts(await model.ensureReadModel(scope), null)).total).toBe(4);
   });
 
