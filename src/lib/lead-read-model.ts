@@ -836,7 +836,10 @@ function isWithinBound(model: ReadModel, now: number): boolean {
  * when it is younger than `READ_MODEL_SERVE_ON_OUTAGE_MS`, loudly; otherwise it throws (502).
  * Whenever a model past its bound is served, `servedStale` says why and `evidenceAt` says how old.
  */
-export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel> {
+export async function ensureReadModel(
+  scope: ReadModelScope,
+  options: { keepWarm?: boolean } = {},
+): Promise<ReadModel> {
   const key = readModelKey(scope);
   const held = await loadModel(key);
   let model: ReadModel;
@@ -885,6 +888,13 @@ export async function ensureReadModel(scope: ReadModelScope): Promise<ReadModel>
       model = fallback;
     }
   }
+  // A background FINGERPRINT read (`x-lead-read-keep-warm: false`, features-service's facts gate)
+  // is answered like any read but never counts as somebody looking (MON-DB-HOT-1112): it asked every
+  // active brand's counts about once a minute, so every brand model stayed "read within the hour"
+  // and the worker re-derived each one every 3 minutes (57% of the refresh time, ~139 brand
+  // refreshes per 10 min, the shared Postgres's largest consumer). Such a model is still kept by
+  // a person's read (Leads page, Unibox, lists), else on the idle active-brand cadence.
+  if (options.keepWarm === false) return model;
   await sql`
     UPDATE lead_read_models SET last_read_at = now()
     WHERE id = ${model.id} AND last_read_at < now() - interval '30 seconds'

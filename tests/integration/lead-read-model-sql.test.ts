@@ -407,6 +407,24 @@ describe.skipIf(!hasRealDatabase)("the read model against a real database", () =
     await model.refreshReadModel(scope);
   });
 
+  it("a fingerprint read (keepWarm: false) is answered but never marks the model read (MON-DB-HOT-1112)", async () => {
+    const before = await model.ensureReadModel(scope);
+    await sql`UPDATE lead_read_models SET last_read_at = now() - interval '2 hours' WHERE id = ${before.id}`;
+    const served = await model.ensureReadModel(scope, { keepWarm: false });
+    expect(served.id).toBe(before.id);
+    expect((await model.readModelBucketCounts(served, null)).total).toBe(4);
+    const cold = await sql<Array<{ recent: boolean }>>`
+      SELECT last_read_at > now() - interval '1 hour' AS recent FROM lead_read_models WHERE id = ${before.id}
+    `;
+    expect(cold[0].recent).toBe(false);
+    // An ordinary read still keeps it warm.
+    await model.ensureReadModel(scope);
+    const warm = await sql<Array<{ recent: boolean }>>`
+      SELECT last_read_at > now() - interval '1 minute' AS recent FROM lead_read_models WHERE id = ${before.id}
+    `;
+    expect(warm[0].recent).toBe(true);
+  });
+
   it("a model older than serve-without-wait whose rebuild hits a DOWN sibling is served, not refused", async () => {
     const before = await model.ensureReadModel(scope);
     await sql`UPDATE lead_read_models SET evidence_at = now() - interval '21 hours' WHERE id = ${before.id}`;
