@@ -44,7 +44,7 @@ export const REFRESH_IF_READ_WITHIN_MS = 60 * 60_000;
  * An active brand's model nobody read within `REFRESH_IF_READ_WITHIN_MS` is refreshed only once its evidence is this
  * old (BOX-OVERLOAD-1026): every 3 min for every active brand, read or not, was the service's largest share of the
  * shared Postgres (a whole-population walk + gateway round per brand). 30 min keeps it well inside
- * `READ_MODEL_SERVE_WITHOUT_WAIT_MS` (1 h), so the first read still answers at once, and that read's catch-up applies
+ * `READ_MODEL_SERVE_WITHOUT_WAIT_MS` (20 h), so the first read still answers at once, and that read's catch-up applies
  * every statement first; the worker then refreshes it on the 3-min cadence while it is read.
  */
 export const IDLE_PINNED_REFRESH_AFTER_MS = 30 * 60_000;
