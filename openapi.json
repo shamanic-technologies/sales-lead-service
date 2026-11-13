@@ -15404,6 +15404,171 @@
           "waiting",
           "throughput"
         ]
+      },
+      "LeadsByAddressResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "leads": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AddressLeadRow"
+                  }
+                }
+              },
+              "required": [
+                "email",
+                "leads"
+              ]
+            }
+          },
+          "count": {
+            "type": "integer",
+            "description": "Number of addresses answered (= distinct asked)."
+          }
+        },
+        "required": [
+          "brandId",
+          "addresses",
+          "count"
+        ]
+      },
+      "AddressLeadRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The list row's `id` (`leads_campaigns.id`): the same row `GET /orgs/leads?brandId=&view=basic&status=all` emits for this person."
+          },
+          "leadId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "The campaign the row is filed under (the list row's `campaignId`)."
+          },
+          "brandIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string",
+            "description": "Lifecycle status of the row: served | claimed | buffered | skipped."
+          },
+          "email": {
+            "type": "string",
+            "description": "The row's email as the list emits it (the lead's first registered address, as stored)."
+          },
+          "servedAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "disqualification": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/LeadDisqualification"
+              },
+              {
+                "description": "Same as the list row's `disqualification`."
+              }
+            ]
+          },
+          "company": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "id": {
+                "type": "string",
+                "nullable": true
+              },
+              "key": {
+                "type": "string"
+              },
+              "isClient": {
+                "type": "boolean"
+              },
+              "signedUp": {
+                "type": "boolean"
+              },
+              "disqualification": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/LeadDisqualification"
+                  },
+                  {
+                    "description": "The Disqualified MARK: its own tag, BESIDE the step tags and the standing, never instead of them. A disqualified lead keeps everything that happened with them (contacted, delivered, positive reply, website visit...) and no step standing or step count moves."
+                  }
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "key",
+              "isClient",
+              "signedUp",
+              "disqualification"
+            ],
+            "description": "Same as the list row's `company`."
+          },
+          "human": {
+            "type": "object",
+            "properties": {
+              "optedOut": {
+                "type": "boolean"
+              },
+              "doNotContact": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "optedOut",
+              "doNotContact"
+            ],
+            "description": "Same as the list row's `human`."
+          }
+        },
+        "required": [
+          "id",
+          "leadId",
+          "campaignId",
+          "brandIds",
+          "status",
+          "email",
+          "servedAt",
+          "disqualification",
+          "company",
+          "human"
+        ]
+      },
+      "LeadsByAddressRequest": {
+        "type": "object",
+        "properties": {
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 5000
+          }
+        },
+        "required": [
+          "emails"
+        ]
       }
     },
     "parameters": {},
@@ -28010,6 +28175,76 @@
           },
           "502": {
             "description": "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/leads/by-address": {
+      "post": {
+        "summary": "Which lead each address is at a brand, for a batch of addresses (internal, service-auth)",
+        "description": "MON-DB-HOT-1112: for each asked address (trimmed, lowercased, deduped, answered in the order asked), EXACTLY the rows `GET /orgs/leads?brandId=&view=basic&sort=activity&status=all` holds whose `email` equals it case-insensitively, in that read's order (same `id`, `leadId`, `campaignId`, `disqualification`, `company`, `human`). Read LIVE: a lead served a second ago is in it. Never opens, builds, refreshes or marks read a read model or change feed (unlike the list walk). Every address is answered: no lead = `leads: []`, never omitted. Up to 5000 addresses per call (split bigger sets). Any read failing = 502/500, never a partial answer.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID from client-service"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LeadsByAddressRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Every asked address with its list rows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadsByAddressResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "x-org-id missing, or body unreadable (emails: 1 to 5000 strings of 1..320 chars)"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "413": {
+            "description": "payload_too_large"
+          },
+          "500": {
+            "description": "Internal server error"
+          },
+          "502": {
+            "description": "campaign-service (offer of a campaign a mark names) or email-gateway (order of an address with several rows) unreadable"
           }
         }
       }
