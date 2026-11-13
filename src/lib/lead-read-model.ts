@@ -257,7 +257,7 @@ function flattenOf(scope: ReadModelScope): (result: StatusResult) => FlattenedSt
   return ids ? flattenCampaignStatus : flattenBrandStatus;
 }
 
-function engagementOf(scope: ReadModelScope): EngagementContext {
+export function engagementOf(scope: ReadModelScope): EngagementContext {
   return {
     serviceContext: { orgId: scope.orgId },
     statusCampaignId: statusCampaignIdOf(scope),
@@ -296,7 +296,7 @@ interface DerivedRow {
 }
 
 /** The delivery questions a set of index rows asks: served rows with an address, under their primary brand. */
-function evidenceRequests(rows: readonly LeadIndexRow[]): EvidenceRequest[] {
+export function evidenceRequests(rows: readonly LeadIndexRow[]): EvidenceRequest[] {
   const out: EvidenceRequest[] = [];
   for (const row of rows) {
     if (row.status !== "served" || !row.email) continue;

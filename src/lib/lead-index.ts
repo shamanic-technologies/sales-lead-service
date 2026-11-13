@@ -161,6 +161,18 @@ export async function* streamLeadIndex(
 }
 
 /**
+ * The index rows of a scope NARROWED to a few people (`scope.leadIds` required), in one short
+ * statement: the same relation, dedup, filters and order as the walk. For a keyed read (the
+ * by-address read, leads-by-address.ts) that must never walk or hold the scope.
+ */
+export async function fetchLeadIndexRowsOf(scope: LeadListScope): Promise<LeadIndexRow[]> {
+  if (!scope.leadIds) throw new Error("fetchLeadIndexRowsOf needs scope.leadIds: it never reads a whole scope");
+  if (scope.leadIds.length === 0) return [];
+  const rows = await leadIndexStatement(scope);
+  return rows.map(mapIndexRow);
+}
+
+/**
  * The same population for a caller that does slow work between chunks (the read model's build and
  * refresh: an email-gateway question and a standing resolve per chunk, seconds each).
  *

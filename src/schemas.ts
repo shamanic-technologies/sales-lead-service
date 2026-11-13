@@ -10828,3 +10828,77 @@ registry.registerPath({
     502: { description: "features-service catalogue (or campaign-service legs) unreadable: `error: dependency_unavailable`" },
   },
 });
+
+const AddressLeadRowSchema = z
+  .object({
+    id: z.string().uuid().openapi({ description: "The list row's `id` (`leads_campaigns.id`): the same row `GET /orgs/leads?brandId=&view=basic&status=all` emits for this person." }),
+    leadId: z.string().uuid(),
+    campaignId: z.string().openapi({ description: "The campaign the row is filed under (the list row's `campaignId`)." }),
+    brandIds: z.array(z.string()),
+    status: z.string().openapi({ description: "Lifecycle status of the row: served | claimed | buffered | skipped." }),
+    email: z.string().openapi({ description: "The row's email as the list emits it (the lead's first registered address, as stored)." }),
+    servedAt: z.string().nullable(),
+    disqualification: LeadDisqualificationSchema.nullable().openapi({ description: "Same as the list row's `disqualification`." }),
+    company: z
+      .object({
+        id: z.string().nullable(),
+        key: z.string(),
+        isClient: z.boolean(),
+        signedUp: z.boolean(),
+        disqualification: LeadDisqualificationSchema.nullable(),
+      })
+      .nullable()
+      .openapi({ description: "Same as the list row's `company`." }),
+    human: z
+      .object({ optedOut: z.boolean(), doNotContact: z.boolean() })
+      .openapi({ description: "Same as the list row's `human`." }),
+  })
+  .openapi("AddressLeadRow");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/leads/by-address",
+  summary: "Which lead each address is at a brand, for a batch of addresses (internal, service-auth)",
+  description:
+    "MON-DB-HOT-1112: for each asked address (trimmed, lowercased, deduped, answered in the order asked), EXACTLY the rows " +
+    "`GET /orgs/leads?brandId=&view=basic&sort=activity&status=all` holds whose `email` equals it case-insensitively, in that " +
+    "read's order (same `id`, `leadId`, `campaignId`, `disqualification`, `company`, `human`). Read LIVE: a lead served a second " +
+    "ago is in it. Never opens, builds, refreshes or marks read a read model or change feed (unlike the list walk). " +
+    "Every address is answered: no lead = `leads: []`, never omitted. Up to 5000 addresses per call (split bigger sets). " +
+    "Any read failing = 502/500, never a partial answer.",
+  request: {
+    params: z.object({ brandId: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ emails: z.array(z.string()).min(1).max(5000) }).openapi("LeadsByAddressRequest"),
+        },
+      },
+    },
+  },
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+    { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID from client-service" },
+  ],
+  responses: {
+    200: {
+      description: "Every asked address with its list rows",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              brandId: z.string(),
+              addresses: z.array(z.object({ email: z.string(), leads: z.array(AddressLeadRowSchema) })),
+              count: z.number().int().openapi({ description: "Number of addresses answered (= distinct asked)." }),
+            })
+            .openapi("LeadsByAddressResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id missing, or body unreadable (emails: 1 to 5000 strings of 1..320 chars)" },
+    401: { description: "Unauthorized" },
+    413: { description: "payload_too_large" },
+    500: { description: "Internal server error" },
+    502: { description: "campaign-service (offer of a campaign a mark names) or email-gateway (order of an address with several rows) unreadable" },
+  },
+});

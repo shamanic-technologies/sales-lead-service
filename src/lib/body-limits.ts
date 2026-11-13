@@ -10,6 +10,7 @@ import type { NextFunction, Request, Response } from "express";
  * - /orgs/leads/evidence-changed: 1000 addresses of up to 320 chars ~ 330 KB.
  * - /internal/leads/ids/by-email: 1000 addresses of up to 320 chars ~ 330 KB.
  * - /internal/reply-latency: 100 groups x 500 campaign ids ~ 2 MB.
+ * - /internal/brands/:brandId/leads/by-address: 5000 addresses of up to 320 chars ~ 1.65 MB.
  */
 export const DEFAULT_JSON_LIMIT = "100kb";
 
@@ -18,6 +19,7 @@ export const ROUTE_JSON_LIMITS: ReadonlyArray<{ path: string; limit: string }> =
   { path: "/orgs/leads/evidence-changed", limit: "1mb" },
   { path: "/internal/leads/ids/by-email", limit: "1mb" },
   { path: "/internal/reply-latency", limit: "4mb" },
+  { path: "/internal/brands/:brandId/leads/by-address", limit: "2mb" },
 ];
 
 export function mountJsonParsers(app: express.Express): void {
