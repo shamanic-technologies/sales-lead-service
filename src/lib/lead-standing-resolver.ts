@@ -313,7 +313,6 @@ export function createLeadStandingResolver(
       const leadMarks = settled(leadMarksRead);
       const levels = settled(levelsRead);
       const humanOptOuts = levels.humanOptOuts;
-      const companyStatus = levels.companyStatus;
       const marks: LeadAndCompanyMarks = { lead: leadMarks, company: levels.companyMarks, companyKeyOf: levels.companyKeyOf };
       const marksNameOffers = anyMarkNamesOffer(marks);
       const markOffers = marksNameOffers ? (offers ?? (await offersFor())) : null;
@@ -469,9 +468,7 @@ export function createLeadStandingResolver(
           }),
           // Off the SAME step states, in the same pass — never a second read of the same ledger.
           closedDeal: closedDealFrom(steps),
-          disqualification: markFor(row, marks, markOffers),
-          human: levels.humanFacts.get(row.leadId) ?? { optedOut: false, doNotContact: false },
-          company: companyBlockFor(row.leadId, row.brandIds, markOffers?.get(row.campaignId) ?? null, marks, companyStatus),
+          ...levelBlocksOf(row, marks, markOffers, levels),
         });
       }
 
@@ -480,9 +477,60 @@ export function createLeadStandingResolver(
   };
 }
 
+/** The row a level block is read for: the person, the campaign it was served under, its brands. */
+export type LevelBlockRow = Pick<StandingRow, "leadId" | "campaignId" | "brandIds">;
+
+/** The three blocks above the standing a row carries: Disqualified, its HUMAN, its COMPANY. */
+export interface LevelBlocks {
+  disqualification: LeadDisqualification | null;
+  human: LeadHumanBlock;
+  company: LeadCompanyBlock | null;
+}
+
+/**
+ * The Disqualified / human / company blocks of ONE row, off the marks and level tags already read.
+ * The list's resolver and the by-address read (leads-by-address.ts) both build them here, so the
+ * two can never disagree about a person.
+ */
+export function levelBlocksOf(
+  row: LevelBlockRow,
+  marks: LeadAndCompanyMarks,
+  markOffers: Map<string, string | null> | null,
+  levels: Awaited<ReturnType<typeof loadLevelTags>>,
+): LevelBlocks {
+  return {
+    disqualification: markFor(row, marks, markOffers),
+    human: levels.humanFacts.get(row.leadId) ?? { optedOut: false, doNotContact: false },
+    company: companyBlockFor(row.leadId, row.brandIds, markOffers?.get(row.campaignId) ?? null, marks, levels.companyStatus),
+  };
+}
+
+/**
+ * The level blocks of many rows WITHOUT the standing: the same two reads the resolver makes (lead
+ * marks, level tags) and, only when a mark names an offer, campaign-service's campaign -> offer map.
+ * No reply verdicts, no legs. FAIL LOUD: any read failing throws, never a row read as unmarked.
+ */
+export async function resolveLevelBlocks(
+  ctx: CampaignLegContext,
+  rows: readonly LevelBlockRow[],
+): Promise<Map<LevelBlockRow, LevelBlocks>> {
+  const out = new Map<LevelBlockRow, LevelBlocks>();
+  if (rows.length === 0) return out;
+  const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
+  const brandIds = Array.from(new Set(rows.flatMap((r) => r.brandIds)));
+  const [leadMarks, levels] = await Promise.all([
+    loadLiveMarks({ orgId: ctx.orgId, brandIds, leadIds }),
+    loadLevelTags({ orgId: ctx.orgId, brandIds, leadIds }),
+  ]);
+  const marks: LeadAndCompanyMarks = { lead: leadMarks, company: levels.companyMarks, companyKeyOf: levels.companyKeyOf };
+  const markOffers = anyMarkNamesOffer(marks) ? await fetchOrgCampaignOffers(ctx) : null;
+  for (const row of rows) out.set(row, levelBlocksOf(row, marks, markOffers, levels));
+  return out;
+}
+
 /** The mark answering for the row's conversation, under the first of its brands that holds one. */
 function markFor(
-  row: StandingRow,
+  row: LevelBlockRow,
   marks: LeadAndCompanyMarks,
   offers: Map<string, string | null> | null,
 ): LeadDisqualification | null {
