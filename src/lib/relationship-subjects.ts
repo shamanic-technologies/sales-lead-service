@@ -16,7 +16,7 @@ import { liveRelationRows } from "./crm-live-relations.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
-import { isSessionlessProductEvent, PRODUCT_EVENT_TYPE } from "./crm-act-types.js";
+import { isSessionlessProductEvent, PRODUCT_EVENT_TYPE, sessionlessProductEventSql } from "./crm-act-types.js";
 import { INBOUND_FACT_TYPES } from "./relationship-intent.js";
 import { WORD_LABELS } from "./timeline-labels.js";
 
@@ -134,6 +134,9 @@ async function pointRows(scope: Scope, points: readonly string[]): Promise<Point
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
       AND f.contact_point = ANY(${sql.param([...points])}::text[])
+      -- A product event the brand's server recorded in no session (a mail scanner hitting a newsletter link) is our
+      -- plumbing, never theirs (UNIBOX-NEWSLETTER-1113): it moves no thread, makes no direct conversation, adds no channel.
+      AND NOT ${sessionlessProductEventSql(sql`f`)}
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
     GROUP BY f.contact_point
   `)) as unknown as PointRow[];
@@ -187,6 +190,11 @@ async function atomicIdsOf(orgId: string, humans: readonly string[]): Promise<{ 
 export async function refreshSubjects(scope: Scope, opts: { humans?: readonly string[] } = {}): Promise<SubjectRefresh> {
   const only = opts.humans === undefined ? null : await atomicIdsOf(scope.orgId, opts.humans);
   if (only && only.canon.size === 0) return { persons: 0, subjects: 0, withoutHuman: 0 };
+  // A whole-brand round never writes a subject back over one written after it began reading (the fast lane refreshed
+  // that person from newer facts meanwhile; the round's re-check, `noteScopeSwept`, refreshes them again). Same guard
+  // as the Unibox rows (LEAD-CI-FLAKY-1110): without it Richard's reply was written, then the round's older read wrote
+  // `wrote_to_us = false` back and the fast lane derived his row from it (UNIBOX-NEWSLETTER-1113 CI).
+  const derivedFrom = only ? null : await dbClock();
   const { pro, perHuman } = await liveRelations(scope, only?.atomic);
   const canon = await canonicalHumans(scope.orgId, pro.map((p) => p.human).filter((h): h is string => h !== null));
   const relationsOfCanon = new Map<string, number>();
@@ -267,7 +275,7 @@ export async function refreshSubjects(scope: Scope, opts: { humans?: readonly st
   for (const r of rows) companiesOf.set(r.human, [...(companiesOf.get(r.human) ?? []), r.company]);
   const moves = rows.filter((r) => r.company !== "" && companiesOf.get(r.human)!.length === 1);
   for (let i = 0; i < moves.length; i += 500) await moveUnknownCompany(scope, moves.slice(i, i + 500));
-  for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500));
+  for (let i = 0; i < rows.length; i += 500) await writeSubjects(scope, rows.slice(i, i + 500), derivedFrom);
   // A relation that went (withdrawn, merged into another human, no longer professional to the brand) is no row.
   const keep = JSON.stringify(rows.map((r) => ({ human: r.human, company: r.company })));
   const onlyRows = only ? sql`AND s.human_id = ANY(${sql.param([...only.canon])}::uuid[])` : sql``;
@@ -331,7 +339,12 @@ async function moveUnknownCompany(scope: Scope, rows: readonly SubjectWrite[]): 
   }
 }
 
-async function writeSubjects(scope: Scope, rows: readonly SubjectWrite[]): Promise<void> {
+async function dbClock(): Promise<string> {
+  const rows = (await db.execute(sql`SELECT clock_timestamp()::text AS at`)) as unknown as Array<{ at: string }>;
+  return rows[0].at;
+}
+
+async function writeSubjects(scope: Scope, rows: readonly SubjectWrite[], derivedFrom: string | null): Promise<void> {
   if (rows.length === 0) return;
   const data = JSON.stringify(rows);
   await db.execute(sql`
@@ -357,6 +370,7 @@ async function writeSubjects(scope: Scope, rows: readonly SubjectWrite[]): Promi
       IS DISTINCT FROM (excluded.name, excluded.emails, excluded.phones, excluded.channels,
            excluded.person_keys, excluded.relation_keys, excluded.contact_points, excluded.shares_human, excluded.thread_seq,
            excluded.has_messages, excluded.has_direct, excluded.wrote_to_us, excluded.last_inbound_at)
+      AND (${derivedFrom}::timestamptz IS NULL OR relationship_subjects.updated_at < ${derivedFrom}::timestamptz)
   `);
 }
 
