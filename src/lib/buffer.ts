@@ -73,6 +73,10 @@ import { walkCandidate, walkContext, walkEvent, walkFoundPerson } from "./serve-
  *           "lead_followup_due"`, LEAD-FOLLOWUP-DATE-1016, src/lib/lead-followup-date.ts): the brand's leads whose next
  *           follow-up date passed, most overdue first, REPEATABLE (served again each time their date passes again);
  *           nothing is bought, a person known by phone alone comes out with `email: null` and their `phone`.
+ *   due_held — a campaign's proactive tick asking ONLY for a lead its brand already holds whose next follow-up date
+ *           passed and who is owed now (body `dueFollowupOnly`, SCRIPT-VALUE-RATING-1113-LEAD): that person filed on this
+ *           campaign as a debt its answerer claims next (claim-next with `person`), held for this campaign until then.
+ *           Never a fresh, bought, retried, stocked or released lead; nobody due = `lead_followup_none_due`.
  *   named — the run's trigger occurrence NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
  *           src/lib/named-lead-serve.ts): exactly that person, filed on this campaign, or a named refusal. No pool, no
  *           audience, nothing bought but the one enrichment of a person known only by an email.
@@ -83,6 +87,7 @@ export type PullNextMode =
   | { kind: "find"; audienceIds: string[] }
   | { kind: "find_contacted" }
   | { kind: "find_due" }
+  | { kind: "due_held" }
   | { kind: "stock"; sourceCampaignIds: string[] };
 
 interface PullNextParams {
@@ -428,6 +433,63 @@ export async function pullNext(
         audienceId: stored?.audience_id ?? null,
         buyingSignal: readBuyingSignal(stored?.buying_signal ?? null),
         ...(stored?.person_id ? { personId: stored.person_id } : {}),
+        qualification,
+      },
+    };
+  }
+
+  // DUE ONLY (SCRIPT-VALUE-RATING-1113-LEAD, owner 2026-11-13: "who to write to without an event = the leads the
+  // campaign's own Plan already holds below the Target; no new audience, no per-outcome rule"): the brand's due, owed
+  // person, held for this campaign's claim, or nobody. No pool, no audience, nothing bought.
+  if (mode.kind === "due_held") {
+    const due = await claimDueFollowupLead({
+      orgId: params.orgId,
+      brandId: params.brandId,
+      brandIds: params.brandIds,
+      sourceCampaignId: params.campaignId,
+      fileAs: "outreach_held",
+      maxPasses: OUTREACH_DUE_MAX_PASSES,
+      featureSlug: params.featureSlug,
+      runId: params.runId ?? null,
+      parentRunId: params.parentRunId ?? null,
+      userId: params.userId ?? null,
+      workflowSlug: params.workflowSlug ?? null,
+      goal,
+      activeGoalId: params.activeGoalId ?? null,
+      brandProfileId: params.brandProfileId ?? null,
+      reachableBy: pipeMethods(params.reachableBy),
+      acceptedEmails: params.acceptedEmails ?? "as_found",
+      relationships,
+      recentlyEmailed: null,
+      offerId,
+      signal,
+    });
+    if (!due) {
+      if (signal?.aborted) return { found: false, reason: SERVE_TIMED_OUT_REASON };
+      console.log(`[lead-service] pullNext found=false due-only campaign=${params.campaignId} reason=${LEAD_FOLLOWUP_NONE_DUE_REASON} brand=${params.brandId}`);
+      return { found: false, reason: LEAD_FOLLOWUP_NONE_DUE_REASON };
+    }
+    const dueLead = await buildFullLead(due.leadId);
+    const qualification = await writerChecks(dueLead);
+    console.log(
+      `[lead-service] pullNext found=true source=followup-due-held campaign=${params.campaignId} email=${due.email} phone=${due.phone} leadId=${due.leadId} row=${due.leadCampaignId} dueAt=${due.dueAt}`,
+    );
+    return {
+      found: true,
+      lead: {
+        leadId: due.leadId,
+        email: due.email,
+        ...(due.email ? {} : { phone: due.phone }),
+        data: dueLead,
+        brandIds: params.brandIds,
+        orgId: params.orgId,
+        userId: params.userId ?? null,
+        apolloPersonId: dueLead.apolloPersonId ?? null,
+        goal,
+        activeGoalId: params.activeGoalId ?? null,
+        brandProfileId: params.brandProfileId ?? null,
+        audienceId: null,
+        buyingSignal: null,
         qualification,
       },
     };
