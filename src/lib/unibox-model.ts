@@ -17,6 +17,7 @@ import { toIsoTimestamp } from "./basic-leads.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { leadStateOf, leadVerdictSql, nextFollowupJsonSql, topRungRank, type LeadState, type LeadVerdict } from "./lead-state.js";
 import { paymentStands } from "./crm-evidence.js";
+import { CRM_NOT_THEIR_ACT, sessionlessProductEventSql } from "./crm-act-types.js";
 import { STEP_REACHED_EVIDENCE } from "./step-reached.js";
 import { loadRelationshipsAt } from "./relationship-read.js";
 import { loadLeadAndCompanyMarks, effectiveLeadOrCompanyMark } from "./lead-disqualification.js";
@@ -174,7 +175,8 @@ interface SubjectRow {
   phones: string[];
   person_keys: string[];
   last_inbound_at: Ts | null;
-  updated_at: Ts;
+  /** When this relation became a subject here: the row's date when nothing ever happened on it (never a refresh time). */
+  first_seen_at: Ts;
 }
 
 /** Every spelling an outreach copy may hold an address under (as registered, and lower-cased), for an index-friendly `= ANY`. */
@@ -222,7 +224,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
   for (const s of subjects) for (const c of s.contact_points ?? []) subjectsOfPoint.set(c, [...(subjectsOfPoint.get(c) ?? []), keyOf(s)]);
   const points = [...subjectsOfPoint.keys()];
 
-  const [timeline, crm, humanFacts, marks, identities, answers] = await Promise.all([
+  const [timeline, crm, humanFacts, marks, identities, answers, acts] = await Promise.all([
     leadIds.length === 0
       ? Promise.resolve([] as Array<{ lead_id: string; label: string; classification: string | null; first_at: Ts | null; last_at: Ts | null }>)
       : (db.execute(sql`
@@ -277,6 +279,20 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
           WHERE c.type = 'reply_sent' AND ${scope.brandId} = ANY(c.brand_ids)
           GROUP BY 1
         `) as unknown as Promise<Array<{ email: string; last_at: Ts | null }>>),
+    // The latest ACT of theirs on each point (UNIBOX-NEWSLETTER-1113): every live crm fact that is something they did
+    // (crm-act-types.ts: not ours, not bookkeeping), any kind crm states, minus a product event the brand's server
+    // recorded in no session (a mail scanner opening a newsletter link: never their act, never activity).
+    points.length === 0
+      ? Promise.resolve([] as Array<{ contact_point: string; last_at: Ts | null }>)
+      : (db.execute(sql`
+          SELECT f.contact_point, max(f.occurred_at) AS last_at
+          FROM crm_facts f
+          WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId} AND f.contact_point = ANY(${sql.param(points)}::text[])
+            AND f.type <> ALL(${sql.param([...NON_EVENT_FACT_TYPES, ...CRM_NOT_THEIR_ACT])}::text[])
+            AND NOT ${sessionlessProductEventSql(sql`f`)}
+            AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
+          GROUP BY 1
+        `) as unknown as Promise<Array<{ contact_point: string; last_at: Ts | null }>>),
   ]);
   const identityOfLead = new Map(identities.map((r) => [r.lead_id, r]));
 
@@ -335,6 +351,7 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       if (step) reach(stepsOf(k), step, at);
     }
   }
+  for (const a of acts) for (const k of subjectsOfPoint.get(a.contact_point) ?? []) touch(k, iso(a.last_at));
   const optOut = new Map(humanFacts.map((r) => [r.human, r]));
 
   const out: UniboxRow[] = [];
@@ -408,7 +425,9 @@ export async function deriveUniboxRows(scope: Scope, subjects: readonly SubjectR
       fitNote,
       lastTheirsAt: lastIn,
       lastOursAt: lastOurs,
-      lastActivityAt: activity.get(k) ?? iso(s.updated_at)!,
+      // Nothing happened on the relation yet: the day it became known here, never the time a refresh last rewrote it
+      // (UNIBOX-NEWSLETTER-1113: a scanner hit moved that and put a newsletter subscriber at the top of the list).
+      lastActivityAt: activity.get(k) ?? iso(s.first_seen_at)!,
       connectionTags: block?.connectionTags ?? [],
       // Filled by `attachLastMessages` (crm-service's thread); not derived here.
       lastMessage: null,
@@ -431,7 +450,7 @@ export async function refreshUniboxRows(
   // `humans` (UNIBOX-REPLY-LAG-1031, the fast lane): only those humans' rows, same derivation, same order.
   const onlyHumans = opts.humans === undefined ? sql`` : sql`AND human_id = ANY(${sql.param([...opts.humans])}::uuid[])`;
   const all = (await db.execute(sql`
-    SELECT human_id::text AS human, company_key, relation_keys, contact_points, name, emails, phones, person_keys, last_inbound_at, updated_at
+    SELECT human_id::text AS human, company_key, relation_keys, contact_points, name, emails, phones, person_keys, last_inbound_at, first_seen_at
     FROM relationship_subjects WHERE org_id = ${scope.orgId} AND brand_id = ${scope.brandId} ${onlyHumans}
     ORDER BY human_id, company_key
   `)) as unknown as SubjectRow[];

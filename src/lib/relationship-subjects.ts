@@ -16,7 +16,7 @@ import { liveRelationRows } from "./crm-live-relations.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
-import { isSessionlessProductEvent, PRODUCT_EVENT_TYPE } from "./crm-act-types.js";
+import { isSessionlessProductEvent, PRODUCT_EVENT_TYPE, sessionlessProductEventSql } from "./crm-act-types.js";
 import { INBOUND_FACT_TYPES } from "./relationship-intent.js";
 import { WORD_LABELS } from "./timeline-labels.js";
 
@@ -134,6 +134,9 @@ async function pointRows(scope: Scope, points: readonly string[]): Promise<Point
     WHERE f.org_id = ${scope.orgId} AND f.brand_id = ${scope.brandId}
       AND f.type <> ALL(${sql.param(NON_EVENT_FACT_TYPES)}::text[])
       AND f.contact_point = ANY(${sql.param([...points])}::text[])
+      -- A product event the brand's server recorded in no session (a mail scanner hitting a newsletter link) is our
+      -- plumbing, never theirs (UNIBOX-NEWSLETTER-1113): it moves no thread, makes no direct conversation, adds no channel.
+      AND NOT ${sessionlessProductEventSql(sql`f`)}
       AND NOT EXISTS (SELECT 1 FROM crm_facts w WHERE w.withdrawn_of = f.fact_id)
     GROUP BY f.contact_point
   `)) as unknown as PointRow[];
