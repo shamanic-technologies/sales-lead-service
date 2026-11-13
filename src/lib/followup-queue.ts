@@ -727,6 +727,12 @@ export async function claimFollowup(params: {
          AND (SELECT count(*) FROM person_taken) = (SELECT count(*) FROM target)
          AND (SELECT count(*) FROM target) > 0
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
+    ), hold_consumed AS (
+      -- A due round served to this row FOR its claim (buffer/next dueFollowupOnly, SCRIPT-VALUE-RATING-1113-LEAD) is
+      -- handed by the claim that takes it: the round is over, the person's date now belongs to this claim.
+      UPDATE lead_followup_due_serves SET handed_at = ${now}::timestamptz
+       WHERE lead_campaign_id IN (SELECT id FROM claimed) AND handed_at IS NULL AND set_aside_at IS NULL AND held_for_claim_until IS NOT NULL
+      RETURNING id
     ), logged AS (
       ${followupActionInsert("claimed", params.actingCampaignId, params.runId, now, sql`claimed`, params.workflowSlug ?? null)}
     )

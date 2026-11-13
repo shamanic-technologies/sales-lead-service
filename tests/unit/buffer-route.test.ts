@@ -666,6 +666,77 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 
+  // --- SCRIPT-VALUE-RATING-1113-LEAD: a proactive tick asks ONLY for a due lead its brand holds ---
+
+  const postDueOnly = (body: Record<string, unknown>, campaignId = CAMPAIGN, featureSlug = "dy-answer-lead") =>
+    request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", campaignId)
+      .set("x-brand-id", BRAND)
+      .set("x-audience-id", "aud-ignored")
+      .set("x-feature-slug", featureSlug)
+      .send(body);
+
+  it("dueFollowupOnly serves in mode due_held: no audience, origin, source or on-demand run read, no on_demand event, the row id answered", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "stock", sourceCampaignIds: [UNIT], read: { offerId: OFFER_ID, sourced: true, sourceCampaigns: [] } });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
+
+    const res = await postDueOnly({ dueFollowupOnly: true, relationships: "business_only" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.lead.leadCampaignId).toBe("row-1");
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ campaignId: CAMPAIGN, mode: { kind: "due_held" }, relationships: "business_only" }), expect.anything());
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(resolveServeSource).not.toHaveBeenCalled();
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(resolveSourceAudiences).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ parentRunId: RUN, campaignId: CAMPAIGN, featureSlug: "dy-answer-lead" }));
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("dueFollowupOnly with nobody due answers lead_followup_none_due, records nothing", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "lead_followup_none_due" });
+
+    const res = await postDueOnly({ dueFollowupOnly: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ found: false, reason: "lead_followup_none_due" });
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("dueFollowupOnly on a source unit's own run is a 400, nothing served", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    const res = await postDueOnly({ dueFollowupOnly: true }, UNIT, "sourcing-apollo-cold-filters");
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("due_followup_only_needs_outreach_campaign");
+    expect(pullNext).not.toHaveBeenCalled();
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ population: "lead_followup_due" }],
+    [{ namedLead: { leadId: "3946e857-0000-4000-8000-000000000000", triggerEventId: "evt-1" } }],
+    [{ stepFilter: { reached: ["signup"] } }],
+  ])("dueFollowupOnly beside another population (%o) is a 400, nothing served", async (extra) => {
+    const res = await postDueOnly({ dueFollowupOnly: true, ...extra });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("due_followup_only_excludes");
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("dueFollowupOnly: false is refused by the schema (only true is a statement)", async () => {
+    const res = await postDueOnly({ dueFollowupOnly: false });
+    expect(res.status).toBe(400);
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
   it("a source unit's own run asks with the email policy ITS OWN workflow states (CATCHALL-SOURCE-OWNS-1014)", async () => {
     decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
     resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });

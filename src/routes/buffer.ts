@@ -78,6 +78,17 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     });
   }
 
+  // A proactive tick asking ONLY for a due lead its brand holds (SCRIPT-VALUE-RATING-1113-LEAD, src/lib/buffer.ts
+  // `due_held`): who to find, who is named and a CRM step filter all name another population; stating one beside it is
+  // refused, never silently dropped.
+  const dueOnly = parsed.data.dueFollowupOnly === true;
+  if (dueOnly && (parsed.data.population || named || parsed.data.stepFilter)) {
+    return res.status(400).json({
+      error: "due_followup_only_excludes",
+      detail: "dueFollowupOnly hands out only a due lead the brand already holds; population, namedLead and stepFilter name other people. State one.",
+    });
+  }
+
   const campaignId = req.campaignId;
   const brandIds = req.brandIds ?? [];
 
@@ -193,6 +204,13 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     // A NAMED serve (LEAD-NAMED-SERVE-1015) hands out the person its occurrence names: no source, no audience.
     if (!named) {
       const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
+      if (dueOnly && sourceMode.kind === "own_run") {
+        inFlightOutreach.delete(campaignId);
+        return res.status(400).json({
+          error: "due_followup_only_needs_outreach_campaign",
+          detail: `dueFollowupOnly is a campaign's own proactive tick: x-campaign-id ${campaignId} (${featureSlug}) is a lead source campaign (leg start_to_lead_found), whose population option is lead_followup_due`,
+        });
+      }
       if (population && sourceMode.kind !== "own_run") {
         // Who a source finds is ITS pipe's lead strategy: only a source unit's own run may state a population.
         inFlightOutreach.delete(campaignId);
@@ -202,7 +220,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         });
       }
 
-      if (sourceMode.kind === "own_run") {
+      if (dueOnly) {
+        // Nothing is bought and no audience is read: no source, origin or stock to resolve.
+      } else if (sourceMode.kind === "own_run") {
         // The source unit's OWN run: in its own audiences, filed under itself.
         const unit = sourceMode.unit;
         ownRunUnit = unit;
@@ -358,7 +378,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // Every answered ask is recorded as ONE `on_demand` trigger event at campaign-service
   // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
   const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
-    ownRunUnit || stockSourceIds || named
+    ownRunUnit || stockSourceIds || named || dueOnly
       ? undefined
       : recordLeadRequested({
       orgId: req.orgId!,
@@ -403,6 +423,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   const pullSignal = AbortSignal.timeout(PULL_NEXT_TIMEOUT_MS);
   const pullMode: PullNextMode | null = named
     ? { kind: "named", named }
+    : dueOnly
+    ? { kind: "due_held" }
     : ownRunUnit
     ? population === "lead_followup_due"
       ? { kind: "find_due" }
