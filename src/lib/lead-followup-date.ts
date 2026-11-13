@@ -743,6 +743,24 @@ export interface DueFollowupFind {
 }
 
 const DUE_BATCH = 50;
+
+/**
+ * How long a due person served FOR A CLAIM (`fileAs: "outreach_held"`, SCRIPT-VALUE-RATING-1113-LEAD) stays the asking
+ * campaign's: its answerer claims them right after the serve (claim-next with `person`), which consumes the hold. A run
+ * that dies before claiming leaves the person due again for anyone once it ends (their one date was never moved).
+ */
+export const DUE_CLAIM_HOLD_MS = 60 * 60_000;
+
+/**
+ * SQL: no round of this person is still open at the brand (`d` = a `lead_followup_dates` row or alias): a find sitting
+ * in a source's stock, or a serve held for a campaign's claim whose hold has not ended.
+ */
+function noOpenDueServeSql(d: SQL): SQL {
+  return sql`NOT EXISTS (
+          SELECT 1 FROM lead_followup_due_serves ds WHERE ds.org_id = ${d}.org_id AND ds.brand_id = ${d}.brand_id AND ds.lead_id = ${d}.lead_id
+            AND ds.handed_at IS NULL AND ds.set_aside_at IS NULL
+            AND (ds.held_for_claim_until IS NULL OR ds.held_for_claim_until > now()))`;
+}
 const DUE_MAX_PASSES = 20;
 
 /**
@@ -761,10 +779,13 @@ export async function claimDueFollowupLead(p: {
    * under it (`source_found`) for the pipe it feeds. `fileAs: "outreach"` (FOLLOWUP-JIT-1107, owner 2026-11-07 option B,
    * the framework's Pull rule: open work nearest the Target first, then new subjects) = a PROACTIVE outreach campaign of
    * the brand serving its due follow-ups before any fresh lead: the person is filed (or re-served) on that campaign and
-   * the round is handed at once.
+   * the round is handed at once. `fileAs: "outreach_held"` (SCRIPT-VALUE-RATING-1113-LEAD, buffer/next
+   * `dueFollowupOnly`) = a campaign's proactive tick asking ONLY for a due lead its brand holds, for its answerer to claim
+   * (claim-next with `person`): filed on that campaign as a debt anyone may claim, the person's one date left due (the
+   * claim takes it), the round HELD for that campaign for DUE_CLAIM_HOLD_MS (no other due serve hands them meanwhile).
    */
   sourceCampaignId: string;
-  fileAs?: "source" | "outreach";
+  fileAs?: "source" | "outreach" | "outreach_held";
   /** At most this many batches of DUE_BATCH looked at (default DUE_MAX_PASSES). */
   maxPasses?: number;
   featureSlug: string;
@@ -791,9 +812,7 @@ export async function claimDueFollowupLead(p: {
       WHERE d.org_id = ${p.orgId} AND d.brand_id = ${p.brandId} AND d.next_followup_at <= now()
         AND ${followupEligibleSql(sql`d`)}
         AND d.lead_id <> ALL(${sql.param(skipped)}::uuid[])
-        AND NOT EXISTS (
-          SELECT 1 FROM lead_followup_due_serves ds WHERE ds.org_id = d.org_id AND ds.brand_id = d.brand_id AND ds.lead_id = d.lead_id
-            AND ds.handed_at IS NULL AND ds.set_aside_at IS NULL)
+        AND ${noOpenDueServeSql(sql`d`)}
         ${dueReachClauses(sql`d.lead_id`, p.reachableBy, p.acceptedEmails, p.relationships, p.recentlyEmailed, serveExclusionScopeOf(p.orgId, [p.brandId], p.offerId ?? null))}
       ORDER BY d.next_followup_at ASC, d.lead_id ASC
       LIMIT ${DUE_BATCH}
@@ -815,7 +834,8 @@ export async function claimDueFollowupLead(p: {
         await postponeDue(db, { orgId: p.orgId, brandId: p.brandId, leadId: c.lead_id }, v);
         continue;
       }
-      const found = p.fileAs === "outreach" ? await fileDueOnOutreach(p, c.lead_id) : await fileDueFind(p, c.lead_id);
+      const found =
+        p.fileAs === "outreach" || p.fileAs === "outreach_held" ? await fileDueOnOutreach(p, c.lead_id) : await fileDueFind(p, c.lead_id);
       walked.check("filed", { filed: found !== null }, found !== null);
       if (found) {
         walked.serve();
@@ -834,6 +854,7 @@ async function fileDueFind(p: Parameters<typeof claimDueFollowupLead>[0], leadId
       SELECT next_followup_at FROM lead_followup_dates
       WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid AND next_followup_at <= now()
         AND ${followupEligibleSql(sql`lead_followup_dates`)}
+        AND ${noOpenDueServeSql(sql`lead_followup_dates`)}
       FOR UPDATE SKIP LOCKED
     `)) as unknown as Array<{ next_followup_at: Ts }>;
     if (!due) return null;
@@ -896,40 +917,55 @@ async function fileDueOnOutreach(p: Parameters<typeof claimDueFollowupLead>[0], 
       SELECT next_followup_at FROM lead_followup_dates
       WHERE org_id = ${p.orgId} AND brand_id = ${p.brandId} AND lead_id = ${leadId}::uuid AND next_followup_at <= now()
         AND ${followupEligibleSql(sql`lead_followup_dates`)}
+        AND ${noOpenDueServeSql(sql`lead_followup_dates`)}
       FOR UPDATE SKIP LOCKED
     `)) as unknown as Array<{ next_followup_at: Ts }>;
     if (!due) return null;
     const contact = await contactOf(tx, leadId);
     if (!contact.email && !contact.phone) throw new Error(`[lead-followup-date] due lead ${leadId} carries neither an email nor a phone`);
     const brandIds = sql.join(p.brandIds.map((b) => sql`${b}`), sql`, `);
-    const details = `Lead follow-up due (FOLLOWUP-JIT-1107), served by its brand's proactive campaign before any fresh lead, due ${iso(due.next_followup_at)}, ${contact.email ? `email=${contact.email}` : `phone=${contact.phone}`}, leadId=${leadId}, campaign=${p.sourceCampaignId}`;
+    const held = p.fileAs === "outreach_held";
+    const details = `Lead follow-up due (${held ? "SCRIPT-VALUE-RATING-1113, served to its brand's proactive campaign for its claim" : "FOLLOWUP-JIT-1107, served by its brand's proactive campaign before any fresh lead"}), due ${iso(due.next_followup_at)}, ${contact.email ? `email=${contact.email}` : `phone=${contact.phone}`}, leadId=${leadId}, campaign=${p.sourceCampaignId}`;
     const [row] = (await tx.execute(sql`
       INSERT INTO leads_campaigns (
         lead_id, campaign_id, org_id, brand_ids, status, status_reason, status_details, served_at,
-        parent_run_id, run_id, push_run_id, user_id, workflow_slug, feature_slug, goal, active_goal_id, brand_profile_id
+        parent_run_id, run_id, push_run_id, user_id, workflow_slug, feature_slug, goal, active_goal_id, brand_profile_id,
+        followup_due_at
       ) VALUES (
         ${leadId}, ${p.sourceCampaignId}, ${p.orgId}, ARRAY[${brandIds}]::text[], 'served', 'served', ${details},
         now(), ${p.parentRunId}, ${p.runId}, ${p.runId}, ${p.userId}, ${p.workflowSlug}, ${p.featureSlug},
-        ${p.goal}, ${p.activeGoalId}, ${p.brandProfileId}
+        ${p.goal}, ${p.activeGoalId}, ${p.brandProfileId}, ${held ? sql`now()` : sql`NULL`}
       )
       ON CONFLICT (lead_id, campaign_id) DO UPDATE SET
         status = 'served', status_details = EXCLUDED.status_details, served_at = now(),
         parent_run_id = EXCLUDED.parent_run_id, run_id = EXCLUDED.run_id, push_run_id = EXCLUDED.push_run_id,
         user_id = EXCLUDED.user_id, workflow_slug = EXCLUDED.workflow_slug, goal = EXCLUDED.goal,
         active_goal_id = EXCLUDED.active_goal_id, brand_profile_id = EXCLUDED.brand_profile_id, updated_at = now()
+        ${
+          held
+            ? // A debt due now that ANY campaign may claim (no writer campaign: lead-service states it), so the asking
+              // campaign's answerer claims it on that campaign; a thread handed to a person is theirs, never re-opened.
+              sql`, followup_due_at = now(), followup_due_set_by_campaign_id = NULL WHERE leads_campaigns.followup_handed_at IS NULL`
+            : sql``
+        }
       RETURNING id::text AS id, (xmax <> 0) AS reserved
     `)) as unknown as Array<{ id: string; reserved: boolean }>;
+    if (!row) return null;
     if (row.reserved) {
       await tx.execute(sql`
         INSERT INTO lead_campaign_run_repoints (lead_campaign_id, run_id, workflow_slug, repointed_at, cause)
         VALUES (${row.id}::uuid, ${p.runId}, ${p.workflowSlug}, now(), 'followup_due')
       `);
     }
+    // Held: the round stays open (handed once the claim takes it), no other due serve hands the person until the hold
+    // ends, and their one date is left due for the claim to take (claim-next moves it, then the answerer's send does).
     await tx.execute(sql`
-      INSERT INTO lead_followup_due_serves (org_id, brand_id, lead_id, source_campaign_id, lead_campaign_id, due_at, handed_at, handed_to_campaign_id, handed_lead_campaign_id)
+      INSERT INTO lead_followup_due_serves (org_id, brand_id, lead_id, source_campaign_id, lead_campaign_id, due_at, handed_at, handed_to_campaign_id, handed_lead_campaign_id, held_for_claim_until)
       VALUES (${p.orgId}, ${p.brandId}, ${leadId}::uuid, ${p.sourceCampaignId}, ${row.id}::uuid, ${iso(due.next_followup_at)}::timestamptz,
-        now(), ${p.sourceCampaignId}, ${row.id}::uuid)
+        ${held ? sql`NULL` : sql`now()`}, ${p.sourceCampaignId}, ${row.id}::uuid,
+        ${held ? sql`now() + (${DUE_CLAIM_HOLD_MS}::double precision * interval '1 millisecond')` : sql`NULL`})
     `);
+    if (held) return { leadId, leadCampaignId: row.id, email: contact.email, phone: contact.phone, dueAt: iso(due.next_followup_at) };
     await tx.execute(sql`
       UPDATE lead_followup_dates SET next_followup_at = now() + ${gap}, basis = 'served',
         reason = ${`Served to its brand's proactive campaign as a due follow-up; nobody sent or stated a date since (asked again in ${DEFAULT_GAP_DAYS} days)`},
