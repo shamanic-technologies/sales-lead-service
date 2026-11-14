@@ -69,10 +69,43 @@ export interface LifecycleCatalogue {
 }
 
 let catalogueCache: { at: number; value: LifecycleCatalogue } | null = null;
+let catalogueFetch: Promise<LifecycleCatalogue> | null = null;
 
-/** features-service's step catalogue: the ladder and each step's rank on it (read, never hard-coded). */
+/** features-service's step catalogue: the ladder and each step's rank on it (read, never hard-coded). A refresh of the
+ * rows waits on it past the TTL and fails when features-service cannot answer. */
 export async function loadLifecycleCatalogue(): Promise<LifecycleCatalogue> {
   if (catalogueCache && Date.now() - catalogueCache.at < CATALOGUE_TTL_MS) return catalogueCache.value;
+  return fetchCatalogueOnce();
+}
+
+/**
+ * The same catalogue for a PAGE READ: once this thread holds one, a read never waits on features-service again
+ * (MON-PAGE-SPEED-1114: every 5 min one Unibox read per thread paid the round trip, seconds when the box is busy). Past
+ * the TTL the held catalogue is served and ONE refresh runs behind it; the next read gets the new one; a failed refresh
+ * keeps the held one (logged). Nothing held yet (boot) = wait on features-service, failing loud. Never used by the
+ * sweep that writes rows (`loadLifecycleCatalogue`).
+ */
+export async function readLifecycleCatalogue(): Promise<LifecycleCatalogue> {
+  if (catalogueCache && Date.now() - catalogueCache.at < CATALOGUE_TTL_MS) return catalogueCache.value;
+  if (!catalogueCache) return fetchCatalogueOnce();
+  const held = catalogueCache.value;
+  fetchCatalogueOnce().catch((error: unknown) => {
+    console.error("[lead-service] features-service step catalogue refresh failed (the held catalogue stays served to reads):", error);
+  });
+  return held;
+}
+
+/** One fetch in flight per thread; concurrent callers share it. */
+function fetchCatalogueOnce(): Promise<LifecycleCatalogue> {
+  if (!catalogueFetch) {
+    catalogueFetch = fetchLifecycleCatalogue().finally(() => {
+      catalogueFetch = null;
+    });
+  }
+  return catalogueFetch;
+}
+
+async function fetchLifecycleCatalogue(): Promise<LifecycleCatalogue> {
   const response = await fetchWithRetry(`${FEATURES_SERVICE_URL}/public/catalogue/steps`, { signal: AbortSignal.timeout(CATALOGUE_TIMEOUT_MS) });
   if (!response.ok) throw new Error(`[lead-service] features-service /public/catalogue/steps answered ${response.status}`);
   const body = (await response.json()) as {
@@ -93,6 +126,7 @@ export async function loadLifecycleCatalogue(): Promise<LifecycleCatalogue> {
 /** Test seam: forget the cached catalogue. */
 export function resetLifecycleCatalogueCache(): void {
   catalogueCache = null;
+  catalogueFetch = null;
 }
 
 type Ts = Date | string;
@@ -809,11 +843,14 @@ function filterSql(scope: Scope, f: UniboxFilters, topRank: number | null) {
     parts.push(sql`unibox_reached_steps(u.steps) && ${sql.param([...f.reachedSteps])}::text[]`);
   }
   if (f.campaignIds !== undefined) {
-    // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once.
-    parts.push(sql`u.lead_ids && ARRAY(
+    // Membership only: the row (tags, Lifecycle) stays the brand's. Uncorrelated, so Postgres reads the scope's leads once
+    // and HASHES them (`NOT (x NOT IN (...))`, `lead_id` is NOT NULL): `u.lead_ids && ARRAY(...)` compared every row
+    // against the whole scope array linearly, 9.8 s for an offer of 85k filings on the largest brand vs 0.2 s hashed,
+    // same rows (MON-PAGE-SPEED-1114). Never go back to the array overlap.
+    parts.push(sql`EXISTS (SELECT 1 FROM unnest(u.lead_ids) AS m(lead_id) WHERE NOT (m.lead_id NOT IN (
       SELECT lc.lead_id FROM leads_campaigns lc
       WHERE lc.org_id = ${scope.orgId} AND ${scope.brandId} = ANY(lc.brand_ids) AND lc.campaign_id = ANY(${sql.param([...f.campaignIds])}::text[])
-    )`);
+    )))`);
   }
   if (f.q) parts.push(sql`u.search_text LIKE ${"%" + f.q.toLowerCase().replace(/[\\%_]/g, (m) => "\\" + m) + "%"}`);
   return sql.join(parts, sql` AND `);
@@ -949,7 +986,7 @@ async function readPage(
     cursorOf: (last: { item: UniboxListRow; raw: Record<string, unknown> }) => string;
   },
 ): Promise<UniboxPage> {
-  const catalogue = await loadLifecycleCatalogue();
+  const catalogue = await readLifecycleCatalogue();
   const where = filterSql(scope, f, topRungRank(catalogue.ladder));
   // The campaigns that reached each row's person ride the page's own statement (one trip, only the page's rows):
   // their `leads_campaigns` filings at the brand, inside the read's scope when one is given.
@@ -1010,7 +1047,7 @@ export interface UniboxLifecycleCounts {
 
 /** How many people of the filtered set stand on each lifecycle rung (DEALS-LIFECYCLE-1021: the board's column headers). */
 export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters): Promise<UniboxLifecycleCounts> {
-  const catalogue = await loadLifecycleCatalogue();
+  const catalogue = await readLifecycleCatalogue();
   const topRank = topRungRank(catalogue.ladder);
   const where = filterSql(scope, f, topRank);
   const [groups, built] = await Promise.all([
@@ -1052,7 +1089,7 @@ export async function readUniboxLifecycleCounts(scope: Scope, f: UniboxFilters):
 export async function readLeadStatesForLeads(scope: Scope, leadIds: readonly string[]): Promise<Map<string, LeadState>> {
   const out = new Map<string, LeadState>();
   if (leadIds.length === 0) return out;
-  const catalogue = await loadLifecycleCatalogue();
+  const catalogue = await readLifecycleCatalogue();
   const rows = (await db.execute(sql`
     SELECT u.*, ${nextFollowupJsonSql} AS next_followup FROM unibox_rows u
     WHERE u.org_id = ${scope.orgId} AND u.brand_id = ${scope.brandId} AND u.lead_ids && ${sql.param([...leadIds])}::uuid[]
@@ -1089,7 +1126,7 @@ export async function readUniboxLead(
   humanId: string | null,
   relationKey: string | null = null,
 ): Promise<{ lead: UniboxRow; leadState: LeadState; campaigns: UniboxCampaign[] } | null> {
-  const catalogue = await loadLifecycleCatalogue();
+  const catalogue = await readLifecycleCatalogue();
   const byHuman = humanId === null ? sql`` : sql`AND u.human_id = ${humanId}::uuid`;
   const byRelation = relationKey === null ? sql`` : sql`AND ${relationKey} = ANY(u.relation_keys)`;
   const rows = (await db.execute(sql`
