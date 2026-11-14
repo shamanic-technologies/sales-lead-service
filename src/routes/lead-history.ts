@@ -360,30 +360,32 @@ router.get(
     // One delivery call for the person, at brand scope, then read each campaign's own evidence out
     // of the breakdown — never a call per campaign, and never the brand roll-up stamped onto every
     // campaign (that would claim a campaign reached somebody it may have sent nothing).
-    let deliveryRead: SourceRead<null> = { ok: true, data: null };
-    let statusResult: StatusResult | null = null;
-    if (email) {
-      try {
-        const response = await checkDeliveryStatus(brandId, undefined, [{ email }], {
+    // Asked together with every other source below (MON-PAGE-SPEED-1114: it used to be awaited first,
+    // so the page waited on it plus the slowest of the rest). Same answer, same degrade.
+    const deliveryAsk: Promise<{ deliveryRead: SourceRead<null>; statusResult: StatusResult | null }> = email
+      ? checkDeliveryStatus(brandId, undefined, [{ email }], {
           orgId: req.orgId!,
           userId: req.userId ?? undefined,
           runId: req.runId ?? undefined,
           brandId,
+        }).then(
+          (response) => ({
+            deliveryRead: { ok: true, data: null } as SourceRead<null>,
+            statusResult: response.results.find((r) => r.email === email) ?? null,
+          }),
+          (error: unknown) => ({
+            deliveryRead: { ok: false, reason: `email-gateway unreachable: ${errorMessage(error)}` } as SourceRead<null>,
+            statusResult: null,
+          }),
+        )
+      : Promise.resolve({
+          deliveryRead: {
+            ok: false,
+            notAsked: true,
+            reason: "this lead carries no registered email, so no delivery evidence can be keyed to it",
+          } as SourceRead<null>,
+          statusResult: null,
         });
-        statusResult = response.results.find((r) => r.email === email) ?? null;
-      } catch (error) {
-        deliveryRead = {
-          ok: false,
-          reason: `email-gateway unreachable: ${errorMessage(error)}`,
-        };
-      }
-    } else {
-      deliveryRead = {
-        ok: false,
-        notAsked: true,
-        reason: "this lead carries no registered email, so no delivery evidence can be keyed to it",
-      };
-    }
 
     // Everything else, in parallel and bounded. A source with no email to ask about answers a
     // stated refusal rather than an empty list, read `not_asked` (the openapi contract: "a person with
@@ -402,8 +404,9 @@ router.get(
       .filter((candidate) => candidate.followup_due_at && !candidate.followup_stopped_reason)
       .map((candidate) => candidate.campaign_id);
 
-    const [mailbox, staffMailbox, replyStatements, optOuts, perCampaign, own, answerers] =
+    const [{ deliveryRead, statusResult }, mailbox, staffMailbox, replyStatements, optOuts, perCampaign, own, answerers] =
       await Promise.all([
+        deliveryAsk,
         email
           ? fetchMailboxConversation(email, ctx)
           : Promise.resolve(noEmail as unknown as SourceRead<null>),

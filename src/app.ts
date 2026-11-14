@@ -59,6 +59,7 @@ import leadIdentityRoutes from "./routes/lead-identity.js";
 import relationshipsRoutes from "./routes/relationships.js";
 import { requireBootReady } from "./middleware/readiness.js";
 import { withRequestContext } from "./lib/request-context.js";
+import { slowReadLog } from "./lib/slow-read-log.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,6 +73,8 @@ mountJsonParsers(app);
 // A body-parser refusal (too large, bad JSON) is a named 4xx, before anything else can read it as a 500.
 app.use(bodyParserErrorHandler);
 app.use(withRequestContext);
+// A GET over 1 s names itself in the log (MON-PAGE-SPEED-1114).
+app.use(slowReadLog);
 
 app.get("/openapi.json", (_req, res) => {
   if (existsSync(openapiPath)) {

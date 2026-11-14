@@ -40,7 +40,7 @@ import {
   UNIBOX_TYPES,
 } from "../lib/unibox-dimensions.js";
 import {
-  loadLifecycleCatalogue,
+  readLifecycleCatalogue,
   readUniboxLead,
   readUniboxLifecycleCounts,
   readUniboxPage,
@@ -125,7 +125,7 @@ function scopeFailed(res: import("express").Response, error: unknown): boolean {
 router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox-lifecycle-counts"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
-    const catalogue = await loadLifecycleCatalogue();
+    const catalogue = await readLifecycleCatalogue();
     const filters = filtersOf(req, catalogue);
     const { offerId, campaignId, campaignIds } = await scopeOf(req, brandId);
     const counts = await readUniboxLifecycleCounts({ orgId: req.orgId!, brandId }, { ...filters, campaignIds });
@@ -144,7 +144,7 @@ router.get("/orgs/leads/unibox-lifecycle-counts", apiKeyAuth, requireOrgId, acce
 router.get("/orgs/leads/unibox", apiKeyAuth, requireOrgId, acceptQuery(READ_QUERY_PARAMS["GET /orgs/leads/unibox"]), async (req: AuthenticatedRequest, res) => {
   try {
     const brandId = brandOf(req);
-    const catalogue = await loadLifecycleCatalogue();
+    const catalogue = await readLifecycleCatalogue();
     const filters = filtersOf(req, catalogue);
     let limit = DEFAULT_LIMIT;
     if (req.query.limit !== undefined) {
