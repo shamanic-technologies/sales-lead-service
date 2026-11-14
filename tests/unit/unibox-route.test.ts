@@ -18,7 +18,7 @@ vi.mock("../../src/lib/unibox-scope.js", () => ({
 }));
 vi.mock("../../src/lib/unibox-model.js", () => ({
   UNIBOX_SORTS: ["company_asc", "company_desc", "stage_desc", "stage_asc", "last_touch_asc"],
-  loadLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map([["website_visit", 3], ["newly_declared_step", null]]) }),
+  readLifecycleCatalogue: async () => ({ ladder: [{ key: "engaged", rank: 3, label: "Engaged" }], ranks: new Map([["website_visit", 3], ["newly_declared_step", null]]) }),
   readUniboxPage: (...a: unknown[]) => readUniboxPage(...a),
   readUniboxLead: (...a: unknown[]) => readUniboxLead(...a),
   readUniboxLifecycleCounts: (...a: unknown[]) => readUniboxLifecycleCounts(...a),

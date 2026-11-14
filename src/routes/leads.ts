@@ -2000,14 +2000,18 @@ async function respondLeadDetail(
 
     // Same campaign-identity resolution the list does, so a campaign-scoped panel reads the whole
     // identity's delivery evidence and not just the live campaign row's (see flattenFamilyStatus).
-    const campaignFamily = campaignIdStr
-      ? await resolveCampaignFamily(campaignIdStr, {
-          orgId: req.orgId!,
-          userId: req.userId ?? null,
-          runId: req.runId ?? null,
-          brandId: brandIdStr ?? null,
-        })
-      : null;
+    // Asked beside the lead's own record (one trip, not two in a row).
+    const [campaignFamily, fullLeadByLeadId] = await Promise.all([
+      campaignIdStr
+        ? resolveCampaignFamily(campaignIdStr, {
+            orgId: req.orgId!,
+            userId: req.userId ?? null,
+            runId: req.runId ?? null,
+            brandId: brandIdStr ?? null,
+          })
+        : Promise.resolve(null),
+      buildFullLeadsBatch([row.leadId]),
+    ]);
     const scopeCampaignIds = campaignFamily ?? (campaignIdStr ? [campaignIdStr] : null);
     const familySet =
       scopeCampaignIds && scopeCampaignIds.length > 1 ? new Set(scopeCampaignIds) : null;
@@ -2017,40 +2021,46 @@ async function respondLeadDetail(
         ? flattenCampaignStatus
         : flattenBrandStatus;
 
-    const fullLeadByLeadId = await buildFullLeadsBatch([row.leadId]);
     const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;
     const emailContact = fullLead?.contacts.find((c) => c.channel === "email");
     const email = emailContact ? { value: emailContact.value, status: emailContact.status } : null;
 
-    const audienceMap = await buildAudienceMapForRows(
-      [{ leadId: row.leadId, email: email?.value ?? null, audienceId: row.audienceId, brandIds: row.brandIds }],
-      brandIdStr,
-      { orgId: req.orgId!, userId: req.userId ?? null, runId: req.runId ?? null },
-    );
-
-    // One row, so the resolver's memoization buys nothing here — it exists so this route emits the
-    // same offer, resolved the same way, as the list element for the same row.
-    const offerMap = await createOfferCardResolver({
-      orgId: req.orgId!,
-      userId: req.userId ?? null,
-      runId: req.runId ?? null,
-      brandId: brandIdStr ?? null,
-    }).resolve([row.campaignId]);
-
-    // Same rule as the list: evidence is only fetched for a served row in a named scope, so an
-    // unserved row (or an unscoped read) carries the same all-false overlay it does there.
-    let deliveryStatus: FlattenedStatus = DEFAULT_STATUS;
-    let statusResult: StatusResult | null = null;
-    if ((brandIdStr || campaignIdStr) && row.status === "served" && email?.value) {
-      const response = await checkDeliveryStatus(
-        row.brandIds[0] ?? "unknown",
-        statusCampaignId(scopeCampaignIds),
-        [{ email: email.value }],
-        getServiceContext(req),
-      );
-      statusResult = response.results.find((r) => r.email === email.value) ?? null;
-      deliveryStatus = statusResult ? flatten(statusResult) : DEFAULT_STATUS;
-    }
+    // The audience card, the offer card and the delivery evidence are three independent sibling reads:
+    // asked TOGETHER, so the panel waits on the slowest one, never on their sum (MON-PAGE-SPEED-1114:
+    // 15.9 s on a busy box when each waited on the one before). Same answers, same failure (any one
+    // throwing fails the read as before).
+    const [audienceMap, offerMap, delivery] = await Promise.all([
+      buildAudienceMapForRows(
+        [{ leadId: row.leadId, email: email?.value ?? null, audienceId: row.audienceId, brandIds: row.brandIds }],
+        brandIdStr,
+        { orgId: req.orgId!, userId: req.userId ?? null, runId: req.runId ?? null },
+      ),
+      // One row, so the resolver's memoization buys nothing here — it exists so this route emits the
+      // same offer, resolved the same way, as the list element for the same row.
+      createOfferCardResolver({
+        orgId: req.orgId!,
+        userId: req.userId ?? null,
+        runId: req.runId ?? null,
+        brandId: brandIdStr ?? null,
+      }).resolve([row.campaignId]),
+      // Same rule as the list: evidence is only fetched for a served row in a named scope, so an
+      // unserved row (or an unscoped read) carries the same all-false overlay it does there.
+      (async (): Promise<{ deliveryStatus: FlattenedStatus; statusResult: StatusResult | null }> => {
+        if (!((brandIdStr || campaignIdStr) && row.status === "served" && email?.value)) {
+          return { deliveryStatus: DEFAULT_STATUS, statusResult: null };
+        }
+        const response = await checkDeliveryStatus(
+          row.brandIds[0] ?? "unknown",
+          statusCampaignId(scopeCampaignIds),
+          [{ email: email.value }],
+          getServiceContext(req),
+        );
+        const result = response.results.find((r) => r.email === email.value) ?? null;
+        return { deliveryStatus: result ? flatten(result) : DEFAULT_STATUS, statusResult: result };
+      })(),
+    ]);
+    let deliveryStatus: FlattenedStatus = delivery.deliveryStatus;
+    const statusResult: StatusResult | null = delivery.statusResult;
     if ((brandIdStr || campaignIdStr) && row.status === "served") {
       deliveryStatus = withChannelSend(deliveryStatus, row.channelSentAt);
     }

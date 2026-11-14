@@ -18,7 +18,7 @@ import { WRITER_ROW_SEPARATOR } from "./message-participants.js";
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { toIsoTimestamp } from "./basic-leads.js";
-import { addressSpellings, loadLifecycleCatalogue, toRow, type UniboxRow } from "./unibox-model.js";
+import { addressSpellings, readLifecycleCatalogue, toRow, type UniboxRow } from "./unibox-model.js";
 import { leadStateOf, type LeadState } from "./lead-state.js";
 
 type Ts = Date | string;
@@ -96,7 +96,7 @@ export async function readUniboxLeadState(
   orgId: string,
   q: { brandId: string | null; leadId: string | null; email: string | null },
 ): Promise<UniboxLeadState | null> {
-  const catalogue = await loadLifecycleCatalogue();
+  const catalogue = await readLifecycleCatalogue();
   const byBrand = q.brandId === null ? sql`` : sql`AND u.brand_id = ${q.brandId}`;
   const byWho =
     q.leadId !== null
