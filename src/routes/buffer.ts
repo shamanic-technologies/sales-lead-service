@@ -96,12 +96,18 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     return res.status(400).json({ error: "x-campaign-id and x-brand-id headers required" });
   }
 
-  // The audience is resolved per (brand, feature) from features-service; the goal
-  // is the brand's own (brands.currentGoal), fetched from brand-service inside
-  // pullNext — NOT a caller input. So x-feature-slug is required; x-goal is not.
-  const featureSlug = req.featureSlug;
-  if (!featureSlug) {
-    return res.status(400).json({ error: "x-feature-slug header required" });
+  // The outreach CHANNEL the campaign writes on. A campaign launched on its TARGET alone has none (INTRO-SERVE-1114,
+  // campaign-service MIGRATE-1105 S8): no x-feature-slug. It is served from the brand's own prospects (pullNext mode
+  // `walk`: retry pool, due follow-ups, then the brand's active audiences of its offer); every rule that reads the
+  // channel (its reach, its network, its source pipes, its origin feed) reads nothing instead. With a channel: today.
+  // The goal is the brand's own (brands.currentGoal), fetched from brand-service inside pullNext, never a caller input.
+  const featureSlug: string | null = req.featureSlug ?? null;
+  // Who a source finds is its own pipe's lead strategy, and a source unit always runs on its origin's channel.
+  if (!featureSlug && parsed.data.population) {
+    return res.status(400).json({
+      error: "population_needs_source_unit",
+      detail: `population "${parsed.data.population}" is a source pipe's lead strategy: a campaign with no channel (no x-feature-slug) is not a lead source campaign`,
+    });
   }
   // Audiences are per-brand; resolve against the primary (first) brand id.
   const brandId = brandIds[0];
@@ -114,7 +120,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // on the lead row only. The run keeps the outreach slug when there is nothing to relabel: no
   // audience (no_audience) or one serving from no list (audience_not_serveable) buys nothing, and an
   // origin the channel's spend reads do not count is logged as an error and left where they count it.
-  let runFeatureSlug: string = featureSlug;
+  let runFeatureSlug: string | null = featureSlug;
 
   // The SOURCE campaign the serve is filed under (src/lib/source-campaign.ts): once the offer's lead
   // sources are campaigns, the serve run and every downstream call carry the ON source campaign's id
@@ -195,14 +201,15 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
     // The channel's own requirement plus WHO the workflow's lead strategy states it finds (owner 2026-10-14): both
     // required, on every serve and every pool.
-    const channelMethods = await channelReachableBy(featureSlug);
+    // No channel = no channel requirement: only what the workflow states.
+    const channelMethods = featureSlug ? await channelReachableBy(featureSlug) : null;
     reachableBy = combineReach(channelMethods, parsed.data.reachableBy ?? null);
-    reachableOn = combineNetworks(await channelMessagingNetwork(featureSlug), parsed.data.reachableOn ?? null);
+    reachableOn = combineNetworks(featureSlug ? await channelMessagingNetwork(featureSlug) : null, parsed.data.reachableOn ?? null);
     // Who says whether a served person was contacted: the sender of the channel's own method (WA-RESERVE-LOOP-1014).
     poolSender = poolSenderOf(channelMethods);
 
     // A NAMED serve (LEAD-NAMED-SERVE-1015) hands out the person its occurrence names: no source, no audience.
-    if (!named) {
+    if (!named && featureSlug) {
       const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
       if (dueOnly && sourceMode.kind === "own_run") {
         inFlightOutreach.delete(campaignId);
@@ -330,7 +337,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       brandId: req.brandId,
       campaignId: serveSource.kind === "source" ? serveSource.campaignId : campaignId,
       workflowSlug: onDemandRun?.workflowSlug ?? workflowSlug,
-      featureSlug: runFeatureSlug,
+      ...(runFeatureSlug ? { featureSlug: runFeatureSlug } : {}),
       goal: req.goal,
       brandProfileId: req.brandProfileId,
       audienceId: req.audienceId,
@@ -359,7 +366,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     campaignId: runCampaignId,
     brandId: req.brandId,
     workflowSlug: runWorkflowSlug,
-    featureSlug: runFeatureSlug,
+    featureSlug: runFeatureSlug ?? undefined,
     goal: req.goal,
     brandProfileId: req.brandProfileId,
     audienceId: req.audienceId,
@@ -378,7 +385,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // Every answered ask is recorded as ONE `on_demand` trigger event at campaign-service
   // (src/lib/lead-requested-events.ts). Never awaited: recording can neither slow nor fail the serve.
   const recordAsk = (performed: LeadRequestedPerformed, leadId: string | null = null) =>
-    ownRunUnit || stockSourceIds || named || dueOnly
+    // A campaign with no channel has no source pipe to answer an `on_demand` ask (INTRO-SERVE-1114): nothing recorded.
+    ownRunUnit || stockSourceIds || named || dueOnly || !featureSlug
       ? undefined
       : recordLeadRequested({
       orgId: req.orgId!,
@@ -433,6 +441,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       : { kind: "find", audienceIds: findAudienceIds }
     : stockSourceIds
       ? { kind: "stock", sourceCampaignIds: stockSourceIds }
+      : !featureSlug
+      ? { kind: "walk", preferredAudienceId: req.audienceId ?? null }
       : null;
 
   // FACTORY-RECORD-SERVE-1028: the walk of this serve (who was looked at, what decided each), stored with the serve.

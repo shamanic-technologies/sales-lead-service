@@ -97,7 +97,7 @@ export async function claimStockedLead(params: {
   outreachCampaignId: string;
   brandIds: string[];
   /** The outreach channel the lead is served for (the outreach row's feature_slug). */
-  featureSlug: string;
+  featureSlug: string | null;
   runId: string | null;
   parentRunId: string | null;
   userId: string | null;
