@@ -155,3 +155,41 @@ export async function resolveSourceAudiences(args: {
   }
   return { kind: "walk", audienceIds: orderSourceAudiences(ofThisSource, args.preferredAudienceId) };
 }
+
+/** One audience a channel-less serve walks, with the origin its serve is labelled with (its OWN list). */
+export interface BrandAudience {
+  audienceId: string;
+  originSlug: string;
+}
+
+/**
+ * WHICH AUDIENCES A CAMPAIGN LAUNCHED ON ITS TARGET ALONE serves from (INTRO-SERVE-1114, MIGRATE-1105 S8): the
+ * campaign has no channel, so no channel can say which origins feed it, and no audience is named per run. Its leads are
+ * the brand's own prospects: every ACTIVE audience of the brand for the campaign's offer (the same list a source unit
+ * reads, `listActiveAudiences`), each labelled with its OWN list origin (asked with no channel header, LEAK-1012), an
+ * audience serving from no list (422) left out (nothing could be bought from it). Order = `orderSourceAudiences`: the
+ * audience the caller named first, then most people left to contact. Anything unreadable throws (nothing is bought).
+ */
+export async function resolveBrandAudiences(args: {
+  orgId: string;
+  brandId: string;
+  offerId: string;
+  preferredAudienceId: string | null;
+  userId?: string | null;
+  runId?: string | null;
+}): Promise<BrandAudience[]> {
+  const audiences = await listActiveAudiences(args);
+  if (audiences.length === 0) return [];
+  const origins = await Promise.all(audiences.map((a) => fetchAudienceOriginSlug(a.id, args.orgId, null)));
+  const originOf = new Map<string, string>();
+  audiences.forEach((a, i) => {
+    if (origins[i] !== null) originOf.set(a.id, origins[i] as string);
+  });
+  const serveable = audiences.filter((a) => originOf.has(a.id));
+  if (args.preferredAudienceId && !serveable.some((a) => a.id === args.preferredAudienceId)) {
+    console.warn(
+      `[lead-service] channel-less serve named audience ${args.preferredAudienceId}, which is not a serveable active audience of brand=${args.brandId} offer=${args.offerId}: walking the brand's audiences instead`,
+    );
+  }
+  return orderSourceAudiences(serveable, args.preferredAudienceId).map((id) => ({ audienceId: id, originSlug: originOf.get(id) as string }));
+}

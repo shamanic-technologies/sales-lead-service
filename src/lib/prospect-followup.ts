@@ -353,7 +353,7 @@ export async function claimContactedProspect(p: {
   brandId: string;
   brandIds: readonly string[];
   sourceCampaignId: string;
-  featureSlug: string;
+  featureSlug: string | null;
   runId: string | null;
   parentRunId: string | null;
   userId: string | null;
