@@ -666,6 +666,81 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(createRun).not.toHaveBeenCalled();
   });
 
+  // --- INTRO-SERVE-1114: a campaign launched on its TARGET alone has no channel (no x-feature-slug) ---
+  const postNoChannel = (body: Record<string, unknown> = {}, audienceId?: string) => {
+    const r = request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", CAMPAIGN)
+      .set("x-brand-id", BRAND);
+    if (audienceId) r.set("x-audience-id", audienceId);
+    return r.send(body);
+  };
+
+  it("a campaign with NO channel is served (never the 400): mode walk over the brand's audiences, no source/origin/channel read, no on_demand event", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
+
+    const res = await postNoChannel({ excludeEmailedWithin: "never" });
+
+    expect(res.status).toBe(200);
+    expect(res.body.found).toBe(true);
+    expect(res.body.lead.leadCampaignId).toBe("row-1");
+    expect(decideSourceMode).not.toHaveBeenCalled();
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(resolveServeSource).not.toHaveBeenCalled();
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    const runArgs = createRun.mock.calls[0][0] as Record<string, unknown>;
+    expect(runArgs).toMatchObject({ parentRunId: RUN, campaignId: CAMPAIGN, taskName: "lead-serve" });
+    expect(runArgs).not.toHaveProperty("featureSlug");
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaignId: CAMPAIGN,
+        runCampaignId: CAMPAIGN,
+        featureSlug: null,
+        runFeatureSlug: null,
+        excludeEmailedWithin: "never",
+        mode: { kind: "walk", preferredAudienceId: null },
+      }),
+      expect.anything(),
+    );
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it("a campaign with no channel names its audience first when the caller states one", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    const res = await postNoChannel({}, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ found: false, reason: "audience_exhausted" });
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ mode: { kind: "walk", preferredAudienceId: AUDIENCE } }), expect.anything());
+  });
+
+  it("a campaign with no channel keeps dueFollowupOnly as due_held (never a fresh person)", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "lead_followup_none_due" });
+
+    const res = await postNoChannel({ dueFollowupOnly: true });
+
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ mode: { kind: "due_held" }, featureSlug: null }), expect.anything());
+  });
+
+  it("a campaign with no channel stating a population is a 400 population_needs_source_unit, nothing served", async () => {
+    const res = await postNoChannel({ population: "lead_followup_due" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("population_needs_source_unit");
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
   // --- SCRIPT-VALUE-RATING-1113-LEAD: a proactive tick asks ONLY for a due lead its brand holds ---
 
   const postDueOnly = (body: Record<string, unknown>, campaignId = CAMPAIGN, featureSlug = "dy-answer-lead") =>

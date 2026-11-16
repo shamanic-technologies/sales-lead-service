@@ -788,7 +788,7 @@ export async function claimDueFollowupLead(p: {
   fileAs?: "source" | "outreach" | "outreach_held";
   /** At most this many batches of DUE_BATCH looked at (default DUE_MAX_PASSES). */
   maxPasses?: number;
-  featureSlug: string;
+  featureSlug: string | null;
   runId: string | null;
   parentRunId: string | null;
   userId: string | null;

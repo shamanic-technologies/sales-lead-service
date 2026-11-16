@@ -6,7 +6,8 @@ import { leadIsJournalist } from "./brand-journalists.js";
 import { leadServeDisqualification } from "./disqualified-sql.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
-import { clearEmptyAnswer, recordEmptyAnswer } from "./source-audience-walk.js";
+import { clearEmptyAnswer, loadEmptyAnswers, orderByEmptyAnswers, recordEmptyAnswer } from "./source-audience-walk.js";
+import { resolveBrandAudiences } from "./source-audiences.js";
 import { HumanServiceStalledError, serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
@@ -80,6 +81,11 @@ import { walkCandidate, walkContext, walkEvent, walkFoundPerson } from "./serve-
  *   named — the run's trigger occurrence NAMES its person (body `namedLead`, LEAD-NAMED-SERVE-1015,
  *           src/lib/named-lead-serve.ts): exactly that person, filed on this campaign, or a named refusal. No pool, no
  *           audience, nothing bought but the one enrichment of a person known only by an email.
+ *   walk  — a campaign launched on its TARGET alone, with NO channel (INTRO-SERVE-1114, MIGRATE-1105 S8): served like
+ *           `serve` (retry pool, due follow-ups, then a fresh person filed `served` on this campaign), but no channel
+ *           names an audience, so the fresh serve walks the brand's active audiences of the campaign's offer
+ *           (src/lib/source-audiences.ts `resolveBrandAudiences`), each asked under its own list origin. No released
+ *           pool (it judges a channel). Exhaustion only when every audience was walked to the end.
  */
 export type PullNextMode =
   | { kind: "serve" }
@@ -88,7 +94,8 @@ export type PullNextMode =
   | { kind: "find_contacted" }
   | { kind: "find_due" }
   | { kind: "due_held" }
-  | { kind: "stock"; sourceCampaignIds: string[] };
+  | { kind: "stock"; sourceCampaignIds: string[] }
+  | { kind: "walk"; preferredAudienceId: string | null };
 
 interface PullNextParams {
   orgId: string;
@@ -97,13 +104,13 @@ interface PullNextParams {
   brandIds: string[];
   /** Primary brand the audience is resolved for (per-brand audiences). */
   brandId: string;
-  /** The OUTREACH channel the lead is served for: written on the lead row, never on a run. */
-  featureSlug: string;
+  /** The OUTREACH channel the lead is served for: written on the lead row, never on a run. Null = a campaign with no channel (walk). */
+  featureSlug: string | null;
   /**
    * The feature slug every downstream call of this serve carries (x-feature-slug): the audience's
    * SOURCING origin (src/lib/sourcing-origin.ts), so what the serve buys is labelled as sourcing.
    */
-  runFeatureSlug: string;
+  runFeatureSlug: string | null;
   /**
    * The campaign every downstream call of this serve carries (x-campaign-id): the ON SOURCE campaign
    * that finds the lead (src/lib/source-campaign.ts), else the outreach campaign. Lead rows, the
@@ -300,7 +307,7 @@ export async function pullNext(
     brandId: params.brandId,
     campaignId: params.runCampaignId ?? params.campaignId,
     workflowSlug: params.workflowSlug,
-    featureSlug: params.runFeatureSlug,
+    featureSlug: params.runFeatureSlug ?? undefined,
     activeGoalId: params.activeGoalId ?? undefined,
     brandProfileId: params.brandProfileId ?? undefined,
     audienceId: audienceId ?? undefined,
@@ -772,7 +779,8 @@ export async function pullNext(
   // RELEASED: a person another pipe of the brand served and could not reach on ITS channel (src/lib/released-pool.ts),
   // that this pipe can. Paid for once already: taken before buying anyone new.
   // A pipe stating a step filter never takes a released person: no crm-service answer about their steps here.
-  if (!finding && !params.stepFilter) {
+  // A campaign with no channel takes nobody released: "can reach them / fed by its origin" is a channel's question.
+  if (!finding && !params.stepFilter && params.featureSlug !== null) {
     const released = await claimReleasedLead({
       orgId: params.orgId,
       campaignId: params.campaignId,
@@ -1019,7 +1027,40 @@ export async function pullNext(
   // FIND: walk the source's audiences in order until one serves somebody. Only when EVERY audience was walked and
   // answered nobody left is it `audience_exhausted`; an unfinished look or an audience that cannot be walked yet
   // says so instead.
-  if (mode.kind === "find") {
+  if (mode.kind === "find" || mode.kind === "walk") {
+    // A source unit walks its own audiences under its own slug; a channel-less campaign walks the brand's audiences of
+    // its offer, each under its own list origin (INTRO-SERVE-1114).
+    let walkAudiences: Array<{ audienceId: string; originSlug: string | null }>;
+    if (mode.kind === "find") {
+      walkAudiences = mode.audienceIds.map((id) => ({ audienceId: id, originSlug: null }));
+    } else {
+      if (!offerId) {
+        walkEvent("no_offer", { campaignId: params.campaignId });
+        console.error(
+          `[lead-service] pullNext found=false channel-less campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId}: the campaign names no offer, so no audience of it can be walked`,
+        );
+        return { found: false, reason: NO_AUDIENCE_REASON };
+      }
+      const listed = await resolveBrandAudiences({
+        orgId: params.orgId,
+        brandId: params.brandId,
+        offerId,
+        preferredAudienceId: mode.preferredAudienceId,
+        userId: params.userId ?? null,
+        runId: params.runId ?? null,
+      });
+      // Audiences that just answered nobody under this policy go last (an order, never a skip), as a source's walk.
+      const ordered = orderByEmptyAnswers(listed.map((a) => a.audienceId), await loadEmptyAnswers(params.campaignId, params.acceptedEmails ?? null));
+      const originOf = new Map(listed.map((a) => [a.audienceId, a.originSlug]));
+      walkAudiences = ordered.map((id) => ({ audienceId: id, originSlug: originOf.get(id) ?? null }));
+      walkContext({ walkAudienceIds: ordered });
+      if (walkAudiences.length === 0) {
+        console.log(
+          `[lead-service] pullNext found=false channel-less campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId} offer=${offerId}: no serveable active audience`,
+        );
+        return { found: false, reason: NO_AUDIENCE_REASON };
+      }
+    }
     const walkDeadline = startedAt + FIND_WALK_BUDGET_MS;
     let notServeable = 0;
     let noRecentPosts = 0;
@@ -1032,19 +1073,19 @@ export async function pullNext(
     let asked = 0;
     const answer = (result: PullNextResult): PullNextResult => {
       console.log(
-        `[lead-service] pullNext find answered campaign=${params.campaignId} found=${result.found}${result.found ? "" : ` reason=${result.reason}`} audiencesAsked=${asked}/${mode.audienceIds.length} stalled=${stalled} elapsedMs=${Date.now() - startedAt}`,
+        `[lead-service] pullNext find answered campaign=${params.campaignId} found=${result.found}${result.found ? "" : ` reason=${result.reason}`} audiencesAsked=${asked}/${walkAudiences.length} stalled=${stalled} elapsedMs=${Date.now() - startedAt}`,
       );
       return result;
     };
-    walk: for (const candidateAudienceId of mode.audienceIds) {
+    walk: for (const { audienceId: candidateAudienceId, originSlug } of walkAudiences) {
       // Out of walk time: answer now; the audiences not asked are asked first next run (never recorded, never skipped).
       if (Date.now() >= walkDeadline) {
-        walkEvent("walk_budget_spent", { audiencesNotAsked: mode.audienceIds.length - asked });
+        walkEvent("walk_budget_spent", { audiencesNotAsked: walkAudiences.length - asked });
         unfinished++;
         break;
       }
       asked++;
-      const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId };
+      const audienceCtx: ServiceContext = { ...ctx, audienceId: candidateAudienceId, ...(originSlug ? { featureSlug: originSlug } : {}) };
       const walked = { sourceCampaignId: params.campaignId, audienceId: candidateAudienceId, acceptedEmails: params.acceptedEmails };
       // The same audience is asked again only after a person emailed recently (fresh contacts only).
       for (;;) {
@@ -1118,7 +1159,7 @@ export async function pullNext(
               ? AUDIENCE_NOT_SERVEABLE_REASON
               : AUDIENCE_EXHAUSTED_REASON;
     console.log(
-      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${mode.audienceIds.length} walkedOut=${walkedOut} notServeable=${notServeable} noRecentPosts=${noRecentPosts} unfinished=${unfinished}`,
+      `[lead-service] pullNext found=false source campaign=${params.campaignId} reason=${reason} audiences=${walkAudiences.length} walkedOut=${walkedOut} notServeable=${notServeable} noRecentPosts=${noRecentPosts} unfinished=${unfinished}`,
     );
     return answer({ found: false, reason });
   }
