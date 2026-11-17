@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 
 const { factOutcomeDeclaration, FACT_OUTCOME_KEYS } = await import("../../src/lib/run-outcomes.js");
-const { consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, FACT_SOURCES_OF_OUTCOME, performerOf, utcDay, firstCrmReaches, CRM_REACHED_OUTCOMES, personOfLeadRows } = await import("../../src/lib/outcome-fact-declarations.js");
+const { consumptionLadderFor, consumedOutcomeFor, FACT_EVENTS_OF_OUTCOME, FACT_SOURCES_OF_OUTCOME, performerOf, utcDay, firstCrmReaches, CRM_REACHED_OUTCOMES, personOfLeadRows } = await import("../../src/lib/outcome-fact-declarations.js");
 
 const none = { positiveReply: false, websiteVisit: false, formSubmitted: false, declaredMeetingBooked: false, declaredMeetingAttended: false, declaredPurchase: false };
 
@@ -68,6 +68,22 @@ describe("fact outcome declarations", () => {
     expect(consumedOutcomeFor("paid_client", { ...none, declaredMeetingBooked: true, declaredMeetingAttended: true })).toEqual({ outcomeKey: "meeting_attended", basis: "meeting_attended" });
     expect(consumedOutcomeFor("paid_client", { ...none, declaredMeetingBooked: true })).toEqual({ outcomeKey: "meeting_booked", basis: "meeting_booked" });
     expect(consumedOutcomeFor("paid_client", { ...none, websiteVisit: true })).toEqual({ outcomeKey: "website_visit", basis: "website_visit" });
+  });
+
+  it("LATE-UNIT-LINK-1117: the candidates a fact can have come from, best first, always ending on the message our outreach sent", () => {
+    const keys = (o: Parameters<typeof consumptionLadderFor>[0], e: typeof none) => consumptionLadderFor(o, e).map((r) => r.outcomeKey);
+    expect(keys("website_visit", { ...none, positiveReply: true })).toEqual(["message_sent"]);
+    expect(keys("signup", { ...none, websiteVisit: true, positiveReply: true })).toEqual(["website_visit", "conversation", "message_sent"]);
+    expect(keys("meeting_booked", none)).toEqual(["message_sent"]);
+    // A booking never names itself; an attended meeting never names itself.
+    expect(keys("meeting_booked", { ...none, positiveReply: true, websiteVisit: true, formSubmitted: true, declaredMeetingBooked: true })).toEqual(["conversation", "website_visit", "form_submitted", "message_sent"]);
+    expect(keys("meeting_attended", { ...none, positiveReply: true, declaredMeetingBooked: true, declaredMeetingAttended: true })).toEqual(["meeting_booked", "conversation", "message_sent"]);
+    expect(keys("paid_client", { ...none, positiveReply: true, declaredPurchase: true, declaredMeetingBooked: true, declaredMeetingAttended: true })).toEqual(["purchase", "meeting_attended", "meeting_booked", "conversation", "message_sent"]);
+    // The first candidate is what the evidence alone says, whenever the evidence says anything.
+    const some = { ...none, positiveReply: true, websiteVisit: true, declaredMeetingBooked: true };
+    for (const o of FACT_OUTCOME_KEYS) expect(consumptionLadderFor(o, some)[0]).toEqual(consumedOutcomeFor(o, some));
+    // No candidate ever names a `conversation` on no evidence: a Unit nobody produced links to nothing.
+    for (const o of FACT_OUTCOME_KEYS) expect(consumptionLadderFor(o, none)).toEqual([{ outcomeKey: "message_sent", basis: "message_sent" }]);
   });
 
   it("the recording run is per UTC day", () => {

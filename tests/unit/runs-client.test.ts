@@ -17,6 +17,29 @@ describe("runs-client", () => {
     vi.unstubAllGlobals();
   });
 
+  it("LATE-UNIT-LINK-1117: a Unit stands when the ledger holds a produced occurrence of the key on the subject, not reversed", async () => {
+    const { hasStandingProducedUnit } = await import("../../src/lib/runs-client.js");
+    const occ = (over: Record<string, unknown>) => ({ direction: "produced", outcomeKey: "conversation", subjectService: "lead-service", subjectId: "L1", reversal: null, ...over });
+    const answer = (occurrences: unknown[], nextCursor: string | null = null) => ({ ok: true, json: () => Promise.resolve({ occurrences, nextCursor }) });
+
+    fetchSpy.mockResolvedValueOnce(answer([occ({ reversal: { reversedAt: "2026-11-05T00:00:00.000Z" } }), occ({ subjectId: "other" }), occ({ outcomeKey: "message_sent" })]));
+    expect(await hasStandingProducedUnit("lead-service", ["L1", "L2"], "conversation", "2026-08-11T00:00:00.000Z")).toBe(false);
+    const asked = new URL(fetchSpy.mock.calls[0][0]).searchParams;
+    expect(Object.fromEntries(asked)).toEqual({ subjectService: "lead-service", subjectIds: "L1,L2", direction: "produced", outcomeKey: "conversation", limit: "1000", declaredBefore: "2026-08-11T00:00:00.000Z" });
+
+    // A second page is read before answering "none"; a twin subject's Unit counts.
+    fetchSpy.mockResolvedValueOnce(answer([occ({ reversal: { reversedAt: "x" } })], "c1")).mockResolvedValueOnce(answer([occ({ subjectId: "L2" })]));
+    expect(await hasStandingProducedUnit("lead-service", ["L1", "L2"], "conversation", null)).toBe(true);
+    expect(new URL(fetchSpy.mock.calls[2][0]).searchParams.get("cursor")).toBe("c1");
+    expect(new URL(fetchSpy.mock.calls[1][0]).searchParams.has("declaredBefore")).toBe(false);
+
+    // An unreadable ledger is never "none".
+    fetchSpy.mockResolvedValueOnce({ ok: false, status: 503, text: () => Promise.resolve("down") });
+    await expect(hasStandingProducedUnit("lead-service", ["L1"], "conversation", null)).rejects.toThrow(/503/);
+    fetchSpy.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({}) });
+    await expect(hasStandingProducedUnit("lead-service", ["L1"], "conversation", null)).rejects.toThrow(/no occurrences array/);
+  });
+
   it("createRun attaches a 5s AbortSignal — DAG retry must not wait minutes on a hung runs-service", async () => {
     fetchSpy.mockResolvedValueOnce({ ok: true, json: () => Promise.resolve({ id: "run-1" }) });
     const { createRun } = await import("../../src/lib/runs-client.js");
