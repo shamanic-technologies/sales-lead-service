@@ -214,6 +214,15 @@ describe("serveThroughCandidates", () => {
     expect(screenInputHash({ ...a, person: { ...a.person, title: "CEO" } })).not.toEqual(screenInputHash(a));
   });
 
+  it("judges a Google Maps business on its address too, leaving every other candidate's input unchanged (GMAPS-LIVE-1117)", () => {
+    const a = cand("c1");
+    expect(screenSnapshot(a).company).not.toHaveProperty("address");
+    const shop = { ...a, company: { ...a.company, address: "Saatlenstrasse 12, 8051 Zürich" } };
+    expect(screenSnapshot(shop as never).company).toMatchObject({ address: "Saatlenstrasse 12, 8051 Zürich" });
+    expect(screenInputHash(shop as never)).not.toEqual(screenInputHash(a));
+    expect(screenInputHash({ ...a, company: { ...a.company, address: null } } as never)).toEqual(screenInputHash(a));
+  });
+
   it("no target text: nothing to screen against, the person is not judged", async () => {
     nextCandidate.mockResolvedValueOnce({ status: "candidate", candidate: cand("c1"), target: null });
     revealCandidate.mockResolvedValue({ status: "served", person });
