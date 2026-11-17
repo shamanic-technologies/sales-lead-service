@@ -107,6 +107,8 @@ export function screenSnapshot(c: Candidate) {
       state: c.company.state,
       country: c.company.country,
       keywords: (c.company.keywords ?? []).slice(0, 20),
+      // Only when held (a Google Maps business), so every other candidate's input, and its hash, is unchanged.
+      ...(c.company.address ? { address: c.company.address } : {}),
     },
   };
 }
@@ -126,7 +128,6 @@ export function organizationFromCandidate(c: Candidate): OrganizationView {
     blogUrl: null,
     crunchbaseUrl: null,
     foundedYear: null,
-    streetAddress: null,
     postalCode: null,
     technologyNames: null,
     industries: null,
@@ -155,6 +156,7 @@ export function organizationFromCandidate(c: Candidate): OrganizationView {
     state: c.company.state,
     country: c.company.country,
     keywords: c.company.keywords,
+    streetAddress: c.company.address ?? null,
   };
 }
 
