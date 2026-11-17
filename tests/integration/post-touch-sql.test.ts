@@ -45,6 +45,7 @@ const { fileBrandSignups } = await import("../../src/lib/brand-signups.js");
 const { sweepPostTouches } = await import("../../src/lib/post-touch.js");
 const { syncCrmEvidence } = await import("../../src/lib/crm-evidence-sync.js");
 const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo } = await import("../../src/lib/outcome-fact-declarations.js");
+const { fakeLedgerOccurrences } = await import("../helpers/fake-ledger.js");
 const { PEOPLE_FACTS_FEED } = await import("../../src/lib/crm-fact-feed.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -131,6 +132,10 @@ describe.skipIf(!hasRealDatabase)("post touches against a real database", () => 
           return new Response(JSON.stringify({ id }), { status: 200 });
         }
         if (/\/v1\/runs\/[^/]+$/.test(url) && init?.method === "PATCH") return new Response("{}", { status: 200 });
+        // A fact of ours checks the Unit it consumes stands on the ledger (LATE-UNIT-LINK-1117): what this file declared.
+        if (url.includes("/internal/outcome-occurrences?") && new URL(url).searchParams.get("subjectService") === "lead-service") {
+          return fakeLedgerOccurrences(url, declared.flatMap((d) => d.body.produced))!;
+        }
         if (url.includes("/internal/outcome-occurrences?")) {
           const q = new URL(url).searchParams;
           expect(q.get("direction")).toBe("produced");

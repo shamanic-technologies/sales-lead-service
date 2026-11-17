@@ -416,6 +416,8 @@ export interface CandidateCompany {
   state: string | null;
   country: string | null;
   keywords: string[] | null;
+  /** Street address when the source serves one (a Google Maps business, GMAPS-LIVE-1117); absent / null otherwise. */
+  address?: string | null;
 }
 
 export interface Candidate {
