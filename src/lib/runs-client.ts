@@ -58,6 +58,49 @@ export async function producedOutcomeKeysOf(subjectService: string, subjectId: s
     .map((o) => o.outcomeKey as string);
 }
 
+/**
+ * Does the ledger hold a STANDING produced Unit of `outcomeKey` on one of these subjects that a consumption dated in
+ * the UTC day ending at `declaredBefore` resolves to (LATE-UNIT-LINK-1117)? runs-service links a consumed
+ * (outcome key, subject) to a produced occurrence of the same key and subject declared before the end of the
+ * consumer's UTC day and never reversed; a consumption naming a Unit nobody produced links to nothing, so the Unit
+ * that consumed it reaches no campaign. Read off `GET /internal/outcome-occurrences` (direction produced), every page
+ * until one stands. Throws on any failure (the caller asks again next pass), never "none" for an unreadable ledger.
+ */
+export async function hasStandingProducedUnit(subjectService: string, subjectIds: readonly string[], outcomeKey: string, declaredBefore: string | null): Promise<boolean> {
+  let cursor: string | null = null;
+  for (let page = 0; page < 20; page++) {
+    const qs = new URLSearchParams({ subjectService, subjectIds: subjectIds.join(","), direction: "produced", outcomeKey, limit: "1000" });
+    if (declaredBefore) qs.set("declaredBefore", declaredBefore);
+    if (cursor) qs.set("cursor", cursor);
+    const response = await fetchWithRetry(`${RUNS_SERVICE_URL}/internal/outcome-occurrences?${qs}`, {
+      method: "GET",
+      headers: { "X-API-Key": RUNS_SERVICE_API_KEY },
+      signal: AbortSignal.timeout(RUNS_SERVICE_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error(`Runs service outcome occurrences read failed: ${response.status} - ${await response.text()}`);
+    }
+    const body = (await response.json()) as {
+      occurrences?: Array<{ outcomeKey?: unknown; subjectService?: unknown; subjectId?: unknown; direction?: unknown; reversal?: unknown }>;
+      nextCursor?: unknown;
+    };
+    if (!Array.isArray(body.occurrences)) throw new Error("Runs service outcome occurrences read: no occurrences array");
+    const standing = body.occurrences.some(
+      (o) =>
+        o.direction === "produced" &&
+        o.outcomeKey === outcomeKey &&
+        o.subjectService === subjectService &&
+        typeof o.subjectId === "string" &&
+        subjectIds.includes(o.subjectId) &&
+        (o.reversal === null || o.reversal === undefined),
+    );
+    if (standing) return true;
+    if (typeof body.nextCursor !== "string" || !body.nextCursor) return false;
+    cursor = body.nextCursor;
+  }
+  throw new Error(`Runs service outcome occurrences read: more than 20 pages of ${outcomeKey} on ${subjectIds.length} subject(s)`);
+}
+
 export async function createRun(params: {
   orgId: string;
   serviceName: string;

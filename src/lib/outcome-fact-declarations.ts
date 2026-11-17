@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { CRM_POSITIVE_REPLY_STEP, crmFactLedgerOutcome } from "./crm-evidence.js";
 import { errorMessage } from "./db-error.js";
-import { createRun, updateRun } from "./runs-client.js";
+import { createRun, hasStandingProducedUnit, updateRun } from "./runs-client.js";
 import { RUNS_SERVICE_API_KEY, RUNS_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
 import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
@@ -47,6 +47,11 @@ import {
  * the same entry outcome. No entry evidence at all = `conversation`
  * with basis `no_evidence`: runs-service then counts it as unknown provenance (never $0, never charged), which is the
  * truth (outreach caused it, the step it went through is not seen here).
+ *
+ * THE CONSUMED UNIT MUST STAND ON THE LEDGER (LATE-UNIT-LINK-1117, `resolveConsumption`): the evidence above only orders
+ * the candidates; the one declared is the first whose produced Unit runs-service holds on the lead (not reversed, dated
+ * before the end of the fact's day), then the `message_sent`. A consumption naming a Unit nobody produced links the
+ * late Unit to nothing: no source Unit, no campaign.
  *
  * EVERY UNIT, WHOEVER MADE IT (LEDGER-DECLARE-1107, owner 2026-11-07: « ON VEUT LE TOTAL ET LES STATS PAR OUTCOME …
  * INDEPENDAMMENT DES SOURCES »; every figure is read off the ledger). A lead outcome is a STATE reached once per (org,
@@ -154,6 +159,29 @@ export function consumedOutcomeFor(outcome: FactOutcomeKey, e: ConsumptionEviden
   if (e.declaredMeetingAttended) return { outcomeKey: "meeting_attended", basis: "meeting_attended" };
   if (e.declaredMeetingBooked) return { outcomeKey: "meeting_booked", basis: "meeting_booked" };
   return entry();
+}
+
+/**
+ * Every outcome the fact can have come from, best first: what the evidence names (`consumedOutcomeFor`'s order), then
+ * the message our outreach sent (a fact is ours only after our first touch). Pure. The ledger picks among them
+ * (`resolveConsumption`): the first whose Unit STANDS there.
+ */
+export function consumptionLadderFor(outcome: FactOutcomeKey, e: ConsumptionEvidence): Array<{ outcomeKey: string; basis: ConsumedBasis }> {
+  const rungs: Array<{ outcomeKey: string; basis: ConsumedBasis }> = [];
+  const sent = { outcomeKey: "message_sent", basis: "message_sent" as const };
+  if (outcome === "website_visit") return [sent];
+  if (outcome === "signup" || outcome === "form_submitted" || outcome === "purchase") {
+    if (e.websiteVisit) rungs.push({ outcomeKey: "website_visit", basis: "website_visit" });
+    if (e.positiveReply) rungs.push({ outcomeKey: "conversation", basis: "positive_reply" });
+    return [...rungs, sent];
+  }
+  if (outcome === "paid_client" && e.declaredPurchase) rungs.push({ outcomeKey: "purchase", basis: "purchase" });
+  if (outcome === "paid_client" && e.declaredMeetingAttended) rungs.push({ outcomeKey: "meeting_attended", basis: "meeting_attended" });
+  if (outcome !== "meeting_booked" && e.declaredMeetingBooked) rungs.push({ outcomeKey: "meeting_booked", basis: "meeting_booked" });
+  if (e.positiveReply) rungs.push({ outcomeKey: "conversation", basis: "positive_reply" });
+  if (e.websiteVisit) rungs.push({ outcomeKey: "website_visit", basis: "website_visit" });
+  if (e.formSubmitted) rungs.push({ outcomeKey: "form_submitted", basis: "form_submitted" });
+  return [...rungs, sent];
 }
 
 /** UTC calendar day `YYYY-MM-DD`. */
@@ -495,7 +523,8 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
       AND p.status IN ('delivered', 'queued') ${before(sql.raw("p.visited_at"))})`;
   const declared = (outcome: FactOutcomeKey) => sql`EXISTS (
     SELECT 1 FROM outcome_fact_declarations d
-    WHERE d.org_id = ${f.orgId} AND d.brand_id = ${f.brandId} AND d.lead_id = ${f.leadId}::uuid AND d.outcome_key = ${outcome})`;
+    WHERE d.org_id = ${f.orgId} AND d.brand_id = ${f.brandId} AND d.lead_id = ${f.leadId}::uuid AND d.outcome_key = ${outcome}
+      AND d.reversed_at IS NULL)`;
   const rows = (await db.execute(sql`
     SELECT
       (${timeline(sql`t.source = 'reply' AND t.detail->>'classification' = 'positive'`)} OR ${ledger([CRM_POSITIVE_REPLY_STEP], true)}) AS positive_reply,
@@ -514,6 +543,66 @@ export async function loadConsumptionEvidence(f: PendingFact): Promise<Consumpti
     declaredMeetingAttended: r.declared_meeting_attended === true,
     declaredPurchase: r.declared_purchase === true,
   };
+}
+
+/** Does the ledger hold a standing produced Unit of the key on one of the subjects, declared before the instant (null = ever)? Throws when unreadable. */
+export type StandingUnitRead = (subjectIds: readonly string[], outcomeKey: string, declaredBefore: string | null) => Promise<boolean>;
+
+const ledgerStandingUnit: StandingUnitRead = (subjectIds, outcomeKey, declaredBefore) =>
+  hasStandingProducedUnit(OUTCOME_SUBJECT_SERVICE, subjectIds, outcomeKey, declaredBefore);
+
+/** A Unit we declared ourselves reaches the ledger within this (live door, else the outbox's first redeliveries). */
+const OWN_UNIT_SETTLE_MS = 60 * 60_000;
+
+/** The lead and every lead row we stated the same subject at runs-service (one hop: its target, the target's other sources). */
+async function sameSubjectLeadIds(leadId: string): Promise<string[]> {
+  const rows = (await db.execute(sql`
+    WITH t AS (
+      SELECT coalesce((SELECT e.target_lead_id FROM lead_subject_equivalences e WHERE e.lead_id = ${leadId}::uuid AND e.status = 'stated'), ${leadId}::uuid) AS id
+    )
+    SELECT id::text AS id FROM t
+    UNION
+    SELECT e.lead_id::text FROM lead_subject_equivalences e JOIN t ON e.target_lead_id = t.id WHERE e.status = 'stated'
+  `)) as unknown as Array<{ id: string }>;
+  return [...new Set([leadId, ...rows.map((r) => r.id)])];
+}
+
+/**
+ * THE ONE OUTCOME A FACT OF OURS CONSUMES, CHECKED ON THE LEDGER (LATE-UNIT-LINK-1117). runs-service links a Unit to
+ * the Unit it came from by its consumed (outcome key, subject): a consumption naming a Unit nobody produced links to
+ * nothing, and the late Unit then reaches no campaign (prod 2026-11-17, 6 Units: two bookings consuming the
+ * `conversation` of a positive reply only the CRM evidenced, that no service declared; one attended consuming a booking
+ * never declared; two paid clients consuming a `conversation` on no evidence; one paid client consuming an attended
+ * meeting dated after the sale). Our evidence only ORDERS the candidates
+ * (`consumptionLadderFor`); the pick is the first whose Unit STANDS on the ledger for the lead (or a lead row stated the
+ * same subject), declared before the end of the fact's UTC day (runs-service's own resolution rule) and never reversed.
+ * A candidate that is a Unit WE declared within the last hour and the ledger does not hold yet (queued for redelivery)
+ * is waited for: throws, asked again next pass. Nothing on the ledger at all (a person our outreach touched before the
+ * ledger's history, no send declared) = what the evidence alone says (`consumedOutcomeFor`), said loud: it will not link.
+ * Throws when the ledger cannot be read (never a guess).
+ */
+export async function resolveConsumption(
+  f: Pick<PendingFact, "orgId" | "brandId" | "leadId" | "outcomeKey" | "occurredAt">,
+  evidence: ConsumptionEvidence,
+  standing: StandingUnitRead = ledgerStandingUnit,
+): Promise<{ outcomeKey: string; basis: ConsumedBasis }> {
+  const subjects = await sameSubjectLeadIds(f.leadId);
+  const before = f.occurredAt ? new Date(Date.parse(`${utcDay(new Date(f.occurredAt))}T00:00:00.000Z`) + 24 * 60 * 60_000).toISOString() : null;
+  for (const rung of consumptionLadderFor(f.outcomeKey, evidence)) {
+    if (await standing(subjects, rung.outcomeKey, before)) return rung;
+    if (rung.basis !== "meeting_booked" && rung.basis !== "meeting_attended" && rung.basis !== "purchase") continue;
+    const fresh = (await db.execute(sql`
+      SELECT 1 FROM outcome_fact_declarations d
+      WHERE d.org_id = ${f.orgId} AND d.brand_id = ${f.brandId} AND d.lead_id = ${f.leadId}::uuid AND d.outcome_key = ${rung.outcomeKey}
+        AND d.reversed_at IS NULL AND d.created_at > now() - make_interval(secs => ${OWN_UNIT_SETTLE_MS / 1000})
+    `)) as unknown as unknown[];
+    if (fresh.length > 0) throw new Error(`the ${rung.outcomeKey} Unit we declared for the lead is not on the ledger yet`);
+  }
+  const unlinked = consumedOutcomeFor(f.outcomeKey, evidence);
+  console.error(
+    `[lead-service] outcome fact consumes a Unit the ledger does not hold (it will link to no source Unit): org=${f.orgId} brand=${f.brandId} lead=${f.leadId} ${f.outcomeKey} consumes ${unlinked.outcomeKey} (${unlinked.basis})`,
+  );
+  return unlinked;
 }
 
 /**
@@ -582,7 +671,7 @@ async function declareOne(f: PendingFact, summary: OutcomeFactSweepSummary): Pro
         ? await outcomeRecordingRunFor(f.orgId, f.brandId, f.outcomeKey, f.occurredAt ? new Date(f.occurredAt) : new Date())
         : await ownRecordingRun(f);
     // A Unit another factory made consumes nothing and is never one of our scripts' (LEDGER-DECLARE-1107).
-    consumed = f.ours ? consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f)) : null;
+    consumed = f.ours ? await resolveConsumption(f, await loadConsumptionEvidence(f)) : null;
     performer = f.ours ? performerOf(await loadFirstTouchWorkflow(f), f.source) : performerOf(null, f.source, f.toolName);
   } catch (err) {
     summary.failed++;
@@ -736,7 +825,7 @@ export async function upgradeToOurs(scope?: { orgId: string }, post: RedatePost 
       occurredAt: r.occurred_at,
     };
     const key = sql`org_id = ${f.orgId} AND brand_id = ${f.brandId} AND lead_id = ${f.leadId}::uuid AND outcome_key = ${f.outcomeKey}`;
-    const consumed = consumedOutcomeFor(f.outcomeKey, await loadConsumptionEvidence(f));
+    const consumed = await resolveConsumption(f, await loadConsumptionEvidence(f));
     const performer = performerOf(await loadFirstTouchWorkflow(f), f.source);
     const d = factOutcomeDeclaration({ orgId: f.orgId, runId: String(r.run_id), leadId: f.leadId, outcomeKey: f.outcomeKey, consumedOutcomeKey: consumed.outcomeKey, performer });
     const res = await post({

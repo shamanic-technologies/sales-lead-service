@@ -18,6 +18,9 @@ const { db } = await import("../../src/db/index.js");
 const { leads, conversionEvents } = await import("../../src/db/schema.js");
 const { sweepOutcomeFactDeclarations, resetOutcomeRecordingRunMemo, redateUndatedDeclarations, statePastPerformers, upgradeToOurs, reverseWithdrawnUnits } = await import("../../src/lib/outcome-fact-declarations.js");
 
+const { fakeLedgerOccurrences } = await import("../helpers/fake-ledger.js");
+type FakeLedgerUnit = import("../helpers/fake-ledger.js").FakeLedgerUnit;
+
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
 
@@ -38,6 +41,11 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
   const created: string[] = [];
   const runsCreated: string[] = [];
   const declared: Declared[] = [];
+  // The ledger runs-service holds beside what this file declares: other services' Units (a send, a judged reply).
+  const ledger: FakeLedgerUnit[] = [];
+  // LATE-UNIT-LINK-1117 cases: `${outcomeKey}|${leadId}` the ledger does not show (yet), and a ledger that cannot be read.
+  const ledgerHides = new Set<string>();
+  const ledgerState = { down: false };
 
   async function newLead(): Promise<string> {
     const [lead] = await db.insert(leads).values({ firstName: "Itest", lastName: "Person" }).returning({ id: leads.id });
@@ -74,6 +82,12 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
           return new Response(JSON.stringify({ id }), { status: 200 });
         }
         if (/\/v1\/runs\/[^/]+$/.test(url) && init?.method === "PATCH") return new Response("{}", { status: 200 });
+        if (url.includes("/internal/outcome-occurrences?") && ledgerState.down) return new Response("down", { status: 503 });
+        const read = fakeLedgerOccurrences(url, [
+          ...ledger,
+          ...declared.flatMap((d) => d.body.produced.map((p) => ({ ...p, declaredAt: d.body.occurredAt }))),
+        ].filter((u) => !ledgerHides.has(`${u.outcomeKey}|${u.subjectId}`)));
+        if (read) return read;
         const m = url.match(/\/v1\/runs\/([^/]+)\/outcomes$/);
         if (m) {
           declared.push({ runId: m[1], orgId: headers.get("x-org-id"), serviceName: headers.get("x-service-name"), body: JSON.parse(String(init?.body)) });
@@ -86,6 +100,7 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
 
   afterAll(async () => {
     vi.unstubAllGlobals();
+    await db.execute(sql`DELETE FROM lead_subject_equivalences WHERE lead_id = ANY(${sql.param(created)}::uuid[])`);
     await db.execute(sql`DELETE FROM outcome_fact_declarations WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM outcome_recording_runs WHERE org_id = ${orgId}`);
     await db.execute(sql`DELETE FROM conversion_events WHERE org_id = ${orgId}`);
@@ -407,6 +422,83 @@ describe.skipIf(!hasRealDatabase)("outcome fact declarations against a real data
     expect((await upgradeToOurs({ orgId }, post)).read).toBe(0);
     // Never a second Unit.
     expect((await sweepOutcomeFactDeclarations({ orgId })).read).toBe(0);
+  });
+
+  it("LATE-UNIT-LINK-1117: a fact of ours consumes a Unit that STANDS on the ledger, never one nobody produced", async () => {
+    const unit = (leadId: string, outcomeKey: string, over: Partial<FakeLedgerUnit> = {}): FakeLedgerUnit => ({ outcomeKey, subjectService: "lead-service", subjectId: leadId, ...over });
+    const consumedBy = (leadId: string, from: number) =>
+      declared.slice(from).filter((d) => d.body.produced[0].subjectId === leadId).map((d) => [d.body.produced[0].outcomeKey, d.body.consumed.map((c) => c.outcomeKey)]);
+    const before = declared.length;
+
+    // A positive reply only the CRM evidenced: no service declared its `conversation`. The booking came from our message.
+    const crmReply = await newLead();
+    await fact(crmReply, "positive_reply", "2026-08-10T18:46:13Z");
+    await fact(crmReply, "meeting_booked", "2026-08-10T18:46:14Z");
+    ledger.push(unit(crmReply, "message_sent", { declaredAt: "2026-08-10T13:24:02Z" }));
+    // A judged reply on the ledger: the booking consumes it.
+    const judged = await newLead();
+    await fact(judged, "positive_reply", "2026-08-10T18:46:13Z");
+    await fact(judged, "meeting_booked", "2026-08-10T18:46:14Z");
+    ledger.push(unit(judged, "message_sent", { declaredAt: "2026-08-10T13:24:02Z" }), unit(judged, "conversation", { declaredAt: "2026-08-10T18:46:13Z" }));
+    // A reversed `conversation`, and one dated after the booking's day, are not Units the booking came from.
+    const reversedReply = await newLead();
+    await fact(reversedReply, "positive_reply", "2026-08-10T18:46:13Z");
+    await fact(reversedReply, "meeting_booked", "2026-08-10T18:46:14Z");
+    ledger.push(unit(reversedReply, "message_sent", { declaredAt: "2026-08-10T13:24:02Z" }), unit(reversedReply, "conversation", { declaredAt: "2026-08-10T18:46:13Z", reversed: true }), unit(reversedReply, "conversation", { declaredAt: "2026-08-11T00:00:00Z" }));
+    // A CRM states "attended" with no booking fact: the entry outcome that stands (here the judged reply).
+    const attendedOnly = await newLead();
+    await fact(attendedOnly, "positive_reply", "2026-05-24T14:27:09Z");
+    await fact(attendedOnly, "meeting_attended", "2026-06-24T15:07:42Z");
+    ledger.push(unit(attendedOnly, "conversation", { declaredAt: "2026-05-24T14:27:09Z" }));
+    // No entry evidence at all: the message our outreach sent, never a `conversation` on no evidence.
+    const noEvidence = await newLead();
+    await fact(noEvidence, "sale", "2026-10-24T12:25:34Z", { source: "manual" });
+    ledger.push(unit(noEvidence, "message_sent", { declaredAt: "2026-10-24T12:07:53Z" }));
+    // A lead row stated the same subject as another: the Unit standing on its twin counts.
+    const twin = await newLead();
+    const twinTarget = await newLead();
+    await db.execute(sql`INSERT INTO lead_subject_equivalences (lead_id, target_lead_id, bases, status) VALUES (${twin}::uuid, ${twinTarget}::uuid, ARRAY['itest'], 'stated')`);
+    await fact(twin, "positive_reply", "2026-08-10T18:46:13Z");
+    await fact(twin, "meeting_booked", "2026-08-10T18:46:14Z");
+    ledger.push(unit(twin, "message_sent", { declaredAt: "2026-08-10T13:24:02Z" }), unit(twinTarget, "conversation", { declaredAt: "2026-08-10T18:46:13Z" }));
+
+    expect(await sweepOutcomeFactDeclarations({ orgId })).toMatchObject({ read: 6, delivered: 6, failed: 0 });
+    expect(consumedBy(crmReply, before)).toEqual([["meeting_booked", ["message_sent"]]]);
+    expect(consumedBy(judged, before)).toEqual([["meeting_booked", ["conversation"]]]);
+    expect(consumedBy(reversedReply, before)).toEqual([["meeting_booked", ["message_sent"]]]);
+    expect(consumedBy(attendedOnly, before)).toEqual([["meeting_attended", ["conversation"]]]);
+    expect(consumedBy(noEvidence, before)).toEqual([["paid_client", ["message_sent"]]]);
+    expect(consumedBy(twin, before)).toEqual([["meeting_booked", ["conversation"]]]);
+    const kept = (await db.execute(sql`
+      SELECT consumed_outcome_key AS k, consumed_basis AS b FROM outcome_fact_declarations WHERE org_id = ${orgId} AND lead_id = ${crmReply}::uuid
+    `)) as unknown as Array<{ k: string; b: string }>;
+    expect(kept).toEqual([{ k: "message_sent", b: "message_sent" }]);
+    await db.execute(sql`DELETE FROM lead_subject_equivalences WHERE lead_id = ${twin}::uuid`);
+  });
+
+  it("LATE-UNIT-LINK-1117: an unreadable ledger declares nothing (asked again); a booking of ours not on the ledger yet is waited for", async () => {
+    const lead = await newLead();
+    await fact(lead, "meeting_booked", "2026-07-02T10:00:00Z");
+    await fact(lead, "meeting_attended", "2026-07-05T10:00:00Z");
+    ledger.push({ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: lead, declaredAt: "2026-07-01T10:00:00Z" });
+    const of = (from: number) => declared.slice(from).filter((d) => d.body.produced[0].subjectId === lead).map((d) => [d.body.produced[0].outcomeKey, d.body.consumed.map((c) => c.outcomeKey)]);
+
+    let mark = declared.length;
+    ledgerState.down = true;
+    expect(await sweepOutcomeFactDeclarations({ orgId })).toMatchObject({ read: 2, delivered: 0, failed: 2 });
+    expect(of(mark)).toEqual([]);
+    ledgerState.down = false;
+
+    // The booking is declared; the ledger does not show it yet (queued at runs-service): attended waits for it,
+    // never falling to a lower Unit while its own booking is on the way.
+    ledgerHides.add(`meeting_booked|${lead}`);
+    mark = declared.length;
+    expect(await sweepOutcomeFactDeclarations({ orgId })).toMatchObject({ read: 2, delivered: 1, failed: 1 });
+    expect(of(mark)).toEqual([["meeting_booked", ["message_sent"]]]);
+    ledgerHides.clear();
+    mark = declared.length;
+    expect(await sweepOutcomeFactDeclarations({ orgId })).toMatchObject({ read: 1, delivered: 1, failed: 0 });
+    expect(of(mark)).toEqual([["meeting_attended", ["meeting_booked"]]]);
   });
 
   it("LEDGER-REVERSAL-1107: a Unit whose fact is taken back is reversed once, at the withdrawal; the fact coming back is a NEW Unit", async () => {
