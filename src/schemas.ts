@@ -2953,6 +2953,13 @@ registry.registerPath({
   parameters: [
     ...AuthHeaders,
     { in: "query" as const, name: "brandId", required: true, schema: { type: "string" as const } },
+    {
+      in: "query" as const,
+      name: "leadId",
+      required: false,
+      description: "Narrow to ONE person (a lead uuid): `people` holds them iff they wait on us. Computed fresh, frozen Gmail verdicts only (REPLY-NO-BALANCE-1118).",
+      schema: { type: "string" as const },
+    },
   ],
   responses: {
     200: {
