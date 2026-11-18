@@ -90,6 +90,20 @@ describe.skipIf(!hasRealDatabase)("awaiting-reply routes against a real database
     expect(res.body.people[1]).toMatchObject({ waitingSince: "2026-10-06T17:08:29.000Z", lastMessage: { kind: "question", label: "question_to_escalate" } });
   });
 
+  it("leadId narrows the read to ONE person (REPLY-NO-BALANCE-1118)", async () => {
+    const one = await request(app).get(`/orgs/leads/awaiting-reply?brandId=${brand}&leadId=${people[questionEmail].leadId}`)
+      .set("x-api-key", "test-api-key").set("x-org-id", org);
+    expect(one.status).toBe(200);
+    expect(one.body.total).toBe(1);
+    expect(one.body.people[0].leadId).toBe(people[questionEmail].leadId);
+    const nobody = await request(app).get(`/orgs/leads/awaiting-reply?brandId=${brand}&leadId=${randomUUID()}`)
+      .set("x-api-key", "test-api-key").set("x-org-id", org);
+    expect(nobody.body.total).toBe(0);
+    const bad = await request(app).get(`/orgs/leads/awaiting-reply?brandId=${brand}&leadId=nope`)
+      .set("x-api-key", "test-api-key").set("x-org-id", org);
+    expect(bad.status).toBe(400);
+  });
+
   it("'answered outside' takes the person out; a new message from them puts them back", async () => {
     const stated = await request(app).post(`/orgs/leads/${people[questionEmail].rowId}/answered-outside`)
       .set("x-api-key", "test-api-key").set("x-org-id", org).set("x-user-id", "owner-1");
