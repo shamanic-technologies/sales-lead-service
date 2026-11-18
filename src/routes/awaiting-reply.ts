@@ -66,6 +66,19 @@ router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, acceptQuery(R
       res.status(400).json({ error: "brandId is required" });
       return;
     }
+    // ONE person (REPLY-NO-BALANCE-1118): campaign-service asks, before admitting a run at an empty balance,
+    // whether the person it carries is waiting on our answer. Computed fresh for that person (never the
+    // brand-wide snapshot), frozen Gmail verdicts only (no judgment billed on this read).
+    const leadId = typeof req.query.leadId === "string" ? req.query.leadId.trim() : "";
+    if (leadId) {
+      if (!UUID_RE.test(leadId)) {
+        res.status(400).json({ error: "leadId must be a lead uuid" });
+        return;
+      }
+      const { people, outsideAnswers, personalMessages } = await readAwaitingReplyWithReport({ orgId: req.orgId!, brandId, leadIds: [leadId] });
+      res.json({ brandId, total: people.length, people, outsideAnswers, personalMessages });
+      return;
+    }
     // Every person still waiting has the Gmail mirrors (the org's own, and staff's) read for a later
     // email of ours, judged once by Jev, billed to this request's org (outside-answers.ts).
     if (req.userId && req.runId) {

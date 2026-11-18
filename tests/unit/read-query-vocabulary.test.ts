@@ -33,6 +33,7 @@ const LIVE_CALLERS: Array<{ read: QueryCheckedRead; caller: string; params: stri
   { read: "GET /orgs/leads/unibox-lead", caller: "dashboard api.ts uniboxCardQuery", params: ["brandId", "relationKey", "humanId"] },
   // brand reads
   { read: "GET /orgs/leads/awaiting-reply", caller: "dashboard api.ts", params: ["brandId"] },
+  { read: "GET /orgs/leads/awaiting-reply", caller: "campaign-service gate-check.ts (REPLY-NO-BALANCE-1118)", params: ["brandId", "leadId"] },
   { read: "GET /orgs/leads/disqualifications", caller: "dashboard api.ts + features disqualification-marks.ts", params: ["brandId", "offerId"] },
   { read: "GET /orgs/followup-dates/scheduled", caller: "features-service campaign-next-steps-io.ts", params: ["campaignIds"] },
   { read: "GET /orgs/brands/:brandId/relationships/review", caller: "dashboard api.ts", params: [] },
