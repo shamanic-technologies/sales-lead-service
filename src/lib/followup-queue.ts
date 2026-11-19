@@ -161,6 +161,9 @@ export function handedClaimableSql(actingCampaignId: string, alias: "lc" | "" = 
 /** Why a pre-responder debt was handed over (stored on the row, `followup_handed_reason`). */
 export const OWED_BEFORE_RESPONDER_REASON = "owed_before_responder_started";
 
+/** Why an occurrence debt was closed: another campaign of the brand claimed the person after it came due (STALE-OWED-1119). */
+export const ANSWERED_ELSEWHERE_REASON = "answered_through_another_campaign";
+
 /**
  * How long a claim holds a due row before another worker may take it.
  *
@@ -727,6 +730,25 @@ export async function claimFollowup(params: {
          AND (SELECT count(*) FROM person_taken) = (SELECT count(*) FROM target)
          AND (SELECT count(*) FROM target) > 0
       RETURNING id, org_id, brand_ids, lead_id, campaign_id
+    ), answered_elsewhere AS (
+      -- WHATEVER ANSWERS A PERSON CLOSES THEIR DEBT (STALE-OWED-1119): one Lead event occurrence names the person on
+      -- every unit of the brand it reaches; the claim that takes the person (any row, any acting campaign) answers
+      -- them, so each OTHER open occurrence debt of theirs at a shared brand, already due, no live lease of its own,
+      -- is closed here. A claim that then fails keeps ITS row due (owed again at the lease's end): the person stays
+      -- owed on the claiming queue (ANSWER-RETRY-1106), never on the stale ones. Prod 2026-11-19: drkaylynne answered
+      -- by 95e0219e, still due on c44e6fb2 since 11-11.
+      UPDATE leads_campaigns s
+         SET followup_stated_closed_at = ${now}::timestamptz,
+             followup_due_at = NULL,
+             followup_stopped_reason = ${ANSWERED_ELSEWHERE_REASON},
+             updated_at = ${now}
+        FROM claimed c
+       WHERE s.org_id = c.org_id AND s.lead_id = c.lead_id AND s.id <> c.id
+         AND s.brand_ids && c.brand_ids
+         AND s.followup_stated_event_id IS NOT NULL AND s.followup_stated_closed_at IS NULL
+         AND s.followup_due_at IS NOT NULL AND s.followup_due_at <= ${now}::timestamptz
+         AND (s.followup_claimed_at IS NULL OR s.followup_claimed_at < ${leaseCutoff})
+      RETURNING s.id
     ), hold_consumed AS (
       -- A due round served to this row FOR its claim (buffer/next dueFollowupOnly, SCRIPT-VALUE-RATING-1113-LEAD) is
       -- handed by the claim that takes it: the round is over, the person's date now belongs to this claim.
