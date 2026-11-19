@@ -2931,6 +2931,26 @@ const AwaitingReplyPersonSchema = z
 
 registry.registerPath({
   method: "get",
+  path: "/internal/ops/awaiting-answers",
+  summary: "Staff Monitoring: people waiting on our answer for more than an hour",
+  description:
+    "REPLY-NO-BALANCE-1118. A sweep every 15 minutes reads \"who is waiting on us\" (the GET /orgs/leads/awaiting-reply rule, " +
+    "frozen Gmail verdicts only) for every brand a person wrote to in the last 30 days, and stores one row per UTC day and brand. " +
+    "`waiting` = the people of the latest sweep whose wait began more than an hour ago and less than 30 days ago, oldest first. " +
+    "`status` red when anyone waits, or when the sweep has not finished for 2 hours (`sweepStale`). `byDay` = per UTC day, " +
+    "`waitingOverHour` at the day's latest sample and `maxWaitingOverHour` the day's worst, summed over brands.",
+  parameters: [
+    { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const } },
+    { in: "query" as const, name: "days", required: false, schema: { type: "integer" as const, minimum: 1, maximum: 90 } },
+  ],
+  responses: {
+    200: { description: "The watch verdict, list and daily series" },
+    400: { description: "days out of range" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
   path: "/orgs/leads/awaiting-reply",
   summary: "The people who wrote back and are waiting on us (\"Needs your call\")",
   description:
