@@ -17,6 +17,7 @@ import { enableCrossThreadLocks } from "./lib/scope-lock.js";
 import { startCrmEvidenceWorker, syncBrandOnce } from "./lib/crm-evidence-worker.js";
 import { startBrandSignupsWorker } from "./lib/brand-signups.js";
 import { startConversionIntakeWorker } from "./lib/conversion-intake.js";
+import { startAwaitingAnswerWatchWorker } from "./lib/awaiting-answer-watch.js";
 import { startCrmFactFeedWorker } from "./lib/crm-fact-feed.js";
 import { startReadModelWorker } from "./lib/lead-read-model-worker.js";
 import { startChangeFeedWorker } from "./lib/lead-change-feed.js";
@@ -75,6 +76,8 @@ startBrandSignupsWorker(({ orgId, brandId }) => syncBrandOnce(orgId, brandId));
 // Every conversion the brand's site tag reports names its person: filed as a lead of the brand, the row attributed to
 // them, whoever caused it (conversion-intake.ts, UNMATCHED-MEETINGS-1117).
 startConversionIntakeWorker();
+// Every person waiting on our answer past the hour, fleet-wide, stored per day for Monitoring (REPLY-NO-BALANCE-1118).
+startAwaitingAnswerWatchWorker();
 // Redelivers every on_demand (was lead_requested) trigger event campaign-service has not recorded yet (lead-requested-events.ts).
 startTriggerEventOutboxWorker();
 // Redelivers every run outcome declaration runs-service has not taken yet (run-outcomes.ts, COST-ACCOUNTING-1023-P1).

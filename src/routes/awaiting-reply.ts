@@ -28,6 +28,7 @@ import {
 import { acceptQuery } from "../lib/query-params.js";
 import { READ_QUERY_PARAMS } from "../lib/read-query-vocabulary.js";
 import { invalidateAndRebuild, invalidateSnapshots, readThroughSnapshot } from "../lib/read-snapshots.js";
+import { readAwaitingAnswerWatch } from "../lib/awaiting-answer-watch.js";
 
 const router = Router();
 
@@ -100,6 +101,24 @@ router.get("/orgs/leads/awaiting-reply", apiKeyAuth, requireOrgId, acceptQuery(R
     res.json({ brandId, total: people.length, people, outsideAnswers, personalMessages });
   } catch (error) {
     respondReadFailure(res, error, "awaiting-reply read");
+  }
+});
+
+/**
+ * Staff Monitoring (REPLY-NO-BALANCE-1118): every person waiting on our answer for more than an hour, fleet-wide, at
+ * the latest watch sweep, and the daily series (lib/awaiting-answer-watch.ts). `days` 1-90, default 14.
+ */
+router.get("/internal/ops/awaiting-answers", apiKeyAuth, async (req, res) => {
+  try {
+    const raw = typeof req.query.days === "string" ? Number(req.query.days) : 14;
+    if (!Number.isInteger(raw) || raw < 1 || raw > 90) {
+      res.status(400).json({ error: "days must be an integer from 1 to 90" });
+      return;
+    }
+    res.json(await readAwaitingAnswerWatch(raw));
+  } catch (error) {
+    console.error("[lead-service] awaiting-answers watch read failed:", error);
+    res.status(500).json({ error: "awaiting-answers watch read failed" });
   }
 });
 
