@@ -27,8 +27,10 @@ export interface CampaignLegContext {
   brandId?: string | null;
 }
 
-interface OrgCampaignRow {
+export interface OrgCampaignRow {
   id?: string;
+  /** The brands the campaign serves; the first one names the offer's catalogue (offer-card-client). */
+  brandIds?: string[] | null;
   legKey?: string | null;
   offerId?: string | null;
   /** The channel's feature: decides whether an outbound leg is served in its new spelling. */
@@ -40,8 +42,13 @@ interface OrgCampaignRow {
  * comes back in its new spelling whichever one campaign-service stored (`servedLegKey`).
  */
 export async function fetchOrgCampaignLegs(ctx: CampaignLegContext): Promise<Map<string, string | null>> {
+  return orgCampaignLegsOf(await fetchOrgCampaignRows(ctx));
+}
+
+/** campaign -> served leg key, read off rows already fetched (the shared per-org read included). */
+export function orgCampaignLegsOf(rows: OrgCampaignRow[]): Map<string, string | null> {
   const byId = new Map<string, string | null>();
-  for (const row of await fetchOrgCampaignRows(ctx)) {
+  for (const row of rows) {
     if (!row?.id) continue;
     byId.set(
       row.id,
@@ -57,8 +64,13 @@ export async function fetchOrgCampaignLegs(ctx: CampaignLegContext): Promise<Map
  * `offerId` on the campaign row, never inferred.
  */
 export async function fetchOrgCampaignOffers(ctx: CampaignLegContext): Promise<Map<string, string | null>> {
+  return orgCampaignOffersOf(await fetchOrgCampaignRows(ctx));
+}
+
+/** campaign -> offer id, read off rows already fetched (the shared per-org read included). */
+export function orgCampaignOffersOf(rows: OrgCampaignRow[]): Map<string, string | null> {
   const byId = new Map<string, string | null>();
-  for (const row of await fetchOrgCampaignRows(ctx)) {
+  for (const row of rows) {
     if (!row?.id) continue;
     byId.set(row.id, typeof row.offerId === "string" && row.offerId.length > 0 ? row.offerId : null);
   }
@@ -80,7 +92,7 @@ export async function fetchOrgCampaignFacts(
   return byId;
 }
 
-async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaignRow[]> {
+export async function fetchOrgCampaignRows(ctx: CampaignLegContext): Promise<OrgCampaignRow[]> {
   const headers: Record<string, string> = {
     "X-API-Key": CAMPAIGN_SERVICE_API_KEY,
     "x-org-id": ctx.orgId,
