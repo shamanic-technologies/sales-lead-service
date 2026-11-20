@@ -261,8 +261,10 @@ export async function upsertRuling(params: {
   ruling: CrmPairingRulingKind;
   note: string | null;
   statedByUserId: string | null;
-}): Promise<void> {
-  await db.execute(sql`
+}): Promise<{ written: boolean }> {
+  // The DO UPDATE's WHERE keeps another org's ruling on the same pair untouched (SEC-CONVERSION-TOKEN-1120):
+  // the row is keyed on (brand, contact, lead) alone and a brand can be held by several orgs.
+  const rows = (await db.execute(sql`
     INSERT INTO crm_pairing_rulings
       (org_id, brand_id, crm_contact_id, lead_id, ruling, note, stated_by_user_id)
     VALUES (${params.orgId}, ${params.brandId}, ${params.crmContactId}, ${params.leadId},
@@ -274,7 +276,10 @@ export async function upsertRuling(params: {
       withdrawn_at = NULL,
       withdrawn_by_user_id = NULL,
       updated_at = now()
-  `);
+      WHERE crm_pairing_rulings.org_id = ${params.orgId}
+    RETURNING id
+  `)) as unknown as Array<{ id: string }>;
+  return { written: rows.length > 0 };
 }
 
 /**
@@ -283,6 +288,7 @@ export async function upsertRuling(params: {
  * nothing and reports as much.
  */
 export async function withdrawRuling(params: {
+  orgId: string;
   brandId: string;
   crmContactId: string;
   leadId: string;
@@ -290,7 +296,8 @@ export async function withdrawRuling(params: {
 }): Promise<{ existed: boolean; alreadyWithdrawn: boolean }> {
   const existing = (await db.execute(sql`
     SELECT withdrawn_at FROM crm_pairing_rulings
-    WHERE brand_id = ${params.brandId}
+    WHERE org_id = ${params.orgId}
+      AND brand_id = ${params.brandId}
       AND crm_contact_id = ${params.crmContactId}
       AND lead_id = ${params.leadId}::uuid
   `)) as unknown as Array<{ withdrawn_at: Date | string | null }>;
@@ -301,7 +308,8 @@ export async function withdrawRuling(params: {
   await db.execute(sql`
     UPDATE crm_pairing_rulings
     SET withdrawn_at = now(), withdrawn_by_user_id = ${params.withdrawnByUserId}, updated_at = now()
-    WHERE brand_id = ${params.brandId}
+    WHERE org_id = ${params.orgId}
+      AND brand_id = ${params.brandId}
       AND crm_contact_id = ${params.crmContactId}
       AND lead_id = ${params.leadId}::uuid
       AND withdrawn_at IS NULL

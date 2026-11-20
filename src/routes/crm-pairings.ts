@@ -29,6 +29,7 @@
  * about what the conversion-attribution path does with the matcher they share.
  */
 import { errorMessage } from "../lib/db-error.js";
+import { orgOwnsBrand } from "../lib/brand-client.js";
 import { Router } from "express";
 import {
   type AuthenticatedRequest,
@@ -655,6 +656,28 @@ function resyncEvidence(orgId: string, brandId: string): void {
 }
 
 /**
+ * A ruling changes what the brand's CRM evidence counts, so only an org OWNING the brand may state or
+ * withdraw one (SEC-CONVERSION-TOKEN-1120): brand-service membership for `x-org-id`, unreadable = 502
+ * (fail closed), not owned = 404 (same answer as an unknown brand).
+ */
+async function refuseUnlessBrandOwner(orgId: string, brandId: string, res: import("express").Response): Promise<boolean> {
+  let owns: boolean;
+  try {
+    owns = await orgOwnsBrand(orgId, brandId);
+  } catch (error) {
+    console.error(`[crm-pairings] brand ownership unreadable org=${orgId} brand=${brandId}`, error);
+    res.status(502).json({ error: "brand_ownership_unavailable" });
+    return true;
+  }
+  if (!owns) {
+    console.warn(`[crm-pairings] ruling refused org=${orgId} brand=${brandId} (not a brand of this org)`);
+    res.status(404).json({ error: "brand_not_found" });
+    return true;
+  }
+  return false;
+}
+
+/**
  * A human accepts or denies a pairing. Outranks the signal and the judgment alike, survives a
  * re-run of the matcher (the statement is keyed on the pair, not on a matcher run), and is
  * correctable by restating or withdrawing.
@@ -691,8 +714,9 @@ router.post(
       return res.status(400).json({ error: "note must be a string when present" });
     }
 
+    if (await refuseUnlessBrandOwner(req.orgId!, brandId, res)) return;
     try {
-      await upsertRuling({
+      const { written } = await upsertRuling({
         orgId: req.orgId!,
         brandId,
         crmContactId,
@@ -701,6 +725,12 @@ router.post(
         note,
         statedByUserId: req.userId ?? null,
       });
+      if (!written) {
+        return res.status(409).json({
+          error: "ruling_held_by_another_org",
+          message: "Another organization holding this brand has already ruled on this pairing.",
+        });
+      }
       resyncEvidence(req.orgId!, brandId);
       return res.status(201).json({
         ruling: {
@@ -750,8 +780,10 @@ router.delete(
       return res.status(400).json({ error: "leadId is required and must be a uuid" });
     }
 
+    if (await refuseUnlessBrandOwner(req.orgId!, brandId, res)) return;
     try {
       const result = await withdrawRuling({
+        orgId: req.orgId!,
         brandId,
         crmContactId,
         leadId,

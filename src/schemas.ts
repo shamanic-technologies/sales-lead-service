@@ -4438,6 +4438,9 @@ registry.registerPath({
     },
     400: { description: "Missing x-org-id" },
     401: { description: "Unauthorized" },
+    404: { description: "brand_not_found: the brand is not one of the caller org's brands (brand-service membership)" },
+    409: { description: "conversion_token_held_by_another_org: the brand's token belongs to another org holding the same brand" },
+    502: { description: "brand_ownership_unavailable: brand-service could not confirm ownership (fail closed)" },
   },
 });
 
@@ -4457,6 +4460,9 @@ registry.registerPath({
     },
     400: { description: "Missing x-org-id" },
     401: { description: "Unauthorized" },
+    404: { description: "brand_not_found: the brand is not one of the caller org's brands (brand-service membership)" },
+    409: { description: "conversion_token_held_by_another_org: the brand's token belongs to another org holding the same brand" },
+    502: { description: "brand_ownership_unavailable: brand-service could not confirm ownership (fail closed)" },
   },
 });
 
