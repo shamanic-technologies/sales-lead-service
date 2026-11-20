@@ -79,6 +79,7 @@ import {
 import { toLeadSources, type LeadSource } from "../lib/lead-sources.js";
 import { loadOriginNamesByList } from "../lib/sourcing-origin.js";
 import { createOfferCardResolver, type OfferCard } from "../lib/offer-card-client.js";
+import { sharedOrgCampaignRows } from "../lib/shared-org-campaigns.js";
 import {
   createCampaignBreakdownResolver,
   type CampaignBreakdownResolver,
@@ -2021,6 +2022,16 @@ async function respondLeadDetail(
         ? flattenCampaignStatus
         : flattenBrandStatus;
 
+    // ONE campaign-service read of the org's campaigns, shared by every one-lead read of the org
+    // (MON-PAGE-SPEED-FLOOR-1120): a page opens several panels at once and each one parsed the whole
+    // list 2-3 times on this thread. Same rows, re-asked for any campaign the held read lacks.
+    const campaignRows = sharedOrgCampaignRows({
+      orgId: req.orgId!,
+      userId: req.userId ?? null,
+      runId: req.runId ?? null,
+      brandId: brandIdStr ?? null,
+    });
+
     const fullLead = fullLeadByLeadId.get(row.leadId) ?? null;
     const emailContact = fullLead?.contacts.find((c) => c.channel === "email");
     const email = emailContact ? { value: emailContact.value, status: emailContact.status } : null;
@@ -2042,6 +2053,7 @@ async function respondLeadDetail(
         userId: req.userId ?? null,
         runId: req.runId ?? null,
         brandId: brandIdStr ?? null,
+        campaignRows,
       }).resolve([row.campaignId]),
       // Same rule as the list: evidence is only fetched for a served row in a named scope, so an
       // unserved row (or an unscoped read) carries the same all-false overlay it does there.
@@ -2074,6 +2086,7 @@ async function respondLeadDetail(
         runId: req.runId ?? null,
         brandId: brandIdStr ?? null,
         deliveryQueried: !!(brandIdStr || campaignIdStr),
+        campaignRows,
       }),
       [
         {
@@ -2109,6 +2122,7 @@ async function respondLeadDetail(
               userId: req.userId ?? null,
               runId: req.runId ?? null,
               brandId: brandIdStr ?? null,
+              campaignRows,
             }),
             singleCampaignScopeId: statusCampaignId(scopeCampaignIds) ?? null,
           }).resolve(
