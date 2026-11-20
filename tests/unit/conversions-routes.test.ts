@@ -6,6 +6,11 @@ import type { SQL } from "drizzle-orm";
 
 const execute = vi.fn();
 const matchConversion = vi.fn();
+const orgOwnsBrand = vi.fn();
+
+vi.mock("../../src/lib/brand-client.js", () => ({
+  orgOwnsBrand: (...a: unknown[]) => orgOwnsBrand(...a),
+}));
 
 vi.mock("../../src/db/index.js", () => ({
   db: { execute: (...args: unknown[]) => execute(...args) },
@@ -386,7 +391,10 @@ describe("GET /orgs/brands/:brandId/conversion-token", () => {
   beforeAll(async () => {
     app = await buildApp();
   }, 30_000);
-  beforeEach(() => execute.mockReset().mockResolvedValue([]));
+  beforeEach(() => {
+    execute.mockReset().mockResolvedValue([]);
+    orgOwnsBrand.mockReset().mockResolvedValue(true);
+  });
 
   it("401 without x-api-key", async () => {
     const res = await request(app).get("/orgs/brands/brand-1/conversion-token");
@@ -1044,5 +1052,98 @@ describe("GET /internal/brands/:brandId/converted-leads", () => {
       .get("/internal/brands/brand-1/converted-leads?event=sale")
       .set("x-api-key", "test-api-key");
     expect(res.status).toBe(500);
+  });
+});
+
+describe("conversion token: only the org owning the brand (SEC-CONVERSION-TOKEN-1120)", () => {
+  let app: express.Express;
+  beforeAll(async () => {
+    app = await buildApp();
+  }, 30_000);
+  beforeEach(() => {
+    execute.mockReset().mockResolvedValue([]);
+    orgOwnsBrand.mockReset();
+  });
+
+  const get = () =>
+    request(app)
+      .get("/orgs/brands/victim-brand/conversion-token")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", "attacker-org");
+  const rotate = () =>
+    request(app)
+      .post("/orgs/brands/victim-brand/conversion-token/rotate")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", "attacker-org");
+
+  it("a foreign org cannot READ the token nor its liveness: 404, no token row touched, no stats read", async () => {
+    orgOwnsBrand.mockResolvedValueOnce(false);
+    const res = await get();
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe("brand_not_found");
+    expect(res.body.token).toBeUndefined();
+    expect(orgOwnsBrand).toHaveBeenCalledWith("attacker-org", "victim-brand");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("a foreign org cannot ROTATE the token: 404, nothing written", async () => {
+    orgOwnsBrand.mockResolvedValueOnce(false);
+    const res = await rotate();
+    expect(res.status).toBe(404);
+    expect(res.body.token).toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("ownership unreadable (brand-service down) fails CLOSED: 502 on read and rotate, nothing touched", async () => {
+    orgOwnsBrand.mockRejectedValue(new Error("brand-service 503"));
+    const r1 = await get();
+    const r2 = await rotate();
+    expect(r1.status).toBe(502);
+    expect(r2.status).toBe(502);
+    expect(r1.body.token).toBeUndefined();
+    expect(r2.body.token).toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("a co-owning org whose brand's token row belongs to ANOTHER org gets 409, never that token nor a second one", async () => {
+    orgOwnsBrand.mockResolvedValue(true);
+    execute.mockResolvedValue([]); // the guarded upsert updates nothing: row held by another org
+    const r1 = await get();
+    expect(r1.status).toBe(409);
+    expect(r1.body.error).toBe("conversion_token_held_by_another_org");
+    expect(r1.body.token).toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(1); // no liveness read either
+    const r2 = await rotate();
+    expect(r2.status).toBe(409);
+    expect(r2.body.token).toBeUndefined();
+  });
+
+  it("owner path: the upsert only touches a row of the caller's org, and liveness reads the caller's org only", async () => {
+    orgOwnsBrand.mockResolvedValue(true);
+    execute.mockResolvedValueOnce([{ token: "pk_conv_mine", last_ping_at: null }]);
+    execute.mockResolvedValueOnce([{ last_event_at: null, event_types: null }]);
+    const res = await request(app)
+      .get("/orgs/brands/brand-1/conversion-token")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", "org-1");
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBe("pk_conv_mine");
+    const upsert = compile(execute.mock.calls[0][0]);
+    expect(upsert.sql.toLowerCase()).toMatch(/do update set updated_at = now\(\)\s+where brand_conversion_tokens\.org_id = \$\d+/);
+    expect(upsert.params).toContain("org-1");
+    const agg = compile(execute.mock.calls[1][0]);
+    expect(agg.sql.toLowerCase()).toMatch(/where brand_id = \$\d+\s+and org_id = \$\d+/);
+    expect(agg.params).toEqual(expect.arrayContaining(["brand-1", "org-1"]));
+
+    execute.mockReset().mockResolvedValueOnce([{ token: "pk_conv_new" }]);
+    const rot = await request(app)
+      .post("/orgs/brands/brand-1/conversion-token/rotate")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", "org-1");
+    expect(rot.status).toBe(200);
+    expect(rot.body.token).toBe("pk_conv_new");
+    const rsql = compile(execute.mock.calls[0][0]);
+    expect(rsql.sql.toLowerCase()).toMatch(/excluded\.token.*where brand_conversion_tokens\.org_id = \$\d+/s);
+    expect(rsql.params).toContain("org-1");
   });
 });
