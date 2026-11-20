@@ -38,8 +38,11 @@ import { db } from "../db/index.js";
 import {
   fetchOrgCampaignLegs,
   fetchOrgCampaignOffers,
+  orgCampaignLegsOf,
+  orgCampaignOffersOf,
   CampaignLegsUnavailableError,
   type CampaignLegContext,
+  type OrgCampaignRow,
 } from "./campaign-leg-client.js";
 import {
   fetchReplyVerdicts,
@@ -162,6 +165,11 @@ export interface LeadStandingResolverOptions extends CampaignLegContext {
    * when several resolvers of ONE request ask about the same people. Absent = each resolve asks.
    */
   replyVerdicts?: ReplyVerdictsMemo;
+  /**
+   * The org's campaign rows from a read SHARED across requests (`shared-org-campaigns.ts`), given the
+   * campaign ids this read needs. Absent = this resolver asks campaign-service itself, as before.
+   */
+  campaignRows?: (campaignIds: readonly string[]) => Promise<OrgCampaignRow[]>;
 }
 
 /**
@@ -171,9 +179,10 @@ export interface LeadStandingResolverOptions extends CampaignLegContext {
  */
 async function loadCampaignLegs(
   ctx: CampaignLegContext,
+  readRows?: () => Promise<OrgCampaignRow[]>,
 ): Promise<{ legs: Map<string, string | null> | null; reason: LeadStandingUnresolvedReason | null }> {
   try {
-    return { legs: await fetchOrgCampaignLegs(ctx), reason: null };
+    return { legs: readRows ? orgCampaignLegsOf(await readRows()) : await fetchOrgCampaignLegs(ctx), reason: null };
   } catch (error) {
     if (!(error instanceof CampaignLegsUnavailableError)) throw error;
     console.error(
@@ -187,17 +196,26 @@ async function loadCampaignLegs(
 export function createLeadStandingResolver(
   options: LeadStandingResolverOptions,
 ): LeadStandingResolver {
-  const { deliveryQueried, replyVerdicts, ...ctx } = options;
+  const { deliveryQueried, replyVerdicts, campaignRows, ...ctx } = options;
   // Which offer each campaign sells, read only once a reply needs placing on an offer.
+  const unavailableOffers = (error: unknown) =>
+    new ReplyVerdictsUnavailableError(
+      `[lead-standing] campaign-service could not say which offer each campaign sells, so no ` +
+        `reply can be placed on an offer: ${errorMessage(error)}`,
+    );
   let campaignOffers: Promise<Map<string, string | null>> | null = null;
-  const offersFor = () => {
+  const offersFor = (campaignIds: readonly string[]) => {
+    // A shared read (MON-PAGE-SPEED-FLOOR-1120) is asked for the chunk's own campaigns: held reads
+    // answer at once, a campaign it does not hold re-asks campaign-service.
+    if (campaignRows) {
+      return campaignRows(campaignIds).then(orgCampaignOffersOf, (error: unknown) => {
+        throw unavailableOffers(error);
+      });
+    }
     if (!campaignOffers) {
       campaignOffers = fetchOrgCampaignOffers(ctx).catch((error: unknown) => {
         campaignOffers = null;
-        throw new ReplyVerdictsUnavailableError(
-          `[lead-standing] campaign-service could not say which offer each campaign sells, so no ` +
-            `reply can be placed on an offer: ${errorMessage(error)}`,
-        );
+        throw unavailableOffers(error);
       });
     }
     return campaignOffers;
@@ -219,8 +237,17 @@ export function createLeadStandingResolver(
       const out = new Map<string, ResolvedLeadFacts>();
       if (rows.length === 0) return out;
 
-      if (!campaignLegs) campaignLegs = loadCampaignLegs(ctx);
-      const { legs, reason: legsFailure } = await campaignLegs;
+      // A shared read is asked again for each chunk's own campaigns (held reads answer at once);
+      // without one, the org's campaigns are read once for the resolver's lifetime, as always.
+      const chunkCampaignIds = Array.from(new Set(rows.map((r) => r.campaignId)));
+      let legsRead: typeof campaignLegs;
+      if (campaignRows) {
+        legsRead = loadCampaignLegs(ctx, () => campaignRows(chunkCampaignIds));
+      } else {
+        if (!campaignLegs) campaignLegs = loadCampaignLegs(ctx);
+        legsRead = campaignLegs;
+      }
+      const { legs, reason: legsFailure } = await legsRead;
 
       const leadIds = Array.from(new Set(rows.map((r) => r.leadId)));
 
@@ -307,7 +334,12 @@ export function createLeadStandingResolver(
         if (list) list.push(r);
         else repliesByEmail.set(key, [r]);
       }
-      const offers = repliesByEmail.size > 0 ? await offersFor() : null;
+      // Every campaign whose offer is looked up: the rows' and each reply's own (reply-outcome.ts).
+      const offerCampaignIds = Array.from(new Set([
+        ...chunkCampaignIds,
+        ...Array.from(repliesByEmail.values()).flatMap((list) => list.map((r) => r.campaignId).filter((id): id is string => !!id)),
+      ]));
+      const offers = repliesByEmail.size > 0 ? await offersFor(offerCampaignIds) : null;
       const outcomeRows = settled(outcomeRead);
       const neverRows = settled(neverRead);
       const leadMarks = settled(leadMarksRead);
@@ -315,7 +347,7 @@ export function createLeadStandingResolver(
       const humanOptOuts = levels.humanOptOuts;
       const marks: LeadAndCompanyMarks = { lead: leadMarks, company: levels.companyMarks, companyKeyOf: levels.companyKeyOf };
       const marksNameOffers = anyMarkNamesOffer(marks);
-      const markOffers = marksNameOffers ? (offers ?? (await offersFor())) : null;
+      const markOffers = marksNameOffers ? (offers ?? (await offersFor(offerCampaignIds))) : null;
 
       // The went-cold rule reads the row's PRIMARY brand's CRM. Nothing below costs anything for a
       // brand whose CRM is not usable.

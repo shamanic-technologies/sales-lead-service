@@ -71,7 +71,13 @@ vi.mock("../../src/lib/campaign-identity-client.js", () => ({
 }));
 
 vi.mock("../../src/lib/trace-event.js", () => ({ traceEvent: vi.fn().mockResolvedValue(undefined) }));
-vi.mock("../../src/config.js", () => ({ LEAD_SERVICE_API_KEY: "test-api-key" }));
+vi.mock("../../src/config.js", () => ({
+  LEAD_SERVICE_API_KEY: "test-api-key",
+  CAMPAIGN_SERVICE_URL: "http://campaign-service.test",
+  CAMPAIGN_SERVICE_API_KEY: "campaign-key",
+  BRAND_SERVICE_URL: "http://brand-service.test",
+  BRAND_SERVICE_API_KEY: "brand-key",
+}));
 
 const ORG = "30000000-0000-0000-0000-000000000001";
 const OTHER_ORG = "30000000-0000-0000-0000-0000000000ff";
@@ -353,5 +359,38 @@ describe("GET /orgs/leads/:id — one lead's full record", () => {
     buildFullLeadsBatchMock.mockRejectedValue(new Error("hydration exploded"));
     const res = await get(`/orgs/leads/${ROW_ID}`);
     expect(res.status).toBe(500);
+  });
+});
+
+// MON-PAGE-SPEED-FLOOR-1120: a page opens several lead panels at once. Each panel used to read the
+// org's whole campaign list from campaign-service 2-3 times (540 KB for the largest org) on the
+// request thread; a burst now shares ONE read and every panel answers the same offer.
+describe("GET /orgs/leads/:id — a burst of panels shares one campaign read", () => {
+  it("8 panels in parallel ask campaign-service for the org's campaigns ONCE, each answering the same offer", async () => {
+    const { resetSharedOrgCampaignRows } = await import("../../src/lib/shared-org-campaigns.js");
+    resetSharedOrgCampaignRows();
+    const campaignReads: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).endsWith("/campaigns")) {
+        campaignReads.push(String(url));
+        await new Promise((r) => setTimeout(r, 20));
+        return new Response(JSON.stringify({ campaigns: [{ id: "campaign-live", offerId: "offer-1", brandIds: [BRAND], legKey: null }] }), { status: 200 });
+      }
+      if (String(url).endsWith(`/internal/brands/${BRAND}/offers`)) {
+        return new Response(JSON.stringify({ offers: [{ offerId: "offer-1", name: "Offer One" }] }), { status: 200 });
+      }
+      return new Response("not stubbed", { status: 503 });
+    }));
+    try {
+      const answers = await Promise.all(Array.from({ length: 8 }, () => get(`/orgs/leads/${ROW_ID}?brandId=${BRAND}`)));
+      for (const res of answers) {
+        expect(res.status).toBe(200);
+        expect(res.body.leadDetail.offer).toEqual({ id: "offer-1", name: "Offer One" });
+      }
+      expect(campaignReads).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+      resetSharedOrgCampaignRows();
+    }
   });
 });

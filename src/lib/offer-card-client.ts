@@ -63,6 +63,11 @@ export interface OfferResolveContext {
   userId?: string | null;
   runId?: string | null;
   brandId?: string | null;
+  /**
+   * The org's campaign rows from a read SHARED across requests (`shared-org-campaigns.ts`), given the
+   * campaign ids the read needs. Absent = this resolver asks campaign-service itself, as before.
+   */
+  campaignRows?: (campaignIds: readonly string[]) => Promise<RawCampaign[]>;
 }
 
 /** What campaign-service says about one campaign, trimmed to what naming an offer needs. */
@@ -83,7 +88,7 @@ function serviceHeaders(apiKey: string, ctx: OfferResolveContext): Record<string
   return headers;
 }
 
-interface RawCampaign {
+export interface RawCampaign {
   id?: string;
   offerId?: string | null;
   brandIds?: string[] | null;
@@ -115,9 +120,12 @@ async function fetchOrgCampaignOffers(
   if (!Array.isArray(data?.campaigns)) {
     throw new Error("campaign-service /campaigns returned no campaigns array");
   }
+  return campaignOffersOf(data.campaigns);
+}
 
+function campaignOffersOf(campaigns: RawCampaign[]): Map<string, CampaignOffer> {
   const byCampaignId = new Map<string, CampaignOffer>();
-  for (const row of data.campaigns) {
+  for (const row of campaigns) {
     // A campaign that states no offer belongs to no offer. Strict — never inferred from a sibling.
     if (!row?.id || !row.offerId) continue;
     byCampaignId.set(row.id, { offerId: row.offerId, brandId: row.brandIds?.[0] ?? null });
@@ -180,7 +188,19 @@ export function createOfferCardResolver(ctx: OfferResolveContext): OfferCardReso
   let campaignOffers: Promise<Map<string, CampaignOffer>> | null = null;
   const offerNamesByBrand = new Map<string, Promise<Map<string, string>>>();
 
-  function campaignOffersOnce(): Promise<Map<string, CampaignOffer>> {
+  function campaignOffersOnce(campaignIds: readonly string[]): Promise<Map<string, CampaignOffer>> {
+    // A shared read (MON-PAGE-SPEED-FLOOR-1120) is asked for this call's own campaigns: held reads
+    // answer at once, a campaign it does not hold re-asks campaign-service.
+    if (ctx.campaignRows) {
+      return ctx.campaignRows(campaignIds).then(campaignOffersOf, (error: Error) => {
+        console.error(
+          `[lead-service] offer unresolved for orgId=${ctx.orgId} — campaign-service could not say ` +
+            `which offer each campaign sells, so leads carry no offer on this read (their campaignId ` +
+            `is unchanged): ${messageOf(error)}`,
+        );
+        return new Map<string, CampaignOffer>();
+      });
+    }
     if (!campaignOffers) {
       campaignOffers = fetchOrgCampaignOffers(ctx).catch((error: Error) => {
         console.error(
@@ -214,7 +234,7 @@ export function createOfferCardResolver(ctx: OfferResolveContext): OfferCardReso
       const cards = new Map<string, OfferCard>();
       if (campaignIds.length === 0) return cards;
 
-      const byCampaignId = await campaignOffersOnce();
+      const byCampaignId = await campaignOffersOnce(campaignIds);
 
       // Only the brands this chunk's campaigns actually name — an org-wide read never asks for a
       // brand it returned no rows for.
