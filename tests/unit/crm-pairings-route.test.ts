@@ -15,6 +15,11 @@ const withdrawRuling = vi.fn();
 const countLeadsNoCrmContactPointsAt = vi.fn();
 
 const fetchPairedLeadFacts = vi.fn();
+const orgOwnsBrand = vi.fn();
+
+vi.mock("../../src/lib/brand-client.js", () => ({
+  orgOwnsBrand: (...a: unknown[]) => orgOwnsBrand(...a),
+}));
 
 vi.mock("../../src/config.js", () => ({
   LEAD_SERVICE_API_KEY: "test-api-key",
@@ -584,8 +589,14 @@ describe("GET /orgs/leads/crm-pairing-counts", () => {
 });
 
 describe("rulings", () => {
+  beforeEach(() => {
+    orgOwnsBrand.mockReset().mockResolvedValue(true);
+    upsertRuling.mockReset();
+    withdrawRuling.mockReset();
+  });
+
   it("records what a person stated", async () => {
-    upsertRuling.mockResolvedValue(undefined);
+    upsertRuling.mockResolvedValue({ written: true });
     const res = await request(app)
       .post("/orgs/leads/crm-pairings/rulings")
       .set(auth)
@@ -601,6 +612,46 @@ describe("rulings", () => {
         statedByUserId: "u1",
       }),
     );
+    expect(orgOwnsBrand).toHaveBeenCalledWith(auth["x-org-id"], BRAND);
+  });
+
+  it("a foreign org cannot state a ruling on another org's brand: 404, nothing written (SEC-CONVERSION-TOKEN-1120)", async () => {
+    orgOwnsBrand.mockResolvedValue(false);
+    const res = await request(app)
+      .post("/orgs/leads/crm-pairings/rulings")
+      .set(auth)
+      .send({ brandId: BRAND, crmContactId: "crm-1", leadId: LEAD, ruling: "rejected" });
+    expect(res.status).toBe(404);
+    expect(upsertRuling).not.toHaveBeenCalled();
+  });
+
+  it("a foreign org cannot withdraw a ruling on another org's brand: 404, nothing read or written", async () => {
+    orgOwnsBrand.mockResolvedValue(false);
+    const res = await request(app)
+      .delete(`/orgs/leads/crm-pairings/rulings?brandId=${BRAND}&crmContactId=crm-1&leadId=${LEAD}`)
+      .set(auth);
+    expect(res.status).toBe(404);
+    expect(withdrawRuling).not.toHaveBeenCalled();
+  });
+
+  it("ownership unreadable fails closed: 502, nothing written", async () => {
+    orgOwnsBrand.mockRejectedValue(new Error("brand-service down"));
+    const res = await request(app)
+      .post("/orgs/leads/crm-pairings/rulings")
+      .set(auth)
+      .send({ brandId: BRAND, crmContactId: "crm-1", leadId: LEAD, ruling: "rejected" });
+    expect(res.status).toBe(502);
+    expect(upsertRuling).not.toHaveBeenCalled();
+  });
+
+  it("a co-owning org cannot overwrite another org's ruling on the same pair: 409", async () => {
+    upsertRuling.mockResolvedValue({ written: false });
+    const res = await request(app)
+      .post("/orgs/leads/crm-pairings/rulings")
+      .set(auth)
+      .send({ brandId: BRAND, crmContactId: "crm-1", leadId: LEAD, ruling: "rejected" });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe("ruling_held_by_another_org");
   });
 
   it("400s on a ruling word it does not know rather than storing it", async () => {
@@ -628,6 +679,7 @@ describe("rulings", () => {
     expect(res.status).toBe(200);
     expect(res.body.withdrawn).toBe(true);
     expect(res.body.alreadyWithdrawn).toBe(false);
+    expect(withdrawRuling).toHaveBeenCalledWith(expect.objectContaining({ orgId: auth["x-org-id"], brandId: BRAND }));
   });
 
   it("is idempotent", async () => {

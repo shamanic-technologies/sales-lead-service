@@ -178,3 +178,31 @@ export async function getActiveOffers(orgId: string, brandId: string): Promise<A
     .filter((o) => o?.status === "active" && typeof o.offerId === "string" && typeof o.name === "string")
     .map((o) => ({ offerId: o.offerId as string, name: o.name as string }));
 }
+
+/**
+ * The brand ids the org OWNS: brand-service `GET /orgs/brands` (its `org_brands` membership for
+ * the `x-org-id` sent). SEC-CONVERSION-TOKEN-1120: the proof an org may touch a brand-keyed
+ * credential (the conversion token). Fails loud on any non-2xx or an unreadable body: the
+ * caller refuses (fail CLOSED), never treats an unreadable answer as "owns".
+ */
+export async function listOrgBrandIds(orgId: string): Promise<Set<string>> {
+  const res = await fetchWithRetry(`${BRAND_SERVICE_URL}/orgs/brands`, {
+    method: "GET",
+    headers: buildHeaders(orgId),
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`[lead-service] brand-service brands of org ${orgId} failed: ${res.status} ${(await res.text()).slice(0, 200)}`);
+  const body = (await res.json()) as { brands?: Array<{ id?: unknown }> };
+  if (!Array.isArray(body.brands)) throw new Error(`[lead-service] brand-service brands of org ${orgId} answered without a brands array`);
+  const ids = new Set<string>();
+  for (const b of body.brands) {
+    if (typeof b?.id !== "string") throw new Error(`[lead-service] brand-service brands of org ${orgId} answered a brand without an id`);
+    ids.add(b.id);
+  }
+  return ids;
+}
+
+/** Does the org own the brand (brand-service membership)? Throws when brand-service cannot say. */
+export async function orgOwnsBrand(orgId: string, brandId: string): Promise<boolean> {
+  return (await listOrgBrandIds(orgId)).has(brandId);
+}

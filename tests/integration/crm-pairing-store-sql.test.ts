@@ -147,6 +147,25 @@ describe.skipIf(!hasRealDatabase)("the CRM pairing store against a real database
     expect(judged?.samePersonProbability).toBeCloseTo(0.9312, 4);
   });
 
+  it("another org on the same brand can neither overwrite nor withdraw a ruling it did not state (SEC-CONVERSION-TOKEN-1120)", async () => {
+    const otherOrg = randomUUID();
+    expect(
+      await upsertRuling({
+        orgId, brandId, crmContactId: "crm-xorg", leadId: pairedLeadId, ruling: "accepted", note: null, statedByUserId: "u1",
+      }),
+    ).toEqual({ written: true });
+    expect(
+      await upsertRuling({
+        orgId: otherOrg, brandId, crmContactId: "crm-xorg", leadId: pairedLeadId, ruling: "rejected", note: "forged", statedByUserId: "x",
+      }),
+    ).toEqual({ written: false });
+    expect(
+      await withdrawRuling({ orgId: otherOrg, brandId, crmContactId: "crm-xorg", leadId: pairedLeadId, withdrawnByUserId: "x" }),
+    ).toEqual({ existed: false, alreadyWithdrawn: false });
+    const live = await loadRulings(brandId, ["crm-xorg"]);
+    expect(live.get(rulingKey("crm-xorg", pairedLeadId))?.ruling).toBe("accepted");
+  });
+
   it("withdraws a ruling without deleting it, and restating brings it back", async () => {
     await upsertRuling({
       orgId,
@@ -161,6 +180,7 @@ describe.skipIf(!hasRealDatabase)("the CRM pairing store against a real database
     expect(live.get(rulingKey("crm-ruled", pairedLeadId))?.ruling).toBe("accepted");
 
     const withdrawn = await withdrawRuling({
+      orgId,
       brandId,
       crmContactId: "crm-ruled",
       leadId: pairedLeadId,
@@ -173,6 +193,7 @@ describe.skipIf(!hasRealDatabase)("the CRM pairing store against a real database
 
     expect(
       await withdrawRuling({
+        orgId,
         brandId,
         crmContactId: "crm-ruled",
         leadId: pairedLeadId,
@@ -182,6 +203,7 @@ describe.skipIf(!hasRealDatabase)("the CRM pairing store against a real database
 
     expect(
       await withdrawRuling({
+        orgId,
         brandId,
         crmContactId: "crm-never-ruled",
         leadId: pairedLeadId,
@@ -240,6 +262,7 @@ describe.skipIf(!hasRealDatabase)("the CRM pairing store against a real database
 
     // Withdrawing the rejection puts the pairing back, and the count with it.
     await withdrawRuling({
+      orgId,
       brandId,
       crmContactId: "crm-rejected",
       leadId: rejectedLeadId,

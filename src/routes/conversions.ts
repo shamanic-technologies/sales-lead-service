@@ -31,6 +31,7 @@ import { toIsoTimestamp } from "../lib/basic-leads.js";
 import { supersedeReplyOutcome } from "../lib/existing-customer.js";
 import { isStaffEmail } from "../lib/staff-identity.js";
 import { STAFF_IDENTITY_WITHDRAWAL } from "../lib/withdrawal-reasons.js";
+import { orgOwnsBrand } from "../lib/brand-client.js";
 
 const router = Router();
 
@@ -230,6 +231,39 @@ router.post("/public/conversions", conversionTokenAuth, wrap(async (req: Convers
   res.json({ received: true });
 }));
 
+// --- Brand ownership for the token routes (SEC-CONVERSION-TOKEN-1120) ---
+// The conversion token is the brand's WRITE credential (whoever holds it can file conversions
+// into the brand's figures), and its row is keyed on the brand alone. So an org touches it only
+// when (1) brand-service says the org owns the brand (org_brands membership), and (2) the token
+// row, when one exists, belongs to that same org (the upsert's `WHERE org_id` guard below: a
+// brand-keyed table never hands one org's token to another, nor mints a second one).
+// brand-service unreadable = 502, never "owns" (fail closed). A brand the org does not own is a
+// 404, the same answer as a brand that does not exist: the route never says which.
+async function requireBrandOwnership(orgId: string, brandId: string, res: Response): Promise<boolean> {
+  let owns: boolean;
+  try {
+    owns = await orgOwnsBrand(orgId, brandId);
+  } catch (error) {
+    console.error(`[lead-service] conversion-token: brand ownership unreadable org=${orgId} brand=${brandId}`, error);
+    res.status(502).json({ error: "brand_ownership_unavailable", message: "Could not confirm this brand belongs to your organization." });
+    return false;
+  }
+  if (!owns) {
+    console.warn(`[lead-service] conversion-token: refused org=${orgId} brand=${brandId} (not a brand of this org)`);
+    res.status(404).json({ error: "brand_not_found", message: "This brand is not one of your organization's brands." });
+    return false;
+  }
+  return true;
+}
+
+function tokenHeldByAnotherOrg(res: Response, orgId: string, brandId: string): void {
+  console.warn(`[lead-service] conversion-token: refused org=${orgId} brand=${brandId} (token held by another org)`);
+  res.status(409).json({
+    error: "conversion_token_held_by_another_org",
+    message: "This brand's conversion tracking belongs to another organization that also holds this brand.",
+  });
+}
+
 /**
  * GET /orgs/brands/:brandId/conversion-token
  *
@@ -243,14 +277,21 @@ router.get(
   wrap(async (req: AuthenticatedRequest, res: Response) => {
     const brandId = req.params.brandId;
     const orgId = req.orgId!;
+    if (!(await requireBrandOwnership(orgId, brandId, res))) return;
     const token = generateConversionToken();
 
+    // The DO UPDATE's WHERE keeps a row of another org untouched: no row comes back, refused.
     const rows = (await db.execute(sql`
       INSERT INTO brand_conversion_tokens (brand_id, org_id, token)
       VALUES (${brandId}, ${orgId}, ${token})
       ON CONFLICT (brand_id) DO UPDATE SET updated_at = now()
+        WHERE brand_conversion_tokens.org_id = ${orgId}
       RETURNING token, last_ping_at
     `)) as unknown as Array<{ token: string; last_ping_at: Date | string | null }>;
+    if (rows.length === 0) {
+      tokenHeldByAnotherOrg(res, orgId, brandId);
+      return;
+    }
 
     // Liveness overlay, DERIVED from received signals (never self-attested). Real events
     // live in conversion_events; ping never lands there, so eventTypesSeen excludes it
@@ -260,6 +301,7 @@ router.get(
              array_agg(DISTINCT event) AS event_types
       FROM conversion_events
       WHERE brand_id = ${brandId}
+        AND org_id = ${orgId}
         -- The tracker's liveness: what the customer's own CRM evidences, or what a prospect's reply
         -- says, is not a signal the website tag sent.
         AND source NOT IN ('crm', 'reply')
@@ -299,14 +341,20 @@ router.post(
   wrap(async (req: AuthenticatedRequest, res: Response) => {
     const brandId = req.params.brandId;
     const orgId = req.orgId!;
+    if (!(await requireBrandOwnership(orgId, brandId, res))) return;
     const token = generateConversionToken();
 
     const rows = (await db.execute(sql`
       INSERT INTO brand_conversion_tokens (brand_id, org_id, token)
       VALUES (${brandId}, ${orgId}, ${token})
       ON CONFLICT (brand_id) DO UPDATE SET token = EXCLUDED.token, rotated_at = now(), updated_at = now()
+        WHERE brand_conversion_tokens.org_id = ${orgId}
       RETURNING token
     `)) as unknown as Array<{ token: string }>;
+    if (rows.length === 0) {
+      tokenHeldByAnotherOrg(res, orgId, brandId);
+      return;
+    }
 
     res.json({ token: rows[0].token, ingestUrl: CONVERSION_INGEST_URL });
   }),
