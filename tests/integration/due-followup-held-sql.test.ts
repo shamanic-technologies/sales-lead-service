@@ -53,8 +53,9 @@ describe.skipIf(!hasRealDatabase)("a proactive tick serves only a due lead its b
     return { leadId: row.id, email };
   }
 
-  const serve = (campaignId: string, fileAs: "outreach_held" | "outreach" = "outreach_held") =>
+  const serve = (campaignId: string, fileAs: "outreach_held" | "outreach" = "outreach_held", ownCampaignOnly = false) =>
     fd.claimDueFollowupLead({
+      ownCampaignOnly,
       orgId,
       brandId,
       brandIds: [brandId],
@@ -126,6 +127,21 @@ describe.skipIf(!hasRealDatabase)("a proactive tick serves only a due lead its b
     expect((await claim(campaignA, p.leadId)).claimed).toBeNull();
     expect((await claim(campaignB, p.leadId)).claimed).toBeNull();
     expect(await serve(campaignB)).toBeNull();
+  });
+
+  it("TARGET-ONLY-DUE-1121: a campaign with no channel gets only a due person it reached itself, never the brand's other due leads", async () => {
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+    const buyer = await emailed("elizabeth"); // filed on campaignC (another campaign's work)
+    const relation = `itest-target-only-${randomUUID()}`;
+    expect(await serve(relation, "outreach_held", true)).toBeNull();
+    // The person the target-only campaign reached itself is its own work.
+    await db.execute(sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, served_at, sent_at)
+      VALUES (${buyer.leadId}::uuid, ${relation}, ${orgId}, ARRAY[${brandId}]::text[], 'served', now() - interval '9 days', now() - interval '9 days')`);
+    expect((await serve(relation, "outreach_held", true))?.leadId).toBe(buyer.leadId);
+    await db.execute(sql`UPDATE lead_followup_due_serves SET held_for_claim_until = now() - interval '1 minute' WHERE source_campaign_id = ${relation}`);
+    await db.execute(sql`DELETE FROM followup_responders WHERE held_campaign_id = ${relation}`);
+    await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId}`);
   });
 
   it("a hold nobody claims ends: the person is due again for anyone", async () => {
