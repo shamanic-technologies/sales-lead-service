@@ -521,6 +521,10 @@ export async function pullNext(
   // who was never handed to the vendor, and the winner is claimed atomically so two
   // concurrent runs cannot take the same person. Nobody retryable (or email-gateway
   // unreachable, which is fail-closed) falls through to serveNext exactly as before.
+  // A relation walk (OUTREACH-3WAYS-1121): its relation audience, read once, narrows this pool and is what the walk walks.
+  const relationAudiences = relationWalk
+    ? await resolveBrandRelationAudiences({ orgId: params.orgId, brandId: params.brandId, relation: relationWalk, userId: params.userId ?? null, runId: params.runId ?? null })
+    : null;
   const retry = finding ? null : await pickRetryCandidate({
     orgId: params.orgId,
     campaignId: params.campaignId,
@@ -534,6 +538,7 @@ export async function pullNext(
     recentlyEmailed,
     offerId,
     ...(params.poolSender ? { sender: params.poolSender } : {}),
+    ...(relationAudiences ? { audienceIds: relationAudiences.map((a) => a.audienceId) } : {}),
   });
 
   if (retry) {
@@ -1045,13 +1050,7 @@ export async function pullNext(
       walkAudiences = mode.audienceIds.map((id) => ({ audienceId: id, originSlug: null }));
     } else if (relationWalk) {
       // The brand's investors / industry peers: its relation audiences, each under its own list origin. No offer needed.
-      const listed = await resolveBrandRelationAudiences({
-        orgId: params.orgId,
-        brandId: params.brandId,
-        relation: relationWalk,
-        userId: params.userId ?? null,
-        runId: params.runId ?? null,
-      });
+      const listed = relationAudiences ?? [];
       const ordered = orderByEmptyAnswers(listed.map((a) => a.audienceId), await loadEmptyAnswers(params.campaignId, params.acceptedEmails ?? null));
       const originOf = new Map(listed.map((a) => [a.audienceId, a.originSlug]));
       walkAudiences = ordered.map((id) => ({ audienceId: id, originSlug: originOf.get(id) ?? null }));
