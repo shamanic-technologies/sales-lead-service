@@ -1006,6 +1006,13 @@ export async function pickFollowupCandidate(params: {
   relationships?: ClaimRelationshipPolicy;
   /** The occurrence's person (CLAIM-OCCURRENCE-PERSON-1025): only their row is claimable. Absent = unchanged. */
   person?: ReturnType<typeof claimPersonKeys>;
+  /**
+   * LEAD-EVENT-ONE-CAMPAIGN-1121: false = the caller states another script of the SAME campaign may still claim this
+   * person under another policy (one Lead event campaign answering prospects, clients and the team, each script its own
+   * policy). A refusal is then reported but leaves the row due, so the next script can claim it; the caller's last
+   * script claims final. Absent / true = today's claim (a refusal stops the row).
+   */
+  refusalFinal?: boolean;
 }): Promise<FollowupClaim> {
   const nowMs = params.nowMs ?? Date.now();
 
@@ -1172,7 +1179,8 @@ export async function pickFollowupCandidate(params: {
         };
         if (verdict.kind === "refuse") {
           // Final for this due row: stopped, so the queue never offers it again (a later `scheduled` re-decides).
-          await stopFollowups([candidate.id], verdict.reason === NOT_A_LEAD_REASON ? RELATIONSHIP_STOP_REASON : `relationship_${verdict.reason}`, nowMs);
+          // Unless the caller states another script of the campaign may still claim them (`refusalFinal: false`).
+          if (params.refusalFinal !== false) await stopFollowups([candidate.id], verdict.reason === NOT_A_LEAD_REASON ? RELATIONSHIP_STOP_REASON : `relationship_${verdict.reason}`, nowMs);
           report.refused.push({ ...who, reason: verdict.reason, tags: verdict.tags, unsureTags: verdict.unsureTags });
           console.log(
             `[lead-service] followup refused by relationship policy ${report.policy} campaign=${params.campaignId} leadCampaignId=${candidate.id} email=${candidate.email ?? `phone:${candidate.phone}`} tags=${verdict.tags.join("+")} unsure=${verdict.unsureTags.join("+")}`,

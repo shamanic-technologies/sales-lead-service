@@ -208,6 +208,9 @@ router.post(
       return;
     }
     const person = claimPersonKeys(rawPerson);
+    // LEAD-EVENT-ONE-CAMPAIGN-1121: the caller states another script of this campaign may still claim the person
+    // (`x-refusal-not-final: true`): a relationship refusal is reported, the row stays due. Absent = today.
+    const refusalNotFinal = req.headers["x-refusal-not-final"] === "true";
     const report: RelationshipGateReport | undefined = policy ? { policy, refused: [], pending: [] } : undefined;
 
     try {
@@ -235,6 +238,7 @@ router.post(
           },
           ...(policy ? { relationships: policy } : {}),
           ...(person ? { person } : {}),
+          ...(refusalNotFinal ? { refusalFinal: false } : {}),
         });
         if (report && attempt.relationships) {
           report.refused.push(...attempt.relationships.refused);
