@@ -107,7 +107,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
     `);
   }
 
-  const claim = (relationships?: "pure_prospect") =>
+  const claim = (relationships?: "pure_prospect" | "current_client" | "own_team", opts: { refusalFinal?: boolean } = {}) =>
     pickFollowupCandidate({
       orgId,
       campaignId,
@@ -115,6 +115,7 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
       actingCampaignId: acting,
       context: { orgId },
       ...(relationships ? { relationships } : {}),
+      ...(opts.refusalFinal === false ? { refusalFinal: false } : {}),
     });
 
   beforeEach(() => {
@@ -266,6 +267,26 @@ describe.skipIf(!hasRealDatabase)("claim-next under a relationship policy", () =
 
     const again = await claim("pure_prospect");
     expect(again).toMatchObject({ claimed: null, reason: "nothing_due" });
+  });
+
+  it("LEAD-EVENT-ONE-CAMPAIGN-1121: a refusal the caller states is not final leaves the row due for the campaign's next script", async () => {
+    const p = await dueLead();
+    await subject(p.human!, [p.email]);
+    await judged(p.human!, LOW);
+    await connectionTag({ orgId, brandId, human: p.human!, personKey: `email:${p.email}`, tag: "personal_to_user" });
+
+    const r = await claim("pure_prospect", { refusalFinal: false });
+    expect(r.claimed).toBeNull();
+    expect(r).toMatchObject({ reason: "relationship_refused" });
+    expect(r.relationships!.refused).toHaveLength(1);
+    const state = await readFollowupState(orgId, p.rowId);
+    expect(state?.stoppedReason).toBeNull();
+    expect(state?.dueAt).not.toBeNull();
+
+    // The campaign's last script claims final: the same refusal now stops the row, as today.
+    const last = await claim("pure_prospect");
+    expect(last).toMatchObject({ claimed: null, reason: "relationship_refused" });
+    expect(await readFollowupState(orgId, p.rowId)).toMatchObject({ dueAt: null, stoppedReason: "relationship_not_a_lead" });
   });
 
   it("refuses a customer the sources evidence, and an unsure investor, then claims the prospect behind them", async () => {

@@ -48,7 +48,7 @@ function toReachRow(r: RawReachRow): ReachRow {
   };
 }
 
-async function assertCrmCopyCaughtUp(): Promise<void> {
+export async function assertCrmCopyCaughtUp(): Promise<void> {
   const cursor = (await db.execute(sql`
     SELECT caught_up_at FROM crm_feed_cursors WHERE feed = ${PEOPLE_FACTS_FEED}
   `)) as unknown as Array<{ caught_up_at: RawTimestamp }>;
