@@ -710,6 +710,45 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(recordLeadRequested).not.toHaveBeenCalled();
   });
 
+  // OUTREACH-3WAYS-1121: the sourcing script's tactic names the brand's investors / industry peers.
+  it.each(["investors", "industry_peers"])("population %s on a campaign with no channel walks that relation, x-audience-id ignored", async (relation) => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
+
+    const res = await postNoChannel({ population: relation, excludeEmailedWithin: "3_months" }, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.found).toBe(true);
+    expect(decideSourceMode).not.toHaveBeenCalled();
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({ mode: { kind: "walk", preferredAudienceId: null, relation }, excludeEmailedWithin: "3_months" }),
+      expect.anything(),
+    );
+  });
+
+  it("population investors on a channel campaign is refused 400 relation_population_needs_target_campaign, nothing run", async () => {
+    const res = await request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", CAMPAIGN)
+      .set("x-brand-id", BRAND)
+      .set("x-feature-slug", "lead-finder-v1")
+      .send({ population: "investors" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("relation_population_needs_target_campaign");
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  it("a buyer population on a campaign with no channel stays 400 population_needs_source_unit", async () => {
+    const res = await postNoChannel({ population: "contacted_pure_prospects" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("population_needs_source_unit");
+  });
+
   it("a campaign with no channel names its audience first when the caller states one", async () => {
     createRun.mockResolvedValueOnce({ id: "serve-run-1" });
     updateRun.mockResolvedValue(undefined);

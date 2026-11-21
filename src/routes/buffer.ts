@@ -27,6 +27,7 @@ import { recordLeadRequested, type LeadRequestedPerformed } from "../lib/lead-re
 import { openOnDemandRun, type OnDemandRun } from "../lib/on-demand-run.js";
 import { loadEmptyAnswers, orderByEmptyAnswers } from "../lib/source-audience-walk.js";
 import type { EmailPolicy } from "../lib/email-policy.js";
+import { isBrandRelation, type BrandRelation } from "../lib/brand-relations.js";
 
 const router = Router();
 
@@ -103,7 +104,17 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // The goal is the brand's own (brands.currentGoal), fetched from brand-service inside pullNext, never a caller input.
   const featureSlug: string | null = req.featureSlug ?? null;
   // Who a source finds is its own pipe's lead strategy, and a source unit always runs on its origin's channel.
-  if (!featureSlug && parsed.data.population) {
+  // A population that is not the offer's buyers (OUTREACH-3WAYS-1121: the brand's investors / industry peers) is walked by a
+  // campaign launched on its target alone, which files the person on itself; a channel campaign's pools and sources are
+  // the offer's buyers'.
+  const relation: BrandRelation | null = isBrandRelation(parsed.data.population) ? parsed.data.population : null;
+  if (relation && featureSlug) {
+    return res.status(400).json({
+      error: "relation_population_needs_target_campaign",
+      detail: `population "${relation}" names who the brand is to these people beyond the offer's buyers: only a campaign launched on its target alone (no x-feature-slug) walks it; x-campaign-id ${campaignId} writes on ${featureSlug}`,
+    });
+  }
+  if (!featureSlug && parsed.data.population && !relation) {
     return res.status(400).json({
       error: "population_needs_source_unit",
       detail: `population "${parsed.data.population}" is a source pipe's lead strategy: a campaign with no channel (no x-feature-slug) is not a lead source campaign`,
@@ -442,7 +453,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     : stockSourceIds
       ? { kind: "stock", sourceCampaignIds: stockSourceIds }
       : !featureSlug
-      ? { kind: "walk", preferredAudienceId: req.audienceId ?? null }
+      ? relation
+        ? { kind: "walk", preferredAudienceId: null, relation }
+        : { kind: "walk", preferredAudienceId: req.audienceId ?? null }
       : null;
 
   // FACTORY-RECORD-SERVE-1028: the walk of this serve (who was looked at, what decided each), stored with the serve.

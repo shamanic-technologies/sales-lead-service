@@ -1,5 +1,6 @@
 import { HUMAN_SERVICE_API_KEY, HUMAN_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import type { BrandRelation } from "./brand-relations.js";
 import { LEAD_SOURCING_SLUG, SourceCampaignUnresolvedError, fetchLeadSourcingChoice } from "./source-campaign.js";
 import { fetchAudienceOriginSlug, loadOriginBySlug } from "./sourcing-origin.js";
 
@@ -192,4 +193,44 @@ export async function resolveBrandAudiences(args: {
     );
   }
   return orderSourceAudiences(serveable, args.preferredAudienceId).map((id) => ({ audienceId: id, originSlug: originOf.get(id) as string }));
+}
+
+/**
+ * The brand's RELATION audience a channel-less campaign walks when its sourcing script's tactic names a population
+ * other than the offer's buyers (OUTREACH-3WAYS-1121): human-service `GET /orgs/audiences/relations?brandId=` names,
+ * per relation, the ONE target audience of that relation for the brand (no offer; its lists are walked by it only).
+ * Not built yet (`audienceId: null`) or not active = nothing to walk (`[]`). The target is labelled with its own
+ * list origin when human-service names one (asked with no channel header); none (422) = no label, still walked: the
+ * candidate path serves a target whatever its lists. Anything unreadable throws (nothing is bought).
+ */
+export async function resolveBrandRelationAudiences(args: {
+  orgId: string;
+  brandId: string;
+  relation: BrandRelation;
+  userId?: string | null;
+  runId?: string | null;
+}): Promise<Array<{ audienceId: string; originSlug: string | null }>> {
+  const headers: Record<string, string> = { "x-api-key": HUMAN_SERVICE_API_KEY, "x-org-id": args.orgId };
+  if (args.userId) headers["x-user-id"] = args.userId;
+  if (args.runId) headers["x-run-id"] = args.runId;
+  const where = `brand=${args.brandId} relation=${args.relation} org=${args.orgId}`;
+  const response = await fetchWithRetry(`${HUMAN_SERVICE_URL}/orgs/audiences/relations?${new URLSearchParams({ brandId: args.brandId })}`, {
+    headers,
+    signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new SourceCampaignUnresolvedError(`human-service brand relations read failed (${where}): ${response.status} ${(await response.text()).slice(0, 300)}`);
+  }
+  const body = (await response.json()) as { relations?: unknown };
+  if (!Array.isArray(body.relations)) throw new SourceCampaignUnresolvedError(`human-service brand relations read unreadable (${where})`);
+  const entry = (body.relations as Array<Record<string, unknown>>).find((r) => r?.relation === args.relation);
+  if (!entry) throw new SourceCampaignUnresolvedError(`human-service brand relations read names no ${args.relation} entry (${where})`);
+  const audienceId = entry.audienceId;
+  if (audienceId === null) return [];
+  if (typeof audienceId !== "string") throw new SourceCampaignUnresolvedError(`human-service brand relations ${args.relation} entry has no audienceId (${where})`);
+  if (entry.status !== "active") {
+    console.log(`[lead-service] brand relation ${args.relation} audience ${audienceId} is ${String(entry.status)} (${where}): nothing to walk`);
+    return [];
+  }
+  return [{ audienceId, originSlug: await fetchAudienceOriginSlug(audienceId, args.orgId, null) }];
 }
