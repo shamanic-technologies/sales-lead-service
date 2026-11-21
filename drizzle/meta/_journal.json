@@ -1072,6 +1072,13 @@
       "when": 1789060500000,
       "tag": "0152_client_history_lookups_reask_profiles",
       "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1789060600000,
+      "tag": "0153_client_history_lookups_version",
+      "breakpoints": true
     }
   ]
 }

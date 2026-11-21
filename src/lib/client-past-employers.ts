@@ -41,7 +41,7 @@ export interface CompanyClient {
 }
 
 export interface PastEmployerCompany {
-  /** Stable key: `company:<brand-service id>` | `domain:<domain>` | `name:<folded name>`. */
+  /** Stable key: `company:<brand-service id>` | `domain:<domain>` | `linkedin:<company page>` | `name:<folded name>`. */
   companyKey: string;
   companyId: string | null;
   name: string | null;
@@ -55,10 +55,12 @@ export interface PastEmployerCompany {
   clients: CompanyClient[];
 }
 
-export function companyKeyOf(row: Pick<EmploymentRow, "companyId" | "domain" | "name">): string | null {
+export function companyKeyOf(row: Pick<EmploymentRow, "companyId" | "domain" | "name"> & { linkedinUrl?: string | null }): string | null {
   if (row.companyId) return `company:${row.companyId}`;
   const domain = row.domain?.trim().toLowerCase().replace(/^www\./, "");
   if (domain) return `domain:${domain}`;
+  const page = companyPageOf(row.linkedinUrl);
+  if (page) return `linkedin:${page}`;
   const name = row.name?.trim().toLowerCase().replace(/\s+/g, " ");
   if (name) return `name:${name}`;
   return null;
@@ -106,6 +108,23 @@ export function groupPastEmployers(rows: readonly EmploymentRow[]): PastEmployer
   return out.sort(
     (a, b) => b.clientCount - a.clientCount || (a.name ?? a.companyKey).localeCompare(b.name ?? b.companyKey) || a.companyKey.localeCompare(b.companyKey),
   );
+}
+
+/**
+ * PURE. A company's LinkedIn page in one spelling (`https://www.linkedin.com/company/<slug>/`, also `school`/`showcase`),
+ * or null for anything else (a member profile, a redirect, a position link). A profile's experience entry names its
+ * employer's page: that page, never the name, is what identifies the company.
+ */
+export function companyPageOf(url: string | null | undefined): string | null {
+  const m = /^(?:https?:\/\/)?(?:[a-z0-9-]+\.)?linkedin\.com\/(company|school|showcase)\/([^/?#\s]+)/i.exec((url ?? "").trim());
+  if (!m) return null;
+  let slug = m[2];
+  try {
+    slug = decodeURIComponent(slug);
+  } catch {
+    // not percent-encoded: keep it verbatim
+  }
+  return `https://www.linkedin.com/${m[1].toLowerCase()}/${slug.toLowerCase()}/`;
 }
 
 /** One role read off a LinkedIn profile answer, in `recordEmploymentHistory`'s words. */
@@ -172,6 +191,12 @@ function experienceArrays(node: unknown, depth = 0): unknown[][] {
   return [];
 }
 
+/** The first company PAGE among a role's link fields, else the first link stated (kept verbatim). */
+function companyLinkOf(values: unknown[]): string | null {
+  const links = values.map(str).filter((v): v is string => v !== null);
+  return links.find((v) => companyPageOf(v) !== null) ?? links[0] ?? null;
+}
+
 /** The roles a profile answer states (first experience list found by shape). Entries naming no company are dropped. */
 export function readProfileRoles(body: unknown): ProfileRole[] {
   const [list] = experienceArrays(body);
@@ -195,7 +220,9 @@ export function readProfileRoles(body: unknown): ProfileRole[] {
       startDate: profileDate(startRaw),
       endDate: present ? null : profileDate(endRaw),
       current: present,
-      companyLinkedinUrl: str(e.companyLinkedinUrl) ?? str(e.company_linkedin_url) ?? str(e.url) ?? (company ? str(company.url) ?? str(company.linkedin_url) : null),
+      companyLinkedinUrl: companyLinkOf([
+        e.companyLinkedinUrl, e.company_linkedin_url, e.url, company?.url, company?.linkedin_url, company?.linkedinUrl,
+      ]),
     });
   }
   return roles;

@@ -19,7 +19,7 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
 import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
 import { assertCrmCopyCaughtUp } from "./step-reached-read.js";
 import { isStaffEmail } from "./staff-identity.js";
-import { groupPastEmployers, readProfileRoles, type EmploymentRow, type PastEmployerCompany } from "./client-past-employers.js";
+import { companyPageOf, groupPastEmployers, readProfileRoles, type EmploymentRow, type PastEmployerCompany, type ProfileRole } from "./client-past-employers.js";
 import { InsufficientCreditError, TregMeter, isTregRefusal, type SpendIdentity } from "./treg-client.js";
 import { readEnrichOutput } from "./named-lead-serve.js";
 import { ENRICH_ENDPOINT } from "./relationship-company.js";
@@ -30,6 +30,12 @@ export const PROFILE_ENDPOINT = "treg.linkedin.user.profile";
 /** Ceiling per profile read ($0.01): the routed tool's providers answer $0.0012-$0.0042 a hit. */
 export const PROFILE_MAX_MICRO = 10_000;
 export const LOOKUP_RETRY_AFTER_DAYS = 90;
+/**
+ * What a stored lookup recorded. 2 = each role's employer carries the LinkedIn company page its experience entry names
+ * (BRAND-PROOF-LOGOS-1121: name-only employers are refused by brand-service's proof store). A career found by an older
+ * version is read again once (its profile is re-read, the enrich step is not repeated: the lead holds the profile URL).
+ */
+export const LOOKUP_VERSION = 2;
 /**
  * One fill call stays inside a caller's 5 minutes: no client is STARTED past this budget, and a started one makes at
  * most two treg calls of 90 s each (treg-client CALL_TIMEOUT_MS), so 100 s + 180 s < 300 s.
@@ -199,15 +205,22 @@ interface LookupRow {
   lead_id: string;
   status: LookupStatus;
   looked_up_at: RawTimestamp;
+  version: number;
 }
 
-async function loadLookups(leadIds: readonly string[]): Promise<Map<string, { status: LookupStatus; lookedUpAt: string }>> {
+async function loadLookups(leadIds: readonly string[]): Promise<Map<string, StoredLookup>> {
   if (leadIds.length === 0) return new Map();
   const rows = (await db.execute(sql`
-    SELECT lead_id::text AS lead_id, status, looked_up_at FROM client_history_lookups
+    SELECT lead_id::text AS lead_id, status, looked_up_at, version FROM client_history_lookups
     WHERE lead_id = ANY(${sql.param([...leadIds])}::uuid[])
   `)) as unknown as LookupRow[];
-  return new Map(rows.map((r) => [r.lead_id, { status: r.status, lookedUpAt: toIsoTimestamp(r.looked_up_at)! }]));
+  return new Map(rows.map((r) => [r.lead_id, { status: r.status, lookedUpAt: toIsoTimestamp(r.looked_up_at)!, version: Number(r.version) }]));
+}
+
+export interface StoredLookup {
+  status: LookupStatus;
+  lookedUpAt: string;
+  version: number;
 }
 
 export type ClientHistoryState = "has_history" | "not_looked_up" | "looked_up_none";
@@ -246,7 +259,8 @@ export async function readClientPastEmployers(orgId: string, brandId: string): P
     reason: clients.length === 0 ? "no_paying_clients" : companies.length === 0 ? "no_employment_history" : null,
     companies,
     clients: clients.map((c) => {
-      const lookup = lookups.get(c.leadId) ?? null;
+      const stored = lookups.get(c.leadId) ?? null;
+      const lookup = stored ? { status: stored.status, lookedUpAt: stored.lookedUpAt } : null;
       return {
         leadId: c.leadId,
         name: c.name,
@@ -271,18 +285,23 @@ export interface FillSummary {
   chargedMicro: number;
 }
 
-/** PURE. Who is owed a lookup now: no history, and no lookup or a non-finding one older than the retry window. */
+/**
+ * PURE. Who is owed a lookup now: no history, and no lookup or a non-finding one older than the retry window; or a
+ * career found by an older lookup version.
+ */
 export function clientsToLookUp(
   clients: readonly PayingClient[],
   withHistory: ReadonlySet<string>,
-  lookups: ReadonlyMap<string, { status: LookupStatus; lookedUpAt: string }>,
+  lookups: ReadonlyMap<string, StoredLookup>,
   now: Date,
 ): PayingClient[] {
   const retryBefore = now.getTime() - LOOKUP_RETRY_AFTER_DAYS * 86_400_000;
   return clients.filter((c) => {
+    const l = lookups.get(c.leadId);
+    // A career an older version read is read again once, so its employers get what identifies them.
+    if (l && l.status === "history_found" && l.version < LOOKUP_VERSION && (c.linkedinUrl || c.email)) return true;
     if (withHistory.has(c.leadId)) return false;
     if (!c.email && !c.linkedinUrl) return false;
-    const l = lookups.get(c.leadId);
     if (!l) return true;
     return l.status !== "history_found" && Date.parse(l.lookedUpAt) < retryBefore;
   });
@@ -293,13 +312,13 @@ async function recordLookup(p: {
   servedBy: string | null; roles: number;
 }): Promise<void> {
   await db.execute(sql`
-    INSERT INTO client_history_lookups (lead_id, paid_by_org_id, run_id, status, linkedin_url, roles_found, charged_micro, served_by, looked_up_at)
-    VALUES (${p.leadId}::uuid, ${p.identity.orgId}, ${p.identity.runId}, ${p.status}, ${p.linkedinUrl}, ${p.roles}, ${p.chargedMicro}, ${p.servedBy}, now())
+    INSERT INTO client_history_lookups (lead_id, paid_by_org_id, run_id, status, linkedin_url, roles_found, charged_micro, served_by, looked_up_at, version)
+    VALUES (${p.leadId}::uuid, ${p.identity.orgId}, ${p.identity.runId}, ${p.status}, ${p.linkedinUrl}, ${p.roles}, ${p.chargedMicro}, ${p.servedBy}, now(), ${LOOKUP_VERSION})
     ON CONFLICT (lead_id) DO UPDATE SET
       paid_by_org_id = EXCLUDED.paid_by_org_id, run_id = EXCLUDED.run_id, status = EXCLUDED.status,
       linkedin_url = EXCLUDED.linkedin_url, roles_found = EXCLUDED.roles_found,
       charged_micro = client_history_lookups.charged_micro + EXCLUDED.charged_micro,
-      served_by = EXCLUDED.served_by, looked_up_at = now()
+      served_by = EXCLUDED.served_by, looked_up_at = now(), version = EXCLUDED.version
   `);
 }
 
@@ -420,6 +439,37 @@ export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, a
   return { roles: [], servedBy, charged };
 }
 
+/**
+ * Each role's employer gets the LinkedIn company page its experience entry names. `recordEmploymentHistory` keys a past
+ * employer on its NAME (a shared row): an employer row of that name on this lead with no page takes it; one holding
+ * ANOTHER page is a different company of the same name, so the role moves to a row of its own (name + page). Never a
+ * lookup by page (no index on a 450 MB table), never a page guessed from a name.
+ */
+async function attachCompanyPages(leadId: string, roles: readonly ProfileRole[]): Promise<void> {
+  for (const role of roles) {
+    const page = companyPageOf(role.companyLinkedinUrl);
+    if (!page) continue;
+    const rows = (await db.execute(sql`
+      SELECT lo.id::text AS lo_id, o.id::text AS org_id, o.linkedin_url
+      FROM leads_organizations lo JOIN organizations o ON o.id = lo.organization_id
+      WHERE lo.lead_id = ${leadId}::uuid AND lower(btrim(o.name)) = lower(btrim(${role.organizationName}))
+    `)) as unknown as Array<{ lo_id: string; org_id: string; linkedin_url: string | null }>;
+    for (const r of rows) {
+      if (companyPageOf(r.linkedin_url) === page) continue;
+      if (r.linkedin_url === null || companyPageOf(r.linkedin_url) === null) {
+        await db.execute(sql`
+          UPDATE organizations SET linkedin_url = ${page}, updated_at = now()
+          WHERE id = ${r.org_id}::uuid AND (linkedin_url IS NULL OR linkedin_url = ${r.linkedin_url})`);
+        continue;
+      }
+      const [created] = (await db.execute(sql`
+        INSERT INTO organizations (name, linkedin_url) VALUES (${role.organizationName}, ${page}) RETURNING id::text AS id
+      `)) as unknown as Array<{ id: string }>;
+      await db.execute(sql`UPDATE leads_organizations SET organization_id = ${created.id}::uuid WHERE id = ${r.lo_id}::uuid`);
+    }
+  }
+}
+
 /** Look one client up. Throws InsufficientCreditError (stop the pass) or TransientLookupError (nothing recorded). */
 async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendIdentity): Promise<{ status: LookupStatus; charged: number }> {
   let charged = 0;
@@ -457,7 +507,7 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
     organization: current
       ? {
           name: current.organizationName, domain: null, websiteUrl: null, industry: null, estimatedNumEmployees: null,
-          annualRevenue: null, linkedinUrl: current.companyLinkedinUrl, logoUrl: null, city: null, state: null, country: null,
+          annualRevenue: null, linkedinUrl: null, logoUrl: null, city: null, state: null, country: null,
         }
       : null,
     employmentHistory: roles.map((r) => ({
@@ -465,6 +515,9 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
     })),
   } as unknown as Person;
   await recordEmploymentHistory({ leadId: client.leadId, person });
+  // The company page is never handed to `recordEmploymentHistory`: its upsert matches an organization by NAME and would
+  // overwrite the page of another company of that name. `attachCompanyPages` attaches it to this lead's row only.
+  await attachCompanyPages(client.leadId, roles);
   await recordLookup({ leadId: client.leadId, identity, status: "history_found", linkedinUrl, chargedMicro: charged, servedBy: career.servedBy, roles: roles.length });
   return { status: "history_found", charged };
 }

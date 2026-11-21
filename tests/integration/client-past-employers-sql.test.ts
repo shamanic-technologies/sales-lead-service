@@ -184,4 +184,44 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
     const nohistory = res.body.clients.find((c: { leadId: string }) => c.leadId === ids.nohistory);
     expect(nohistory.history).toBe("looked_up_none");
   });
+
+  it("each employer of a career carries the LinkedIn company page its entry names; same name, other page = its own row", async () => {
+    const lead = await (async () => {
+      const [row] = await db.insert(leads).values({ firstName: "career", linkedinUrl: `https://www.linkedin.com/in/career-${tag}` }).returning({ id: leads.id });
+      await db.insert(leadContactMethods).values({ leadId: row.id, channel: "email", value: addr("career"), source: "itest" });
+      await db.insert(leadsCampaigns).values({ leadId: row.id, campaignId: randomUUID(), orgId, brandIds: [brandId], status: "served" });
+      return row.id;
+    })();
+    await payment(addr("career"), { status: "succeeded", amountMinor: 100 });
+    // Another company of the same NAME already holds its own page: a name never identifies it.
+    await db.insert(organizations).values({ name: `Arketi-${tag}`, linkedinUrl: `https://www.linkedin.com/company/other-arketi-${tag}/` });
+    treg.answer = (req) =>
+      req.endpointId === "treg.linkedin.user.profile"
+        ? {
+            status: 200,
+            chargedMicro: 1_500,
+            body: {
+              raw: { experiences: [
+                { company: { name: `Google-${tag}`, url: `https://www.linkedin.com/company/google-${tag}/` }, jobTitle: "PM", timePeriod: { startDate: { year: 2012, month: 1 }, endDate: { year: 2016, month: 5 } } },
+                { company: { name: `Arketi-${tag}`, url: `https://www.linkedin.com/company/arketi-${tag}` }, jobTitle: "VP", current: true, timePeriod: { startDate: { year: 2020, month: 3 } } },
+                { company: { name: `NameOnly-${tag}` }, jobTitle: "Intern", timePeriod: { startDate: { year: 2010, month: 6 } } },
+              ] },
+              _treg: { served_by: "fetchinio.linkedin.user.profile", tried: [{ endpoint_id: "fetchinio.linkedin.user.profile", provider: "fetchinio", outcome: "hit" }] },
+            },
+          }
+        : { status: 200, chargedMicro: 0, body: { output: {}, _treg: { served_by: null, tried: [] } } };
+    const res = await request(app).post(`/internal/brands/${brandId}/client-past-employers`)
+      .set("x-api-key", "test-api-key").set("x-org-id", orgId).set("x-run-id", randomUUID()).set("x-user-id", randomUUID());
+    expect(res.status).toBe(200);
+    const mine = res.body.companies.filter((c: { clients: Array<{ leadId: string }> }) => c.clients.some((x) => x.leadId === lead));
+    const byName = Object.fromEntries(mine.map((c: { name: string; linkedinUrl: string | null; companyKey: string }) => [c.name, c]));
+    expect(byName[`Google-${tag}`].linkedinUrl).toBe(`https://www.linkedin.com/company/google-${tag}/`);
+    expect(byName[`Google-${tag}`].companyKey).toBe(`linkedin:https://www.linkedin.com/company/google-${tag}/`);
+    expect(byName[`Arketi-${tag}`].linkedinUrl).toBe(`https://www.linkedin.com/company/arketi-${tag}/`);
+    expect(byName[`NameOnly-${tag}`].linkedinUrl).toBeNull();
+    const other = (await db.execute(sql`SELECT linkedin_url FROM organizations WHERE name = ${`Arketi-${tag}`} ORDER BY linkedin_url`)) as unknown as Array<{ linkedin_url: string }>;
+    expect(other.map((o) => o.linkedin_url)).toEqual([`https://www.linkedin.com/company/arketi-${tag}/`, `https://www.linkedin.com/company/other-arketi-${tag}/`]);
+    const stored = (await db.execute(sql`SELECT status, version FROM client_history_lookups WHERE lead_id = ${lead}::uuid`)) as unknown as Array<{ status: string; version: number }>;
+    expect(stored).toEqual([{ status: "history_found", version: 2 }]);
+  });
 });
