@@ -326,6 +326,8 @@ export const NEVER_ROUTE_TO: readonly string[] = ["apollo"];
 export const CAREER_ENRICH_MAX_MICRO = 60_000;
 /** A hit naming the person but no LinkedIn profile is asked again WITHOUT that provider, at most this many calls. */
 export const CAREER_ENRICH_ROUNDS = 3;
+/** A profile answer with no career is asked again without its provider, at most this many calls. */
+export const CAREER_PROFILE_ROUNDS = 3;
 /** What ONE client's lookup may spend in total, every call included ($0.15). */
 export const CAREER_LOOKUP_MAX_MICRO = 150_000;
 
@@ -346,8 +348,6 @@ function isAnswer(status: number): boolean {
 
 export interface EmailLookupAnswer {
   linkedinUrl: string | null;
-  /** The current employer an answer named, when no profile was found (a logo too: « pas forcément les actuelles »). */
-  employer: { name: string; domain: string | null; title: string | null } | null;
   charged: number;
 }
 
@@ -355,10 +355,11 @@ export interface EmailLookupAnswer {
  * Who this email belongs to, through treg's routed `people.enrich` (Apollo excluded). Only a 200 is an answer; a
  * refusal, an error, a pending task or a timeout THROWS (`TransientLookupError`, or the meter's own error) so the
  * caller records nothing and asks again on the next call. A hit with no profile is asked again without its provider.
+ * The employer an enrich hit names is NOT recorded: a provider placeholder (« missing account name ») came back as a
+ * company name on 2026-11-21; only a LinkedIn experience list is a career.
  */
 export async function findProfileByEmail(email: string, call: TregCall): Promise<EmailLookupAnswer> {
   let charged = 0;
-  let employer: EmailLookupAnswer["employer"] = null;
   const exclude = [...NEVER_ROUTE_TO];
   for (let round = 0; round < CAREER_ENRICH_ROUNDS; round++) {
     const maxMicro = Math.min(CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - charged);
@@ -367,13 +368,56 @@ export async function findProfileByEmail(email: string, call: TregCall): Promise
     charged += r.chargedMicro;
     if (!isAnswer(r.status)) throw new TransientLookupError(`people.enrich answered ${r.status} (charged ${charged} micro-USD so far)`);
     const found = readEnrichOutput(r.body);
-    if (found.linkedinUrl) return { linkedinUrl: found.linkedinUrl, employer, charged };
-    if (!employer && found.companyName) employer = { name: found.companyName, domain: found.companyDomain, title: found.title };
+    if (found.linkedinUrl) return { linkedinUrl: found.linkedinUrl, charged };
     const provider = servedProviderOf(r.body);
     if (!provider) break; // every provider within the ceiling missed: a real « nobody knows this address »
     exclude.push(provider);
   }
-  return { linkedinUrl: null, employer, charged };
+  return { linkedinUrl: null, charged };
+}
+
+/** The `/in/<handle>` of a profile URL (some providers take only the handle), or null. */
+export function linkedinHandleOf(url: string): string | null {
+  const m = /linkedin\.com\/in\/([^/?#]+)/i.exec(url);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+export interface ProfileLookupAnswer {
+  /** null = the provider says it holds no readable profile (final). */
+  roles: ReturnType<typeof readProfileRoles> | null;
+  servedBy: string | null;
+  charged: number;
+}
+
+/**
+ * The career on a LinkedIn profile, through treg's routed `linkedin.user.profile` (Apollo excluded), asked with the
+ * URL AND its handle (harvestapi takes only the handle). A profile answer carrying no experience list (brightdata
+ * answers `experience: null` on most public profiles, 7 of 8 on 2026-11-21) is asked again without its provider.
+ * Same failure rule as `findProfileByEmail`: anything but a 200 or the provider's own « no profile » THROWS.
+ */
+export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, alreadyCharged: number): Promise<ProfileLookupAnswer> {
+  let charged = 0;
+  let servedBy: string | null = null;
+  const exclude = [...NEVER_ROUTE_TO];
+  const handle = linkedinHandleOf(linkedinUrl);
+  const params = { linkedin_url: linkedinUrl, ...(handle ? { linkedin_handle: handle } : {}) };
+  for (let round = 0; round < CAREER_PROFILE_ROUNDS; round++) {
+    const maxMicro = Math.min(PROFILE_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - alreadyCharged - charged);
+    if (maxMicro <= 0) break;
+    const p = await call({ endpointId: PROFILE_ENDPOINT, method: "POST", params, maxMicro, routeExclude: [...exclude] });
+    charged += p.chargedMicro;
+    // Only the PROVIDER saying it has no readable profile (404/410/422, not treg's own refusal) is a final answer.
+    const providerHasNone = (p.status === 404 || p.status === 410 || p.status === 422) && !isTregRefusal(p.status, p.body);
+    if (providerHasNone) return { roles: null, servedBy: servedByOf(p.body), charged };
+    if (!isAnswer(p.status)) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
+    servedBy = servedByOf(p.body);
+    const roles = readProfileRoles(p.body);
+    if (roles.length > 0) return { roles, servedBy, charged };
+    const provider = servedProviderOf(p.body);
+    if (!provider) break;
+    exclude.push(provider);
+  }
+  return { roles: [], servedBy, charged };
 }
 
 /** Look one client up. Throws InsufficientCreditError (stop the pass) or TransientLookupError (nothing recorded). */
@@ -386,36 +430,21 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
     linkedinUrl = found.linkedinUrl;
     if (linkedinUrl) {
       await db.execute(sql`UPDATE leads SET linkedin_url = COALESCE(linkedin_url, ${linkedinUrl}) WHERE id = ${client.leadId}::uuid`);
-    } else if (found.employer) {
-      await recordEmploymentHistory({
-        leadId: client.leadId,
-        person: {
-          firstName: null, lastName: null, name: null, title: found.employer.title, email: client.email,
-          organization: {
-            name: found.employer.name, domain: found.employer.domain, websiteUrl: null, industry: null, estimatedNumEmployees: null,
-            annualRevenue: null, linkedinUrl: null, logoUrl: null, city: null, state: null, country: null,
-          },
-          employmentHistory: [],
-        } as unknown as Person,
-      });
     }
   }
   if (!linkedinUrl) {
     await recordLookup({ leadId: client.leadId, identity, status: "no_linkedin", linkedinUrl: null, chargedMicro: charged, servedBy: null, roles: 0 });
     return { status: "no_linkedin", charged };
   }
-  const p = await call({ endpointId: PROFILE_ENDPOINT, method: "POST", params: { linkedin_url: linkedinUrl }, maxMicro: PROFILE_MAX_MICRO, routeExclude: NEVER_ROUTE_TO });
-  charged += p.chargedMicro;
-  // Only the PROVIDER saying it has no readable profile (404/410/422, not treg's own refusal) is a final answer.
-  const providerHasNone = (p.status === 404 || p.status === 410 || p.status === 422) && !isTregRefusal(p.status, p.body);
-  if (!isAnswer(p.status) && !providerHasNone) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
-  if (providerHasNone) {
-    await recordLookup({ leadId: client.leadId, identity, status: "profile_unreadable", linkedinUrl, chargedMicro: charged, servedBy: servedByOf(p.body), roles: 0 });
+  const career = await readCareerOfProfile(linkedinUrl, call, charged);
+  charged += career.charged;
+  if (career.roles === null) {
+    await recordLookup({ leadId: client.leadId, identity, status: "profile_unreadable", linkedinUrl, chargedMicro: charged, servedBy: career.servedBy, roles: 0 });
     return { status: "profile_unreadable", charged };
   }
-  const roles = readProfileRoles(p.body);
+  const roles = career.roles;
   if (roles.length === 0) {
-    await recordLookup({ leadId: client.leadId, identity, status: "no_experience", linkedinUrl, chargedMicro: charged, servedBy: servedByOf(p.body), roles: 0 });
+    await recordLookup({ leadId: client.leadId, identity, status: "no_experience", linkedinUrl, chargedMicro: charged, servedBy: career.servedBy, roles: 0 });
     return { status: "no_experience", charged };
   }
   const current = roles.find((r) => r.current) ?? null;
@@ -436,7 +465,7 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
     })),
   } as unknown as Person;
   await recordEmploymentHistory({ leadId: client.leadId, person });
-  await recordLookup({ leadId: client.leadId, identity, status: "history_found", linkedinUrl, chargedMicro: charged, servedBy: servedByOf(p.body), roles: roles.length });
+  await recordLookup({ leadId: client.leadId, identity, status: "history_found", linkedinUrl, chargedMicro: charged, servedBy: career.servedBy, roles: roles.length });
   return { status: "history_found", charged };
 }
 
