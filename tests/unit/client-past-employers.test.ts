@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { groupPastEmployers, profileDate, readProfileRoles, type EmploymentRow } from "../../src/lib/client-past-employers.js";
-import { clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
+import { LOOKUP_VERSION, clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
+import { companyKeyOf, companyPageOf } from "../../src/lib/client-past-employers.js";
 
 const row = (over: Partial<EmploymentRow>): EmploymentRow => ({
   clientLeadId: "a", leadId: "a", organizationId: "o", companyId: null, name: "Acme", domain: null, logoUrl: null,
@@ -81,12 +82,52 @@ describe("clientsToLookUp", () => {
       [c("has"), c("none", null), c("fresh"), c("recent"), c("old"), c("found")],
       new Set(["has"]),
       new Map([
-        ["recent", { status: "no_linkedin" as const, lookedUpAt: "2026-11-01T00:00:00Z" }],
-        ["old", { status: "no_experience" as const, lookedUpAt: "2026-07-01T00:00:00Z" }],
-        ["found", { status: "history_found" as const, lookedUpAt: "2026-01-01T00:00:00Z" }],
+        ["recent", { status: "no_linkedin" as const, lookedUpAt: "2026-11-01T00:00:00Z", version: LOOKUP_VERSION }],
+        ["old", { status: "no_experience" as const, lookedUpAt: "2026-07-01T00:00:00Z", version: LOOKUP_VERSION }],
+        ["found", { status: "history_found" as const, lookedUpAt: "2026-01-01T00:00:00Z", version: LOOKUP_VERSION }],
       ]),
       now,
     );
     expect(out.map((x) => x.leadId)).toEqual(["fresh", "old"]);
+  });
+});
+
+describe("clientsToLookUp, lookup version", () => {
+  const now = new Date("2026-11-21T00:00:00Z");
+  const c = (leadId: string, linkedinUrl: string | null) => ({ leadId, name: null, email: null, linkedinUrl, paidAt: null });
+  it("a career an older version found is read again once, even with history; the current version is not", () => {
+    const out = clientsToLookUp(
+      [c("old-found", "https://www.linkedin.com/in/a"), c("new-found", "https://www.linkedin.com/in/b"), c("old-miss", null)],
+      new Set(["old-found", "new-found"]),
+      new Map([
+        ["old-found", { status: "history_found" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: 1 }],
+        ["new-found", { status: "history_found" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: LOOKUP_VERSION }],
+        ["old-miss", { status: "no_linkedin" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: 1 }],
+      ]),
+      now,
+    );
+    expect(out.map((x) => x.leadId)).toEqual(["old-found"]);
+  });
+});
+
+describe("companyPageOf", () => {
+  it("one spelling for a company page; anything else is no page", () => {
+    expect(companyPageOf("https://www.linkedin.com/company/SmarterClicks/")).toBe("https://www.linkedin.com/company/smarterclicks/");
+    expect(companyPageOf("http://fr.linkedin.com/company/google?trk=x")).toBe("https://www.linkedin.com/company/google/");
+    expect(companyPageOf("linkedin.com/school/essec-business-school")).toBe("https://www.linkedin.com/school/essec-business-school/");
+    expect(companyPageOf("https://www.linkedin.com/in/someone/")).toBeNull();
+    expect(companyPageOf("https://www.linkedin.com/redir/suspicious-page?url=x")).toBeNull();
+    expect(companyPageOf(null)).toBeNull();
+  });
+
+  it("a company is keyed on its page before its name", () => {
+    expect(companyKeyOf({ companyId: null, domain: null, name: "Arketi Group", linkedinUrl: "https://linkedin.com/company/arketi" }))
+      .toBe("linkedin:https://www.linkedin.com/company/arketi/");
+    expect(companyKeyOf({ companyId: null, domain: "arketi.com", name: "Arketi", linkedinUrl: "https://linkedin.com/company/arketi" })).toBe("domain:arketi.com");
+  });
+
+  it("a role's link fields: the company page wins over another link", () => {
+    const [role] = readProfileRoles({ experience: [{ company: { name: "Google", url: "https://www.linkedin.com/company/google/" }, url: "https://www.linkedin.com/in/x/details/position/1" }] });
+    expect(role.companyLinkedinUrl).toBe("https://www.linkedin.com/company/google/");
   });
 });
