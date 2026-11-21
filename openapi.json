@@ -8958,7 +8958,8 @@
                         "history_found",
                         "no_linkedin",
                         "no_experience",
-                        "profile_unreadable"
+                        "profile_unreadable",
+                        "no_identifier"
                       ]
                     },
                     "lookedUpAt": {
@@ -9005,6 +9006,10 @@
               "profileUnreadable": {
                 "type": "integer"
               },
+              "noIdentifier": {
+                "type": "integer",
+                "description": "Paying clients with no email, LinkedIn profile or phone to look them up by (recorded, nothing spent)."
+              },
               "failed": {
                 "type": "integer"
               },
@@ -9023,6 +9028,7 @@
               "noLinkedin",
               "noExperience",
               "profileUnreadable",
+              "noIdentifier",
               "failed",
               "remaining",
               "chargedMicro"
