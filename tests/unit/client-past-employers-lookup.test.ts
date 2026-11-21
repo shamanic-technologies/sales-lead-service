@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 const {
-  findProfileByEmail, payingClientsOf, servedProviderOf, TransientLookupError, CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO,
+  findProfileByEmail, readCareerOfProfile, linkedinHandleOf, payingClientsOf, servedProviderOf, TransientLookupError,
+  CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO,
 } = await import("../../src/lib/client-past-employers-read.js");
 
-type Req = { endpointId: string; maxMicro: number; routeExclude?: readonly string[] };
+type Req = { endpointId: string; maxMicro: number; params?: Record<string, unknown>; routeExclude?: readonly string[] };
 const answer = (status: number, body: unknown, chargedMicro = 0) => ({ status, body, chargedMicro, contentType: "application/json" });
 const miss = { output: { full_name: null, linkedin_url: null }, _treg: { served_by: null, outcome: "miss", tried: [] } };
 const hit = (provider: string, output: Record<string, unknown>) => ({
@@ -39,20 +40,20 @@ describe("findProfileByEmail", () => {
 
   it("a real miss is a final « no profile », asked once, Apollo excluded, wide ceiling", async () => {
     const { call, reqs } = fakeCall([answer(200, miss)]);
-    expect(await findProfileByEmail("a@b.co", call)).toEqual({ linkedinUrl: null, employer: null, charged: 0 });
+    expect(await findProfileByEmail("a@b.co", call)).toEqual({ linkedinUrl: null, charged: 0 });
     expect(reqs).toHaveLength(1);
     expect(reqs[0].routeExclude).toEqual(["apollo"]);
     expect(reqs[0].maxMicro).toBe(CAREER_ENRICH_MAX_MICRO);
   });
 
-  it("a hit without a profile is asked again without its provider; the employer it named is kept", async () => {
+  it("a hit without a profile is asked again without its provider (its employer is never taken as a career)", async () => {
     const { call, reqs } = fakeCall([
       answer(200, hit("leadocean", { full_name: "Ann Lee", company_name: "Beyond", company_domain: "beyond.tech", title: "CEO", linkedin_url: null }), 5_000),
       answer(200, hit("tomba", { full_name: "Ann Lee", linkedin_url: "https://www.linkedin.com/in/annlee" }), 8_900),
     ]);
     const out = await findProfileByEmail("a@b.co", call);
     expect(out.linkedinUrl).toBe("https://www.linkedin.com/in/annlee");
-    expect(out.employer).toEqual({ name: "Beyond", domain: "beyond.tech", title: "CEO" });
+    expect(out).not.toHaveProperty("employer");
     expect(out.charged).toBe(13_900);
     expect(reqs.map((r) => r.routeExclude)).toEqual([["apollo"], ["apollo", "leadocean"]]);
     expect(reqs[1].maxMicro).toBe(Math.min(CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - 5_000));
@@ -66,6 +67,50 @@ describe("findProfileByEmail", () => {
     ]);
     expect((await findProfileByEmail("a@b.co", call)).linkedinUrl).toBeNull();
     expect(reqs).toHaveLength(3);
+  });
+});
+
+describe("readCareerOfProfile", () => {
+  const profile = (provider: string, raw: unknown) => ({
+    output: { full_name: "Ann" }, raw,
+    _treg: { served_by: `${provider}.linkedin.user.profile`, tried: [{ endpoint_id: `${provider}.linkedin.user.profile`, provider, outcome: "hit" }] },
+  });
+  const url = "https://www.linkedin.com/in/ann-lee-42/";
+
+  it("asks with the URL and its handle; a career-less answer is re-asked without its provider", async () => {
+    const { call, reqs } = fakeCall([
+      answer(200, profile("brightdata", [{ name: "Ann", experience: null, current_company: { name: "Beyond" } }]), 1_500),
+      answer(200, profile("fetchinio", { experiences: [
+        { name: "Beyond", company: { name: "Beyond" }, jobTitle: "CEO", current: true, ongoing: true, timePeriod: { startDate: { month: 12, year: 2016 }, endDate: null } },
+        { name: "Google", company: { name: "Google" }, jobTitle: "PM", current: false, timePeriod: { startDate: { month: 1, year: 2012 }, endDate: { month: 5, year: 2016 } } },
+      ] }), 1_500),
+    ]);
+    const out = await readCareerOfProfile(url, call, 0);
+    expect(reqs[0].params).toEqual({ linkedin_url: url, linkedin_handle: "ann-lee-42" });
+    expect(reqs.map((r) => r.routeExclude)).toEqual([["apollo"], ["apollo", "brightdata"]]);
+    expect(out.charged).toBe(3_000);
+    expect(out.servedBy).toBe("fetchinio.linkedin.user.profile");
+    expect(out.roles).toEqual([
+      { organizationName: "Beyond", title: "CEO", startDate: "2016-12-01", endDate: null, current: true, companyLinkedinUrl: null },
+      { organizationName: "Google", title: "PM", startDate: "2012-01-01", endDate: "2016-05-01", current: false, companyLinkedinUrl: null },
+    ]);
+  });
+
+  it("the provider's own « no profile » is final; treg's refusal or an error is no answer", async () => {
+    expect((await readCareerOfProfile(url, fakeCall([answer(404, { detail: "profile not found" })]).call, 0)).roles).toBeNull();
+    await expect(readCareerOfProfile(url, fakeCall([answer(404, { detail: "no tool for that" })]).call, 0)).rejects.toBeInstanceOf(TransientLookupError);
+    await expect(readCareerOfProfile(url, fakeCall([answer(502, {})]).call, 0)).rejects.toBeInstanceOf(TransientLookupError);
+  });
+
+  it("never asks past the client's ceiling", async () => {
+    const { call, reqs } = fakeCall([]);
+    expect(await readCareerOfProfile(url, call, CAREER_LOOKUP_MAX_MICRO)).toEqual({ roles: [], servedBy: null, charged: 0 });
+    expect(reqs).toHaveLength(0);
+  });
+
+  it("reads the handle off a profile URL", () => {
+    expect(linkedinHandleOf("https://www.linkedin.com/in/j%C3%A9r%C3%B4me-x?trk=a")).toBe("jérôme-x");
+    expect(linkedinHandleOf("https://www.linkedin.com/company/acme")).toBeNull();
   });
 });
 

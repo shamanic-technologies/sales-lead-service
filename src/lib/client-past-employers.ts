@@ -185,12 +185,13 @@ export function readProfileRoles(body: unknown): ProfileRole[] {
       str(e.companyName) ?? str(e.company_name) ?? (company ? str(company.name) : str(e.company)) ?? str(e.organization) ?? str(e.organization_name);
     // A link where a name belongs (LinkedIn's own `redir/suspicious-page?url=...` for a self-typed employer) names no company.
     if (!organizationName || /^(https?:\/\/|www\.)/i.test(organizationName)) continue;
-    const endRaw = e.endDate ?? e.end_date ?? e.ends_at ?? e.end;
-    const startRaw = e.startDate ?? e.start_date ?? e.starts_at ?? e.start;
-    const present = isPresent(endRaw) || e.current === true || e.is_current === true;
+    const period = e.timePeriod && typeof e.timePeriod === "object" ? (e.timePeriod as Record<string, unknown>) : null;
+    const endRaw = e.endDate ?? e.end_date ?? e.ends_at ?? e.end ?? period?.endDate;
+    const startRaw = e.startDate ?? e.start_date ?? e.starts_at ?? e.start ?? period?.startDate;
+    const present = isPresent(endRaw) || e.current === true || e.is_current === true || e.ongoing === true;
     roles.push({
       organizationName,
-      title: str(e.title) ?? str(e.position) ?? str(e.job_title),
+      title: str(e.title) ?? str(e.position) ?? str(e.job_title) ?? str(e.jobTitle),
       startDate: profileDate(startRaw),
       endDate: present ? null : profileDate(endRaw),
       current: present,
