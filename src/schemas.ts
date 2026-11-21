@@ -7712,6 +7712,117 @@ registry.registerPath({
   },
 });
 
+// --- The companies where a brand's paying clients have worked (BRAND-PROOF-LOGOS-1121) ---
+
+const ClientPastEmployerClientSchema = z.object({
+  leadId: z.string().openapi({ description: "The paying client's lead (the lead holding the paid evidence)." }),
+  title: z.string().nullable(),
+  startDate: z.string().nullable().openapi({ description: "YYYY-MM-DD; first of the month/year when that is all the source states." }),
+  endDate: z.string().nullable(),
+  current: z.boolean().openapi({ description: "true = they work there now." }),
+});
+
+const ClientPastEmployerCompanySchema = z
+  .object({
+    companyKey: z.string().openapi({ description: "`company:<brand-service company id>` when resolved, else `domain:<domain>`, else `name:<case-folded name>`." }),
+    companyId: z.string().nullable().openapi({ description: "brand-service company id of the employer, when resolved." }),
+    name: z.string().nullable(),
+    domain: z.string().nullable(),
+    logoUrl: z.string().nullable(),
+    linkedinUrl: z.string().nullable(),
+    clientCount: z.number().int().openapi({ description: "Distinct paying clients who worked there (past or current)." }),
+    currentForSome: z.boolean(),
+    clients: z.array(ClientPastEmployerClientSchema).openapi({ description: "The trace: each client, the role and its dates." }),
+  })
+  .openapi("ClientPastEmployerCompany");
+
+const ClientPastEmployersResponseSchema = z
+  .object({
+    brandId: z.string(),
+    payingClients: z.number().int(),
+    clientsWithHistory: z.number().int(),
+    companyCount: z.number().int(),
+    reason: z.enum(["no_paying_clients", "no_employment_history"]).nullable().openapi({ description: "Why `companies` is empty; null when it is not." }),
+    companies: z.array(ClientPastEmployerCompanySchema).openapi({ description: "Most clients first, then name." }),
+    clients: z.array(
+      z.object({
+        leadId: z.string(),
+        name: z.string().nullable(),
+        paidAt: z.string().nullable(),
+        history: z.enum(["has_history", "not_looked_up", "looked_up_none"]),
+        lookup: z.object({ status: z.enum(["history_found", "no_linkedin", "no_experience", "profile_unreadable"]), lookedUpAt: z.string() }).nullable(),
+        companyKeys: z.array(z.string()),
+      }),
+    ),
+    lookups: z
+      .object({
+        attempted: z.number().int(),
+        historyFound: z.number().int(),
+        noLinkedin: z.number().int(),
+        noExperience: z.number().int(),
+        profileUnreadable: z.number().int(),
+        failed: z.number().int(),
+        remaining: z.number().int().openapi({ description: "Clients still owed a lookup after this call: call again." }),
+        chargedMicro: z.number().int().openapi({ description: "treg spend of this call, micro-USD, declared on the caller's run (treg-micro-usd)." }),
+      })
+      .optional()
+      .openapi({ description: "POST only: what this call looked up." }),
+  })
+  .openapi("ClientPastEmployersResponse");
+
+const clientPastEmployersHeaders = [
+  { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "API key for authenticating requests" },
+  { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "Internal organization UUID owning the brand" },
+];
+
+const clientPastEmployersDescription =
+  "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. " +
+  "A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands " +
+  "(succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. " +
+  "One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error.";
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/brands/{brandId}/client-past-employers",
+  summary: "Companies where the brand's paying clients have worked (read, never spends)",
+  description: clientPastEmployersDescription,
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: clientPastEmployersHeaders,
+  responses: {
+    200: { description: "The companies and their trace", content: { "application/json": { schema: ClientPastEmployersResponseSchema } } },
+    400: { description: "Missing x-org-id" },
+    401: { description: "Unauthorized" },
+    500: { description: "Unreadable (client_past_employers_unreadable)" },
+    503: { description: "The copy of crm-service's people facts has not reached the end of the feed yet (crm_copy_not_caught_up)" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/brands/{brandId}/client-past-employers",
+  summary: "Look up missing careers of the brand's paying clients, then answer the same read",
+  description:
+    clientPastEmployersDescription +
+    " First, for each paying client with no role on any of their leads: the LinkedIn profile known on a lead of theirs, else treg people.enrich by email to find it, " +
+    "then treg linkedin.user.profile for the experience list, recorded as the lead's employment history. Apollo is never called. " +
+    "Org-billed on the caller's run (x-run-id, x-user-id). A client is looked up once; a lookup that found nothing is asked again after 90 days; " +
+    "a failed call records nothing. At most 40 clients per call, none started past ~100 s: `lookups.remaining` > 0 = call again. Idempotent, safe daily.",
+  request: { params: z.object({ brandId: z.string() }) },
+  parameters: [
+    ...clientPastEmployersHeaders,
+    { in: "header" as const, name: "x-run-id", required: true, schema: { type: "string" as const }, description: "The caller's run: the lookups' spend hangs on it" },
+    { in: "header" as const, name: "x-user-id", required: true, schema: { type: "string" as const }, description: "Billing authorizes the paid lookup per user" },
+  ],
+  responses: {
+    200: { description: "The companies, their trace, and `lookups`", content: { "application/json": { schema: ClientPastEmployersResponseSchema } } },
+    400: { description: "Missing x-org-id, x-run-id or x-user-id" },
+    401: { description: "Unauthorized" },
+    402: { description: "insufficient_credit (or a sales funnel max budget, with `reason` + `sales_funnel_cap`)" },
+    500: { description: "Unreadable (client_past_employers_unreadable)" },
+    503: { description: "crm_copy_not_caught_up" },
+  },
+});
+
 // --- "Already a customer", read off the prospect's own reply ---
 
 const NamedPersonCampaignParam = z.object({

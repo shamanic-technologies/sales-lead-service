@@ -8890,6 +8890,239 @@
           "reachedAt"
         ]
       },
+      "ClientPastEmployersResponse": {
+        "type": "object",
+        "properties": {
+          "brandId": {
+            "type": "string"
+          },
+          "payingClients": {
+            "type": "integer"
+          },
+          "clientsWithHistory": {
+            "type": "integer"
+          },
+          "companyCount": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "no_paying_clients",
+              "no_employment_history",
+              null
+            ],
+            "description": "Why `companies` is empty; null when it is not."
+          },
+          "companies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClientPastEmployerCompany"
+            },
+            "description": "Most clients first, then name."
+          },
+          "clients": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "paidAt": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "history": {
+                  "type": "string",
+                  "enum": [
+                    "has_history",
+                    "not_looked_up",
+                    "looked_up_none"
+                  ]
+                },
+                "lookup": {
+                  "type": "object",
+                  "nullable": true,
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "history_found",
+                        "no_linkedin",
+                        "no_experience",
+                        "profile_unreadable"
+                      ]
+                    },
+                    "lookedUpAt": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "lookedUpAt"
+                  ]
+                },
+                "companyKeys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "leadId",
+                "name",
+                "paidAt",
+                "history",
+                "lookup",
+                "companyKeys"
+              ]
+            }
+          },
+          "lookups": {
+            "type": "object",
+            "properties": {
+              "attempted": {
+                "type": "integer"
+              },
+              "historyFound": {
+                "type": "integer"
+              },
+              "noLinkedin": {
+                "type": "integer"
+              },
+              "noExperience": {
+                "type": "integer"
+              },
+              "profileUnreadable": {
+                "type": "integer"
+              },
+              "failed": {
+                "type": "integer"
+              },
+              "remaining": {
+                "type": "integer",
+                "description": "Clients still owed a lookup after this call: call again."
+              },
+              "chargedMicro": {
+                "type": "integer",
+                "description": "treg spend of this call, micro-USD, declared on the caller's run (treg-micro-usd)."
+              }
+            },
+            "required": [
+              "attempted",
+              "historyFound",
+              "noLinkedin",
+              "noExperience",
+              "profileUnreadable",
+              "failed",
+              "remaining",
+              "chargedMicro"
+            ],
+            "description": "POST only: what this call looked up."
+          }
+        },
+        "required": [
+          "brandId",
+          "payingClients",
+          "clientsWithHistory",
+          "companyCount",
+          "reason",
+          "companies",
+          "clients"
+        ]
+      },
+      "ClientPastEmployerCompany": {
+        "type": "object",
+        "properties": {
+          "companyKey": {
+            "type": "string",
+            "description": "`company:<brand-service company id>` when resolved, else `domain:<domain>`, else `name:<case-folded name>`."
+          },
+          "companyId": {
+            "type": "string",
+            "nullable": true,
+            "description": "brand-service company id of the employer, when resolved."
+          },
+          "name": {
+            "type": "string",
+            "nullable": true
+          },
+          "domain": {
+            "type": "string",
+            "nullable": true
+          },
+          "logoUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "linkedinUrl": {
+            "type": "string",
+            "nullable": true
+          },
+          "clientCount": {
+            "type": "integer",
+            "description": "Distinct paying clients who worked there (past or current)."
+          },
+          "currentForSome": {
+            "type": "boolean"
+          },
+          "clients": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "leadId": {
+                  "type": "string",
+                  "description": "The paying client's lead (the lead holding the paid evidence)."
+                },
+                "title": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "startDate": {
+                  "type": "string",
+                  "nullable": true,
+                  "description": "YYYY-MM-DD; first of the month/year when that is all the source states."
+                },
+                "endDate": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "current": {
+                  "type": "boolean",
+                  "description": "true = they work there now."
+                }
+              },
+              "required": [
+                "leadId",
+                "title",
+                "startDate",
+                "endDate",
+                "current"
+              ]
+            },
+            "description": "The trace: each client, the role and its dates."
+          }
+        },
+        "required": [
+          "companyKey",
+          "companyId",
+          "name",
+          "domain",
+          "logoUrl",
+          "linkedinUrl",
+          "clientCount",
+          "currentForSome",
+          "clients"
+        ]
+      },
       "ChannelRefusalBody": {
         "type": "object",
         "properties": {
@@ -22755,6 +22988,141 @@
           },
           "503": {
             "description": "The copy of crm-service's people facts has not reached the end of the feed yet (crm_copy_not_caught_up)"
+          }
+        }
+      }
+    },
+    "/internal/brands/{brandId}/client-past-employers": {
+      "get": {
+        "summary": "Companies where the brand's paying clients have worked (read, never spends)",
+        "description": "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID owning the brand"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The companies and their trace",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientPastEmployersResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing x-org-id"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "Unreadable (client_past_employers_unreadable)"
+          },
+          "503": {
+            "description": "The copy of crm-service's people facts has not reached the end of the feed yet (crm_copy_not_caught_up)"
+          }
+        }
+      },
+      "post": {
+        "summary": "Look up missing careers of the brand's paying clients, then answer the same read",
+        "description": "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error. First, for each paying client with no role on any of their leads: the LinkedIn profile known on a lead of theirs, else treg people.enrich by email to find it, then treg linkedin.user.profile for the experience list, recorded as the lead's employment history. Apollo is never called. Org-billed on the caller's run (x-run-id, x-user-id). A client is looked up once; a lookup that found nothing is asked again after 90 days; a failed call records nothing. At most 40 clients per call, none started past ~100 s: `lookups.remaining` > 0 = call again. Idempotent, safe daily.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "API key for authenticating requests"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Internal organization UUID owning the brand"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The caller's run: the lookups' spend hangs on it"
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Billing authorizes the paid lookup per user"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "brandId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The companies, their trace, and `lookups`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClientPastEmployersResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing x-org-id, x-run-id or x-user-id"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "402": {
+            "description": "insufficient_credit (or a sales funnel max budget, with `reason` + `sales_funnel_cap`)"
+          },
+          "500": {
+            "description": "Unreadable (client_past_employers_unreadable)"
+          },
+          "503": {
+            "description": "crm_copy_not_caught_up"
           }
         }
       }
