@@ -33,9 +33,13 @@ export const LOOKUP_RETRY_AFTER_DAYS = 90;
 /**
  * What a stored lookup recorded. 2 = each role's employer carries the LinkedIn company page its experience entry names
  * (BRAND-PROOF-LOGOS-1121: name-only employers are refused by brand-service's proof store). A career found by an older
- * version is read again once (its profile is re-read, the enrich step is not repeated: the lead holds the profile URL).
+ * version than `PAGES_VERSION` is read again once (its profile is re-read, the enrich step is not repeated: the lead
+ * holds the profile URL). 3 = a profile the cheap providers could not read is asked once more of the dearer ones
+ * (`CAREER_PROFILE_DEEP_MAX_MICRO`): a « no experience » / « unreadable » recorded before it is asked again once.
  */
-export const LOOKUP_VERSION = 2;
+export const LOOKUP_VERSION = 3;
+export const PAGES_VERSION = 2;
+export const DEEP_PROFILE_VERSION = 3;
 /**
  * One fill call stays inside a caller's 5 minutes: no client is STARTED past this budget, and a started one makes at
  * most two treg calls of 90 s each (treg-client CALL_TIMEOUT_MS), so 100 s + 180 s < 300 s.
@@ -48,8 +52,12 @@ const PAID = STEP_REACHED_EVIDENCE.paid_client;
 
 export interface PayingClient {
   leadId: string;
+  /** Every paying lead row folded into this person (the holder included), sorted. */
+  memberLeadIds: string[];
   name: string | null;
   email: string | null;
+  /** An E.164 phone of the person, looked up only when no email and no profile is held. */
+  phone: string | null;
   linkedinUrl: string | null;
   paidAt: string | null;
 }
@@ -63,13 +71,14 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
   // A copy still filling would answer fewer payers than the brand has: refused (503), never a short list.
   await assertCrmCopyCaughtUp();
   const rows = (await db.execute(sql`
-    SELECT ce.matched_lead_id::text AS lead_id, ce.event AS type, NULL::jsonb AS payload, ce.received_at AS at
+    SELECT ce.matched_lead_id::text AS lead_id, ce.event AS type, NULL::jsonb AS payload, ce.received_at AS at,
+      NULL::text AS fact_id
     FROM conversion_events ce
     WHERE ce.org_id = ${orgId} AND ce.brand_id = ${brandId}
       AND ce.event = ANY(${sql.param([...PAID.ledgerEvents])}::text[])
       AND ce.withdrawn_at IS NULL AND ce.attribution_status = 'attributed' AND ce.matched_lead_id IS NOT NULL
     UNION ALL
-    SELECT m.lead_id::text, f.type, f.payload, f.occurred_at
+    SELECT m.lead_id::text, f.type, f.payload, f.occurred_at, f.fact_id::text
     FROM crm_facts f
     CROSS JOIN LATERAL unnest(f.emails) AS e(addr)
     JOIN lead_contact_methods m ON m.channel = 'email' AND lower(m.value) = lower(trim(e.addr))
@@ -80,11 +89,14 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
         SELECT 1 FROM leads_campaigns lc
         WHERE lc.lead_id = m.lead_id AND lc.org_id = f.org_id AND f.brand_id = ANY(lc.brand_ids)
       )
-  `)) as unknown as Array<{ lead_id: string; type: string; payload: Record<string, unknown> | null; at: RawTimestamp }>;
+  `)) as unknown as Array<{ lead_id: string; type: string; payload: Record<string, unknown> | null; at: RawTimestamp; fact_id: string | null }>;
 
   const paidAt = new Map<string, string | null>();
+  // The leads ONE paid fact names together (one payment stated under two addresses of the same payer).
+  const leadsByFact = new Map<string, Set<string>>();
   for (const r of rows) {
     if (!rowReaches({ emails: [], name: null, phones: [], at: null, type: r.type, payload: r.payload })) continue;
+    if (r.fact_id) leadsByFact.set(r.fact_id, (leadsByFact.get(r.fact_id) ?? new Set()).add(r.lead_id));
     const at = r.at === null ? null : toIsoTimestamp(r.at);
     const prior = paidAt.get(r.lead_id);
     if (!paidAt.has(r.lead_id) || (at !== null && (prior === null || prior === undefined || at < prior))) paidAt.set(r.lead_id, at);
@@ -97,6 +109,8 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
       NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') AS name,
       ARRAY(SELECT lower(cm.value) FROM lead_contact_methods cm
             WHERE cm.lead_id = l.id AND cm.channel = 'email' ORDER BY cm.created_at, cm.id) AS emails,
+      (SELECT cm.value FROM lead_contact_methods cm
+        WHERE cm.lead_id = l.id AND cm.channel = 'phone' AND cm.value LIKE '+%' ORDER BY cm.created_at, cm.id LIMIT 1) AS phone,
       ARRAY(SELECT lower(cm.value) FROM leads x JOIN lead_contact_methods cm ON cm.lead_id = x.id AND cm.channel = 'email'
             WHERE x.id <> l.id AND l.human_id IS NOT NULL AND x.human_id = l.human_id
             ORDER BY cm.created_at, cm.id) AS human_emails,
@@ -111,6 +125,7 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
 
   return payingClientsOf(
     people.map((p) => ({ ...p, paid_at: paidAt.get(p.lead_id) ?? null })),
+    [...leadsByFact.values()].filter((s) => s.size > 1).map((s) => [...s]),
   );
 }
 
@@ -122,21 +137,56 @@ export interface PayingLeadRow {
   /** Every address of the human's OTHER leads. */
   human_emails: string[] | null;
   linkedin_url: string | null;
+  phone?: string | null;
   not_a_person: boolean;
   paid_at?: string | null;
 }
 
 /**
- * PURE. One paying client per PERSON (human-service's human; no human = the lead alone): the lead that paid first
- * holds the client (ties: lowest lead id). A person any of whose addresses (any lead of theirs) is staff is us, never
- * a client (Kevin's own human held 7 leads, 3 of them counted as payers). The lookup address is the client lead's
- * first non-staff address, else one of the human's other leads.
+ * PURE. One paying client per PERSON. Two paying leads are one person when (1) human-service names the same human
+ * (`leads.human_id`), (2) ONE paid fact names both (a payment stated under two addresses of its payer: `coPaid`), or
+ * (3) both hold the same LinkedIn member profile (a profile is one person's own page). Nothing is written: this only
+ * keeps a payer from counting twice (prod 2026-11-22: one payer's payments named two gmail addresses, two humans;
+ * another's two addresses both led to one profile). The lead that paid first holds the client (ties: lowest lead id).
+ * A person any of whose addresses (any lead of theirs) is staff is us, never a client (Kevin's own human held 7
+ * leads, 3 of them counted as payers). The lookup address is the holder's first address, else another lead's.
  */
-export function payingClientsOf(rows: ReadonlyArray<PayingLeadRow & { paid_at: string | null }>): PayingClient[] {
+export function payingClientsOf(
+  rows: ReadonlyArray<PayingLeadRow & { paid_at: string | null }>,
+  coPaid: ReadonlyArray<readonly string[]> = [],
+): PayingClient[] {
+  const live = rows.filter((r) => !r.not_a_person);
+  const parent = new Map<string, string>(live.map((r) => [r.lead_id, r.lead_id]));
+  const find = (x: string): string => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root)!;
+    parent.set(x, root);
+    return root;
+  };
+  const union = (a: string, b: string) => {
+    if (!parent.has(a) || !parent.has(b)) return;
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra < rb ? rb : ra, ra < rb ? ra : rb);
+  };
+  const firstBy = new Map<string, string>();
+  for (const r of live) {
+    const keys = [
+      r.human_id ? `human:${r.human_id}` : null,
+      r.linkedin_url && linkedinHandleOf(r.linkedin_url) ? `in:${linkedinHandleOf(r.linkedin_url)!.toLowerCase()}` : null,
+    ];
+    for (const k of keys) {
+      if (!k) continue;
+      const seen = firstBy.get(k);
+      if (seen) union(seen, r.lead_id);
+      else firstBy.set(k, r.lead_id);
+    }
+  }
+  for (const group of coPaid) for (const id of group.slice(1)) union(group[0], id);
+
   const byPerson = new Map<string, Array<PayingLeadRow & { paid_at: string | null }>>();
-  for (const r of rows) {
-    if (r.not_a_person) continue;
-    const key = r.human_id ? `human:${r.human_id}` : `lead:${r.lead_id}`;
+  for (const r of live) {
+    const key = find(r.lead_id);
     byPerson.set(key, [...(byPerson.get(key) ?? []), r]);
   }
   const out: PayingClient[] = [];
@@ -151,10 +201,13 @@ export function payingClientsOf(rows: ReadonlyArray<PayingLeadRow & { paid_at: s
     );
     const holder = sorted[0];
     const own = holder.emails ?? [];
+    const others = sorted.slice(1).flatMap((r) => r.emails ?? []);
     out.push({
       leadId: holder.lead_id,
+      memberLeadIds: sorted.map((r) => r.lead_id).sort(),
       name: holder.name ?? sorted.find((r) => r.name)?.name ?? null,
-      email: own[0] ?? all[0] ?? null,
+      email: own[0] ?? others[0] ?? all[0] ?? null,
+      phone: holder.phone ?? sorted.find((r) => r.phone)?.phone ?? null,
       linkedinUrl: holder.linkedin_url ?? sorted.find((r) => r.linkedin_url)?.linkedin_url ?? null,
       paidAt: holder.paid_at,
     });
@@ -162,15 +215,18 @@ export function payingClientsOf(rows: ReadonlyArray<PayingLeadRow & { paid_at: s
   return out.sort((a, b) => a.leadId.localeCompare(b.leadId));
 }
 
-/** Every role we hold on any lead of each client's human. */
-export async function loadClientEmployment(clientLeadIds: readonly string[]): Promise<EmploymentRow[]> {
-  if (clientLeadIds.length === 0) return [];
+/** Every role we hold on any lead of each client (every folded member and each member's human). */
+export async function loadClientEmployment(
+  clients: ReadonlyArray<Pick<PayingClient, "leadId" | "memberLeadIds">>,
+): Promise<EmploymentRow[]> {
+  const pairs = clients.flatMap((c) => (c.memberLeadIds.length > 0 ? c.memberLeadIds : [c.leadId]).map((m) => [c.leadId, m] as const));
+  if (pairs.length === 0) return [];
   const rows = (await db.execute(sql`
-    SELECT c.client_lead_id::text AS client_lead_id, lo.lead_id::text AS lead_id, o.id::text AS organization_id,
+    SELECT DISTINCT c.client_lead_id::text AS client_lead_id, lo.lead_id::text AS lead_id, o.id::text AS organization_id,
       o.company_id::text AS company_id, o.name, o.primary_domain AS domain, o.logo_url, o.linkedin_url,
       lo.title, lo.start_date::text AS start_date, lo.end_date::text AS end_date, lo.current
-    FROM unnest(${sql.param([...clientLeadIds])}::uuid[]) AS c(client_lead_id)
-    JOIN leads l ON l.id = c.client_lead_id
+    FROM unnest(${sql.param(pairs.map((p) => p[0]))}::uuid[], ${sql.param(pairs.map((p) => p[1]))}::uuid[]) AS c(client_lead_id, member_id)
+    JOIN leads l ON l.id = c.member_id
     JOIN LATERAL (
       SELECT l.id
       UNION
@@ -199,7 +255,8 @@ export async function loadClientEmployment(clientLeadIds: readonly string[]): Pr
   }));
 }
 
-export type LookupStatus = "history_found" | "no_linkedin" | "no_experience" | "profile_unreadable";
+/** `no_identifier` = nothing to look the person up by (no email, no profile, no phone): recorded, nothing spent. */
+export type LookupStatus = "history_found" | "no_linkedin" | "no_experience" | "profile_unreadable" | "no_identifier";
 
 interface LookupRow {
   lead_id: string;
@@ -246,7 +303,7 @@ export interface ClientPastEmployersAnswer {
 export async function readClientPastEmployers(orgId: string, brandId: string): Promise<ClientPastEmployersAnswer> {
   const clients = await loadPayingClients(orgId, brandId);
   const ids = clients.map((c) => c.leadId);
-  const [rows, lookups] = await Promise.all([loadClientEmployment(ids), loadLookups(ids)]);
+  const [rows, lookups] = await Promise.all([loadClientEmployment(clients), loadLookups(ids)]);
   const companies = groupPastEmployers(rows);
   const keysByClient = new Map<string, string[]>();
   for (const c of companies) for (const cl of c.clients) keysByClient.set(cl.leadId, [...(keysByClient.get(cl.leadId) ?? []), c.companyKey]);
@@ -279,6 +336,8 @@ export interface FillSummary {
   noLinkedin: number;
   noExperience: number;
   profileUnreadable: number;
+  /** Clients with nothing to look them up by (no email, profile or phone). */
+  noIdentifier: number;
   failed: number;
   /** Clients still owed a lookup after this call (budget or failures): call again. */
   remaining: number;
@@ -299,10 +358,15 @@ export function clientsToLookUp(
   return clients.filter((c) => {
     const l = lookups.get(c.leadId);
     // A career an older version read is read again once, so its employers get what identifies them.
-    if (l && l.status === "history_found" && l.version < LOOKUP_VERSION && (c.linkedinUrl || c.email)) return true;
+    if (l && l.status === "history_found" && l.version < PAGES_VERSION && (c.linkedinUrl || c.email)) return true;
     if (withHistory.has(c.leadId)) return false;
-    if (!c.email && !c.linkedinUrl) return false;
+    const identified = Boolean(c.email || c.linkedinUrl || c.phone);
+    // Never attempted: looked up now; with nothing to look them up by, the lookup records that (free).
     if (!l) return true;
+    if (l.status === "no_identifier") return identified;
+    if (!identified) return false;
+    // A profile the cheap providers could not read: asked once more now that the dearer ones are tried.
+    if ((l.status === "no_experience" || l.status === "profile_unreadable") && l.version < DEEP_PROFILE_VERSION && c.linkedinUrl) return true;
     return l.status !== "history_found" && Date.parse(l.lookedUpAt) < retryBefore;
   });
 }
@@ -347,6 +411,15 @@ export const CAREER_ENRICH_MAX_MICRO = 60_000;
 export const CAREER_ENRICH_ROUNDS = 3;
 /** A profile answer with no career is asked again without its provider, at most this many calls. */
 export const CAREER_PROFILE_ROUNDS = 3;
+/**
+ * Once the cheap rounds read no career, ONE last call with this ceiling ($0.05) reaches the providers that read the
+ * profiles the cheap ones miss (fiber-ai $0.04 a hit read a payer's 15 roles on 2026-11-22 after every provider under
+ * $0.01 missed). Every endpoint already tried is excluded, so nothing is paid twice.
+ */
+export const CAREER_PROFILE_DEEP_MAX_MICRO = 50_000;
+/** Reverse phone lookup for a person known by phone alone (no email, no profile): $0.001 a hit, a miss free. */
+export const PHONE_ENDPOINT = "blitzapi.people.phone.reverse";
+export const PHONE_MAX_MICRO = 2_000;
 /** What ONE client's lookup may spend in total, every call included ($0.15). */
 export const CAREER_LOOKUP_MAX_MICRO = 150_000;
 
@@ -420,23 +493,54 @@ export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, a
   const exclude = [...NEVER_ROUTE_TO];
   const handle = linkedinHandleOf(linkedinUrl);
   const params = { linkedin_url: linkedinUrl, ...(handle ? { linkedin_handle: handle } : {}) };
-  for (let round = 0; round < CAREER_PROFILE_ROUNDS; round++) {
-    const maxMicro = Math.min(PROFILE_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - alreadyCharged - charged);
-    if (maxMicro <= 0) break;
+  const ask = async (ceiling: number): Promise<{ done: ProfileLookupAnswer | null; moreProviders: boolean }> => {
+    const maxMicro = Math.min(ceiling, CAREER_LOOKUP_MAX_MICRO - alreadyCharged - charged);
+    if (maxMicro <= 0) return { done: null, moreProviders: false };
     const p = await call({ endpointId: PROFILE_ENDPOINT, method: "POST", params, maxMicro, routeExclude: [...exclude] });
     charged += p.chargedMicro;
     // Only the PROVIDER saying it has no readable profile (404/410/422, not treg's own refusal) is a final answer.
     const providerHasNone = (p.status === 404 || p.status === 410 || p.status === 422) && !isTregRefusal(p.status, p.body);
-    if (providerHasNone) return { roles: null, servedBy: servedByOf(p.body), charged };
+    if (providerHasNone) return { done: { roles: null, servedBy: servedByOf(p.body), charged }, moreProviders: false };
     if (!isAnswer(p.status)) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
-    servedBy = servedByOf(p.body);
+    servedBy = servedByOf(p.body) ?? servedBy;
     const roles = readProfileRoles(p.body);
-    if (roles.length > 0) return { roles, servedBy, charged };
+    if (roles.length > 0) return { done: { roles, servedBy: servedByOf(p.body), charged }, moreProviders: false };
+    // Every endpoint that answered (hit or miss) is not asked again; one skipped for its price may be, dearer.
+    for (const ep of triedEndpointsOf(p.body)) if (!exclude.includes(ep)) exclude.push(ep);
     const provider = servedProviderOf(p.body);
-    if (!provider) break;
-    exclude.push(provider);
+    if (provider && !exclude.includes(provider)) exclude.push(provider);
+    return { done: null, moreProviders: provider !== null };
+  };
+  for (let round = 0; round < CAREER_PROFILE_ROUNDS; round++) {
+    const r = await ask(PROFILE_MAX_MICRO);
+    if (r.done) return r.done;
+    if (!r.moreProviders) break;
   }
+  const deep = await ask(CAREER_PROFILE_DEEP_MAX_MICRO);
+  if (deep.done) return deep.done;
   return { roles: [], servedBy, charged };
+}
+
+/** PURE. The endpoints a routed answer actually asked (`_treg.tried`, outcome other than `skipped`). */
+export function triedEndpointsOf(body: unknown): string[] {
+  const tried = (body as { _treg?: { tried?: unknown } } | null)?._treg?.tried;
+  if (!Array.isArray(tried)) return [];
+  return tried
+    .filter((t): t is Record<string, unknown> => Boolean(t) && typeof t === "object")
+    .filter((t) => t.outcome !== "skipped" && typeof t.endpoint_id === "string")
+    .map((t) => t.endpoint_id as string);
+}
+
+/**
+ * The LinkedIn profile behind a phone number (a payer known by phone alone), or null. Same failure rule: only a 200
+ * is an answer.
+ */
+export async function findProfileByPhone(phone: string, call: TregCall): Promise<EmailLookupAnswer> {
+  const r = await call({ endpointId: PHONE_ENDPOINT, method: "POST", params: { phone }, maxMicro: PHONE_MAX_MICRO });
+  if (!isAnswer(r.status)) throw new TransientLookupError(`${PHONE_ENDPOINT} answered ${r.status}`);
+  const person = (r.body as { person?: unknown } | null)?.person;
+  const found = person && typeof person === "object" ? readEnrichOutput({ output: person }) : null;
+  return { linkedinUrl: found?.linkedinUrl ?? null, charged: r.chargedMicro };
 }
 
 /**
@@ -474,6 +578,18 @@ async function attachCompanyPages(leadId: string, roles: readonly ProfileRole[])
 async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendIdentity): Promise<{ status: LookupStatus; charged: number }> {
   let charged = 0;
   let linkedinUrl = client.linkedinUrl;
+  if (!linkedinUrl && !client.email && !client.phone) {
+    await recordLookup({ leadId: client.leadId, identity, status: "no_identifier", linkedinUrl: null, chargedMicro: 0, servedBy: null, roles: 0 });
+    return { status: "no_identifier", charged };
+  }
+  if (!linkedinUrl && !client.email && client.phone) {
+    const found = await findProfileByPhone(client.phone, call);
+    charged += found.charged;
+    linkedinUrl = found.linkedinUrl;
+    if (linkedinUrl) {
+      await db.execute(sql`UPDATE leads SET linkedin_url = COALESCE(linkedin_url, ${linkedinUrl}) WHERE id = ${client.leadId}::uuid`);
+    }
+  }
   if (!linkedinUrl && client.email) {
     const found = await findProfileByEmail(client.email, call);
     charged += found.charged;
@@ -526,9 +642,11 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
 export async function fillClientHistories(identity: SpendIdentity, brandId: string, now = new Date()): Promise<FillSummary> {
   const clients = await loadPayingClients(identity.orgId, brandId);
   const ids = clients.map((c) => c.leadId);
-  const [rows, lookups] = await Promise.all([loadClientEmployment(ids), loadLookups(ids)]);
+  const [rows, lookups] = await Promise.all([loadClientEmployment(clients), loadLookups(ids)]);
   const owed = clientsToLookUp(clients, new Set(rows.map((r) => r.clientLeadId)), lookups, now);
-  const summary: FillSummary = { attempted: 0, historyFound: 0, noLinkedin: 0, noExperience: 0, profileUnreadable: 0, failed: 0, remaining: 0, chargedMicro: 0 };
+  const summary: FillSummary = {
+    attempted: 0, historyFound: 0, noLinkedin: 0, noExperience: 0, profileUnreadable: 0, noIdentifier: 0, failed: 0, remaining: 0, chargedMicro: 0,
+  };
   const meter = new TregMeter({ ...identity, brandId });
   const deadline = Date.now() + FILL_BUDGET_MS;
   const queue = owed.slice(0, FILL_MAX_CLIENTS);
@@ -543,6 +661,7 @@ export async function fillClientHistories(identity: SpendIdentity, brandId: stri
         if (r.status === "history_found") summary.historyFound += 1;
         else if (r.status === "no_linkedin") summary.noLinkedin += 1;
         else if (r.status === "no_experience") summary.noExperience += 1;
+        else if (r.status === "no_identifier") summary.noIdentifier += 1;
         else summary.profileUnreadable += 1;
       } catch (error) {
         if (error instanceof InsufficientCreditError) {

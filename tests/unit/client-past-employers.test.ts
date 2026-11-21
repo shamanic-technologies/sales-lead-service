@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { groupPastEmployers, profileDate, readProfileRoles, type EmploymentRow } from "../../src/lib/client-past-employers.js";
-import { LOOKUP_VERSION, clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
-import { companyKeyOf, companyPageOf } from "../../src/lib/client-past-employers.js";
+import { DEEP_PROFILE_VERSION, LOOKUP_VERSION, clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
+import { companyKeyOf, companyPageOf, companyPageOfId } from "../../src/lib/client-past-employers.js";
 
 const row = (over: Partial<EmploymentRow>): EmploymentRow => ({
   clientLeadId: "a", leadId: "a", organizationId: "o", companyId: null, name: "Acme", domain: null, logoUrl: null,
@@ -76,8 +76,8 @@ describe("readProfileRoles", () => {
 
 describe("clientsToLookUp", () => {
   const now = new Date("2026-11-21T00:00:00Z");
-  const c = (leadId: string, email: string | null = "x@y.com") => ({ leadId, name: null, email, linkedinUrl: null, paidAt: null });
-  it("skips clients with history, no identity, or a recent lookup; retries an old non-finding one", () => {
+  const c = (leadId: string, email: string | null = "x@y.com") => ({ leadId, memberLeadIds: [leadId], name: null, email, phone: null, linkedinUrl: null, paidAt: null });
+  it("skips clients with history or a recent lookup; retries an old non-finding one; a never-attempted one is attempted", () => {
     const out = clientsToLookUp(
       [c("has"), c("none", null), c("fresh"), c("recent"), c("old"), c("found")],
       new Set(["has"]),
@@ -88,13 +88,39 @@ describe("clientsToLookUp", () => {
       ]),
       now,
     );
-    expect(out.map((x) => x.leadId)).toEqual(["fresh", "old"]);
+    // « none » has nothing to look them up by: attempted anyway, the lookup records `no_identifier` (nothing spent).
+    expect(out.map((x) => x.leadId)).toEqual(["none", "fresh", "old"]);
+  });
+
+  it("a `no_identifier` is asked again only once an identifier appears", () => {
+    const stored = new Map([
+      ["still", { status: "no_identifier" as const, lookedUpAt: "2026-11-20T00:00:00Z", version: LOOKUP_VERSION }],
+      ["phone", { status: "no_identifier" as const, lookedUpAt: "2026-11-20T00:00:00Z", version: LOOKUP_VERSION }],
+    ]);
+    const out = clientsToLookUp([c("still", null), { ...c("phone", null), phone: "+16475550100" }], new Set(), stored, now);
+    expect(out.map((x) => x.leadId)).toEqual(["phone"]);
+  });
+
+  it("a profile recorded career-less before the deep round is asked once more; after it, not before the retry window", () => {
+    const li = "https://www.linkedin.com/in/imahboob";
+    const out = clientsToLookUp(
+      [{ ...c("before"), linkedinUrl: li }, { ...c("unreadable"), linkedinUrl: li }, { ...c("after"), linkedinUrl: li }, c("no-profile")],
+      new Set(),
+      new Map([
+        ["before", { status: "no_experience" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: DEEP_PROFILE_VERSION - 1 }],
+        ["unreadable", { status: "profile_unreadable" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: DEEP_PROFILE_VERSION - 1 }],
+        ["after", { status: "no_experience" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: DEEP_PROFILE_VERSION }],
+        ["no-profile", { status: "no_linkedin" as const, lookedUpAt: "2026-11-21T00:00:00Z", version: DEEP_PROFILE_VERSION - 1 }],
+      ]),
+      now,
+    );
+    expect(out.map((x) => x.leadId)).toEqual(["before", "unreadable"]);
   });
 });
 
 describe("clientsToLookUp, lookup version", () => {
   const now = new Date("2026-11-21T00:00:00Z");
-  const c = (leadId: string, linkedinUrl: string | null) => ({ leadId, name: null, email: null, linkedinUrl, paidAt: null });
+  const c = (leadId: string, linkedinUrl: string | null) => ({ leadId, memberLeadIds: [leadId], name: null, email: null, phone: null, linkedinUrl, paidAt: null });
   it("a career an older version found is read again once, even with history; the current version is not", () => {
     const out = clientsToLookUp(
       [c("old-found", "https://www.linkedin.com/in/a"), c("new-found", "https://www.linkedin.com/in/b"), c("old-miss", null)],
@@ -129,5 +155,29 @@ describe("companyPageOf", () => {
   it("a role's link fields: the company page wins over another link", () => {
     const [role] = readProfileRoles({ experience: [{ company: { name: "Google", url: "https://www.linkedin.com/company/google/" }, url: "https://www.linkedin.com/in/x/details/position/1" }] });
     expect(role.companyLinkedinUrl).toBe("https://www.linkedin.com/company/google/");
+  });
+});
+
+describe("company page from a LinkedIn company id", () => {
+  it("a positive numeric id names its page; a placeholder (negative/zero) names none; a stated page still wins", () => {
+    expect(companyPageOfId(2217)).toBe("https://www.linkedin.com/company/2217/");
+    expect(companyPageOfId("3505228")).toBe("https://www.linkedin.com/company/3505228/");
+    expect(companyPageOfId("-12160977")).toBeNull();
+    expect(companyPageOfId(0)).toBeNull();
+    expect(companyPageOfId(null)).toBeNull();
+  });
+
+  it("reads a fiber-ai shaped profile (raw.output.profile.experiences, ISO dates, is_current, linkedin_company_id)", () => {
+    const roles = readProfileRoles({
+      output: { full_name: "M I" },
+      raw: { output: { found: true, profile: { experiences: [
+        { company_name: "Accuzar", title: "Technology Officer", start_date: "2023-10-01T00:00:00.000Z", end_date: null, is_current: true, linkedin_company_id: "-12160977" },
+        { company_name: "Halliburton", title: null, start_date: "2020-09-01T00:00:00.000Z", end_date: "2021-10-31T00:00:00.000Z", is_current: false, linkedin_company_id: "2217" },
+      ] } } },
+    });
+    expect(roles).toEqual([
+      { organizationName: "Accuzar", title: "Technology Officer", startDate: "2023-10-01", endDate: null, current: true, companyLinkedinUrl: null },
+      { organizationName: "Halliburton", title: null, startDate: "2020-09-01", endDate: "2021-10-31", current: false, companyLinkedinUrl: "https://www.linkedin.com/company/2217/" },
+    ]);
   });
 });
