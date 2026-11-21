@@ -1,5 +1,6 @@
 import { HUMAN_SERVICE_API_KEY, HUMAN_SERVICE_URL } from "../config.js";
 import { fetchWithRetry } from "./fetch-retry.js";
+import type { BrandRelation } from "./brand-relations.js";
 import { LEAD_SOURCING_SLUG, SourceCampaignUnresolvedError, fetchLeadSourcingChoice } from "./source-campaign.js";
 import { fetchAudienceOriginSlug, loadOriginBySlug } from "./sourcing-origin.js";
 
@@ -81,14 +82,18 @@ export async function listsOfOrigins(origins: ReadonlySet<string>): Promise<Set<
   return lists;
 }
 
-async function listActiveAudiences(args: { orgId: string; brandId: string; offerId: string; userId?: string | null; runId?: string | null }): Promise<ListedAudience[]> {
+async function listActiveAudiences(
+  args: { orgId: string; brandId: string; userId?: string | null; runId?: string | null } & ({ offerId: string; relation?: never } | { relation: BrandRelation; offerId?: never }),
+): Promise<ListedAudience[]> {
   const out: ListedAudience[] = [];
   const headers: Record<string, string> = { "x-api-key": HUMAN_SERVICE_API_KEY, "x-org-id": args.orgId };
   if (args.userId) headers["x-user-id"] = args.userId;
   if (args.runId) headers["x-run-id"] = args.runId;
   for (let offset = 0; ; offset += PAGE) {
-    const query = new URLSearchParams({ brandId: args.brandId, offerId: args.offerId, status: "active", limit: String(PAGE), offset: String(offset) });
-    const where = `brand=${args.brandId} offer=${args.offerId} org=${args.orgId}`;
+    // An offer's audiences (its buyers), or the brand's audiences of one RELATION (OUTREACH-3WAYS-1121: no offer).
+    const scope: Record<string, string> = args.relation ? { relation: args.relation } : { offerId: args.offerId as string };
+    const query = new URLSearchParams({ brandId: args.brandId, ...scope, status: "active", limit: String(PAGE), offset: String(offset) });
+    const where = `brand=${args.brandId} ${args.relation ? `relation=${args.relation}` : `offer=${args.offerId}`} org=${args.orgId}`;
     const response = await fetchWithRetry(`${HUMAN_SERVICE_URL}/orgs/audiences?${query}`, { headers, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
     if (!response.ok) {
       throw new SourceCampaignUnresolvedError(`human-service audience list failed (${where}): ${response.status} ${(await response.text()).slice(0, 300)}`);
@@ -192,4 +197,28 @@ export async function resolveBrandAudiences(args: {
     );
   }
   return orderSourceAudiences(serveable, args.preferredAudienceId).map((id) => ({ audienceId: id, originSlug: originOf.get(id) as string }));
+}
+
+/**
+ * The brand's RELATION audiences a channel-less campaign walks when its sourcing script's tactic names a population
+ * other than the offer's buyers (OUTREACH-3WAYS-1121): human-service's audiences of that relation for the brand
+ * (no offer), each labelled with its OWN list origin like `resolveBrandAudiences` (asked with no channel header; one
+ * serving from no list, 422, left out). Order = most people left to contact first. Anything unreadable throws.
+ */
+export async function resolveBrandRelationAudiences(args: {
+  orgId: string;
+  brandId: string;
+  relation: BrandRelation;
+  userId?: string | null;
+  runId?: string | null;
+}): Promise<BrandAudience[]> {
+  const audiences = await listActiveAudiences({ orgId: args.orgId, brandId: args.brandId, relation: args.relation, userId: args.userId, runId: args.runId });
+  if (audiences.length === 0) return [];
+  const origins = await Promise.all(audiences.map((a) => fetchAudienceOriginSlug(a.id, args.orgId, null)));
+  const originOf = new Map<string, string>();
+  audiences.forEach((a, i) => {
+    if (origins[i] !== null) originOf.set(a.id, origins[i] as string);
+  });
+  const serveable = audiences.filter((a) => originOf.has(a.id));
+  return orderSourceAudiences(serveable, null).map((id) => ({ audienceId: id, originSlug: originOf.get(id) as string }));
 }
