@@ -183,7 +183,8 @@ export function readProfileRoles(body: unknown): ProfileRole[] {
     const company = e.company && typeof e.company === "object" ? (e.company as Record<string, unknown>) : null;
     const organizationName =
       str(e.companyName) ?? str(e.company_name) ?? (company ? str(company.name) : str(e.company)) ?? str(e.organization) ?? str(e.organization_name);
-    if (!organizationName) continue;
+    // A link where a name belongs (LinkedIn's own `redir/suspicious-page?url=...` for a self-typed employer) names no company.
+    if (!organizationName || /^(https?:\/\/|www\.)/i.test(organizationName)) continue;
     const endRaw = e.endDate ?? e.end_date ?? e.ends_at ?? e.end;
     const startRaw = e.startDate ?? e.start_date ?? e.starts_at ?? e.start;
     const present = isPresent(endRaw) || e.current === true || e.is_current === true;

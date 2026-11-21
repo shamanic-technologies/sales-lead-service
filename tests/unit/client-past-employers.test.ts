@@ -51,6 +51,7 @@ describe("readProfileRoles", () => {
         { title: "CEO", start_date: "2010", end_date: "Present", company: "Stripe", url: "https://www.linkedin.com/company/stripe" },
         { title: "Cofounder", start_date: "2007", end_date: "2008", company: "Auctomatic" },
         { title: "No company" },
+        { title: "Founder", company: "https://www.linkedin.com/redir/suspicious-page?url=distribute%2eyou" },
       ] },
     });
     expect(roles).toEqual([
