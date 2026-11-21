@@ -113,6 +113,29 @@ describe.skipIf(!hasRealDatabase)("retry-pool statements against a real database
     }
   });
 
+  // OUTREACH-3WAYS-1121: a walk of the brand's investors / industry peers hands back only its own relation audience's people.
+  it("narrows the pool to the audiences named (one, several, none), every row when absent", async () => {
+    const audCampaignId = `itest-aud-${randomUUID()}`;
+    const leadIds: string[] = [];
+    for (const audienceId of ["aud-investors", "aud-buyers"]) {
+      const [lead] = await db.insert(leads).values({ name: `itest ${randomUUID()}` }).returning({ id: leads.id });
+      leadIds.push(lead.id);
+      await db.insert(leadContactMethods).values({ leadId: lead.id, channel: "email", value: `aud-${randomUUID()}@itest.example`, source: "apollo" });
+      await db.insert(leadsCampaigns).values({ leadId: lead.id, campaignId: audCampaignId, orgId, brandIds: [brandId], status: "served", servedAt: new Date(Date.now() - 60_000), audienceId });
+    }
+    try {
+      const of = async (audienceIds?: string[]) =>
+        (await loadRetryCandidates({ orgId, campaignId: audCampaignId, nowMs: Date.now(), ...(audienceIds ? { audienceIds } : {}) })).map((c) => c.audienceId).sort();
+      expect(await of()).toEqual(["aud-buyers", "aud-investors"]);
+      expect(await of(["aud-investors"])).toEqual(["aud-investors"]);
+      expect(await of(["aud-investors", "aud-buyers"])).toEqual(["aud-buyers", "aud-investors"]);
+      expect(await of([])).toEqual([]);
+    } finally {
+      await db.delete(leadsCampaigns).where(eq(leadsCampaigns.campaignId, audCampaignId));
+      for (const id of leadIds) await db.delete(leadContactMethods).where(eq(leadContactMethods.leadId, id));
+    }
+  });
+
   it("marks several candidates sent in one statement", async () => {
     await markSentCandidates(seeded, Date.now());
 
