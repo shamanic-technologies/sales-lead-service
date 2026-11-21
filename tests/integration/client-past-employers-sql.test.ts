@@ -222,6 +222,50 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
     const other = (await db.execute(sql`SELECT linkedin_url FROM organizations WHERE name = ${`Arketi-${tag}`} ORDER BY linkedin_url`)) as unknown as Array<{ linkedin_url: string }>;
     expect(other.map((o) => o.linkedin_url)).toEqual([`https://www.linkedin.com/company/arketi-${tag}/`, `https://www.linkedin.com/company/other-arketi-${tag}/`]);
     const stored = (await db.execute(sql`SELECT status, version FROM client_history_lookups WHERE lead_id = ${lead}::uuid`)) as unknown as Array<{ status: string; version: number }>;
-    expect(stored).toEqual([{ status: "history_found", version: 2 }]);
+    expect(stored).toEqual([{ status: "history_found", version: 3 }]);
+  });
+
+  it("one payer under two addresses (one paid fact naming both) is ONE client; a payer known by phone alone is looked up by phone; one with nothing is attempted and recorded", async () => {
+    const brand2 = randomUUID();
+    const mk = async (name: string, emails: string[], phone: string | null): Promise<string> => {
+      const [row] = await db.insert(leads).values({ firstName: name, humanId: randomUUID() }).returning({ id: leads.id });
+      for (const value of emails) await db.insert(leadContactMethods).values({ leadId: row.id, channel: "email", value, source: "itest" });
+      if (phone) await db.insert(leadContactMethods).values({ leadId: row.id, channel: "phone", value: phone, source: "itest" });
+      await db.insert(leadsCampaigns).values({ leadId: row.id, campaignId: randomUUID(), orgId, brandIds: [brand2], status: "served" });
+      return row.id;
+    };
+    const a = await mk("two-a", [addr("two-a")], null);
+    const b = await mk("two-b", [addr("two-b")], null);
+    await db.insert(crmFacts).values({
+      factId: randomUUID(), seq: BigInt(Math.floor(Math.random() * 1e15)), orgId, brandId: brand2, personKey: `email:${addr("two-a")}`, fullName: null,
+      emails: [addr("two-a"), addr("two-b")], phones: [], type: "payment", occurredAt: new Date("2026-06-13T23:01:17.000Z"), dateBasis: "created_at",
+      source: "stripe", sourceRef: `ref-${randomUUID()}`, payload: { status: "succeeded", amountMinor: 100 }, raw: { itest: true },
+    });
+    const phoneOnly = await mk("phone-only", [], `+1647555${tag.replace(/\D/g, "0").slice(0, 4).padEnd(4, "0")}`);
+    const nothing = await mk("nothing", [], null);
+    for (const leadId of [phoneOnly, nothing]) {
+      await db.insert(conversionEvents).values({
+        orgId, brandId: brand2, event: "sale", matchedLeadId: leadId, matchConfidence: "deterministic", attributionStatus: "attributed",
+        source: "manual", receivedAt: new Date("2026-09-28T12:00:00.000Z"),
+      });
+    }
+
+    const clients = await loadPayingClients(orgId, brand2);
+    expect(clients).toHaveLength(3);
+    const two = clients.find((c) => c.memberLeadIds.length === 2);
+    expect(two?.memberLeadIds).toEqual([a, b].sort());
+
+    treg.calls.length = 0;
+    treg.answer = () => ({ status: 200, body: { found: false, person: null, output: { linkedin_url: null }, _treg: { served_by: null, outcome: "miss", tried: [] } }, chargedMicro: 0 });
+    const res = await request(app).post(`/internal/brands/${brand2}/client-past-employers`)
+      .set("x-api-key", "test-api-key").set("x-org-id", orgId).set("x-run-id", randomUUID()).set("x-user-id", randomUUID());
+    expect(res.status).toBe(200);
+    expect(res.body.payingClients).toBe(3);
+    expect(res.body.lookups).toMatchObject({ attempted: 3, failed: 0, noLinkedin: 2, noIdentifier: 1, remaining: 0 });
+    expect(treg.calls.filter((c) => c.endpointId === "blitzapi.people.phone.reverse")).toHaveLength(1);
+    const byLead = new Map(res.body.clients.map((c: { leadId: string; lookup: { status: string } | null; history: string }) => [c.leadId, c]));
+    expect((byLead.get(nothing) as { lookup: { status: string } }).lookup.status).toBe("no_identifier");
+    expect((byLead.get(phoneOnly) as { lookup: { status: string } }).lookup.status).toBe("no_linkedin");
+    expect(res.body.clients.every((c: { history: string }) => c.history !== "not_looked_up")).toBe(true);
   });
 });

@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../src/db/index.js", () => ({ db: {} }));
 const {
-  findProfileByEmail, readCareerOfProfile, linkedinHandleOf, payingClientsOf, servedProviderOf, TransientLookupError,
-  CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO,
+  findProfileByEmail, findProfileByPhone, readCareerOfProfile, linkedinHandleOf, payingClientsOf, servedProviderOf, TransientLookupError,
+  CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO, CAREER_PROFILE_DEEP_MAX_MICRO, PROFILE_MAX_MICRO, PHONE_ENDPOINT, triedEndpointsOf,
 } = await import("../../src/lib/client-past-employers-read.js");
 
 type Req = { endpointId: string; maxMicro: number; params?: Record<string, unknown>; routeExclude?: readonly string[] };
@@ -87,7 +87,7 @@ describe("readCareerOfProfile", () => {
     ]);
     const out = await readCareerOfProfile(url, call, 0);
     expect(reqs[0].params).toEqual({ linkedin_url: url, linkedin_handle: "ann-lee-42" });
-    expect(reqs.map((r) => r.routeExclude)).toEqual([["apollo"], ["apollo", "brightdata"]]);
+    expect(reqs.map((r) => r.routeExclude)).toEqual([["apollo"], ["apollo", "brightdata.linkedin.user.profile", "brightdata"]]);
     expect(out.charged).toBe(3_000);
     expect(out.servedBy).toBe("fetchinio.linkedin.user.profile");
     expect(out.roles).toEqual([
@@ -102,6 +102,34 @@ describe("readCareerOfProfile", () => {
     await expect(readCareerOfProfile(url, fakeCall([answer(502, {})]).call, 0)).rejects.toBeInstanceOf(TransientLookupError);
   });
 
+  it("a profile every cheap provider missed is asked ONCE more of the dearer ones, never re-asking an endpoint already tried", async () => {
+    const cheapMiss = {
+      output: { full_name: null }, raw: null,
+      _treg: { served_by: null, outcome: "miss", tried: [
+        { endpoint_id: "fetchinio.linkedin.user.profile", provider: "fetchinio", outcome: "miss" },
+        { endpoint_id: "anyapi.linkedin.user.profile.full", provider: "anyapi", outcome: "miss" },
+        { endpoint_id: "fiber-ai.linkedin.user.profile", provider: "fiber-ai", outcome: "skipped" },
+      ] },
+    };
+    const { call, reqs } = fakeCall([
+      answer(200, cheapMiss, 2_900),
+      answer(200, profile("fiber-ai", { output: { profile: { experiences: [
+        { company_name: "Halliburton", start_date: "2020-09-01T00:00:00.000Z", end_date: "2021-10-31T00:00:00.000Z", is_current: false, linkedin_company_id: "2217" },
+      ] } } }), 40_000),
+    ]);
+    const out = await readCareerOfProfile(url, call, 0);
+    expect(reqs.map((r) => r.maxMicro)).toEqual([PROFILE_MAX_MICRO, CAREER_PROFILE_DEEP_MAX_MICRO]);
+    expect(reqs[1].routeExclude).toEqual(["apollo", "fetchinio.linkedin.user.profile", "anyapi.linkedin.user.profile.full"]);
+    expect(out.charged).toBe(42_900);
+    expect(out.roles?.[0]).toMatchObject({ organizationName: "Halliburton", companyLinkedinUrl: "https://www.linkedin.com/company/2217/" });
+  });
+
+  it("the deep round answering nothing either = no experience (recorded), its spend counted", async () => {
+    const { call, reqs } = fakeCall([answer(200, miss), answer(200, miss)]);
+    expect(await readCareerOfProfile(url, call, 0)).toEqual({ roles: [], servedBy: null, charged: 0 });
+    expect(reqs).toHaveLength(2);
+  });
+
   it("never asks past the client's ceiling", async () => {
     const { call, reqs } = fakeCall([]);
     expect(await readCareerOfProfile(url, call, CAREER_LOOKUP_MAX_MICRO)).toEqual({ roles: [], servedBy: null, charged: 0 });
@@ -111,6 +139,24 @@ describe("readCareerOfProfile", () => {
   it("reads the handle off a profile URL", () => {
     expect(linkedinHandleOf("https://www.linkedin.com/in/j%C3%A9r%C3%B4me-x?trk=a")).toBe("jérôme-x");
     expect(linkedinHandleOf("https://www.linkedin.com/company/acme")).toBeNull();
+  });
+});
+
+describe("findProfileByPhone", () => {
+  it("asks the phone reverse lookup once; a hit's profile is the answer, a miss is none, anything but a 200 throws", async () => {
+    const hitCall = fakeCall([answer(200, { found: true, person: { full_name: "Ann Lee", linkedin_url: "https://www.linkedin.com/in/annlee" } }, 1_000)]);
+    expect(await findProfileByPhone("+16475550100", hitCall.call)).toEqual({ linkedinUrl: "https://www.linkedin.com/in/annlee", charged: 1_000 });
+    expect(hitCall.reqs[0]).toMatchObject({ endpointId: PHONE_ENDPOINT, params: { phone: "+16475550100" } });
+    expect(await findProfileByPhone("+1", fakeCall([answer(200, { found: false, person: null })]).call)).toEqual({ linkedinUrl: null, charged: 0 });
+    await expect(findProfileByPhone("+1", fakeCall([answer(429, {})]).call)).rejects.toBeInstanceOf(TransientLookupError);
+  });
+});
+
+describe("triedEndpointsOf", () => {
+  it("lists the endpoints a routed answer asked, never one skipped for its price", () => {
+    expect(triedEndpointsOf({ _treg: { tried: [{ endpoint_id: "a.x", outcome: "miss" }, { endpoint_id: "b.x", outcome: "skipped" }, { endpoint_id: "c.x", outcome: "hit" }] } }))
+      .toEqual(["a.x", "c.x"]);
+    expect(triedEndpointsOf(null)).toEqual([]);
   });
 });
 
@@ -134,9 +180,28 @@ describe("payingClientsOf", () => {
       row({ lead_id: "a", emails: ["solo@co.io"], paid_at: null }),
     ]);
     expect(out).toEqual([
-      { leadId: "a", name: null, email: "solo@co.io", linkedinUrl: null, paidAt: null },
-      { leadId: "b", name: "Ann", email: "x@co.io", linkedinUrl: null, paidAt: "2026-02-01T00:00:00.000Z" },
+      { leadId: "a", memberLeadIds: ["a"], name: null, email: "solo@co.io", phone: null, linkedinUrl: null, paidAt: null },
+      { leadId: "b", memberLeadIds: ["b", "c"], name: "Ann", email: "x@co.io", phone: null, linkedinUrl: null, paidAt: "2026-02-01T00:00:00.000Z" },
     ]);
+  });
+
+  it("two humans are ONE payer when one paid fact names both, or both hold the same LinkedIn profile", () => {
+    const out = payingClientsOf(
+      [
+        row({ lead_id: "m1", human_id: "h1", emails: ["imtiyaz.m@gmail.com"], paid_at: "2026-06-13T23:01:17.000Z", linkedin_url: "https://www.linkedin.com/in/imahboob" }),
+        row({ lead_id: "m2", human_id: "h2", emails: ["m.imtiyaz@gmail.com"], paid_at: "2026-06-13T23:01:17.000Z" }),
+        row({ lead_id: "c1", human_id: "h3", emails: ["chaim@co.tech"], paid_at: "2026-10-27T17:43:11.000Z", linkedin_url: "https://www.linkedin.com/in/Chaim-Tesser/" }),
+        row({ lead_id: "c2", human_id: "h4", emails: ["c@gmail.com"], paid_at: "2026-11-04T21:55:26.000Z", linkedin_url: "https://linkedin.com/in/chaim-tesser" }),
+        row({ lead_id: "z", human_id: "h5", emails: ["z@co.io"], paid_at: "2026-01-01T00:00:00.000Z" }),
+      ],
+      [["m1", "m2"]],
+    );
+    expect(out.map((c) => [c.leadId, c.memberLeadIds])).toEqual([["c1", ["c1", "c2"]], ["m1", ["m1", "m2"]], ["z", ["z"]]]);
+    expect(out.find((c) => c.leadId === "m1")?.linkedinUrl).toBe("https://www.linkedin.com/in/imahboob");
+  });
+
+  it("a person known by phone alone carries it", () => {
+    expect(payingClientsOf([row({ lead_id: "s", phone: "+16475550100", paid_at: null })])[0]).toMatchObject({ email: null, phone: "+16475550100" });
   });
 
   it("a person any of whose addresses is staff is never a client; not-a-person is out", () => {

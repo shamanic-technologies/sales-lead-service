@@ -191,6 +191,17 @@ function experienceArrays(node: unknown, depth = 0): unknown[][] {
   return [];
 }
 
+/**
+ * The company page a role's LinkedIn company ID names (`/company/<id>/`, which LinkedIn serves for a numeric id), or
+ * null. Some providers state only the id (fiber-ai `linkedin_company_id`); a negative or zero id is a placeholder
+ * LinkedIn mints for a self-typed employer and names no page.
+ */
+export function companyPageOfId(value: unknown): string | null {
+  const s = typeof value === "number" ? String(value) : str(value);
+  if (!s || !/^[1-9]\d*$/.test(s)) return null;
+  return `https://www.linkedin.com/company/${s}/`;
+}
+
 /** The first company PAGE among a role's link fields, else the first link stated (kept verbatim). */
 function companyLinkOf(values: unknown[]): string | null {
   const links = values.map(str).filter((v): v is string => v !== null);
@@ -222,6 +233,7 @@ export function readProfileRoles(body: unknown): ProfileRole[] {
       current: present,
       companyLinkedinUrl: companyLinkOf([
         e.companyLinkedinUrl, e.company_linkedin_url, e.url, company?.url, company?.linkedin_url, company?.linkedinUrl,
+        companyPageOfId(e.linkedin_company_id ?? e.companyId ?? e.company_id ?? company?.id),
       ]),
     });
   }
