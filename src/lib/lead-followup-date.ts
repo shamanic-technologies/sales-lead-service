@@ -802,6 +802,13 @@ export async function claimDueFollowupLead(p: {
   recentlyEmailed?: RecentlyEmailedScope | null;
   /** The campaign's offer (COMPANY-MARK-SERVE-1101: a Disqualified mark naming it refuses the person). Absent/null = brand-wide marks only. */
   offerId?: string | null;
+  /**
+   * Only a person this campaign itself holds (a `leads_campaigns` row on `sourceCampaignId`), TARGET-ONLY-DUE-1121: a
+   * campaign launched on its Target alone (no channel) holds the people its own runs reached; the brand's other due
+   * leads are other campaigns' work (OUTREACH-3WAYS-1121: our "investors" campaign followed up a buyer the brand emailed
+   * in September with an investor note). Absent/false = every due lead of the brand, as before.
+   */
+  ownCampaignOnly?: boolean;
   signal?: AbortSignal;
 }): Promise<DueFollowupFind | null> {
   const skipped: string[] = [];
@@ -813,6 +820,7 @@ export async function claimDueFollowupLead(p: {
         AND ${followupEligibleSql(sql`d`)}
         AND d.lead_id <> ALL(${sql.param(skipped)}::uuid[])
         AND ${noOpenDueServeSql(sql`d`)}
+        ${p.ownCampaignOnly ? sql`AND EXISTS (SELECT 1 FROM leads_campaigns oc WHERE oc.lead_id = d.lead_id AND oc.campaign_id = ${p.sourceCampaignId})` : sql``}
         ${dueReachClauses(sql`d.lead_id`, p.reachableBy, p.acceptedEmails, p.relationships, p.recentlyEmailed, serveExclusionScopeOf(p.orgId, [p.brandId], p.offerId ?? null))}
       ORDER BY d.next_followup_at ASC, d.lead_id ASC
       LIMIT ${DUE_BATCH}
