@@ -311,8 +311,8 @@ describe("pullNext relation walk (OUTREACH-3WAYS-1121: the sourcing script's tac
     expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-1" }, [], expect.anything());
     // The brand's due follow-ups belong to its buyers' campaigns.
     expect(claimDueFollowupLead).not.toHaveBeenCalled();
-    // Its own already-paid people still go first (free rule unchanged).
-    expect(pickRetryCandidate).toHaveBeenCalled();
+    // Its own already-paid people still go first, narrowed to people its relation audience found (never a buyer).
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ audienceIds: ["aud-investors"] }));
   });
 
   it("industry_peers: serves a person from the brand's industry-peer audiences only", async () => {
@@ -345,6 +345,7 @@ describe("pullNext relation walk (OUTREACH-3WAYS-1121: the sourcing script's tac
     expect(offerChecks).toHaveBeenCalled();
     expect(claimDueFollowupLead).toHaveBeenCalled();
     expect(serveThroughCandidates.mock.calls[0][5]).toEqual({ offerChecks: true });
+    expect(pickRetryCandidate.mock.calls[0][0]).not.toHaveProperty("audienceIds");
   });
 });
 

@@ -8,6 +8,8 @@ import { createRun, updateRun } from "../lib/runs-client.js";
 import { traceEvent } from "../lib/trace-event.js";
 import { BufferNextRequestSchema } from "../schemas.js";
 import { relationshipOfLead } from "../lib/relationship-read.js";
+import { completeServedCompanyName } from "../lib/company-name-fill.js";
+import type { FullLead } from "../lib/lead-shape.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
@@ -531,6 +533,9 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     // Who the served person is to the brand (RELATIONSHIP-TAGS-1014): the writer reads it before writing. Cached
     // with the answer, so a replay serves the same block.
     if (result.found && result.lead && result.lead.data) {
+      // The company the writer and the sender name (COLD-NO-COMPANY-1121): a nameless employer row takes the
+      // name its owner (brand-service) states, persisted on the row, BEFORE the writer spends on this lead.
+      await completeServedCompanyName(result.lead.data as FullLead);
       (result.lead.data as unknown as Record<string, unknown>).relationship = await relationshipOfLead(req.orgId!, brandId, result.lead.leadId);
       // The lead ROW the person holds on the asking campaign (every serve files one): what /orgs/leads/{id}/... read.
       const [row] = (await db.execute(sql`
