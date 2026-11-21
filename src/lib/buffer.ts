@@ -457,7 +457,9 @@ export async function pullNext(
 
   // DUE ONLY (SCRIPT-VALUE-RATING-1113-LEAD, owner 2026-11-13: "who to write to without an event = the leads the
   // campaign's own Plan already holds below the Target; no new audience, no per-outcome rule"): the brand's due, owed
-  // person, held for this campaign's claim, or nobody. No pool, no audience, nothing bought.
+  // person, held for this campaign's claim, or nobody. No pool, no audience, nothing bought. A campaign launched on its
+  // Target alone (no channel) holds only the people its own runs reached (TARGET-ONLY-DUE-1121): a relation campaign
+  // (investors, industry peers) never follows up the offer's buyers with its brief.
   if (mode.kind === "due_held") {
     const due = await claimDueFollowupLead({
       orgId: params.orgId,
@@ -465,6 +467,8 @@ export async function pullNext(
       brandIds: params.brandIds,
       sourceCampaignId: params.campaignId,
       fileAs: "outreach_held",
+      // TARGET-ONLY-DUE-1121: a campaign with no channel answers only the people it reached itself.
+      ownCampaignOnly: !params.featureSlug,
       maxPasses: OUTREACH_DUE_MAX_PASSES,
       featureSlug: params.featureSlug,
       runId: params.runId ?? null,
