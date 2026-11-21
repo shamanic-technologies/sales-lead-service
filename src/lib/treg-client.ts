@@ -273,7 +273,14 @@ export class TregMeter {
     return this.keys;
   }
 
-  async call(req: { endpointId: string; method: "GET" | "POST"; params: Record<string, ParamValue>; maxMicro: number }): Promise<TregCallResult> {
+  async call(req: {
+    endpointId: string;
+    method: "GET" | "POST";
+    params: Record<string, ParamValue>;
+    maxMicro: number;
+    /** Routed endpoints only: providers treg must never pick for this call (`X-Treg-Route-Exclude`). */
+    routeExclude?: readonly string[];
+  }): Promise<TregCallResult> {
     const keys = await this.resolve();
     const [hold] = await runsCosts(this.identity, [
       { costName: TREG_COST_NAME, costSource: keys.keySource, quantity: req.maxMicro, status: "provisioned" },
@@ -296,6 +303,7 @@ export class TregMeter {
       "X-Treg-Route-Max-Cost": (req.maxMicro / 1_000_000).toFixed(6),
       "Idempotency-Key": randomUUID(),
     };
+    if (req.routeExclude && req.routeExclude.length > 0) headers["X-Treg-Route-Exclude"] = req.routeExclude.join(",");
     let body: string | undefined;
     if (req.method === "GET") {
       const qs = new URLSearchParams(Object.entries(req.params).map(([k, v]) => [k, String(v)]));

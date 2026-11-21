@@ -2,11 +2,28 @@
  * BRAND-PROOF-LOGOS-1121 against a REAL database: who a brand's paying clients are (ledger + CRM payments that stand),
  * the roles held on every lead of each client's human, and the read's empty answers.
  */
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
+
+// The fill's treg calls are answered by the test (no key-service, runs-service or billing): `tregAnswer` decides.
+const treg = vi.hoisted(() => ({
+  calls: [] as Array<{ endpointId: string; params: Record<string, unknown>; routeExclude?: readonly string[] }>,
+  answer: (_req: { endpointId: string; params: Record<string, unknown> }) => ({ status: 500, body: { detail: "boom" } as unknown, chargedMicro: 0 }),
+}));
+vi.mock("../../src/lib/treg-client.js", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../../src/lib/treg-client.js")>();
+  class TregMeter {
+    constructor(_identity: unknown) {}
+    async call(req: { endpointId: string; params: Record<string, unknown>; routeExclude?: readonly string[] }) {
+      treg.calls.push(req);
+      return { ...treg.answer(req), contentType: "application/json" };
+    }
+  }
+  return { ...real, TregMeter };
+});
 
 const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, conversionEvents, crmFacts, leadsCampaigns, organizations, leadsOrganizations } = await import(
@@ -94,17 +111,31 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
     await payment(`kevin+${tag}@distribute.you`, { status: "succeeded", amountMinor: 100 });
     await lead("stranger", [addr("stranger")], null, false);
     await payment(addr("stranger"), { status: "succeeded", amountMinor: 100 });
+    // One PERSON paying through two leads = one client, held by the lead that paid first.
+    const twice = randomUUID();
+    await lead("twice-late", [addr("twice-late")], twice);
+    await payment(addr("twice-late"), { status: "succeeded", amountMinor: 100 });
+    await lead("twice-early", [addr("twice-early")], twice);
+    await db.insert(conversionEvents).values({
+      orgId, brandId, event: "sale", matchedLeadId: ids["twice-early"], matchConfidence: "deterministic", attributionStatus: "attributed",
+      source: "manual", receivedAt: new Date("2026-01-02T00:00:00.000Z"),
+    });
+    // A payer whose OTHER lead holds a staff address is us (staff tests never count).
+    const staffHuman = randomUUID();
+    await lead("staff-human", [addr("staff-human")], staffHuman);
+    await payment(addr("staff-human"), { status: "succeeded", amountMinor: 100 });
+    await lead("staff-human-other", [`kevin.lourd+${tag}@gmail.com`], staffHuman, false);
   });
 
   it("names exactly the paying clients", async () => {
     const clients = await loadPayingClients(orgId, brandId);
-    expect(clients.map((c) => c.leadId).sort()).toEqual([ids.ledger, ids.crm, ids.nohistory].sort());
+    expect(clients.map((c) => c.leadId).sort()).toEqual([ids.ledger, ids.crm, ids.nohistory, ids["twice-early"]].sort());
   });
 
   it("answers the companies with their trace, every lead of the human counted", async () => {
     const res = await request(app).get(`/internal/brands/${brandId}/client-past-employers`).set("x-api-key", "test-api-key").set("x-org-id", orgId);
     expect(res.status).toBe(200);
-    expect(res.body.payingClients).toBe(3);
+    expect(res.body.payingClients).toBe(4);
     expect(res.body.clientsWithHistory).toBe(2);
     expect(res.body.reason).toBeNull();
     const acme = res.body.companies.find((c: { name: string }) => c.name === `Acme-${tag}`);
@@ -126,5 +157,31 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
   it("the fill door refuses without the caller's run", async () => {
     const res = await request(app).post(`/internal/brands/${brandId}/client-past-employers`).set("x-api-key", "test-api-key").set("x-org-id", orgId);
     expect(res.status).toBe(400);
+  });
+
+  it("a treg call that failed records nothing (asked again next call); a real miss records no_linkedin", async () => {
+    const lookupOf = async (leadId: string) =>
+      (await db.execute(sql`SELECT status FROM client_history_lookups WHERE lead_id = ${leadId}::uuid`)) as unknown as Array<{ status: string }>;
+    const post = () =>
+      request(app).post(`/internal/brands/${brandId}/client-past-employers`)
+        .set("x-api-key", "test-api-key").set("x-org-id", orgId).set("x-run-id", randomUUID()).set("x-user-id", randomUUID());
+
+    for (const failure of [500, 402, 400, 401, 202]) {
+      treg.calls.length = 0;
+      treg.answer = () => ({ status: failure, body: { detail: "refused" }, chargedMicro: 0 });
+      const res = await post();
+      expect(res.status).toBe(200);
+      expect(res.body.lookups).toMatchObject({ attempted: 2, failed: 2, remaining: 2, noLinkedin: 0 });
+      expect(await lookupOf(ids.nohistory)).toEqual([]);
+      expect(treg.calls.every((c) => c.routeExclude?.includes("apollo"))).toBe(true);
+    }
+
+    treg.calls.length = 0;
+    treg.answer = () => ({ status: 200, body: { output: { linkedin_url: null }, _treg: { served_by: null, outcome: "miss", tried: [] } }, chargedMicro: 0 });
+    const res = await post();
+    expect(res.body.lookups).toMatchObject({ attempted: 2, failed: 0, noLinkedin: 2, remaining: 0 });
+    expect(await lookupOf(ids.nohistory)).toEqual([{ status: "no_linkedin" }]);
+    const nohistory = res.body.clients.find((c: { leadId: string }) => c.leadId === ids.nohistory);
+    expect(nohistory.history).toBe("looked_up_none");
   });
 });

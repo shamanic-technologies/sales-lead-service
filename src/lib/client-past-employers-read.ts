@@ -20,9 +20,9 @@ import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
 import { assertCrmCopyCaughtUp } from "./step-reached-read.js";
 import { isStaffEmail } from "./staff-identity.js";
 import { groupPastEmployers, readProfileRoles, type EmploymentRow, type PastEmployerCompany } from "./client-past-employers.js";
-import { InsufficientCreditError, TregMeter, type SpendIdentity } from "./treg-client.js";
+import { InsufficientCreditError, TregMeter, isTregRefusal, type SpendIdentity } from "./treg-client.js";
 import { readEnrichOutput } from "./named-lead-serve.js";
-import { ENRICH_ENDPOINT, ENRICH_MAX_MICRO } from "./relationship-company.js";
+import { ENRICH_ENDPOINT } from "./relationship-company.js";
 import { recordEmploymentHistory } from "./leads-registry.js";
 import type { Person } from "./people-client.js";
 
@@ -87,10 +87,13 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
 
   const ids = [...paidAt.keys()];
   const people = (await db.execute(sql`
-    SELECT l.id::text AS lead_id,
+    SELECT l.id::text AS lead_id, l.human_id::text AS human_id,
       NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') AS name,
       ARRAY(SELECT lower(cm.value) FROM lead_contact_methods cm
             WHERE cm.lead_id = l.id AND cm.channel = 'email' ORDER BY cm.created_at, cm.id) AS emails,
+      ARRAY(SELECT lower(cm.value) FROM leads x JOIN lead_contact_methods cm ON cm.lead_id = x.id AND cm.channel = 'email'
+            WHERE x.id <> l.id AND l.human_id IS NOT NULL AND x.human_id = l.human_id
+            ORDER BY cm.created_at, cm.id) AS human_emails,
       (SELECT x.linkedin_url FROM leads x
         WHERE (x.id = l.id OR (l.human_id IS NOT NULL AND x.human_id = l.human_id)) AND x.linkedin_url IS NOT NULL
         ORDER BY (x.id = l.id) DESC LIMIT 1) AS linkedin_url,
@@ -98,19 +101,56 @@ export async function loadPayingClients(orgId: string, brandId: string): Promise
               WHERE npm.org_id = ${orgId} AND npm.lead_id = l.id AND npm.withdrawn_at IS NULL) AS not_a_person
     FROM leads l
     WHERE l.id = ANY(${sql.param(ids)}::uuid[])
-  `)) as unknown as Array<{ lead_id: string; name: string | null; emails: string[] | null; linkedin_url: string | null; not_a_person: boolean }>;
+  `)) as unknown as PayingLeadRow[];
 
+  return payingClientsOf(
+    people.map((p) => ({ ...p, paid_at: paidAt.get(p.lead_id) ?? null })),
+  );
+}
+
+export interface PayingLeadRow {
+  lead_id: string;
+  human_id: string | null;
+  name: string | null;
+  emails: string[] | null;
+  /** Every address of the human's OTHER leads. */
+  human_emails: string[] | null;
+  linkedin_url: string | null;
+  not_a_person: boolean;
+  paid_at?: string | null;
+}
+
+/**
+ * PURE. One paying client per PERSON (human-service's human; no human = the lead alone): the lead that paid first
+ * holds the client (ties: lowest lead id). A person any of whose addresses (any lead of theirs) is staff is us, never
+ * a client (Kevin's own human held 7 leads, 3 of them counted as payers). The lookup address is the client lead's
+ * first non-staff address, else one of the human's other leads.
+ */
+export function payingClientsOf(rows: ReadonlyArray<PayingLeadRow & { paid_at: string | null }>): PayingClient[] {
+  const byPerson = new Map<string, Array<PayingLeadRow & { paid_at: string | null }>>();
+  for (const r of rows) {
+    if (r.not_a_person) continue;
+    const key = r.human_id ? `human:${r.human_id}` : `lead:${r.lead_id}`;
+    byPerson.set(key, [...(byPerson.get(key) ?? []), r]);
+  }
   const out: PayingClient[] = [];
-  for (const p of people) {
-    const emails = p.emails ?? [];
-    if (p.not_a_person) continue;
-    if (emails.length > 0 && emails.every((e) => isStaffEmail(e))) continue;
+  for (const group of byPerson.values()) {
+    const all = group.flatMap((r) => [...(r.emails ?? []), ...(r.human_emails ?? [])]);
+    if (all.some((e) => isStaffEmail(e))) continue;
+    const sorted = [...group].sort(
+      (a, b) =>
+        (a.paid_at === null ? 1 : 0) - (b.paid_at === null ? 1 : 0) ||
+        (a.paid_at ?? "").localeCompare(b.paid_at ?? "") ||
+        a.lead_id.localeCompare(b.lead_id),
+    );
+    const holder = sorted[0];
+    const own = holder.emails ?? [];
     out.push({
-      leadId: p.lead_id,
-      name: p.name,
-      email: emails.find((e) => !isStaffEmail(e)) ?? null,
-      linkedinUrl: p.linkedin_url,
-      paidAt: paidAt.get(p.lead_id) ?? null,
+      leadId: holder.lead_id,
+      name: holder.name ?? sorted.find((r) => r.name)?.name ?? null,
+      email: own[0] ?? all[0] ?? null,
+      linkedinUrl: holder.linkedin_url ?? sorted.find((r) => r.linkedin_url)?.linkedin_url ?? null,
+      paidAt: holder.paid_at,
     });
   }
   return out.sort((a, b) => a.leadId.localeCompare(b.leadId));
@@ -270,28 +310,106 @@ function servedByOf(body: unknown): string | null {
 
 export class TransientLookupError extends Error {}
 
+/** A metered treg call (the caller's `TregMeter.call`), injectable for tests. */
+export type TregCall = TregMeter["call"];
+
+/**
+ * Providers treg must never route a career lookup to: Apollo (owner 2026-11-19: « je ne veux plus qu'on utilise Apollo
+ * autant que possible »). Sent on every routed call as `X-Treg-Route-Exclude`, whatever the ceiling.
+ */
+export const NEVER_ROUTE_TO: readonly string[] = ["apollo"];
+/**
+ * Ceiling of ONE routed `people.enrich` call (the whole waterfall). The $0.003 of the serve path only reaches the
+ * four cheapest email providers, which knew none of distribute.you's 25 payers (2026-11-21: 24 misses, 1 hit without
+ * a profile); the providers that do (companyenrich $0.049 a hit) sit higher. Misses are free.
+ */
+export const CAREER_ENRICH_MAX_MICRO = 60_000;
+/** A hit naming the person but no LinkedIn profile is asked again WITHOUT that provider, at most this many calls. */
+export const CAREER_ENRICH_ROUNDS = 3;
+/** What ONE client's lookup may spend in total, every call included ($0.15). */
+export const CAREER_LOOKUP_MAX_MICRO = 150_000;
+
+/** The provider a routed answer was served by (`_treg.tried[].provider` of the hit), or null on a miss. */
+export function servedProviderOf(body: unknown): string | null {
+  const t = (body as { _treg?: { served_by?: unknown; tried?: unknown } } | null)?._treg;
+  const servedBy = typeof t?.served_by === "string" ? t.served_by : null;
+  if (!servedBy) return null;
+  const tried = Array.isArray(t?.tried) ? (t!.tried as Array<Record<string, unknown>>) : [];
+  const hit = tried.find((x) => x && x.endpoint_id === servedBy && typeof x.provider === "string");
+  return hit ? (hit.provider as string) : servedBy.split(".")[0] || null;
+}
+
+/** Status of a routed answer that IS treg's answer: 200 (hit or miss). Anything else = nothing learnt. */
+function isAnswer(status: number): boolean {
+  return status === 200;
+}
+
+export interface EmailLookupAnswer {
+  linkedinUrl: string | null;
+  /** The current employer an answer named, when no profile was found (a logo too: « pas forcément les actuelles »). */
+  employer: { name: string; domain: string | null; title: string | null } | null;
+  charged: number;
+}
+
+/**
+ * Who this email belongs to, through treg's routed `people.enrich` (Apollo excluded). Only a 200 is an answer; a
+ * refusal, an error, a pending task or a timeout THROWS (`TransientLookupError`, or the meter's own error) so the
+ * caller records nothing and asks again on the next call. A hit with no profile is asked again without its provider.
+ */
+export async function findProfileByEmail(email: string, call: TregCall): Promise<EmailLookupAnswer> {
+  let charged = 0;
+  let employer: EmailLookupAnswer["employer"] = null;
+  const exclude = [...NEVER_ROUTE_TO];
+  for (let round = 0; round < CAREER_ENRICH_ROUNDS; round++) {
+    const maxMicro = Math.min(CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - charged);
+    if (maxMicro <= 0) break;
+    const r = await call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email }, maxMicro, routeExclude: [...exclude] });
+    charged += r.chargedMicro;
+    if (!isAnswer(r.status)) throw new TransientLookupError(`people.enrich answered ${r.status} (charged ${charged} micro-USD so far)`);
+    const found = readEnrichOutput(r.body);
+    if (found.linkedinUrl) return { linkedinUrl: found.linkedinUrl, employer, charged };
+    if (!employer && found.companyName) employer = { name: found.companyName, domain: found.companyDomain, title: found.title };
+    const provider = servedProviderOf(r.body);
+    if (!provider) break; // every provider within the ceiling missed: a real « nobody knows this address »
+    exclude.push(provider);
+  }
+  return { linkedinUrl: null, employer, charged };
+}
+
 /** Look one client up. Throws InsufficientCreditError (stop the pass) or TransientLookupError (nothing recorded). */
-async function lookUpOne(client: PayingClient, meter: TregMeter, identity: SpendIdentity): Promise<{ status: LookupStatus; charged: number }> {
+async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendIdentity): Promise<{ status: LookupStatus; charged: number }> {
   let charged = 0;
   let linkedinUrl = client.linkedinUrl;
   if (!linkedinUrl && client.email) {
-    const r = await meter.call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email: client.email }, maxMicro: ENRICH_MAX_MICRO });
-    charged += r.chargedMicro;
-    if (r.status >= 500 || r.status === 429 || r.status === 402) throw new TransientLookupError(`people.enrich answered ${r.status}`);
-    const found = r.status < 300 ? readEnrichOutput(r.body) : readEnrichOutput(null);
+    const found = await findProfileByEmail(client.email, call);
+    charged += found.charged;
     linkedinUrl = found.linkedinUrl;
     if (linkedinUrl) {
       await db.execute(sql`UPDATE leads SET linkedin_url = COALESCE(linkedin_url, ${linkedinUrl}) WHERE id = ${client.leadId}::uuid`);
+    } else if (found.employer) {
+      await recordEmploymentHistory({
+        leadId: client.leadId,
+        person: {
+          firstName: null, lastName: null, name: null, title: found.employer.title, email: client.email,
+          organization: {
+            name: found.employer.name, domain: found.employer.domain, websiteUrl: null, industry: null, estimatedNumEmployees: null,
+            annualRevenue: null, linkedinUrl: null, logoUrl: null, city: null, state: null, country: null,
+          },
+          employmentHistory: [],
+        } as unknown as Person,
+      });
     }
   }
   if (!linkedinUrl) {
     await recordLookup({ leadId: client.leadId, identity, status: "no_linkedin", linkedinUrl: null, chargedMicro: charged, servedBy: null, roles: 0 });
     return { status: "no_linkedin", charged };
   }
-  const p = await meter.call({ endpointId: PROFILE_ENDPOINT, method: "POST", params: { linkedin_url: linkedinUrl }, maxMicro: PROFILE_MAX_MICRO });
+  const p = await call({ endpointId: PROFILE_ENDPOINT, method: "POST", params: { linkedin_url: linkedinUrl }, maxMicro: PROFILE_MAX_MICRO, routeExclude: NEVER_ROUTE_TO });
   charged += p.chargedMicro;
-  if (p.status >= 500 || p.status === 429 || p.status === 402) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
-  if (p.status >= 300) {
+  // Only the PROVIDER saying it has no readable profile (404/410/422, not treg's own refusal) is a final answer.
+  const providerHasNone = (p.status === 404 || p.status === 410 || p.status === 422) && !isTregRefusal(p.status, p.body);
+  if (!isAnswer(p.status) && !providerHasNone) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
+  if (providerHasNone) {
     await recordLookup({ leadId: client.leadId, identity, status: "profile_unreadable", linkedinUrl, chargedMicro: charged, servedBy: servedByOf(p.body), roles: 0 });
     return { status: "profile_unreadable", charged };
   }
@@ -338,7 +456,7 @@ export async function fillClientHistories(identity: SpendIdentity, brandId: stri
       const client = queue.shift()!;
       summary.attempted += 1;
       try {
-        const r = await lookUpOne(client, meter, identity);
+        const r = await lookUpOne(client, (req) => meter.call(req), identity);
         summary.chargedMicro += r.charged;
         if (r.status === "history_found") summary.historyFound += 1;
         else if (r.status === "no_linkedin") summary.noLinkedin += 1;
