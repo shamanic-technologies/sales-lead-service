@@ -323,3 +323,50 @@ describe("readSourceLeadsFound", () => {
     await expect(readSourceLeadsFound()).rejects.toBeInstanceOf(LeadsFoundUnavailableError);
   });
 });
+
+// OUTREACH-3WAYS-1121: the brand's relation audience (investors / industry peers), human-service's relations read.
+describe("resolveBrandRelationAudiences", () => {
+  const RELATIONS = "http://human/orgs/audiences/relations?brandId=brand-1";
+  const read = (investors: Record<string, unknown>) =>
+    json({
+      brandId: "brand-1",
+      relations: [
+        { relation: "investors", ...investors },
+        { relation: "industry_peers", audienceId: "aud-peers", status: "active", name: "Peers", lists: [] },
+      ],
+    });
+
+  it("names the ONE target of the relation, labelled with its own origin", async () => {
+    const calls = stubFetch({
+      [RELATIONS]: () => read({ audienceId: "aud-inv", status: "active" }),
+      "http://human/orgs/audiences/aud-inv/sourcing-origin": () => json({ sourcingFeatureSlug: COLD }),
+    });
+    const { resolveBrandRelationAudiences } = await import("../../src/lib/source-audiences.js");
+    expect(await resolveBrandRelationAudiences({ orgId: ORG, brandId: "brand-1", relation: "investors" })).toEqual([{ audienceId: "aud-inv", originSlug: COLD }]);
+    expect(calls[0]).toBe(RELATIONS);
+  });
+
+  it("a target serving from no own list (422) is still walked, with no label", async () => {
+    stubFetch({
+      [RELATIONS]: () => read({ audienceId: "aud-inv", status: "active" }),
+      "http://human/orgs/audiences/aud-inv/sourcing-origin": () => json({ error: "no list" }, 422),
+    });
+    const { resolveBrandRelationAudiences } = await import("../../src/lib/source-audiences.js");
+    expect(await resolveBrandRelationAudiences({ orgId: ORG, brandId: "brand-1", relation: "investors" })).toEqual([{ audienceId: "aud-inv", originSlug: null }]);
+  });
+
+  it("not built yet (audienceId null) or not active = nothing to walk", async () => {
+    stubFetch({ [RELATIONS]: () => read({ audienceId: null, status: null }) });
+    const { resolveBrandRelationAudiences } = await import("../../src/lib/source-audiences.js");
+    expect(await resolveBrandRelationAudiences({ orgId: ORG, brandId: "brand-1", relation: "investors" })).toEqual([]);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    stubFetch({ [RELATIONS]: () => read({ audienceId: "aud-inv", status: "paused" }) });
+    expect(await resolveBrandRelationAudiences({ orgId: ORG, brandId: "brand-1", relation: "investors" })).toEqual([]);
+  });
+
+  it("an unreadable read throws (nothing bought), never an empty walk", async () => {
+    stubFetch({ [RELATIONS]: () => json({ error: "down" }, 502) });
+    const { resolveBrandRelationAudiences } = await import("../../src/lib/source-audiences.js");
+    await expect(resolveBrandRelationAudiences({ orgId: ORG, brandId: "brand-1", relation: "investors" })).rejects.toThrow(/relations read failed/);
+  });
+});
