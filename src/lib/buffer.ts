@@ -7,7 +7,8 @@ import { leadServeDisqualification } from "./disqualified-sql.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, loadEmptyAnswers, orderByEmptyAnswers, recordEmptyAnswer } from "./source-audience-walk.js";
-import { resolveBrandAudiences } from "./source-audiences.js";
+import { resolveBrandAudiences, resolveBrandRelationAudiences } from "./source-audiences.js";
+import type { BrandRelation } from "./brand-relations.js";
 import { HumanServiceStalledError, serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
 import { AudienceOfferMismatchError, fetchAudienceOfferId } from "./sourcing-origin.js";
@@ -86,6 +87,12 @@ import { walkCandidate, walkContext, walkEvent, walkFoundPerson } from "./serve-
  *           names an audience, so the fresh serve walks the brand's active audiences of the campaign's offer
  *           (src/lib/source-audiences.ts `resolveBrandAudiences`), each asked under its own list origin. No released
  *           pool (it judges a channel). Exhaustion only when every audience was walked to the end.
+ *           With `relation` (OUTREACH-3WAYS-1121, body `population: "investors" | "industry_peers"`, the sourcing
+ *           script's tactic): the walk reads the brand's RELATION audiences (human-service: who the people are to the
+ *           brand beyond the offer's buyers) instead of the offer's, needs no offer, takes none of the brand's due
+ *           follow-ups (they are the buyers' work) and runs none of the offer's checks (must-pass nor Bonus: they ask
+ *           about a buyer's need). Every free rule of the serve (re-contact window, opt-outs, bounces, suppression,
+ *           journalists, disqualified) is unchanged.
  */
 export type PullNextMode =
   | { kind: "serve" }
@@ -95,7 +102,7 @@ export type PullNextMode =
   | { kind: "find_due" }
   | { kind: "due_held" }
   | { kind: "stock"; sourceCampaignIds: string[] }
-  | { kind: "walk"; preferredAudienceId: string | null };
+  | { kind: "walk"; preferredAudienceId: string | null; relation?: BrandRelation | null };
 
 interface PullNextParams {
   orgId: string;
@@ -277,6 +284,8 @@ export async function pullNext(
   // "Lead follow-up due" (find_due) is a source's own run too: before BLANK-CANDIDATES-1101 it drained the retry pool of
   // the source itself and handed its own finds out 100+ times each (campaign a70d7e5b, ~2,000 runs a day, no send).
   const finding = mode.kind === "find" || mode.kind === "find_contacted" || mode.kind === "find_due";
+  // A walk of the brand's investors / industry peers (OUTREACH-3WAYS-1121): not the offer's buyers.
+  const relationWalk: BrandRelation | null = mode.kind === "walk" ? mode.relation ?? null : null;
 
   // A source unit's own run with no audience of its origin: it looked at nobody (never exhaustion).
   if (mode.kind === "find" && mode.audienceIds.length === 0) {
@@ -374,8 +383,9 @@ export async function pullNext(
   const ctx: ServiceContext = { ...baseCtx, goal };
   // The offer's enabled checks, read before anything is bought: the Bonus ones run once a person
   // is served (email verified, handed to the writer next), every one is read back for the writer.
-  const checks = await offerChecks(params.orgId, params.brandId, offerId);
-  walkContext({ offerId });
+  // A relation walk serves people who are not the offer's buyers: none of the offer's checks apply to them.
+  const checks = relationWalk ? [] : await offerChecks(params.orgId, params.brandId, offerId);
+  walkContext({ offerId, ...(relationWalk ? { relation: relationWalk } : {}) });
   const writerChecks = async (fullLead: Awaited<ReturnType<typeof buildFullLead>>): Promise<WriterChecks> => {
     const identity: SpendIdentity | null = params.runId
       ? {
@@ -565,7 +575,7 @@ export async function pullNext(
   // thread, and the sender continues their last thread from its mailbox. No campaign of its own, no channel branch: the
   // pipe's own reach decides who it can write to. A pipe stating a step filter skips it (nothing here vouches for a
   // person's CRM steps, like the released pool). Fresh-contacts windows are a COLD tactic: never applied to a follow-up.
-  if (!finding && !params.stepFilter) {
+  if (!finding && !params.stepFilter && !relationWalk) {
     const due = await claimDueFollowupLead({
       orgId: params.orgId,
       brandId: params.brandId,
@@ -1033,6 +1043,25 @@ export async function pullNext(
     let walkAudiences: Array<{ audienceId: string; originSlug: string | null }>;
     if (mode.kind === "find") {
       walkAudiences = mode.audienceIds.map((id) => ({ audienceId: id, originSlug: null }));
+    } else if (relationWalk) {
+      // The brand's investors / industry peers: its relation audiences, each under its own list origin. No offer needed.
+      const listed = await resolveBrandRelationAudiences({
+        orgId: params.orgId,
+        brandId: params.brandId,
+        relation: relationWalk,
+        userId: params.userId ?? null,
+        runId: params.runId ?? null,
+      });
+      const ordered = orderByEmptyAnswers(listed.map((a) => a.audienceId), await loadEmptyAnswers(params.campaignId, params.acceptedEmails ?? null));
+      const originOf = new Map(listed.map((a) => [a.audienceId, a.originSlug]));
+      walkAudiences = ordered.map((id) => ({ audienceId: id, originSlug: originOf.get(id) ?? null }));
+      walkContext({ walkAudienceIds: ordered });
+      if (walkAudiences.length === 0) {
+        console.log(
+          `[lead-service] pullNext found=false channel-less campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId} relation=${relationWalk}: no serveable audience of this relation`,
+        );
+        return { found: false, reason: NO_AUDIENCE_REASON };
+      }
     } else {
       if (!offerId) {
         walkEvent("no_offer", { campaignId: params.campaignId });
@@ -1093,7 +1122,7 @@ export async function pullNext(
         let served: Awaited<ReturnType<typeof serveNext>>;
         try {
           served =
-            (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal, walkDeadline)) ??
+            (await serveThroughCandidates(candidateAudienceId, audienceCtx, offerId, signal, walkDeadline, { offerChecks: !relationWalk })) ??
             (await serveNext(candidateAudienceId, audienceCtx, FIND_SERVE_NEXT_TIMEOUT_MS));
         } catch (err) {
           if (isAudienceNotServeableError(err)) {

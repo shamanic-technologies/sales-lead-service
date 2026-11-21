@@ -30,8 +30,11 @@ vi.mock("../../src/lib/source-audience-walk.js", () => ({
 }));
 // INTRO-SERVE-1114: the brand's audiences a channel-less campaign walks (human-service list has its own suite).
 const resolveBrandAudiences = vi.fn();
+// OUTREACH-3WAYS-1121: the brand's investor / industry-peer audiences (human-service relation audiences).
+const resolveBrandRelationAudiences = vi.fn();
 vi.mock("../../src/lib/source-audiences.js", () => ({
   resolveBrandAudiences: (...a: unknown[]) => resolveBrandAudiences(...a),
+  resolveBrandRelationAudiences: (...a: unknown[]) => resolveBrandRelationAudiences(...a),
 }));
 vi.mock("../../src/lib/source-stock.js", () => ({
   SOURCE_FOUND_STATUS_REASON: "source_found",
@@ -49,7 +52,8 @@ vi.mock("../../src/lib/audience-fit-client.js", () => ({
 const getCurrentGoal = vi.fn();
 const claimReleasedLead = vi.fn(async () => null);
 vi.mock("../../src/lib/released-pool.js", () => ({ claimReleasedLead: (...a: unknown[]) => claimReleasedLead(...(a as [])) }));
-vi.mock("../../src/lib/lead-followup-date.js", () => ({ claimDueFollowupLead: vi.fn(async () => null), dueVerdict: vi.fn() }));
+const claimDueFollowupLead = vi.fn(async (..._a: unknown[]) => null);
+vi.mock("../../src/lib/lead-followup-date.js", () => ({ claimDueFollowupLead: (...a: unknown[]) => claimDueFollowupLead(...a), dueVerdict: vi.fn() }));
 vi.mock("../../src/lib/sourcing-origin.js", () => ({
   fetchAudienceOfferId: vi.fn(async () => null),
   AudienceOfferMismatchError: class extends Error {},
@@ -252,6 +256,95 @@ describe("pullNext walk mode (a campaign launched on its Target alone, no channe
     expect(result.lead?.leadId).toBe("lead-9");
     expect(resolveBrandAudiences).not.toHaveBeenCalled();
     expect(serveNext).not.toHaveBeenCalled();
+  });
+});
+
+describe("pullNext relation walk (OUTREACH-3WAYS-1121: the sourcing script's tactic names the brand's investors / industry peers)", () => {
+  const relationParams = (relation: "investors" | "industry_peers" | null) => ({
+    orgId: "org-1",
+    campaignId: "target-unit-1",
+    brandIds: ["brand-1"],
+    brandId: "brand-1",
+    featureSlug: null,
+    runFeatureSlug: null,
+    runCampaignId: "target-unit-1",
+    runId: "run-1",
+    userId: "user-1",
+    audienceId: null,
+    mode: { kind: "walk" as const, preferredAudienceId: null, relation },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getCurrentGoal.mockResolvedValue("conversation");
+    pickRetryCandidate.mockResolvedValue(null);
+    fetchCampaign.mockResolvedValue({ id: "target-unit-1", offerId: "offer-1" });
+    offerChecks.mockResolvedValue([{ id: "c-bonus", mode: "mention" }]);
+    checksForWriter.mockResolvedValue({ domain: null, checks: [] });
+    upsertLeadFromPerson.mockResolvedValue("lead-1");
+    registerServedEmail.mockResolvedValue("lead-1");
+    recordEmploymentHistory.mockResolvedValue(undefined);
+    buildFullLead.mockResolvedValue({ leadId: "lead-1" });
+    resolveBrandAudiences.mockResolvedValue([{ audienceId: "aud-buyers", originSlug: "sourcing-apollo-cold-filters" }]);
+    resolveBrandRelationAudiences.mockImplementation(async (a: { relation: string }) =>
+      a.relation === "investors"
+        ? [{ audienceId: "aud-investors", originSlug: "sourcing-apollo-cold-filters" }]
+        : [{ audienceId: "aud-peers", originSlug: "sourcing-apollo-cold-filters" }],
+    );
+    serveNext.mockResolvedValue({ status: "served", person });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("investors: serves a person from the brand's investor audiences only, filed on the campaign, no offer check, no buyer follow-up", async () => {
+    const result = await pullNext(relationParams("investors"));
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-investors");
+    expect(resolveBrandRelationAudiences).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-1", brandId: "brand-1", relation: "investors" }));
+    expect(resolveBrandAudiences).not.toHaveBeenCalled();
+    expect(serveNext).toHaveBeenCalledWith("aud-investors", expect.objectContaining({ audienceId: "aud-investors" }), FIND_SERVE_NEXT_TIMEOUT_MS);
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ campaignId: "target-unit-1", status: "served", audienceId: "aud-investors" }));
+    // Not the offer's buyers: none of the offer's checks (must-pass skipped on the candidate path, no Bonus).
+    expect(offerChecks).not.toHaveBeenCalled();
+    expect(serveThroughCandidates.mock.calls[0][5]).toEqual({ offerChecks: false });
+    expect(checksForWriter).toHaveBeenCalledWith({ leadId: "lead-1" }, [], expect.anything());
+    // The brand's due follow-ups belong to its buyers' campaigns.
+    expect(claimDueFollowupLead).not.toHaveBeenCalled();
+    // Its own already-paid people still go first (free rule unchanged).
+    expect(pickRetryCandidate).toHaveBeenCalled();
+  });
+
+  it("industry_peers: serves a person from the brand's industry-peer audiences only", async () => {
+    const result = await pullNext(relationParams("industry_peers"));
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-peers");
+    expect(resolveBrandRelationAudiences).toHaveBeenCalledWith(expect.objectContaining({ relation: "industry_peers" }));
+    expect(resolveBrandAudiences).not.toHaveBeenCalled();
+  });
+
+  it("a relation walk needs no offer", async () => {
+    fetchCampaign.mockResolvedValue({ id: "target-unit-1", offerId: null });
+    const result = await pullNext(relationParams("investors"));
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-investors");
+  });
+
+  it("no audience of that relation is no_audience (never exhaustion), nothing bought", async () => {
+    resolveBrandRelationAudiences.mockResolvedValueOnce([]);
+    const result = await pullNext(relationParams("investors"));
+    expect(result).toEqual({ found: false, reason: "no_audience" });
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+
+  it("no such tactic: unchanged, the offer's buyers with their checks and the brand's due follow-ups first", async () => {
+    const result = await pullNext(relationParams(null));
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-buyers");
+    expect(resolveBrandRelationAudiences).not.toHaveBeenCalled();
+    expect(offerChecks).toHaveBeenCalled();
+    expect(claimDueFollowupLead).toHaveBeenCalled();
+    expect(serveThroughCandidates.mock.calls[0][5]).toEqual({ offerChecks: true });
   });
 });
 

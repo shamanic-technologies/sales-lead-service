@@ -296,6 +296,11 @@ export async function serveThroughCandidates(
   signal?: AbortSignal,
   /** When the caller's own walk stops starting new work (ms since epoch); the budget never runs past it. */
   walkDeadline?: number,
+  /**
+   * `offerChecks: false` = the walk serves people who are not the offer's buyers (the brand's investors or industry
+   * peers, OUTREACH-3WAYS-1121): the offer's must-pass checks ask about a buyer's need and are not applied.
+   */
+  options: { offerChecks?: boolean } = {},
 ): Promise<ServeNextResult | null> {
   if (!ctx.runId) throw new Error("[lead-service] serving through candidates needs the serve's run id");
   const identity: SpendIdentity = {
@@ -336,7 +341,7 @@ export async function serveThroughCandidates(
       return { status: "pending", person: null };
     }
     if (mustPass === null) {
-      mustPass = ctx.brandId ? await mustPassCriteria(ctx.orgId, ctx.brandId, offerId) : [];
+      mustPass = ctx.brandId && options.offerChecks !== false ? await mustPassCriteria(ctx.orgId, ctx.brandId, offerId) : [];
     }
     const basis = decisionBasis(mustPass);
     const walked = walkCandidate("candidates", `candidate:${candidate.candidateId}`);
