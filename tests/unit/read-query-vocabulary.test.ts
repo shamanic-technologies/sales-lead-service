@@ -43,6 +43,14 @@ const LIVE_CALLERS: Array<{ read: QueryCheckedRead; caller: string; params: stri
   { read: "GET /orgs/stats", caller: "api-service routes/campaigns.ts", params: ["orgId", "brandId", "groupBy", "workflowSlug", "featureSlug", "workflowDynastySlug", "featureDynastySlug", "campaignId"] },
   { read: "GET /orgs/stats", caller: "features-service routes/stats.ts", params: ["groupBy", "workflowSlug", "workflowDynastySlug", "featureSlug", "brandId", "campaignId"] },
   { read: "GET /orgs/stats", caller: "distribute CLI routes.ts", params: ["brandId", "campaignId", "groupBy"] },
+  // Provider reads of our Units (ENGINE-GET-ASK-1123): what the served OpenAPI documents to workflow-service's scripts (`ctx.get`).
+  { read: "GET /orgs/units/lead-found", caller: "workflow-service scripts (ctx.get lead_found)", params: ["emails", "leadIds", "domains", "brandId", "campaignId", "since", "until", "notServedTo", "limit", "cursor"] },
+  { read: "GET /orgs/units/company-researched", caller: "workflow-service scripts (ctx.get company_researched)", params: ["domains", "brandId", "since", "until", "limit", "cursor"] },
+  ...(["website-visit", "signup", "form-submitted", "purchase", "meeting-booked", "meeting-attended", "paid-client"] as const).map((o) => ({
+    read: `GET /orgs/units/${o}` as QueryCheckedRead,
+    caller: "workflow-service scripts (ctx.get of the fact outcome)",
+    params: ["emails", "leadIds", "domains", "brandId", "since", "until", "limit", "cursor"],
+  })),
 ];
 
 describe("every parameter a live caller sends is still accepted (LEADS-UNKNOWN-FILTER-1105)", () => {
