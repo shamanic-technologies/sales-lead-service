@@ -1,3 +1,4 @@
+import { FIND_PEOPLE_IN } from "./lib/stated-source.js";
 import { BRAND_RELATIONS } from "./lib/brand-relations.js";
 import { z } from "zod";
 import { EMAIL_POLICIES } from "./lib/email-policy.js";
@@ -1042,6 +1043,19 @@ export const BufferNextRequestSchema = z
         "`investors` / `industry_peers` (OUTREACH-3WAYS-1121) = a population that is NOT the offer's buyers: the brand's equity investors, or founders and leaders of companies in the brand's industry (competitors included), as human-service holds them (audiences of that relation, built for the brand, no offer). Stated by a campaign launched on its target alone (no x-feature-slug), else 400 `relation_population_needs_target_campaign`. The serve walks those audiences only (x-audience-id ignored), files one new person on THIS campaign like any channel-less serve (its own already-paid people first), and every free rule is unchanged (fresh-contacts window, opt-outs, bounces, suppression, journalists, disqualified, one person once). It takes none of the brand's due follow-ups (they belong to the buyers' campaigns) and runs none of the offer's qualification checks (they ask about a buyer's need). No such audience = `found:false` reason `no_audience`; walked to the end = `audience_exhausted`.",
       example: "lead_followup_due",
     }),
+    findPeopleIn: z.enum(FIND_PEOPLE_IN).optional().openapi({
+      description:
+        "WHERE this run finds the people it serves (SERVE-SOURCE-AS-DATA-1124), stated by the Lead found script itself: " +
+        "`sources_picked_for_the_brand` = the sources chosen for the brand and offer (Lead Sourcing: the people sources human-service picked for this brand); " +
+        "`apollo_cold_filters` = people matching the audience's filters in Apollo's database (job title, industry, company size, place), not yet in touch with the brand; " +
+        "`apollo_buying_signals` = people at companies showing a buying signal in Apollo (hiring, a new job, a funding round); " +
+        "`linkedin_post_engagement` = people who liked, commented or shared LinkedIn posts of the brand's competitors or industry; " +
+        "`client_crm_contacts` = people in the client's own CRM (contacts the client already holds). " +
+        "The run is served from exactly that source, under the same rules as a run of that source today: the brand's active audiences of the campaign's offer that find people there (an audience whose own list is that source, or that holds that source switched on), the same purchases, and the serve run and everything bought under it labelled with that source (spend, billing, sourcing origin). " +
+        "On a campaign launched on its target alone (no x-feature-slug): the campaign's own already-paid people found through that source first, then a new person from that source, filed on this campaign; none of the brand's due follow-ups (they come from no source). No audience of that source = `found:false` reason `no_audience`; every one walked to the end = `audience_exhausted`; never another source instead. " +
+        "On a campaign that has a channel, the stated source must be the one the run already finds in (a lead source campaign of that source, or the origin of the named audience), and the serve is then today's; any other = 400 `find_people_in_disagrees`. With `population`, `namedLead` or `dueFollowupOnly` = 400 `find_people_in_excludes`. Absent = today's serve, bytes unchanged.",
+      example: "apollo_cold_filters",
+    }),
     dueFollowupOnly: z.literal(true).optional().openapi({
       description:
         "SCRIPT-VALUE-RATING-1113-LEAD: a campaign's PROACTIVE tick (its own run, no trigger occurrence) asks ONLY for a lead its brand already holds whose ONE next follow-up date (GET /orgs/leads/{id}/followup-date) has passed and who is owed a follow-up now (the same verdict and stops as \"Lead follow-up due\": we wrote to them or they acted toward the brand; not opted out, unsubscribed, bounced, disqualified, a journalist, or a non-prospect relationship), most overdue first, reached on the pipe's own contact methods. NEVER a fresh, bought, retried, stocked or released lead: no audience is read (x-audience-id ignored), nothing is bought, no `on_demand` event is recorded. The person is filed on THIS campaign (its own row re-served, else a new one) as a follow-up due now that this campaign's answerer then claims exactly like an occurrence's person: POST /orgs/campaigns/{campaignId}/followups/claim-next with `person: {leadId}` (relationship policy honoured there). The round is HELD for this campaign for 1 hour: no other due serve (another campaign's tick, a proactive serve, a Lead follow-up due source) hands the person meanwhile; the claim consumes the hold and takes the person's date; a run that never claims leaves the person due again for anyone once the hold ends (their date is never moved by this serve). Answer: the served shape (`lead.leadId`, `lead.email` or `lead.phone`, `lead.leadCampaignId`, `lead.data`), or `found:false` reason `lead_followup_none_due` (nobody due and owed: not exhaustion). Only an outreach campaign may state it: a source unit's own run = 400 `due_followup_only_needs_outreach_campaign`; with `population`, `namedLead` or `stepFilter` = 400 `due_followup_only_excludes`. Absent = today's serve, bytes unchanged.",
@@ -1061,7 +1075,7 @@ export const BufferNextRequestSchema = z
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `reachableOn`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `dueFollowupOnly`, `namedLead`), all optional; an empty body is today's serve. Which combinations are refused: see the operation's description.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `reachableOn`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `findPeopleIn`, `dueFollowupOnly`, `namedLead`), all optional; an empty body is today's serve. Which combinations are refused: see the operation's description.",
   });
 
 export const ServedBuyingSignalSchema = z
@@ -2493,6 +2507,7 @@ const ASK_LEAD_FOUND_DESCRIPTION = [
     "- `stepFilter`: `{reached?: Step[], notReached?: Step[]}` = funnel steps the person reached in the brand's own tools (crm-service's words, forwarded verbatim). Absent = no such filter.\n" +
     `- \`excludeEmailedWithin\`: \`${RECENTLY_EMAILED_WINDOWS.join("` | `")}\` = nobody the brand emailed in that window (\`never\` = ever). Absent = no such skip.\n` +
     `- \`population\`: \`contacted_pure_prospects\` | \`lead_followup_due\` (a source campaign's own run only: people the brand already knows, nothing bought) | \`${BRAND_RELATIONS.join("` | `")}\` (a target-only campaign only: the brand's investors / industry peers instead of the offer's buyers). Absent = the audience's people.\n` +
+    `- \`findPeopleIn\`: \`${FIND_PEOPLE_IN.join("` | `")}\` = WHERE a new person is found: the sources chosen for the brand, Apollo's database by the audience's filters, Apollo buying signals (hiring, new job, funding), people engaging with competitors' or industry LinkedIn posts, or the client's own CRM contacts. Served exactly as a run of that source (same audiences, purchases and labels); on a campaign with no channel, its already-paid people from that source first, then a new one, no due follow-up; none = \`no_audience\`, never another source. Absent = today.\n` +
     "- `dueFollowupOnly`: `true` = ONLY a lead the brand already holds whose follow-up is due; never a new, bought, retried, stocked or released person. Absent = the plain serve.\n" +
     "- `namedLead`: `{leadId, triggerEventId}` = EXACTLY that person (the one a trigger occurrence names), or a named refusal with `message` and `final`. Absent = the serve picks.",
   "**Refused combinations (400, `error` = the code, nothing served, nothing bought).**\n" +
@@ -2504,6 +2519,8 @@ const ASK_LEAD_FOUND_DESCRIPTION = [
     `- \`relation_population_needs_target_campaign\`: \`population\` \`${BRAND_RELATIONS.join("` / `")}\` on a campaign that has a channel (\`x-feature-slug\` present).\n` +
     "- `population_needs_source_unit`: `population` `contacted_pure_prospects` / `lead_followup_due` on anything but a source campaign's own run.\n" +
     "- `step_filter_refused`: crm-service refused the stated `stepFilter` (an unknown step).\n" +
+    "- `find_people_in_excludes`: `findPeopleIn` with `population`, `namedLead` or `dueFollowupOnly`.\n" +
+    "- `find_people_in_disagrees`: `findPeopleIn` on a campaign with a channel that finds people elsewhere (a source campaign of another source, a campaign serving its sources' stock, or an audience whose source is another one / none named).\n" +
     "- `x-campaign-id and x-brand-id headers required`.",
   "**Other refusals.** 409 = another serve of the same campaign is still running (one serve per campaign at a time). 500 = the serve could not be set up or failed: nothing is reported as served.",
   "**`found: false` reasons.** Only `audience_exhausted` means a population ran out; test for it by name, never by excluding the others.\n" +
@@ -2540,7 +2557,7 @@ registry.registerPath({
     },
     400: {
       description:
-        "Invalid body or a refused combination, `error` = the code: `step_filter_needs_audience_serve`, `named_lead_excludes_population`, `due_followup_only_excludes`, `due_followup_only_needs_outreach_campaign`, `relation_population_needs_target_campaign`, `population_needs_source_unit`, `step_filter_refused` (crm-service refused the stated stepFilter); or the campaign / brand header is missing. Nothing served.",
+        "Invalid body or a refused combination, `error` = the code: `step_filter_needs_audience_serve`, `named_lead_excludes_population`, `due_followup_only_excludes`, `due_followup_only_needs_outreach_campaign`, `relation_population_needs_target_campaign`, `population_needs_source_unit`, `step_filter_refused` (crm-service refused the stated stepFilter), `find_people_in_excludes`, `find_people_in_disagrees`; or the campaign / brand header is missing. Nothing served.",
       content: { "application/json": { schema: ErrorResponseSchema } },
     },
     401: { description: "Unauthorized" },
