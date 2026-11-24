@@ -223,6 +223,35 @@ export const LOAD_INDEXES: readonly PostBootIndex[] = [
     log: "[lead-service] load index",
   },
   {
+    // Provider reads of our Units (ENGINE-GET-ASK-1123, provider-units.ts): `GET /orgs/units/lead-found` by brand or
+    // org walks the org's finds newest first (keyset on served_at, id) instead of sorting every row of the brand.
+    name: "idx_lc_units_found",
+    on: "ON leads_campaigns (org_id, served_at DESC, id DESC) WHERE status_reason IN ('served', 'source_found') AND served_at IS NOT NULL",
+    lockKey: "7290519146308441041",
+    log: "[lead-service] load index",
+  },
+  {
+    // Provider reads, `domains=`: the leads holding an address at a company domain.
+    name: "idx_lcm_email_domain",
+    on: "ON lead_contact_methods (split_part(lower(value), '@', 2)) WHERE channel = 'email'",
+    lockKey: "7290519146308441042",
+    log: "[lead-service] load index",
+  },
+  {
+    // `GET /orgs/units/company-researched` by brand: the org's checks of one brand.
+    name: "idx_qck_org_brand",
+    on: "ON qualification_checks (org_id, brand_id)",
+    lockKey: "7290519146308441043",
+    log: "[lead-service] load index",
+  },
+  {
+    // `GET /orgs/units/company-researched?domains=`: the org's checks on one company.
+    name: "idx_qck_org_domain",
+    on: "ON qualification_checks (org_id, domain)",
+    lockKey: "7290519146308441044",
+    log: "[lead-service] load index",
+  },
+  {
     // their-acts `actScopes`: the scopes whose dates carry an act.
     name: "idx_lfd_last_action_scope",
     on: "ON lead_followup_dates (org_id, brand_id) WHERE last_action_at IS NOT NULL",

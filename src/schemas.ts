@@ -9,7 +9,8 @@ import {
 } from "@asteasolutions/zod-to-openapi";
 // The published `reason` enum IS the empty-serve vocabulary — read it from the one module
 // that declares it, so the contract cannot drift from what the serve path actually returns.
-import { SERVE_EMPTY_REASONS } from "./lib/serve-reasons.js";
+import { SERVE_EMPTY_REASONS, type ServeEmptyReason } from "./lib/serve-reasons.js";
+import { FACT_UNIT_OUTCOMES, PROVIDER_UNIT_READS, type ProviderUnitRead } from "./lib/provider-units-query.js";
 import { WALK_POOLS, WALK_RULES } from "./lib/serve-walk-rules.js";
 import { CAUSE_REASONS, LEAD_STATE_EVIDENCE_KINDS, LEAD_STATES } from "./lib/lead-states.js";
 import { EMAIL_SEND_WORKFLOW_SOURCES } from "./lib/repoint-causes.js";
@@ -1060,7 +1061,7 @@ export const BufferNextRequestSchema = z
   })
   .openapi("BufferNextRequest", {
     description:
-      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `namedLead`), all optional; an empty body is today's serve.",
+      "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `reachableOn`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `dueFollowupOnly`, `namedLead`), all optional; an empty body is today's serve. Which combinations are refused: see the operation's description.",
   });
 
 export const ServedBuyingSignalSchema = z
@@ -2442,34 +2443,366 @@ registry.registerPath({
   },
 });
 
+// ─── The lead serve, documented as the ASK of `lead_found` (ENGINE-GET-ASK-1123) ────────────────────────────────────
+// A Script (or our AI) must learn every input of the serve from the served OpenAPI alone. Descriptions only: nothing
+// here changes what the route accepts (tests/unit/provider-units-openapi.test.ts holds the request schema's parsing).
+// `operationId` is a contract: never rename it.
+
+/** One plain sentence per empty-serve reason. Typed on the enum: a reason added later fails the build until described. */
+export const SERVE_EMPTY_REASON_MEANINGS: Record<ServeEmptyReason, string> = {
+  audience_exhausted: "the audience(s) asked were walked to the end: nobody left. The ONLY reason that means a population ran out.",
+  no_audience: "no audience was named (no `x-audience-id`), or a target-only campaign has no serveable audience / no offer: nobody was looked at.",
+  serve_timed_out: "the serve's time budget ended before the look finished: ask again.",
+  audience_not_serveable: "the named audience has no committed list yet: its population is unknown, not empty.",
+  credit_insufficient: "the org has no platform credit: nothing was bought. A wait (add credit).",
+  source_campaign_off: "the audience's origin is a source campaign of the offer that is OFF: nothing is bought from it.",
+  source_stock_empty: "the campaign is fed by sources that find people in their own runs, and none holds a find nobody worked yet.",
+  origin_not_fed: "the named audience serves from an origin this campaign's channel is not fed by: a wrong audience was named.",
+  audience_offer_mismatch: "the named audience belongs to another offer than the one the campaign sells.",
+  no_recent_posts: "a LinkedIn-engagement audience whose competitor pages posted nothing in its window: nobody to read yet.",
+  contacted_prospects_none_owed: "`population: contacted_pure_prospects`: nobody the brand contacted is owed a follow-up right now.",
+  lead_followup_none_due: "`population: lead_followup_due` or `dueFollowupOnly`: nobody of the brand is due and owed a follow-up right now.",
+  recently_emailed: "`excludeEmailedWithin`: every person this call bought was emailed by the brand inside the window (each stays filed for later).",
+  journalist: "every person this call bought is a journalist of the brand: never served for sales.",
+  disqualified: "every person this call bought (or their company) is marked Disqualified for the brand.",
+  sales_funnel_max_budget_reached: "billing refused a spend: the campaign's max budget is reached (`sales_funnel_cap`, `message` beside it). A wait (raise the budget), never \"add credit\".",
+  sales_funnel_max_budget_unreadable: "billing could not read the campaign's max budget and refused the spend. A wait.",
+  named_lead_not_filed: "`namedLead`: the person is not filed on this campaign. Final.",
+  named_lead_no_email: "`namedLead`: the person has no email. Final.",
+  named_lead_suppressed: "`namedLead`: opted out, do-not-contact, unsubscribed or bounced. Final.",
+  named_lead_already_worked: "`namedLead`: an earlier run of the same occurrence already got the person sent or queued. Final.",
+  named_lead_in_send_queue: "`namedLead`: the sender already holds a message to send them. Final.",
+  named_lead_sender_refuses: "`namedLead`: the sender refuses to write to them. Final.",
+  named_lead_sender_finished: "`namedLead`: the sender is finished with them in this campaign. Final.",
+  named_lead_unwritable: "`namedLead`: no first name and no company, even after one enrichment. Final.",
+  named_lead_sender_unreadable: "`namedLead`: the sender's state could not be read. A wait: ask again.",
+  named_lead_journalist: "`namedLead`: the person is a journalist of the brand. Final.",
+  named_lead_disqualified: "`namedLead`: the person (or their company) is marked Disqualified. Final.",
+};
+
+const ASK_LEAD_FOUND_DESCRIPTION = [
+  "This service is the Provider of the outcome `lead_found`. This operation is its ASK: it hands the calling campaign ONE person to work, or says why not. It can SPEND (a fresh person is bought through human-service on a `lead-serve` child run of `x-run-id`) and it WRITES (the person is filed on the campaign). To only READ the people already found, call `GET /orgs/units/lead-found` (operationId `listLeadFoundUnits`), which costs nothing.",
+  "**Answer.** `found: true` + `lead` (`leadId`, `email` or `phone`, `leadCampaignId`, the full person under `lead.data`, `audienceId`, `buyingSignal`, `qualification`, `relationship`), or `found: false` + `reason`. Asking twice with the same `x-run-id` returns the first answer again (idempotent on the run).",
+  "**Where the person comes from, in order** (an outreach campaign with a channel): (1) the campaign's own already-paid people nobody wrote to yet; (2) the brand's leads whose follow-up date has come and who are owed one; (3) a person another campaign released for a channel reason; (4) a find a source campaign holds in stock; (5) a NEW person bought from the audience `x-audience-id`. Steps 1-4 buy nobody.",
+  "**Headers.** `x-api-key`, `x-org-id`, `x-run-id` (the caller's run; the serve run hangs under it), `x-campaign-id` and `x-brand-id` are REQUIRED (missing campaign or brand = 400). `x-user-id`, `x-workflow-slug` are recorded on the person's row. `x-audience-id` = the audience a fresh person is bought from; absent on a channel campaign = nobody new is looked for (`found: false`, `no_audience`); this service never picks an audience for an outreach campaign. `x-feature-slug` = the channel the campaign writes on; ABSENT = a campaign launched on its target alone: the serve walks the brand's own active audiences of the campaign's offer (the one named by `x-audience-id` first), with no channel rule, no source campaign and no released person. `x-campaign-id` = a lead SOURCE campaign (leg `start_to_lead_found`) = that source's own run: it finds a person in its own audiences, files them under itself (its stock) and contacts nobody.",
+  "**Body: who to find (all optional; an empty body `{}` is the plain serve).**\n" +
+    `- \`acceptedEmails\`: \`${EMAIL_POLICIES.join("` | `")}\`. Absent = \`valid_only\`.\n` +
+    "- `reachableBy`: `[\"email\"]`, `[\"phone\"]` or both = only people reachable by EVERY listed method. Absent = only what the channel itself needs.\n" +
+    "- `reachableOn`: messaging networks the person's phone must be on (e.g. `[\"whatsapp\"]`). Absent = only the channel's own network.\n" +
+    `- \`relationships\`: \`${RELATIONSHIP_POLICIES.join("` | `")}\` = nobody the brand knows as personal, investor, supplier, team, partner or advisor. Absent = no such filter.\n` +
+    "- `stepFilter`: `{reached?: Step[], notReached?: Step[]}` = funnel steps the person reached in the brand's own tools (crm-service's words, forwarded verbatim). Absent = no such filter.\n" +
+    `- \`excludeEmailedWithin\`: \`${RECENTLY_EMAILED_WINDOWS.join("` | `")}\` = nobody the brand emailed in that window (\`never\` = ever). Absent = no such skip.\n` +
+    `- \`population\`: \`contacted_pure_prospects\` | \`lead_followup_due\` (a source campaign's own run only: people the brand already knows, nothing bought) | \`${BRAND_RELATIONS.join("` | `")}\` (a target-only campaign only: the brand's investors / industry peers instead of the offer's buyers). Absent = the audience's people.\n` +
+    "- `dueFollowupOnly`: `true` = ONLY a lead the brand already holds whose follow-up is due; never a new, bought, retried, stocked or released person. Absent = the plain serve.\n" +
+    "- `namedLead`: `{leadId, triggerEventId}` = EXACTLY that person (the one a trigger occurrence names), or a named refusal with `message` and `final`. Absent = the serve picks.",
+  "**Refused combinations (400, `error` = the code, nothing served, nothing bought).**\n" +
+    "- `Invalid request`: the body does not parse (`details` says which field).\n" +
+    "- `step_filter_needs_audience_serve`: `stepFilter` with `population`.\n" +
+    "- `named_lead_excludes_population`: `namedLead` with `population`.\n" +
+    "- `due_followup_only_excludes`: `dueFollowupOnly` with `population`, `namedLead` or `stepFilter`.\n" +
+    "- `due_followup_only_needs_outreach_campaign`: `dueFollowupOnly` on a source campaign's own run.\n" +
+    `- \`relation_population_needs_target_campaign\`: \`population\` \`${BRAND_RELATIONS.join("` / `")}\` on a campaign that has a channel (\`x-feature-slug\` present).\n` +
+    "- `population_needs_source_unit`: `population` `contacted_pure_prospects` / `lead_followup_due` on anything but a source campaign's own run.\n" +
+    "- `step_filter_refused`: crm-service refused the stated `stepFilter` (an unknown step).\n" +
+    "- `x-campaign-id and x-brand-id headers required`.",
+  "**Other refusals.** 409 = another serve of the same campaign is still running (one serve per campaign at a time). 500 = the serve could not be set up or failed: nothing is reported as served.",
+  "**`found: false` reasons.** Only `audience_exhausted` means a population ran out; test for it by name, never by excluding the others.\n" +
+    SERVE_EMPTY_REASONS.map((r) => `- \`${r}\`: ${SERVE_EMPTY_REASON_MEANINGS[r]}`).join("\n"),
+  "**Example.** A cold-email script that only wants never-emailed people with a confirmed address: headers `x-campaign-id`, `x-brand-id`, `x-audience-id`, `x-feature-slug`, body `{\"acceptedEmails\": \"valid_only\", \"excludeEmailedWithin\": \"never\"}`.",
+].join("\n\n");
+
+/** buffer/next reads these two headers in its own way: say so on this operation (the shared text is about attribution). */
+const AskLeadFoundHeaders = BufferNextHeaders.map((h) =>
+  h.name === "x-audience-id"
+    ? { ...h, description: "The audience (human-service audience id) a fresh person is bought from. Absent on a campaign with a channel = nobody new is looked for (`found:false`, reason `no_audience`). On a target-only campaign it is asked first among the brand's audiences. Ignored with `namedLead`, `dueFollowupOnly` and a relation `population`." }
+    : h.name === "x-feature-slug"
+      ? { ...h, description: "The channel the campaign writes on. ABSENT = a campaign launched on its target alone: the serve walks the brand's active audiences of the campaign's offer, with no channel rule." }
+      : h,
+);
+
 registry.registerPath({
   method: "post",
   path: "/orgs/buffer/next",
-  summary: "Pull the next lead from the buffer",
-  description:
-    "Claims and returns the next available lead from the campaign buffer. " +
-    "Response contains the full canonical lead payload (FullLead) under `lead.data` — " +
-    "use `data.firstName`, `data.lastName`, `data.organization.name` for outbound recipient fields.",
+  operationId: "askLeadFound",
+  summary: "Ask for the next lead to work (the serve): one person, or why not",
+  description: ASK_LEAD_FOUND_DESCRIPTION,
   request: {
     params: z.object({}),
     body: {
       content: { "application/json": { schema: BufferNextRequestSchema } },
     },
   },
-  parameters: BufferNextHeaders,
+  parameters: AskLeadFoundHeaders,
   responses: {
     200: {
-      description: "Next lead from buffer (or found=false when exhausted)",
+      description: "The person served (`found: true`), or `found: false` with its `reason` (only `audience_exhausted` means a population ran out)",
       content: { "application/json": { schema: BufferNextResponseSchema } },
     },
     400: {
-      description: "Invalid request; `population_needs_source_unit`; `step_filter_needs_audience_serve` (stepFilter + population); `step_filter_refused` (crm-service refused the stated stepFilter, nothing served)",
+      description:
+        "Invalid body or a refused combination, `error` = the code: `step_filter_needs_audience_serve`, `named_lead_excludes_population`, `due_followup_only_excludes`, `due_followup_only_needs_outreach_campaign`, `relation_population_needs_target_campaign`, `population_needs_source_unit`, `step_filter_refused` (crm-service refused the stated stepFilter); or the campaign / brand header is missing. Nothing served.",
       content: { "application/json": { schema: ErrorResponseSchema } },
     },
     401: { description: "Unauthorized" },
+    409: {
+      description: "Another serve of the same campaign is still running",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+    500: {
+      description: "The serve could not be set up or failed",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
   },
 });
 
+// ─── Provider reads of our Units (ENGINE-GET-ASK-1123) ──────────────────────────────────────────────────────────────
+// workflow-service finds each read by its TAG (`provider:<outcome key>`) in the served openapi.json and calls it as a
+// script's run. NEVER rename a path, a tag or an operationId. The query is parsed by `parseUnitsQuery`
+// (lib/provider-units-query.ts); these schemas document it. Exactly ONE operation carries each tag: a second one would
+// make workflow-service ask the script to name which (`filters.route`).
+
+const unitsList = (what: string) => z.union([z.string(), z.array(z.string())]).optional().openapi({ description: what });
+
+const unitsPersonFilters = {
+  emails: unitsList(
+    "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+  ),
+  leadIds: unitsList("lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."),
+  domains: unitsList(
+    "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+  ),
+};
+
+const unitsBrandFilter = {
+  brandId: z.string().min(1).optional().openapi({ description: "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)." }),
+};
+
+const unitsWindowFilters = {
+  since: z.string().optional().openapi({
+    description: "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+    example: "2026-08-23T00:00:00Z",
+  }),
+  until: z.string().optional().openapi({ description: "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now." }),
+};
+
+const unitsPagingFilters = {
+  limit: z.coerce.number().int().min(1).max(1000).optional().openapi({ description: "Page size, 1-1000. Omitted = 100." }),
+  cursor: z.string().min(1).optional().openapi({ description: "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page." }),
+};
+
+export const LeadFoundUnitsQuerySchema = z
+  .object({
+    ...unitsPersonFilters,
+    ...unitsBrandFilter,
+    campaignId: z.string().min(1).optional().openapi({
+      description: "Only finds FILED UNDER this campaign: the source campaign that found the person, or the outreach campaign whose serve bought them. Omitted = every campaign.",
+    }),
+    ...unitsWindowFilters,
+    notServedTo: z.string().min(1).optional().openapi({
+      description:
+        "Only found people NOT yet served. `any_campaign` = found people not yet served for sales outreach: a source campaign's find that was never handed from its stock AND whose person has no row, written at or after the find, under another campaign of the same brand that works them (another source's find and the brand's own intake filings do not count). A find bought by an outreach campaign's own serve was served to that campaign at once: never returned. `<campaign id>` = never handed to THAT campaign: not found under it, not handed to it from stock, and the person has no row under it. Omitted = every find.",
+      example: "any_campaign",
+    }),
+    ...unitsPagingFilters,
+  })
+  .openapi("LeadFoundUnitsQuery");
+
+export const FactUnitsQuerySchema = z
+  .object({ ...unitsPersonFilters, ...unitsBrandFilter, ...unitsWindowFilters, ...unitsPagingFilters })
+  .openapi("FactUnitsQuery");
+
+export const CompanyResearchedUnitsQuerySchema = z
+  .object({
+    domains: unitsList("Company domains researched, comma-separated (or repeated); lowercased, max 100. The Unit's subject itself."),
+    ...unitsBrandFilter,
+    ...unitsWindowFilters,
+    ...unitsPagingFilters,
+  })
+  .openapi("CompanyResearchedUnitsQuery");
+
+const unitSubject = (id: string) =>
+  z
+    .object({ service: z.literal("lead-service"), id: z.string().openapi({ description: id }) })
+    .openapi({ description: "The Unit's subject, exactly as declared on runs-service's ledger (`subjectService`, `subjectId`)." });
+const unitAt = z.string().openapi({ description: "When the Unit happened (ISO 8601 UTC)", example: "2026-10-02T09:14:07.512Z" });
+const unitId = z.string().openapi({ description: "Stable id of this Unit at this Provider" });
+const unitEmail = z.string().nullable().openapi({ description: "The person's first registered email, lowercased. Null = known by phone or social identity only." });
+
+const LeadFoundUnitSchema = z
+  .object({
+    unitId,
+    outcome: z.literal("lead_found"),
+    subject: unitSubject("The person's lead id"),
+    at: unitAt,
+    email: unitEmail,
+    brandId: z.string().nullable().openapi({ description: "The find's primary brand (first of `brandIds`)" }),
+    brandIds: z.array(z.string()),
+    campaignId: z.string().openapi({ description: "The campaign the find is filed under: a source campaign (`madeBy.kind` `source_find`) or the outreach campaign whose serve bought the person (`serve`)" }),
+    runId: z.string().nullable().openapi({ description: "The serve run that found the person. Null when a later re-hand overwrote the run on the row (`madeBy.runRepointed`)." }),
+    madeBy: z.object({
+      kind: z.enum(["source_find", "serve"]).openapi({ description: "`source_find` = a source campaign's own run found them (stock, nobody contacted); `serve` = an outreach campaign's serve bought them for itself" }),
+      audienceId: z.string().nullable().openapi({ description: "The audience the person was found in" }),
+      workflowSlug: z.string().nullable().openapi({ description: "The Script version the finding run ran" }),
+      featureSlug: z.string().nullable(),
+      parentRunId: z.string().nullable().openapi({ description: "The run that asked for the serve. Null when re-pointed." }),
+      runRepointed: z.boolean().openapi({ description: "True = the row was handed out again since, its run ids are a later run's: `runId` / `parentRunId` are served null, never a later run's id" }),
+    }),
+    served: z
+      .object({
+        handedToCampaignId: z.string().nullable().openapi({ description: "The campaign that took this find from its source's stock" }),
+        handedAt: z.string().nullable(),
+        setAsideAt: z.string().nullable().openapi({ description: "The find was set aside at hand-over (no longer fits its audience, not the source's own): never handed" }),
+        setAsideReason: z.string().nullable(),
+      })
+      .openapi({ description: "What became of a source's find, as stored on its row. All null on a find nobody took yet, and on a `serve` find." }),
+  })
+  .openapi("LeadFoundUnit");
+
+const FactUnitSchema = z
+  .object({
+    unitId,
+    outcome: z.enum(FACT_UNIT_OUTCOMES),
+    subject: unitSubject("The person's lead id"),
+    at: unitAt,
+    email: unitEmail,
+    brandId: z.string(),
+    campaignId: z.null().openapi({ description: "Always null: a fact Unit is the person's at the brand, this store names no campaign" }),
+    runId: z.string().openapi({ description: "The recording run the Unit was declared on" }),
+    madeBy: z.object({
+      performer: z.record(z.string(), z.unknown()).nullable().openapi({ description: "Who performed it, as stated on the ledger: `{kind: script, workflowSlug}` or `{kind: crm | tracker | client_team | ...}`. Null = not stated yet." }),
+      causedByOutreach: z.boolean().openapi({ description: "True = declared as OURS (it consumes the outcome it came from); false = another factory's Unit, consuming nothing" }),
+      consumedOutcome: z.string().nullable().openapi({ description: "The outcome key this Unit consumed (the same lead). Null = consumes nothing." }),
+      consumedBasis: z.string().nullable(),
+      conversionEventId: z.string().nullable().openapi({ description: "The outcome ledger row behind it" }),
+      crmFactId: z.string().nullable().openapi({ description: "The CRM fact behind it, when no ledger row holds the reach" }),
+    }),
+    reversed: z.boolean().openapi({ description: "True = the fact was taken back and the Unit reversed on the ledger (a counter-entry). Still listed: filter on it." }),
+    reversedAt: z.string().nullable(),
+  })
+  .openapi("FactUnit");
+
+const CompanyResearchedUnitSchema = z
+  .object({
+    unitId,
+    outcome: z.literal("company_researched"),
+    subject: unitSubject("The company's normalized domain"),
+    at: unitAt,
+    brandId: z.string(),
+    campaignId: z.null().openapi({ description: "Always null: this store names no campaign" }),
+    runId: z.string().openapi({ description: "The run that paid the research" }),
+    madeBy: z.object({
+      kind: z.literal("qualification_check"),
+      offerIds: z.array(z.string()),
+      criterionIds: z.array(z.string()).openapi({ description: "The checks the run applied to the company" }),
+      checkedSubjects: z.array(z.string()).openapi({ description: "Who the checks were applied on: `lead:<leadId>` or `company:<domain>` (a sample company)" }),
+    }),
+  })
+  .openapi("CompanyResearchedUnit");
+
+const unitsResponse = (name: string, unit: z.ZodTypeAny, outcome: z.ZodTypeAny) =>
+  z
+    .object({
+      outcome,
+      count: z.number().int().openapi({ description: "Units on THIS page" }),
+      units: z.array(unit).openapi({ description: "Newest first. Empty when none exists." }),
+      nextCursor: z.string().nullable().openapi({ description: "Pass as `cursor` for the next page. Null = last page." }),
+    })
+    .openapi(name);
+
+export const LeadFoundUnitsResponseSchema = unitsResponse("LeadFoundUnitsResponse", LeadFoundUnitSchema, z.literal("lead_found"));
+export const FactUnitsResponseSchema = unitsResponse("FactUnitsResponse", FactUnitSchema, z.enum(FACT_UNIT_OUTCOMES));
+export const CompanyResearchedUnitsResponseSchema = unitsResponse("CompanyResearchedUnitsResponse", CompanyResearchedUnitSchema, z.literal("company_researched"));
+
+const UnitsErrorSchema = z
+  .object({
+    error: z.string().openapi({ description: "A code: `person_or_brand_filter_required`, `invalid_emails`, `invalid_leadIds`, `invalid_domains`, `invalid_since`, `invalid_until`, `invalid_limit`, `invalid_cursor`, `too_many_values`; or the sentence of an unknown query parameter (then `code: unknown_query_parameter`, `unknown[]`, `accepted[]`)" }),
+    message: z.string().optional(),
+  })
+  .passthrough()
+  .openapi("UnitsError");
+
+const UnitsHeaders = [
+  { in: "header" as const, name: "x-api-key", required: true, schema: { type: "string" as const }, description: "This service's API key" },
+  { in: "header" as const, name: "x-org-id", required: true, schema: { type: "string" as const }, description: "The calling org (internal UUID). The read answers for THIS org only." },
+  { in: "header" as const, name: "x-user-id", required: false, schema: { type: "string" as const }, description: "Sent by workflow-service with the script's run; not read" },
+  { in: "header" as const, name: "x-run-id", required: false, schema: { type: "string" as const }, description: "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing" },
+];
+
+const unitsCommon = (who: string) =>
+  `**Who.** ${who} None = 400 \`person_or_brand_filter_required\`: nobody lists a whole org by accident.\n\n` +
+  "**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n" +
+  "**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n" +
+  "**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n" +
+  "**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.";
+
+const PERSON_WHO = "Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged).";
+const PEOPLE_INDEXES = "people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain)";
+
+const UNIT_READ_DOCS: Record<"lead_found" | "company_researched" | "fact", (read: ProviderUnitRead) => { summary: string; description: string }> = {
+  lead_found: () => ({
+    summary: "Units of `lead_found` that already exist: the people already found",
+    description:
+      "This service is the Provider of the outcome `lead_found`. A Unit = ONE find: the moment a serve FOUND a person and filed them, either a source campaign's own run (`madeBy.kind` `source_find`: kept in its stock, nobody contacted) or an outreach campaign's serve buying a new person for itself (`serve`). Handing an already-found person out again (a retry, a stock hand-over, a released person, a named person, a due follow-up) is NOT a find and is never listed: the same rule as runs-service's ledger. `at` = when they were found.\n\n" +
+      "**Examples.** Found people not yet served for sales outreach: `GET /orgs/units/lead-found?brandId=<brand>&notServedTo=any_campaign`. Was Jane already found, and when? `?emails=jane@acme.com`. Everyone found at her company since a date: `?domains=acme.com&since=2026-08-23T00:00:00Z`. What one source campaign found and my campaign never got: `?campaignId=<source campaign>&notServedTo=<my campaign>`.\n\n" +
+      unitsCommon(PERSON_WHO) +
+      "\n\n**Exact rule read.** A row of `leads_campaigns` of the org whose `status_reason` is `served` or `source_found` AND whose `status_details` is the serve's own find text (`Served via audience ...`, or `Lead served, email=...` before 2026-06-20), the person not a journalist of the brand. Limits of what the rows hold: a find row that a later round re-opened under another text, or that the one-time requeue archived, is not listed; a person marked Disqualified in the very second of the find is listed although the ledger holds no Unit; finds before 2026-05-08 were never stored.\n\n" +
+      "**`notServedTo`.** Read off the same table: the find's own `source_handed_at` / `source_handed_to_campaign_id`, and the person's other rows (`idx_lc_lead_campaign`).\n\n" +
+      `**Indexes read.** \`leads_campaigns\`: \`idx_lc_units_found\` (org, served_at, id: the newest-first walk), \`idx_lc_lead_campaign\` (a person's rows), \`idx_lc_org_campaign_status\` (\`campaignId\`), \`idx_lc_brand_ids\` (\`brandId\`); ${PEOPLE_INDEXES}.`,
+  }),
+  company_researched: () => ({
+    summary: "Units of `company_researched` that already exist: the companies already researched",
+    description:
+      "This service is the Provider of the outcome `company_researched`. A Unit = ONE company (its normalized domain) a run of the org paid NEW research on: a qualification check whose probe that run was charged for, or whose verdict that run judged. `at` = the run's latest check on that company. A check answered from research already held is not a Unit (nothing new was paid).\n\n" +
+      "**Examples.** Was acme.com already researched for this org? `GET /orgs/units/company-researched?domains=acme.com`. Everything researched for a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`.\n\n" +
+      unitsCommon("Name at least ONE of `domains` (the company itself) or `brandId`.") +
+      "\n\n**Exact rule read.** `qualification_checks` rows of the org applied on a lead or a sample company (`lead:` / `company:` subjects; a must-pass check on a candidate is the find's own cost, never a Unit) whose run recorded the check's verdict or was charged for its observation, grouped per (run, domain). Limits of what the rows hold: a check keeps only its LATEST application, so research a later run redid names the later run; research an old finding serve run paid itself was declared as its `lead_found` and is left out. No campaign and no person filter: this store names neither.\n\n" +
+      "**Indexes read.** `qualification_checks`: `idx_qck_org_brand` (`brandId`), `idx_qck_org_domain` (`domains`); verdicts and observations by primary key; `leads_campaigns` `idx_lc_lead_campaign`. One brand's (or one domain's) checks are grouped per page.",
+  }),
+  fact: (read) => ({
+    summary: `Units of \`${read.outcome}\` that already exist for a person or a brand`,
+    description:
+      `This service is the Provider of the outcome \`${read.outcome}\`. A Unit = ONE lead of a brand reaching \`${read.outcome}\`, once per (brand, lead), whoever caused it: \`madeBy.causedByOutreach\` says whether it was declared as ours, \`madeBy.performer\` who performed it, \`madeBy.consumedOutcome\` the outcome it came from. \`at\` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with \`reversed: true\`.\n\n` +
+      `**Examples.** Did Jane already reach it? \`GET ${read.path}?emails=jane@acme.com\`: an empty \`units\` means no. Every Unit of a brand since a date: \`?brandId=<brand>&since=2026-08-23T00:00:00Z\`. Anyone at her company: \`?domains=acme.com\`.\n\n` +
+      unitsCommon(PERSON_WHO) +
+      "\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n" +
+      `**Indexes read.** \`outcome_fact_declarations\`: \`idx_ofd_org_outcome_brand\` (org, outcome, brand), \`idx_ofd_lead\` (a person's Units); ${PEOPLE_INDEXES}. One brand's Units of the outcome are sorted per page.`,
+  }),
+};
+
+const UNIT_READ_SCHEMAS = {
+  lead_found: { query: LeadFoundUnitsQuerySchema, response: LeadFoundUnitsResponseSchema },
+  company_researched: { query: CompanyResearchedUnitsQuerySchema, response: CompanyResearchedUnitsResponseSchema },
+  fact: { query: FactUnitsQuerySchema, response: FactUnitsResponseSchema },
+} as const;
+
+for (const read of PROVIDER_UNIT_READS) {
+  const doc = UNIT_READ_DOCS[read.kind](read);
+  registry.registerPath({
+    method: "get",
+    path: read.path,
+    operationId: read.operationId,
+    tags: [read.tag],
+    summary: doc.summary,
+    description: doc.description,
+    request: { query: UNIT_READ_SCHEMAS[read.kind].query },
+    parameters: UnitsHeaders,
+    responses: {
+      200: {
+        description: `One page of \`${read.outcome}\` Units, newest first (possibly empty)`,
+        content: { "application/json": { schema: UNIT_READ_SCHEMAS[read.kind].response } },
+      },
+      400: {
+        description: "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+        content: { "application/json": { schema: UnitsErrorSchema } },
+      },
+      401: { description: "Unauthorized" },
+      500: {
+        description: "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+        content: { "application/json": { schema: UnitsErrorSchema } },
+      },
+    },
+  });
+}
 registry.registerPath({
   method: "get",
   path: "/orgs/leads",

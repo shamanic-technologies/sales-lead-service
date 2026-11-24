@@ -10,6 +10,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import healthRoutes from "./routes/health.js";
 import bufferRoutes from "./routes/buffer.js";
+import providerUnitsRoutes from "./routes/provider-units.js";
 import prospectFollowupRoutes from "./routes/prospect-followup.js";
 import leadFollowupDateRoutes from "./routes/lead-followup-date.js";
 import crmPairingsRoutes from "./routes/crm-pairings.js";
@@ -93,6 +94,7 @@ app.use(healthRoutes);
 app.use(requireBootReady);
 
 app.use(bufferRoutes);
+app.use(providerUnitsRoutes); // ENGINE-GET-ASK-1123: Provider reads of our Units, found by OpenAPI tag
 // Registered BEFORE the leads router: its literal `/orgs/leads/crm-pairing*` paths must win
 // over `/orgs/leads/:id`, which matches any single segment.
 app.use(crmPairingsRoutes);

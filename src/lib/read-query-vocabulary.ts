@@ -8,6 +8,8 @@
  * pinned in tests/unit/read-query-vocabulary.test.ts: removing one from here fails that test.
  */
 
+import { UNIT_QUERY_PARAMS } from "./provider-units-query.js";
+
 /** Which population a leads read is about (resolveLeadReadScope, routes/leads.ts). */
 const LEAD_SCOPE = ["brandId", "campaignId", "offerId", "orgId", "userId", "workflowSlug"] as const;
 
@@ -57,6 +59,16 @@ export const READ_QUERY_PARAMS = {
     "workflowDynastySlug", "featureDynastySlug", "workflowSlug", "workflowSlugs", "featureSlug", "featureSlugs",
     "groupBy",
   ],
+  // Provider reads of our Units (ENGINE-GET-ASK-1123, provider-units-query.ts): one per outcome we declare.
+  "GET /orgs/units/lead-found": UNIT_QUERY_PARAMS.lead_found,
+  "GET /orgs/units/company-researched": UNIT_QUERY_PARAMS.company_researched,
+  "GET /orgs/units/website-visit": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/signup": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/form-submitted": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/purchase": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/meeting-booked": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/meeting-attended": UNIT_QUERY_PARAMS.fact,
+  "GET /orgs/units/paid-client": UNIT_QUERY_PARAMS.fact,
 } as const satisfies Record<string, readonly string[]>;
 
 export type QueryCheckedRead = keyof typeof READ_QUERY_PARAMS;

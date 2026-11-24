@@ -1536,7 +1536,507 @@
             "description": "LEAD-NAMED-SERVE-1015: the run works the person its trigger occurrence NAMES. The serve hands out EXACTLY that person (filed on the asking campaign of the org, e.g. by POST /orgs/campaigns/{id}/leads/by-email), in the same served shape as any serve, never another person; no audience is read (x-audience-id ignored), nothing is bought except ONE enrichment (treg people.enrich, billed to the org on the serve run) of a person known only by an email with no first name and no company. Otherwise `found:false` with `reason` (a `named_lead_*` code, or `credit_insufficient` / `serve_timed_out`), `message` (one sentence a client can read) and `final` (true = a retry cannot change it: end the occurrence as refused; false = wait, ask again later). Codes: `named_lead_not_filed`, `named_lead_no_email`, `named_lead_suppressed` (opted out, do not contact, unsubscribed, bounced), `named_lead_already_worked` (a redelivered run of an occurrence whose earlier run already got the person sent or queued; an earlier run that failed before sending gets the person again), `named_lead_in_send_queue`, `named_lead_sender_refuses`, `named_lead_sender_finished`, `named_lead_unwritable` (no name or company even after enrichment), all final; `named_lead_sender_unreadable`, `credit_insufficient`, `serve_timed_out` are waits. Who-to-find options (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`) do not apply to a named person; `population` with it = 400 `named_lead_excludes_population`. Absent = today's serve, bytes unchanged."
           }
         },
-        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `namedLead`), all optional; an empty body is today's serve."
+        "description": "The brand, feature, goal, and run identity are read from headers; lead-service resolves the audience (features-service) and serves the next person (human-service). No audience filters and no provider are accepted — human-service owns both. The body carries only what the workflow states (`acceptedEmails`, `reachableBy`, `reachableOn`, `relationships`, `stepFilter`, `excludeEmailedWithin`, `population`, `dueFollowupOnly`, `namedLead`), all optional; an empty body is today's serve. Which combinations are refused: see the operation's description."
+      },
+      "LeadFoundUnitsResponse": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "lead_found"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "description": "Units on THIS page"
+          },
+          "units": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LeadFoundUnit"
+            },
+            "description": "Newest first. Empty when none exists."
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pass as `cursor` for the next page. Null = last page."
+          }
+        },
+        "required": [
+          "outcome",
+          "count",
+          "units",
+          "nextCursor"
+        ]
+      },
+      "LeadFoundUnit": {
+        "type": "object",
+        "properties": {
+          "unitId": {
+            "type": "string",
+            "description": "Stable id of this Unit at this Provider"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "lead_found"
+            ]
+          },
+          "subject": {
+            "type": "object",
+            "properties": {
+              "service": {
+                "type": "string",
+                "enum": [
+                  "lead-service"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "description": "The person's lead id"
+              }
+            },
+            "required": [
+              "service",
+              "id"
+            ],
+            "description": "The Unit's subject, exactly as declared on runs-service's ledger (`subjectService`, `subjectId`)."
+          },
+          "at": {
+            "type": "string",
+            "description": "When the Unit happened (ISO 8601 UTC)",
+            "example": "2026-10-02T09:14:07.512Z"
+          },
+          "email": {
+            "type": "string",
+            "nullable": true,
+            "description": "The person's first registered email, lowercased. Null = known by phone or social identity only."
+          },
+          "brandId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The find's primary brand (first of `brandIds`)"
+          },
+          "brandIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "campaignId": {
+            "type": "string",
+            "description": "The campaign the find is filed under: a source campaign (`madeBy.kind` `source_find`) or the outreach campaign whose serve bought the person (`serve`)"
+          },
+          "runId": {
+            "type": "string",
+            "nullable": true,
+            "description": "The serve run that found the person. Null when a later re-hand overwrote the run on the row (`madeBy.runRepointed`)."
+          },
+          "madeBy": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "source_find",
+                  "serve"
+                ],
+                "description": "`source_find` = a source campaign's own run found them (stock, nobody contacted); `serve` = an outreach campaign's serve bought them for itself"
+              },
+              "audienceId": {
+                "type": "string",
+                "nullable": true,
+                "description": "The audience the person was found in"
+              },
+              "workflowSlug": {
+                "type": "string",
+                "nullable": true,
+                "description": "The Script version the finding run ran"
+              },
+              "featureSlug": {
+                "type": "string",
+                "nullable": true
+              },
+              "parentRunId": {
+                "type": "string",
+                "nullable": true,
+                "description": "The run that asked for the serve. Null when re-pointed."
+              },
+              "runRepointed": {
+                "type": "boolean",
+                "description": "True = the row was handed out again since, its run ids are a later run's: `runId` / `parentRunId` are served null, never a later run's id"
+              }
+            },
+            "required": [
+              "kind",
+              "audienceId",
+              "workflowSlug",
+              "featureSlug",
+              "parentRunId",
+              "runRepointed"
+            ]
+          },
+          "served": {
+            "type": "object",
+            "properties": {
+              "handedToCampaignId": {
+                "type": "string",
+                "nullable": true,
+                "description": "The campaign that took this find from its source's stock"
+              },
+              "handedAt": {
+                "type": "string",
+                "nullable": true
+              },
+              "setAsideAt": {
+                "type": "string",
+                "nullable": true,
+                "description": "The find was set aside at hand-over (no longer fits its audience, not the source's own): never handed"
+              },
+              "setAsideReason": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "handedToCampaignId",
+              "handedAt",
+              "setAsideAt",
+              "setAsideReason"
+            ],
+            "description": "What became of a source's find, as stored on its row. All null on a find nobody took yet, and on a `serve` find."
+          }
+        },
+        "required": [
+          "unitId",
+          "outcome",
+          "subject",
+          "at",
+          "email",
+          "brandId",
+          "brandIds",
+          "campaignId",
+          "runId",
+          "madeBy",
+          "served"
+        ]
+      },
+      "UnitsError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "A code: `person_or_brand_filter_required`, `invalid_emails`, `invalid_leadIds`, `invalid_domains`, `invalid_since`, `invalid_until`, `invalid_limit`, `invalid_cursor`, `too_many_values`; or the sentence of an unknown query parameter (then `code: unknown_query_parameter`, `unknown[]`, `accepted[]`)"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": {
+          "nullable": true
+        }
+      },
+      "CompanyResearchedUnitsResponse": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "company_researched"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "description": "Units on THIS page"
+          },
+          "units": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompanyResearchedUnit"
+            },
+            "description": "Newest first. Empty when none exists."
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pass as `cursor` for the next page. Null = last page."
+          }
+        },
+        "required": [
+          "outcome",
+          "count",
+          "units",
+          "nextCursor"
+        ]
+      },
+      "CompanyResearchedUnit": {
+        "type": "object",
+        "properties": {
+          "unitId": {
+            "type": "string",
+            "description": "Stable id of this Unit at this Provider"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "company_researched"
+            ]
+          },
+          "subject": {
+            "type": "object",
+            "properties": {
+              "service": {
+                "type": "string",
+                "enum": [
+                  "lead-service"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "description": "The company's normalized domain"
+              }
+            },
+            "required": [
+              "service",
+              "id"
+            ],
+            "description": "The Unit's subject, exactly as declared on runs-service's ledger (`subjectService`, `subjectId`)."
+          },
+          "at": {
+            "type": "string",
+            "description": "When the Unit happened (ISO 8601 UTC)",
+            "example": "2026-10-02T09:14:07.512Z"
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "campaignId": {
+            "nullable": true,
+            "description": "Always null: this store names no campaign"
+          },
+          "runId": {
+            "type": "string",
+            "description": "The run that paid the research"
+          },
+          "madeBy": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "qualification_check"
+                ]
+              },
+              "offerIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "criterionIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The checks the run applied to the company"
+              },
+              "checkedSubjects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Who the checks were applied on: `lead:<leadId>` or `company:<domain>` (a sample company)"
+              }
+            },
+            "required": [
+              "kind",
+              "offerIds",
+              "criterionIds",
+              "checkedSubjects"
+            ]
+          }
+        },
+        "required": [
+          "unitId",
+          "outcome",
+          "subject",
+          "at",
+          "brandId",
+          "campaignId",
+          "runId",
+          "madeBy"
+        ]
+      },
+      "FactUnitsResponse": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "website_visit",
+              "signup",
+              "form_submitted",
+              "purchase",
+              "meeting_booked",
+              "meeting_attended",
+              "paid_client"
+            ]
+          },
+          "count": {
+            "type": "integer",
+            "description": "Units on THIS page"
+          },
+          "units": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FactUnit"
+            },
+            "description": "Newest first. Empty when none exists."
+          },
+          "nextCursor": {
+            "type": "string",
+            "nullable": true,
+            "description": "Pass as `cursor` for the next page. Null = last page."
+          }
+        },
+        "required": [
+          "outcome",
+          "count",
+          "units",
+          "nextCursor"
+        ]
+      },
+      "FactUnit": {
+        "type": "object",
+        "properties": {
+          "unitId": {
+            "type": "string",
+            "description": "Stable id of this Unit at this Provider"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "website_visit",
+              "signup",
+              "form_submitted",
+              "purchase",
+              "meeting_booked",
+              "meeting_attended",
+              "paid_client"
+            ]
+          },
+          "subject": {
+            "type": "object",
+            "properties": {
+              "service": {
+                "type": "string",
+                "enum": [
+                  "lead-service"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "description": "The person's lead id"
+              }
+            },
+            "required": [
+              "service",
+              "id"
+            ],
+            "description": "The Unit's subject, exactly as declared on runs-service's ledger (`subjectService`, `subjectId`)."
+          },
+          "at": {
+            "type": "string",
+            "description": "When the Unit happened (ISO 8601 UTC)",
+            "example": "2026-10-02T09:14:07.512Z"
+          },
+          "email": {
+            "type": "string",
+            "nullable": true,
+            "description": "The person's first registered email, lowercased. Null = known by phone or social identity only."
+          },
+          "brandId": {
+            "type": "string"
+          },
+          "campaignId": {
+            "nullable": true,
+            "description": "Always null: a fact Unit is the person's at the brand, this store names no campaign"
+          },
+          "runId": {
+            "type": "string",
+            "description": "The recording run the Unit was declared on"
+          },
+          "madeBy": {
+            "type": "object",
+            "properties": {
+              "performer": {
+                "type": "object",
+                "nullable": true,
+                "additionalProperties": {
+                  "nullable": true
+                },
+                "description": "Who performed it, as stated on the ledger: `{kind: script, workflowSlug}` or `{kind: crm | tracker | client_team | ...}`. Null = not stated yet."
+              },
+              "causedByOutreach": {
+                "type": "boolean",
+                "description": "True = declared as OURS (it consumes the outcome it came from); false = another factory's Unit, consuming nothing"
+              },
+              "consumedOutcome": {
+                "type": "string",
+                "nullable": true,
+                "description": "The outcome key this Unit consumed (the same lead). Null = consumes nothing."
+              },
+              "consumedBasis": {
+                "type": "string",
+                "nullable": true
+              },
+              "conversionEventId": {
+                "type": "string",
+                "nullable": true,
+                "description": "The outcome ledger row behind it"
+              },
+              "crmFactId": {
+                "type": "string",
+                "nullable": true,
+                "description": "The CRM fact behind it, when no ledger row holds the reach"
+              }
+            },
+            "required": [
+              "performer",
+              "causedByOutreach",
+              "consumedOutcome",
+              "consumedBasis",
+              "conversionEventId",
+              "crmFactId"
+            ]
+          },
+          "reversed": {
+            "type": "boolean",
+            "description": "True = the fact was taken back and the Unit reversed on the ledger (a counter-entry). Still listed: filter on it."
+          },
+          "reversedAt": {
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "required": [
+          "unitId",
+          "outcome",
+          "subject",
+          "at",
+          "email",
+          "brandId",
+          "campaignId",
+          "runId",
+          "madeBy",
+          "reversed",
+          "reversedAt"
+        ]
       },
       "LeadsResponse": {
         "type": "object",
@@ -15850,8 +16350,9 @@
     },
     "/orgs/buffer/next": {
       "post": {
-        "summary": "Pull the next lead from the buffer",
-        "description": "Claims and returns the next available lead from the campaign buffer. Response contains the full canonical lead payload (FullLead) under `lead.data` — use `data.firstName`, `data.lastName`, `data.organization.name` for outbound recipient fields.",
+        "operationId": "askLeadFound",
+        "summary": "Ask for the next lead to work (the serve): one person, or why not",
+        "description": "This service is the Provider of the outcome `lead_found`. This operation is its ASK: it hands the calling campaign ONE person to work, or says why not. It can SPEND (a fresh person is bought through human-service on a `lead-serve` child run of `x-run-id`) and it WRITES (the person is filed on the campaign). To only READ the people already found, call `GET /orgs/units/lead-found` (operationId `listLeadFoundUnits`), which costs nothing.\n\n**Answer.** `found: true` + `lead` (`leadId`, `email` or `phone`, `leadCampaignId`, the full person under `lead.data`, `audienceId`, `buyingSignal`, `qualification`, `relationship`), or `found: false` + `reason`. Asking twice with the same `x-run-id` returns the first answer again (idempotent on the run).\n\n**Where the person comes from, in order** (an outreach campaign with a channel): (1) the campaign's own already-paid people nobody wrote to yet; (2) the brand's leads whose follow-up date has come and who are owed one; (3) a person another campaign released for a channel reason; (4) a find a source campaign holds in stock; (5) a NEW person bought from the audience `x-audience-id`. Steps 1-4 buy nobody.\n\n**Headers.** `x-api-key`, `x-org-id`, `x-run-id` (the caller's run; the serve run hangs under it), `x-campaign-id` and `x-brand-id` are REQUIRED (missing campaign or brand = 400). `x-user-id`, `x-workflow-slug` are recorded on the person's row. `x-audience-id` = the audience a fresh person is bought from; absent on a channel campaign = nobody new is looked for (`found: false`, `no_audience`); this service never picks an audience for an outreach campaign. `x-feature-slug` = the channel the campaign writes on; ABSENT = a campaign launched on its target alone: the serve walks the brand's own active audiences of the campaign's offer (the one named by `x-audience-id` first), with no channel rule, no source campaign and no released person. `x-campaign-id` = a lead SOURCE campaign (leg `start_to_lead_found`) = that source's own run: it finds a person in its own audiences, files them under itself (its stock) and contacts nobody.\n\n**Body: who to find (all optional; an empty body `{}` is the plain serve).**\n- `acceptedEmails`: `valid_only` | `valid_and_catch_all` | `valid_catch_all_and_unknown`. Absent = `valid_only`.\n- `reachableBy`: `[\"email\"]`, `[\"phone\"]` or both = only people reachable by EVERY listed method. Absent = only what the channel itself needs.\n- `reachableOn`: messaging networks the person's phone must be on (e.g. `[\"whatsapp\"]`). Absent = only the channel's own network.\n- `relationships`: `business_only` = nobody the brand knows as personal, investor, supplier, team, partner or advisor. Absent = no such filter.\n- `stepFilter`: `{reached?: Step[], notReached?: Step[]}` = funnel steps the person reached in the brand's own tools (crm-service's words, forwarded verbatim). Absent = no such filter.\n- `excludeEmailedWithin`: `3_months` | `2_months` | `never` = nobody the brand emailed in that window (`never` = ever). Absent = no such skip.\n- `population`: `contacted_pure_prospects` | `lead_followup_due` (a source campaign's own run only: people the brand already knows, nothing bought) | `investors` | `industry_peers` (a target-only campaign only: the brand's investors / industry peers instead of the offer's buyers). Absent = the audience's people.\n- `dueFollowupOnly`: `true` = ONLY a lead the brand already holds whose follow-up is due; never a new, bought, retried, stocked or released person. Absent = the plain serve.\n- `namedLead`: `{leadId, triggerEventId}` = EXACTLY that person (the one a trigger occurrence names), or a named refusal with `message` and `final`. Absent = the serve picks.\n\n**Refused combinations (400, `error` = the code, nothing served, nothing bought).**\n- `Invalid request`: the body does not parse (`details` says which field).\n- `step_filter_needs_audience_serve`: `stepFilter` with `population`.\n- `named_lead_excludes_population`: `namedLead` with `population`.\n- `due_followup_only_excludes`: `dueFollowupOnly` with `population`, `namedLead` or `stepFilter`.\n- `due_followup_only_needs_outreach_campaign`: `dueFollowupOnly` on a source campaign's own run.\n- `relation_population_needs_target_campaign`: `population` `investors` / `industry_peers` on a campaign that has a channel (`x-feature-slug` present).\n- `population_needs_source_unit`: `population` `contacted_pure_prospects` / `lead_followup_due` on anything but a source campaign's own run.\n- `step_filter_refused`: crm-service refused the stated `stepFilter` (an unknown step).\n- `x-campaign-id and x-brand-id headers required`.\n\n**Other refusals.** 409 = another serve of the same campaign is still running (one serve per campaign at a time). 500 = the serve could not be set up or failed: nothing is reported as served.\n\n**`found: false` reasons.** Only `audience_exhausted` means a population ran out; test for it by name, never by excluding the others.\n- `audience_exhausted`: the audience(s) asked were walked to the end: nobody left. The ONLY reason that means a population ran out.\n- `no_audience`: no audience was named (no `x-audience-id`), or a target-only campaign has no serveable audience / no offer: nobody was looked at.\n- `serve_timed_out`: the serve's time budget ended before the look finished: ask again.\n- `audience_not_serveable`: the named audience has no committed list yet: its population is unknown, not empty.\n- `credit_insufficient`: the org has no platform credit: nothing was bought. A wait (add credit).\n- `source_campaign_off`: the audience's origin is a source campaign of the offer that is OFF: nothing is bought from it.\n- `source_stock_empty`: the campaign is fed by sources that find people in their own runs, and none holds a find nobody worked yet.\n- `origin_not_fed`: the named audience serves from an origin this campaign's channel is not fed by: a wrong audience was named.\n- `audience_offer_mismatch`: the named audience belongs to another offer than the one the campaign sells.\n- `no_recent_posts`: a LinkedIn-engagement audience whose competitor pages posted nothing in its window: nobody to read yet.\n- `contacted_prospects_none_owed`: `population: contacted_pure_prospects`: nobody the brand contacted is owed a follow-up right now.\n- `lead_followup_none_due`: `population: lead_followup_due` or `dueFollowupOnly`: nobody of the brand is due and owed a follow-up right now.\n- `recently_emailed`: `excludeEmailedWithin`: every person this call bought was emailed by the brand inside the window (each stays filed for later).\n- `journalist`: every person this call bought is a journalist of the brand: never served for sales.\n- `disqualified`: every person this call bought (or their company) is marked Disqualified for the brand.\n- `sales_funnel_max_budget_reached`: billing refused a spend: the campaign's max budget is reached (`sales_funnel_cap`, `message` beside it). A wait (raise the budget), never \"add credit\".\n- `sales_funnel_max_budget_unreadable`: billing could not read the campaign's max budget and refused the spend. A wait.\n- `named_lead_not_filed`: `namedLead`: the person is not filed on this campaign. Final.\n- `named_lead_no_email`: `namedLead`: the person has no email. Final.\n- `named_lead_suppressed`: `namedLead`: opted out, do-not-contact, unsubscribed or bounced. Final.\n- `named_lead_already_worked`: `namedLead`: an earlier run of the same occurrence already got the person sent or queued. Final.\n- `named_lead_in_send_queue`: `namedLead`: the sender already holds a message to send them. Final.\n- `named_lead_sender_refuses`: `namedLead`: the sender refuses to write to them. Final.\n- `named_lead_sender_finished`: `namedLead`: the sender is finished with them in this campaign. Final.\n- `named_lead_unwritable`: `namedLead`: no first name and no company, even after one enrichment. Final.\n- `named_lead_sender_unreadable`: `namedLead`: the sender's state could not be read. A wait: ask again.\n- `named_lead_journalist`: `namedLead`: the person is a journalist of the brand. Final.\n- `named_lead_disqualified`: `namedLead`: the person (or their company) is marked Disqualified. Final.\n\n**Example.** A cold-email script that only wants never-emailed people with a confirmed address: headers `x-campaign-id`, `x-brand-id`, `x-audience-id`, `x-feature-slug`, body `{\"acceptedEmails\": \"valid_only\", \"excludeEmailedWithin\": \"never\"}`.",
         "parameters": [
           {
             "in": "header",
@@ -15923,7 +16424,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Feature slug for tracking (propagated through the call path)"
+            "description": "The channel the campaign writes on. ABSENT = a campaign launched on its target alone: the serve walks the brand's active audiences of the campaign's offer, with no channel rule."
           },
           {
             "in": "header",
@@ -15959,7 +16460,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Audience identifier (human-service audience.id) for attribution, when explicitly tagged by the caller."
+            "description": "The audience (human-service audience id) a fresh person is bought from. Absent on a campaign with a channel = nobody new is looked for (`found:false`, reason `no_audience`). On a target-only campaign it is asked first among the brand's audiences. Ignored with `namedLead`, `dueFollowupOnly` and a relation `population`."
           }
         ],
         "requestBody": {
@@ -15973,7 +16474,7 @@
         },
         "responses": {
           "200": {
-            "description": "Next lead from buffer (or found=false when exhausted)",
+            "description": "The person served (`found: true`), or `found: false` with its `reason` (only `audience_exhausted` means a population ran out)",
             "content": {
               "application/json": {
                 "schema": {
@@ -15983,7 +16484,7 @@
             }
           },
           "400": {
-            "description": "Invalid request; `population_needs_source_unit`; `step_filter_needs_audience_serve` (stepFilter + population); `step_filter_refused` (crm-service refused the stated stepFilter, nothing served)",
+            "description": "Invalid body or a refused combination, `error` = the code: `step_filter_needs_audience_serve`, `named_lead_excludes_population`, `due_followup_only_excludes`, `due_followup_only_needs_outreach_campaign`, `relation_population_needs_target_campaign`, `population_needs_source_unit`, `step_filter_refused` (crm-service refused the stated stepFilter); or the campaign / brand header is missing. Nothing served.",
             "content": {
               "application/json": {
                 "schema": {
@@ -15994,6 +16495,1791 @@
           },
           "401": {
             "description": "Unauthorized"
+          },
+          "409": {
+            "description": "Another serve of the same campaign is still running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The serve could not be set up or failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/lead-found": {
+      "get": {
+        "operationId": "listLeadFoundUnits",
+        "tags": [
+          "provider:lead_found"
+        ],
+        "summary": "Units of `lead_found` that already exist: the people already found",
+        "description": "This service is the Provider of the outcome `lead_found`. A Unit = ONE find: the moment a serve FOUND a person and filed them, either a source campaign's own run (`madeBy.kind` `source_find`: kept in its stock, nobody contacted) or an outreach campaign's serve buying a new person for itself (`serve`). Handing an already-found person out again (a retry, a stock hand-over, a released person, a named person, a due follow-up) is NOT a find and is never listed: the same rule as runs-service's ledger. `at` = when they were found.\n\n**Examples.** Found people not yet served for sales outreach: `GET /orgs/units/lead-found?brandId=<brand>&notServedTo=any_campaign`. Was Jane already found, and when? `?emails=jane@acme.com`. Everyone found at her company since a date: `?domains=acme.com&since=2026-08-23T00:00:00Z`. What one source campaign found and my campaign never got: `?campaignId=<source campaign>&notServedTo=<my campaign>`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** A row of `leads_campaigns` of the org whose `status_reason` is `served` or `source_found` AND whose `status_details` is the serve's own find text (`Served via audience ...`, or `Lead served, email=...` before 2026-06-20), the person not a journalist of the brand. Limits of what the rows hold: a find row that a later round re-opened under another text, or that the one-time requeue archived, is not listed; a person marked Disqualified in the very second of the find is listed although the ledger holds no Unit; finds before 2026-05-08 were never stored.\n\n**`notServedTo`.** Read off the same table: the find's own `source_handed_at` / `source_handed_to_campaign_id`, and the person's other rows (`idx_lc_lead_campaign`).\n\n**Indexes read.** `leads_campaigns`: `idx_lc_units_found` (org, served_at, id: the newest-first walk), `idx_lc_lead_campaign` (a person's rows), `idx_lc_org_campaign_status` (`campaignId`), `idx_lc_brand_ids` (`brandId`); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain).",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only finds FILED UNDER this campaign: the source campaign that found the person, or the outreach campaign whose serve bought them. Omitted = every campaign."
+            },
+            "required": false,
+            "description": "Only finds FILED UNDER this campaign: the source campaign that found the person, or the outreach campaign whose serve bought them. Omitted = every campaign.",
+            "name": "campaignId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only found people NOT yet served. `any_campaign` = found people not yet served for sales outreach: a source campaign's find that was never handed from its stock AND whose person has no row, written at or after the find, under another campaign of the same brand that works them (another source's find and the brand's own intake filings do not count). A find bought by an outreach campaign's own serve was served to that campaign at once: never returned. `<campaign id>` = never handed to THAT campaign: not found under it, not handed to it from stock, and the person has no row under it. Omitted = every find.",
+              "example": "any_campaign"
+            },
+            "required": false,
+            "description": "Only found people NOT yet served. `any_campaign` = found people not yet served for sales outreach: a source campaign's find that was never handed from its stock AND whose person has no row, written at or after the find, under another campaign of the same brand that works them (another source's find and the brand's own intake filings do not count). A find bought by an outreach campaign's own serve was served to that campaign at once: never returned. `<campaign id>` = never handed to THAT campaign: not found under it, not handed to it from stock, and the person has no row under it. Omitted = every find.",
+            "name": "notServedTo",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `lead_found` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LeadFoundUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/company-researched": {
+      "get": {
+        "operationId": "listCompanyResearchedUnits",
+        "tags": [
+          "provider:company_researched"
+        ],
+        "summary": "Units of `company_researched` that already exist: the companies already researched",
+        "description": "This service is the Provider of the outcome `company_researched`. A Unit = ONE company (its normalized domain) a run of the org paid NEW research on: a qualification check whose probe that run was charged for, or whose verdict that run judged. `at` = the run's latest check on that company. A check answered from research already held is not a Unit (nothing new was paid).\n\n**Examples.** Was acme.com already researched for this org? `GET /orgs/units/company-researched?domains=acme.com`. Everything researched for a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`.\n\n**Who.** Name at least ONE of `domains` (the company itself) or `brandId`. None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `qualification_checks` rows of the org applied on a lead or a sample company (`lead:` / `company:` subjects; a must-pass check on a candidate is the find's own cost, never a Unit) whose run recorded the check's verdict or was charged for its observation, grouped per (run, domain). Limits of what the rows hold: a check keeps only its LATEST application, so research a later run redid names the later run; research an old finding serve run paid itself was declared as its `lead_found` and is left out. No campaign and no person filter: this store names neither.\n\n**Indexes read.** `qualification_checks`: `idx_qck_org_brand` (`brandId`), `idx_qck_org_domain` (`domains`); verdicts and observations by primary key; `leads_campaigns` `idx_lc_lead_campaign`. One brand's (or one domain's) checks are grouped per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains researched, comma-separated (or repeated); lowercased, max 100. The Unit's subject itself."
+            },
+            "required": false,
+            "description": "Company domains researched, comma-separated (or repeated); lowercased, max 100. The Unit's subject itself.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `company_researched` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompanyResearchedUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/website-visit": {
+      "get": {
+        "operationId": "listWebsiteVisitUnits",
+        "tags": [
+          "provider:website_visit"
+        ],
+        "summary": "Units of `website_visit` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `website_visit`. A Unit = ONE lead of a brand reaching `website_visit`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/website-visit?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `website_visit` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/signup": {
+      "get": {
+        "operationId": "listSignupUnits",
+        "tags": [
+          "provider:signup"
+        ],
+        "summary": "Units of `signup` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `signup`. A Unit = ONE lead of a brand reaching `signup`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/signup?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `signup` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/form-submitted": {
+      "get": {
+        "operationId": "listFormSubmittedUnits",
+        "tags": [
+          "provider:form_submitted"
+        ],
+        "summary": "Units of `form_submitted` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `form_submitted`. A Unit = ONE lead of a brand reaching `form_submitted`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/form-submitted?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `form_submitted` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/purchase": {
+      "get": {
+        "operationId": "listPurchaseUnits",
+        "tags": [
+          "provider:purchase"
+        ],
+        "summary": "Units of `purchase` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `purchase`. A Unit = ONE lead of a brand reaching `purchase`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/purchase?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `purchase` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/meeting-booked": {
+      "get": {
+        "operationId": "listMeetingBookedUnits",
+        "tags": [
+          "provider:meeting_booked"
+        ],
+        "summary": "Units of `meeting_booked` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `meeting_booked`. A Unit = ONE lead of a brand reaching `meeting_booked`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/meeting-booked?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `meeting_booked` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/meeting-attended": {
+      "get": {
+        "operationId": "listMeetingAttendedUnits",
+        "tags": [
+          "provider:meeting_attended"
+        ],
+        "summary": "Units of `meeting_attended` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `meeting_attended`. A Unit = ONE lead of a brand reaching `meeting_attended`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/meeting-attended?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `meeting_attended` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orgs/units/paid-client": {
+      "get": {
+        "operationId": "listPaidClientUnits",
+        "tags": [
+          "provider:paid_client"
+        ],
+        "summary": "Units of `paid_client` that already exist for a person or a brand",
+        "description": "This service is the Provider of the outcome `paid_client`. A Unit = ONE lead of a brand reaching `paid_client`, once per (brand, lead), whoever caused it: `madeBy.causedByOutreach` says whether it was declared as ours, `madeBy.performer` who performed it, `madeBy.consumedOutcome` the outcome it came from. `at` = the instant the fact happened, as dated on runs-service's ledger. A Unit whose fact was taken back is still listed with `reversed: true`.\n\n**Examples.** Did Jane already reach it? `GET /orgs/units/paid-client?emails=jane@acme.com`: an empty `units` means no. Every Unit of a brand since a date: `?brandId=<brand>&since=2026-08-23T00:00:00Z`. Anyone at her company: `?domains=acme.com`.\n\n**Who.** Name at least ONE of `emails`, `leadIds`, `domains` (a Unit matching ANY of them is returned) or `brandId` (a brand alone is allowed: the read is paged). None = 400 `person_or_brand_filter_required`: nobody lists a whole org by accident.\n\n**When.** `since` is yours to choose; omitted = since inception, so old Units are included. `until` is optional.\n\n**Scope.** The CALLING org (`x-org-id`) only, never another org's data.\n\n**Answer.** Newest first, paged by `cursor` (read until `nextCursor` is null). No Unit, or a person nobody knows = 200 with an empty `units`, never a 404. A query parameter this read does not know = 400 naming the accepted ones.\n\n**Cost.** None: it reads this service's own records, calls no other service, serves nobody, claims nothing, writes nothing.\n\n**Exact rule read.** `outcome_fact_declarations` (one row per org x brand x lead x outcome): what this service declared on the ledger. A fact not declared yet (the background pass runs every 5 minutes) is not listed. No campaign filter: this store names none.\n\n**Indexes read.** `outcome_fact_declarations`: `idx_ofd_org_outcome_brand` (org, outcome, brand), `idx_ofd_lead` (a person's Units); people by `idx_lcm_email_lower_value` (address), `idx_lcm_email_domain` (domain of an address), `idx_org_lower_primary_domain` + `idx_lo_org` (current employer's domain). One brand's Units of the outcome are sorted per page.",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "x-api-key",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "This service's API key"
+          },
+          {
+            "in": "header",
+            "name": "x-org-id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The calling org (internal UUID). The read answers for THIS org only."
+          },
+          {
+            "in": "header",
+            "name": "x-user-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service with the script's run; not read"
+          },
+          {
+            "in": "header",
+            "name": "x-run-id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Sent by workflow-service (the script's run); not read: the read opens no run and spends nothing"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively)."
+            },
+            "required": false,
+            "description": "Email addresses, comma-separated (or the parameter repeated); trimmed, lowercased, max 100. Units of the lead holding any of these addresses (any address registered to the person, compared case-insensitively).",
+            "name": "emails",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200)."
+            },
+            "required": false,
+            "description": "lead-service lead ids (uuid), comma-separated (or repeated); max 100. A well-formed id nobody holds returns no Unit (200).",
+            "name": "leadIds",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ],
+              "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is."
+            },
+            "required": false,
+            "description": "Company domains (the part after '@'), comma-separated (or repeated); lowercased, a leading '@' dropped, max 100. Units of every lead holding an address at that domain OR whose current employer's domain it is.",
+            "name": "domains",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required)."
+            },
+            "required": false,
+            "description": "Only Units of this brand. Allowed ALONE (the read is paged). Omitted = every brand of the calling org (then a person filter is required).",
+            "name": "brandId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+              "example": "2026-08-23T00:00:00Z"
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, INCLUSIVE lower bound on the Unit's `at` (no zone = UTC). Omitted = since inception: old Units are included.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now."
+            },
+            "required": false,
+            "description": "ISO 8601 date or datetime, EXCLUSIVE upper bound on the Unit's `at`. Omitted = up to now.",
+            "name": "until",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "description": "Page size, 1-1000. Omitted = 100."
+            },
+            "required": false,
+            "description": "Page size, 1-1000. Omitted = 100.",
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page."
+            },
+            "required": false,
+            "description": "The previous page's `nextCursor`, verbatim (opaque). Omitted = first page.",
+            "name": "cursor",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of `paid_client` Units, newest first (possibly empty)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactUnitsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query, nobody and no brand named (`person_or_brand_filter_required`), an unknown query parameter, or a cursor this read did not issue",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "500": {
+            "description": "The Units could not be read (`units_unreadable`): never an empty page on a read failure",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitsError"
+                }
+              }
+            }
           }
         }
       }
