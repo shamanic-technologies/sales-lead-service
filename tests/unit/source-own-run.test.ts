@@ -32,7 +32,9 @@ vi.mock("../../src/lib/source-audience-walk.js", () => ({
 const resolveBrandAudiences = vi.fn();
 // OUTREACH-3WAYS-1121: the brand's investor / industry-peer audiences (human-service relation audiences).
 const resolveBrandRelationAudiences = vi.fn();
+const resolveSourceAudiences = vi.fn();
 vi.mock("../../src/lib/source-audiences.js", () => ({
+  resolveSourceAudiences: (...a: unknown[]) => resolveSourceAudiences(...a),
   resolveBrandAudiences: (...a: unknown[]) => resolveBrandAudiences(...a),
   resolveBrandRelationAudiences: (...a: unknown[]) => resolveBrandRelationAudiences(...a),
 }));
@@ -615,6 +617,70 @@ describe("pullNext stock mode (an outreach campaign fed by sources that find on 
   it("stock empty = source_stock_empty, never exhaustion, nothing found on demand", async () => {
     claimStockedLead.mockResolvedValueOnce({ lead: null, setAside: [] });
     await expect(pullNext(stockParams("aud-1"))).resolves.toEqual({ found: false, reason: "source_stock_empty" });
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+});
+
+describe("pullNext stated-source walk (SERVE-SOURCE-AS-DATA-1124: the Lead found script states where it finds people)", () => {
+  const SLUG = "sourcing-apollo-cold-filters";
+  const sourceParams = () => ({
+    orgId: "org-1",
+    campaignId: "target-unit-1",
+    brandIds: ["brand-1"],
+    brandId: "brand-1",
+    featureSlug: null,
+    runFeatureSlug: SLUG,
+    runCampaignId: "target-unit-1",
+    runId: "run-1",
+    userId: "user-1",
+    audienceId: null,
+    mode: { kind: "walk" as const, preferredAudienceId: null, source: { findPeopleIn: "apollo_cold_filters" as const, slug: SLUG } },
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getCurrentGoal.mockResolvedValue("conversation");
+    pickRetryCandidate.mockResolvedValue(null);
+    fetchCampaign.mockResolvedValue({ id: "target-unit-1", offerId: "offer-1" });
+    offerChecks.mockResolvedValue([]);
+    checksForWriter.mockResolvedValue({ domain: null, checks: [] });
+    upsertLeadFromPerson.mockResolvedValue("lead-1");
+    registerServedEmail.mockResolvedValue("lead-1");
+    recordEmploymentHistory.mockResolvedValue(undefined);
+    buildFullLead.mockResolvedValue({ leadId: "lead-1" });
+    resolveSourceAudiences.mockResolvedValue({ kind: "walk", audienceIds: ["aud-apollo"] });
+    serveNext.mockResolvedValue({ status: "served", person });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  it("walks only the source's audiences (the ones a run of that source walks), asked under its slug, filed on the campaign, no due follow-up", async () => {
+    const result = await pullNext(sourceParams());
+    expect(result.found).toBe(true);
+    expect(result.lead?.audienceId).toBe("aud-apollo");
+    expect(resolveSourceAudiences).toHaveBeenCalledWith(expect.objectContaining({ orgId: "org-1", brandId: "brand-1", offerId: "offer-1", unitSlug: SLUG }));
+    expect(resolveBrandAudiences).not.toHaveBeenCalled();
+    expect(serveNext).toHaveBeenCalledWith("aud-apollo", expect.objectContaining({ audienceId: "aud-apollo", featureSlug: SLUG }), FIND_SERVE_NEXT_TIMEOUT_MS);
+    expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ campaignId: "target-unit-1", status: "served", audienceId: "aud-apollo" }));
+    expect(claimDueFollowupLead).not.toHaveBeenCalled();
+    expect(pickRetryCandidate).toHaveBeenCalledWith(expect.objectContaining({ audienceIds: ["aud-apollo"] }));
+  });
+
+  it("no audience of the stated source is no_audience, never another source, nothing bought", async () => {
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: [] });
+    const result = await pullNext(sourceParams());
+    expect(result).toEqual({ found: false, reason: "no_audience" });
+    expect(resolveBrandAudiences).not.toHaveBeenCalled();
+    expect(pickRetryCandidate).not.toHaveBeenCalled();
+    expect(serveNext).not.toHaveBeenCalled();
+  });
+
+  it("a campaign naming no offer: no_audience, nothing read or bought", async () => {
+    fetchCampaign.mockResolvedValue({ id: "target-unit-1", offerId: null });
+    const result = await pullNext(sourceParams());
+    expect(result).toEqual({ found: false, reason: "no_audience" });
+    expect(resolveSourceAudiences).not.toHaveBeenCalled();
     expect(serveNext).not.toHaveBeenCalled();
   });
 });

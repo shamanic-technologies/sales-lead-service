@@ -780,6 +780,117 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(pullNext).not.toHaveBeenCalled();
   });
 
+  // --- SERVE-SOURCE-AS-DATA-1124: the Lead found script states WHERE it finds people (findPeopleIn) ---
+  it("a campaign with no channel stating findPeopleIn apollo_cold_filters walks that source, labelled as a sourcing-apollo-cold-filters run", async () => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co", data: {} } });
+
+    const res = await postNoChannel({ findPeopleIn: "apollo_cold_filters", excludeEmailedWithin: "never" }, AUDIENCE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.found).toBe(true);
+    expect(decideSourceMode).not.toHaveBeenCalled();
+    expect(resolveSourcingOriginSlug).not.toHaveBeenCalled();
+    expect(openOnDemandRun).not.toHaveBeenCalled();
+    expect(createRun).toHaveBeenCalledWith(expect.objectContaining({ campaignId: CAMPAIGN, featureSlug: "sourcing-apollo-cold-filters" }));
+    expect(pullNext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        campaignId: CAMPAIGN,
+        featureSlug: null,
+        runFeatureSlug: "sourcing-apollo-cold-filters",
+        mode: { kind: "walk", preferredAudienceId: AUDIENCE, source: { findPeopleIn: "apollo_cold_filters", slug: "sourcing-apollo-cold-filters" } },
+      }),
+      expect.anything(),
+    );
+    expect(recordLeadRequested).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["sources_picked_for_the_brand", "lead-sourcing"],
+    ["apollo_buying_signals", "sourcing-apollo-buying-signals"],
+    ["linkedin_post_engagement", "sourcing-linkedin-engagement-signals"],
+    ["client_crm_contacts", "sourcing-crm-contacts"],
+  ])("findPeopleIn %s names the %s source", async (value, slug) => {
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "no_audience" });
+    const res = await postNoChannel({ findPeopleIn: value });
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ runFeatureSlug: slug, mode: { kind: "walk", preferredAudienceId: null, source: { findPeopleIn: value, slug } } }), expect.anything());
+  });
+
+  it("an unknown findPeopleIn value is a 400, nothing run", async () => {
+    const res = await postNoChannel({ findPeopleIn: "sourcing-apollo-cold-filters" });
+    expect(res.status).toBe(400);
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
+  it.each([{ population: "investors" }, { dueFollowupOnly: true }, { namedLead: { leadId: "3946e857-0000-4000-8000-000000000000", triggerEventId: "evt-1" } }])(
+    "findPeopleIn beside %o is a 400 find_people_in_excludes",
+    async (extra) => {
+      const res = await postNoChannel({ findPeopleIn: "apollo_cold_filters", ...extra });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe("find_people_in_excludes");
+      expect(createRun).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a source campaign of the stated source is served as today (find in its own audiences)", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    resolveSourceAudiences.mockResolvedValueOnce({ kind: "walk", audienceIds: ["aud-1"] });
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: true, lead: { leadId: "lead-1", email: "a@b.co" } });
+
+    const res = await postAsUnit(undefined, { findPeopleIn: "apollo_cold_filters" });
+
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ campaignId: UNIT, runFeatureSlug: "sourcing-apollo-cold-filters", mode: { kind: "find", audienceIds: ["aud-1"] } }), expect.anything());
+  });
+
+  it("a source campaign of ANOTHER source refuses the stated one: 400 find_people_in_disagrees, nothing run", async () => {
+    decideSourceMode.mockResolvedValueOnce({ kind: "own_run", unit: unit() });
+    const res = await postAsUnit(undefined, { findPeopleIn: "client_crm_contacts" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("find_people_in_disagrees");
+    expect(createRun).not.toHaveBeenCalled();
+    expect(pullNext).not.toHaveBeenCalled();
+  });
+
+  const postOutreach = (body: Record<string, unknown>) =>
+    request(app)
+      .post("/orgs/buffer/next")
+      .set("x-api-key", "test-api-key")
+      .set("x-org-id", ORG)
+      .set("x-run-id", RUN)
+      .set("x-campaign-id", CAMPAIGN)
+      .set("x-brand-id", BRAND)
+      .set("x-audience-id", AUDIENCE)
+      .set("x-feature-slug", "sales-cold-email-outreach")
+      .send(body);
+
+  it("a channel campaign whose audience finds in the stated source is served as today", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-apollo-cold-filters");
+    createRun.mockResolvedValueOnce({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    pullNext.mockResolvedValueOnce({ found: false, reason: "audience_exhausted" });
+
+    const res = await postOutreach({ findPeopleIn: "apollo_cold_filters" });
+
+    expect(res.status).toBe(200);
+    expect(pullNext).toHaveBeenCalledWith(expect.objectContaining({ featureSlug: "sales-cold-email-outreach", runFeatureSlug: "sourcing-apollo-cold-filters" }), expect.anything());
+    expect((pullNext.mock.calls[0][0] as Record<string, unknown>).mode).toBeUndefined();
+  });
+
+  it("a channel campaign whose audience finds elsewhere refuses the stated source: 400 find_people_in_disagrees", async () => {
+    resolveSourcingOriginSlug.mockResolvedValueOnce("sourcing-crm-contacts");
+    const res = await postOutreach({ findPeopleIn: "apollo_cold_filters" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe("find_people_in_disagrees");
+    expect(createRun).not.toHaveBeenCalled();
+  });
+
   // --- SCRIPT-VALUE-RATING-1113-LEAD: a proactive tick asks ONLY for a due lead its brand holds ---
 
   const postDueOnly = (body: Record<string, unknown>, campaignId = CAMPAIGN, featureSlug = "dy-answer-lead") =>

@@ -1,3 +1,4 @@
+import { statedSourceOf, type StatedSource } from "../lib/stated-source.js";
 import { errorMessage, errorString, messageOf } from "../lib/db-error.js";
 import { Router } from "express";
 import { eq, lt, sql } from "drizzle-orm";
@@ -92,6 +93,16 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     });
   }
 
+  // WHERE the run finds people, stated by its script (SERVE-SOURCE-AS-DATA-1124, src/lib/stated-source.ts). A named
+  // person, a due lead and a population are not found in a source: stating one beside it is refused, never dropped.
+  const statedSource: StatedSource | null = statedSourceOf(parsed.data.findPeopleIn);
+  if (statedSource && (parsed.data.population || named || dueOnly)) {
+    return res.status(400).json({
+      error: "find_people_in_excludes",
+      detail: `findPeopleIn "${statedSource.findPeopleIn}" names the source a new person is found in; population, namedLead and dueFollowupOnly name people found elsewhere. State one.`,
+    });
+  }
+
   const campaignId = req.campaignId;
   const brandIds = req.brandIds ?? [];
 
@@ -166,6 +177,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
   // The named audience may not be served for this pipe (its origin does not feed the channel): no FRESH serve, the
   // campaign's own pools still drain (src/lib/buffer.ts).
   let freshServeRefused: { reason: ServeEmptyReason; detail: string } | null = null;
+  // The named audience's own sourcing origin, when this channel serve resolved one (a stated source is checked on it).
+  let audienceOrigin: string | null = null;
 
   // The idempotency lookup, in-flight guard, and child-run creation all run
   // BEFORE the main pullNext try/catch below. A throw here (e.g. runs-service
@@ -240,6 +253,18 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         });
       }
 
+      if (statedSource && (sourceMode.kind === "stock" || (sourceMode.kind === "own_run" && sourceMode.unit.featureSlug !== statedSource.slug))) {
+        // A source campaign finds in its own source; a campaign serving its sources' stock finds in no stated one.
+        inFlightOutreach.delete(campaignId);
+        return res.status(400).json({
+          error: "find_people_in_disagrees",
+          detail:
+            sourceMode.kind === "own_run"
+              ? `findPeopleIn "${statedSource.findPeopleIn}" (${statedSource.slug}) disagrees with x-campaign-id ${campaignId}, a lead source campaign of ${sourceMode.unit.featureSlug}`
+              : `findPeopleIn "${statedSource.findPeopleIn}" (${statedSource.slug}): x-campaign-id ${campaignId} (${featureSlug}) serves the stock its own source campaigns found, never a stated source`,
+        });
+      }
+
       if (dueOnly) {
         // Nothing is bought and no audience is read: no source, origin or stock to resolve.
       } else if (sourceMode.kind === "own_run") {
@@ -276,7 +301,10 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
               orgId: req.orgId!,
               outreachFeatureSlug: featureSlug,
             });
-            if (origin) runFeatureSlug = origin;
+            if (origin) {
+              runFeatureSlug = origin;
+              audienceOrigin = origin;
+            }
           } catch (err) {
             if (err instanceof OriginNotFedError) {
               // A source that does not feed this pipe: nobody is served from it here, never "keeping the label".
@@ -328,6 +356,25 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         }
       }
     }
+
+    // A channel campaign stating a source (SERVE-SOURCE-AS-DATA-1124): today's serve only when it finds in that very
+    // source (the named audience's origin, or the source campaign the serve is filed under), else a named refusal.
+    if (statedSource && featureSlug && !ownRunUnit) {
+      const agrees =
+        !stockSourceIds &&
+        !freshServeRefused &&
+        (audienceOrigin === statedSource.slug || (serveSource.kind === "source" && serveSource.sourceSlug === statedSource.slug));
+      if (!agrees) {
+        inFlightOutreach.delete(campaignId);
+        return res.status(400).json({
+          error: "find_people_in_disagrees",
+          detail: `findPeopleIn "${statedSource.findPeopleIn}" (${statedSource.slug}) is not where x-campaign-id ${campaignId} (${featureSlug}) finds people for audience ${req.audienceId ?? "(none named)"}: it finds in ${stockSourceIds ? "its source campaigns' stock" : audienceOrigin ?? "no source"}`,
+        });
+      }
+    }
+    // A campaign launched on its target alone finds in the stated source: the serve run and every call under it carry
+    // that source, as a run of it does today.
+    if (statedSource && !featureSlug) runFeatureSlug = statedSource.slug;
 
     // A serve under a source unit is that unit answering its `on_demand` trigger: its own run, opened now.
     if (serveSource.kind === "source") {
@@ -457,6 +504,8 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       : !featureSlug
       ? relation
         ? { kind: "walk", preferredAudienceId: null, relation }
+        : statedSource
+        ? { kind: "walk", preferredAudienceId: req.audienceId ?? null, source: statedSource }
         : { kind: "walk", preferredAudienceId: req.audienceId ?? null }
       : null;
 
@@ -484,6 +533,7 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       stepFilter: parsed.data.stepFilter ?? null,
       excludeEmailedWithin: parsed.data.excludeEmailedWithin ?? null,
       freshServeRefused: freshServeRefused ?? null,
+      ...(statedSource ? { findPeopleIn: statedSource.findPeopleIn } : {}),
     },
   });
   let walkRecorded = false;
