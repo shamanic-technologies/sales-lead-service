@@ -38,6 +38,8 @@ const SERVE_400_CODES = [
   "relation_population_needs_target_campaign",
   "population_needs_source_unit",
   "step_filter_refused",
+  "find_people_in_excludes",
+  "find_people_in_disagrees",
 ];
 
 for (const [name, doc] of [["generated document", generated], ["committed openapi.json", committed]] as const) {
@@ -92,12 +94,19 @@ for (const [name, doc] of [["generated document", generated], ["committed openap
 
     it("names every body field, in the operation and on the field itself", () => {
       expect(SERVE_BODY_FIELDS.sort()).toEqual(
-        ["acceptedEmails", "dueFollowupOnly", "excludeEmailedWithin", "namedLead", "population", "reachableBy", "reachableOn", "relationships", "stepFilter"].sort(),
+        ["acceptedEmails", "dueFollowupOnly", "excludeEmailedWithin", "findPeopleIn", "namedLead", "population", "reachableBy", "reachableOn", "relationships", "stepFilter"].sort(),
       );
       const properties = doc.components.schemas.BufferNextRequest.properties!;
       for (const field of SERVE_BODY_FIELDS) {
         expect(op.description, field).toContain(`\`${field}\``);
         expect(properties[field]?.description, field).toBeTruthy();
+      }
+    });
+
+    it("names every findPeopleIn value (SERVE-SOURCE-AS-DATA-1124)", () => {
+      for (const value of ["sources_picked_for_the_brand", "apollo_cold_filters", "apollo_buying_signals", "linkedin_post_engagement", "client_crm_contacts"]) {
+        expect(op.description, value).toContain(value);
+        expect(doc.components.schemas.BufferNextRequest.properties!.findPeopleIn?.description, value).toContain(value);
       }
     });
 

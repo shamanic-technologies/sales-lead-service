@@ -7,7 +7,8 @@ import { leadServeDisqualification } from "./disqualified-sql.js";
 import { leadsCampaigns } from "../db/schema.js";
 import { readEmailVerdict, type EmailPolicy, type PoolEmailPolicy } from "./email-policy.js";
 import { clearEmptyAnswer, loadEmptyAnswers, orderByEmptyAnswers, recordEmptyAnswer } from "./source-audience-walk.js";
-import { resolveBrandAudiences, resolveBrandRelationAudiences } from "./source-audiences.js";
+import { resolveBrandAudiences, resolveBrandRelationAudiences, resolveSourceAudiences } from "./source-audiences.js";
+import type { StatedSource } from "./stated-source.js";
 import type { BrandRelation } from "./brand-relations.js";
 import { HumanServiceStalledError, serveNext, type Person, type ReachMethod, type ServiceContext, type StepFilter } from "./people-client.js";
 import { claimReleasedLead } from "./released-pool.js";
@@ -93,6 +94,11 @@ import { walkCandidate, walkContext, walkEvent, walkFoundPerson } from "./serve-
  *           follow-ups (they are the buyers' work) and runs none of the offer's checks (must-pass nor Bonus: they ask
  *           about a buyer's need). Every free rule of the serve (re-contact window, opt-outs, bounces, suppression,
  *           journalists, disqualified) is unchanged.
+ *           With `source` (SERVE-SOURCE-AS-DATA-1124, body `findPeopleIn`, the Lead found script's own word): the walk
+ *           reads only the audiences of the offer that find people in THAT source, exactly the audiences a run of that
+ *           source walks (src/lib/source-audiences.ts `resolveSourceAudiences`), each asked under that source's slug;
+ *           the campaign's own paid-unsent people first but only those those audiences found; none of the brand's due
+ *           follow-ups (they come from no source). Never another source instead: none = `no_audience`.
  */
 export type PullNextMode =
   | { kind: "serve" }
@@ -102,7 +108,7 @@ export type PullNextMode =
   | { kind: "find_due" }
   | { kind: "due_held" }
   | { kind: "stock"; sourceCampaignIds: string[] }
-  | { kind: "walk"; preferredAudienceId: string | null; relation?: BrandRelation | null };
+  | { kind: "walk"; preferredAudienceId: string | null; relation?: BrandRelation | null; source?: StatedSource | null };
 
 interface PullNextParams {
   orgId: string;
@@ -286,6 +292,8 @@ export async function pullNext(
   const finding = mode.kind === "find" || mode.kind === "find_contacted" || mode.kind === "find_due";
   // A walk of the brand's investors / industry peers (OUTREACH-3WAYS-1121): not the offer's buyers.
   const relationWalk: BrandRelation | null = mode.kind === "walk" ? mode.relation ?? null : null;
+  // A walk of the source the script stated (SERVE-SOURCE-AS-DATA-1124).
+  const sourceWalk: StatedSource | null = mode.kind === "walk" ? mode.source ?? null : null;
 
   // A source unit's own run with no audience of its origin: it looked at nobody (never exhaustion).
   if (mode.kind === "find" && mode.audienceIds.length === 0) {
@@ -529,7 +537,25 @@ export async function pullNext(
   const relationAudiences = relationWalk
     ? await resolveBrandRelationAudiences({ orgId: params.orgId, brandId: params.brandId, relation: relationWalk, userId: params.userId ?? null, runId: params.runId ?? null })
     : null;
-  const retry = finding ? null : await pickRetryCandidate({
+  // A stated source (SERVE-SOURCE-AS-DATA-1124): its audiences of the offer, read once, narrow this pool and are what the
+  // walk walks. No offer = nothing to read (the walk answers no_audience below).
+  const sourceAudienceIds =
+    sourceWalk && offerId
+      ? (
+          await resolveSourceAudiences({
+            orgId: params.orgId,
+            brandId: params.brandId,
+            offerId,
+            unitSlug: sourceWalk.slug,
+            preferredAudienceId: mode.kind === "walk" ? mode.preferredAudienceId : null,
+            userId: params.userId ?? null,
+            runId: params.runId ?? null,
+          })
+        ).audienceIds
+      : sourceWalk
+        ? []
+        : null;
+  const retry = finding || (sourceAudienceIds && sourceAudienceIds.length === 0) ? null : await pickRetryCandidate({
     orgId: params.orgId,
     campaignId: params.campaignId,
     brandId: params.brandId,
@@ -543,6 +569,7 @@ export async function pullNext(
     offerId,
     ...(params.poolSender ? { sender: params.poolSender } : {}),
     ...(relationAudiences ? { audienceIds: relationAudiences.map((a) => a.audienceId) } : {}),
+    ...(sourceAudienceIds ? { audienceIds: sourceAudienceIds } : {}),
   });
 
   if (retry) {
@@ -584,7 +611,7 @@ export async function pullNext(
   // thread, and the sender continues their last thread from its mailbox. No campaign of its own, no channel branch: the
   // pipe's own reach decides who it can write to. A pipe stating a step filter skips it (nothing here vouches for a
   // person's CRM steps, like the released pool). Fresh-contacts windows are a COLD tactic: never applied to a follow-up.
-  if (!finding && !params.stepFilter && !relationWalk) {
+  if (!finding && !params.stepFilter && !relationWalk && !sourceWalk) {
     const due = await claimDueFollowupLead({
       orgId: params.orgId,
       brandId: params.brandId,
@@ -1052,6 +1079,17 @@ export async function pullNext(
     let walkAudiences: Array<{ audienceId: string; originSlug: string | null }>;
     if (mode.kind === "find") {
       walkAudiences = mode.audienceIds.map((id) => ({ audienceId: id, originSlug: null }));
+    } else if (sourceWalk) {
+      // The stated source's audiences, each asked under that source's slug, as a run of that source asks them.
+      const ordered = orderByEmptyAnswers(sourceAudienceIds ?? [], await loadEmptyAnswers(params.campaignId, params.acceptedEmails ?? null));
+      walkAudiences = ordered.map((id) => ({ audienceId: id, originSlug: sourceWalk.slug }));
+      walkContext({ walkAudienceIds: ordered, findPeopleIn: sourceWalk.findPeopleIn });
+      if (walkAudiences.length === 0) {
+        console.log(
+          `[lead-service] pullNext found=false channel-less campaign=${params.campaignId} reason=${NO_AUDIENCE_REASON} brand=${params.brandId} offer=${offerId ?? "-"} source=${sourceWalk.slug}: no active audience of this source`,
+        );
+        return { found: false, reason: NO_AUDIENCE_REASON };
+      }
     } else if (relationWalk) {
       // The brand's investors / industry peers: its relation audiences, each under its own list origin. No offer needed.
       const listed = relationAudiences ?? [];
