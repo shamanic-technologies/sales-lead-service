@@ -30,7 +30,7 @@ const { leads, leadContactMethods, conversionEvents, crmFacts, leadsCampaigns, o
   "../../src/db/schema.js"
 );
 const { PEOPLE_FACTS_FEED } = await import("../../src/lib/crm-fact-feed.js");
-const { loadPayingClients } = await import("../../src/lib/client-past-employers-read.js");
+const { loadPayingClients, LOOKUP_VERSION } = await import("../../src/lib/client-past-employers-read.js");
 const { setTestOrgMembers } = await import("../helpers/org-members.js");
 const routes = (await import("../../src/routes/client-past-employers.js")).default;
 
@@ -223,7 +223,7 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
     const other = (await db.execute(sql`SELECT linkedin_url FROM organizations WHERE name = ${`Arketi-${tag}`} ORDER BY linkedin_url`)) as unknown as Array<{ linkedin_url: string }>;
     expect(other.map((o) => o.linkedin_url)).toEqual([`https://www.linkedin.com/company/arketi-${tag}/`, `https://www.linkedin.com/company/other-arketi-${tag}/`]);
     const stored = (await db.execute(sql`SELECT status, version FROM client_history_lookups WHERE lead_id = ${lead}::uuid`)) as unknown as Array<{ status: string; version: number }>;
-    expect(stored).toEqual([{ status: "history_found", version: 3 }]);
+    expect(stored).toEqual([{ status: "history_found", version: LOOKUP_VERSION }]);
   });
 
   it("one payer under two addresses (one paid fact naming both) is ONE client; a payer known by phone alone is looked up by phone; one with nothing is attempted and recorded", async () => {

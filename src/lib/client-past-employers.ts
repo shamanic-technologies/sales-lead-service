@@ -346,6 +346,20 @@ function companyLinkOf(values: unknown[]): string | null {
   return links.find((v) => companyPageOf(v) !== null) ?? links[0] ?? null;
 }
 
+/**
+ * PURE. A TEASER read: roles of which none carries a start or an end date (a logged-out view of the profile, e.g. only
+ * the current employer, TEAM-PAST-EMPLOYERS-1125). Not a career: the next provider is asked.
+ */
+export function isTeaserCareer(roles: ReadonlyArray<Pick<ProfileRole, "startDate" | "endDate">>): boolean {
+  return roles.length > 0 && roles.every((r) => !r.startDate && !r.endDate);
+}
+
+/** PURE. The persons (`clientLeadId`) whose every held role carries no date: a career recorded off a teaser read. */
+export function undatedPersonsOf(rows: ReadonlyArray<Pick<EmploymentRow, "clientLeadId" | "startDate" | "endDate">>): Set<string> {
+  const dated = new Set(rows.filter((r) => r.startDate || r.endDate).map((r) => r.clientLeadId));
+  return new Set(rows.map((r) => r.clientLeadId).filter((id) => !dated.has(id)));
+}
+
 /** The roles a profile answer states (first experience list found by shape). Entries naming no company are dropped. */
 export function readProfileRoles(body: unknown): ProfileRole[] {
   const [list] = experienceArrays(body);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { groupPastEmployers, profileDate, readProfileRoles, type EmploymentRow } from "../../src/lib/client-past-employers.js";
-import { DEEP_PROFILE_VERSION, LOOKUP_VERSION, clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
+import { groupPastEmployers, isTeaserCareer, profileDate, readProfileRoles, undatedPersonsOf, type EmploymentRow } from "../../src/lib/client-past-employers.js";
+import { DEEP_PROFILE_VERSION, LOOKUP_VERSION, TEASER_VERSION, clientsToLookUp } from "../../src/lib/client-past-employers-read.js";
 import { companyKeyOf, companyPageOf, companyPageOfId } from "../../src/lib/client-past-employers.js";
 
 const row = (over: Partial<EmploymentRow>): EmploymentRow => ({
@@ -179,5 +179,33 @@ describe("company page from a LinkedIn company id", () => {
       { organizationName: "Accuzar", title: "Technology Officer", startDate: "2023-10-01", endDate: null, current: true, companyLinkedinUrl: null },
       { organizationName: "Halliburton", title: null, startDate: "2020-09-01", endDate: "2021-10-31", current: false, companyLinkedinUrl: "https://www.linkedin.com/company/2217/" },
     ]);
+  });
+});
+
+describe("teaser careers (TEAM-PAST-EMPLOYERS-1125)", () => {
+  it("a career is a teaser when no role carries a date", () => {
+    expect(isTeaserCareer([{ startDate: null, endDate: null }])).toBe(true);
+    expect(isTeaserCareer([{ startDate: null, endDate: null }, { startDate: "2014-09-01", endDate: null }])).toBe(false);
+    expect(isTeaserCareer([])).toBe(false);
+  });
+
+  it("names the persons whose every held role is undated", () => {
+    const rows = [
+      row({ clientLeadId: "kevin", startDate: null, endDate: null }),
+      row({ clientLeadId: "ann", startDate: null, endDate: null }),
+      row({ clientLeadId: "ann", startDate: "2012-01-01" }),
+    ];
+    expect([...undatedPersonsOf(rows)]).toEqual(["kevin"]);
+  });
+
+  it("a career an older version read off a teaser is read again once; a dated one, or one read at this version, is not", () => {
+    const now = new Date("2026-11-25T00:00:00Z");
+    const c = (leadId: string) => ({ leadId, memberLeadIds: [leadId], name: null, email: "a@b.co", phone: null, linkedinUrl: "https://www.linkedin.com/in/x", paidAt: null });
+    const found = (version: number) => ({ status: "history_found" as const, lookedUpAt: "2026-11-25T00:00:00Z", version });
+    const people = [c("kevin"), c("ann"), c("zoe")];
+    const lookups = new Map([["kevin", found(TEASER_VERSION - 1)], ["ann", found(TEASER_VERSION - 1)], ["zoe", found(TEASER_VERSION)]]);
+    const out = clientsToLookUp(people, new Set(["kevin", "ann", "zoe"]), lookups, now, new Set(["kevin", "zoe"]));
+    expect(out.map((x) => x.leadId)).toEqual(["kevin"]);
+    expect(LOOKUP_VERSION).toBeGreaterThanOrEqual(TEASER_VERSION);
   });
 });
