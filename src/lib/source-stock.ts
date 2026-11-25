@@ -6,7 +6,16 @@ import type { ReachMethod } from "./people-client.js";
 import { reachClauses, type RelationshipScope } from "./reach-sql.js";
 import { serveExclusionScopeOf } from "./disqualified-sql.js";
 import type { PoolEmailPolicy } from "./email-policy.js";
-import { contactOf, dueReachClauses, markDueServe, openDueServeOfSourceRow, openDueServeSql, postponeDue } from "./lead-followup-date.js";
+import {
+  contactOf,
+  dueReachClauses,
+  holdDateForHandedDue,
+  lockFollowupDate,
+  markDueServe,
+  openDueServeOfSourceRow,
+  openDueServeSql,
+  postponeDue,
+} from "./lead-followup-date.js";
 import type { ProspectFollowupVerdict } from "./prospect-followup.js";
 
 /**
@@ -283,6 +292,8 @@ async function handDueFind(
 ): Promise<ClaimStep> {
   const contact = await contactOf(tx, row.lead_id);
   if (!contact.email && !contact.phone) throw new Error(`[source-stock] due find ${row.id} (lead ${row.lead_id}) carries neither an email nor a phone`);
+  // ONE-PERSON-ONE-SERVE-1125: the person's one date is held until this transaction ends, and moved below when handed.
+  await lockFollowupDate(tx, due);
   const verdict = await params.askDueOwed!({ orgId: due.orgId, brandId: due.brandId, leadId: due.leadId });
   if (!verdict.owed) {
     const reason = `${verdict.kind === "not_yet" ? "not yet owed" : "no longer owed"} a follow-up: ${verdict.reasons.join(", ")}`;
@@ -326,6 +337,7 @@ async function handDueFind(
     `);
   }
   await markDueServe(tx, due.id, { handedTo: params.outreachCampaignId, handedRowId: filed.id });
+  await holdDateForHandedDue(tx, due, params.outreachCampaignId);
   return {
     kind: "handed",
     lead: {
