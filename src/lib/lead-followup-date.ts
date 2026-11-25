@@ -1017,6 +1017,34 @@ export async function markDueServe(
   }
 }
 
+/**
+ * ONE-PERSON-ONE-SERVE-1125: the person's ONE date row, LOCKED for the rest of the caller's transaction (a stocked due
+ * find about to be handed). Every due serve takes this row `FOR UPDATE SKIP LOCKED` first, so while it is held no other
+ * campaign of the brand can be handed the person.
+ */
+export async function lockFollowupDate(exec: { execute: typeof db.execute }, due: { orgId: string; brandId: string; leadId: string }): Promise<void> {
+  await exec.execute(sql`
+    SELECT 1 FROM lead_followup_dates WHERE org_id = ${due.orgId} AND brand_id = ${due.brandId} AND lead_id = ${due.leadId}::uuid FOR UPDATE`);
+}
+
+/**
+ * ONE-PERSON-ONE-SERVE-1125 (owner FOLLOWUP-JIT 2026-11-07: ONE next follow-up date per person x brand): a stocked "Lead
+ * follow-up due" find HANDED to a campaign means that campaign now holds the person's follow-up, so their one date moves
+ * like any due serve (+DEFAULT_GAP_DAYS until the holder sends or states a date). Before it, the hand-over left the date
+ * past due and the brand's proactive serve handed the SAME person to another campaign seconds later (prod 2026-11-25,
+ * distribute.you: Paul handed to the follow-up unit at 17:24:45, to the proactive campaign at 17:24:54; Christine got
+ * two emails one second apart). A later date (stated, or a send since) is never shortened; a stopped person is untouched.
+ * Not a new serve round: `served_count` / `last_served_at` stay the round's.
+ */
+export async function holdDateForHandedDue(exec: { execute: typeof db.execute }, due: { orgId: string; brandId: string; leadId: string }, campaignId: string): Promise<void> {
+  await exec.execute(sql`
+    UPDATE lead_followup_dates SET next_followup_at = now() + ${gap}, basis = 'served',
+      reason = ${`Handed to campaign ${campaignId} as a due follow-up; nobody sent or stated a date since (asked again in ${DEFAULT_GAP_DAYS} days)`},
+      updated_at = now()
+    WHERE org_id = ${due.orgId} AND brand_id = ${due.brandId} AND lead_id = ${due.leadId}::uuid
+      AND basis <> 'stopped' AND (next_followup_at IS NULL OR next_followup_at < now() + ${gap})`);
+}
+
 /** Is the person still owed a follow-up by the brand now (any lead, emailed or not)? The verdict the serve reads. */
 export async function dueVerdict(
   scope: { orgId: string; brandId: string; leadId: string },

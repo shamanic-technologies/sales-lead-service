@@ -580,6 +580,79 @@ describe.skipIf(!hasRealDatabase)("lead follow-up dates (LEAD-FOLLOWUP-DATE-1016
       expect(new Date((await dateOf(recent.leadId)).nextFollowupAt!).getTime()).toBeGreaterThan(Date.now() + 5 * 86_400_000);
     });
 
+    /** Earlier tests leave finds in the source's stock: set them aside so only this test's people can be handed. */
+    async function clearStock() {
+      await db.execute(sql`UPDATE lead_followup_due_serves SET set_aside_at = now(), set_aside_reason = 'itest' WHERE org_id = ${orgId} AND handed_at IS NULL AND set_aside_at IS NULL`);
+      await db.execute(sql`
+        UPDATE leads_campaigns SET source_set_aside_at = now(), source_set_aside_reason = 'itest'
+        WHERE org_id = ${orgId} AND status_reason = 'source_found' AND source_handed_at IS NULL AND source_set_aside_at IS NULL`);
+    }
+
+    it("a due person handed to one campaign is never handed to another campaign of the brand seconds later (ONE-PERSON-ONE-SERVE-1125, prod replay)", async () => {
+      await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+      await clearStock();
+      // Paul, 2026-11-25: emailed 3 times in the summer by a cold campaign, never answered, date long past.
+      const paul = await emailedOn(randomUUID(), "paul");
+      await setDue(paul.leadId, "2026-08-18T13:11:47Z");
+      // The "Lead follow-up due" source finds him (2026-11-10), his date moves 7 days out, then passes again.
+      expect((await serveDue())?.leadId).toBe(paul.leadId);
+      await setDue(paul.leadId, "2026-11-16T01:09:46Z");
+      // 17:24:45: the follow-up unit takes him from the source's stock.
+      const handed = await takeStock();
+      expect(handed.lead?.leadId).toBe(paul.leadId);
+      // 17:24:54: the brand's proactive campaign asks for a due follow-up: nobody (it handed Paul before the fix).
+      expect(await serveOnCold()).toBeNull();
+      const d = await dateOf(paul.leadId);
+      expect(d.basis).toBe("served");
+      expect(new Date(d.nextFollowupAt!).getTime()).toBeGreaterThan(Date.now() + 6 * 86_400_000);
+      expect(d.servedCount).toBe(1); // the hand-over is not a new serve round
+      const [n] = (await db.execute(sql`
+        SELECT count(DISTINCT campaign_id)::int AS n FROM leads_campaigns WHERE lead_id = ${paul.leadId}::uuid AND served_at > now() - interval '1 minute'
+          AND campaign_id IN (${followupCampaignId}, ${coldCampaignId})`)) as unknown as Array<{ n: number }>;
+      expect(n.n).toBe(1);
+    });
+
+    it("a writer's later stated date is never shortened by the hand-over", async () => {
+      await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+      await clearStock();
+      const p = await emailedOn(randomUUID(), "statedlater");
+      await setDue(p.leadId);
+      expect((await serveDue())?.leadId).toBe(p.leadId);
+      // Stated 60 days out after the source found them: still owed now? The verdict asks the stops, not the date.
+      await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '60 days', basis = 'stated' WHERE org_id = ${orgId} AND brand_id = ${brandId} AND lead_id = ${p.leadId}::uuid`);
+      expect((await takeStock()).lead?.leadId).toBe(p.leadId);
+      const d = await dateOf(p.leadId);
+      expect(d.basis).toBe("stated");
+      expect(new Date(d.nextFollowupAt!).getTime()).toBeGreaterThan(Date.now() + 59 * 86_400_000);
+    });
+
+    it("two campaigns of one brand asking at once never both get the same person (parallel burst)", async () => {
+      await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
+      await clearStock();
+      const people = [];
+      for (let i = 0; i < 6; i++) people.push(await emailedOn(randomUUID(), `burst${i}`));
+      for (const p of people) await setDue(p.leadId);
+      // The source finds them all, then every date passes again (as Paul's and Christine's did).
+      for (let i = 0; i < people.length; i++) expect(await serveDue()).not.toBeNull();
+      for (const p of people) await setDue(p.leadId);
+      const ask = (i: number) =>
+        i % 2 === 0
+          ? takeStock().then((r) => ({ campaign: "followup", leadId: r.lead?.leadId ?? null }))
+          : serveOnCold().then((r) => ({ campaign: "cold", leadId: r?.leadId ?? null }));
+      const results = await Promise.all(Array.from({ length: people.length * 3 }, (_, i) => ask(i)));
+      const byLead = new Map<string, Set<string>>();
+      for (const r of results) {
+        if (!r.leadId) continue;
+        const s = byLead.get(r.leadId) ?? new Set<string>();
+        expect(s.has(r.campaign)).toBe(false); // never twice to one campaign either
+        s.add(r.campaign);
+        byLead.set(r.leadId, s);
+      }
+      for (const [, campaigns] of byLead) expect(campaigns.size).toBe(1);
+      // Every person was handed once (the follow-up unit took the stocked rounds).
+      expect([...byLead.keys()].sort()).toEqual(people.map((p) => p.leadId).sort());
+    });
+
     it("an email pipe never takes a person it can only reach by phone", async () => {
       await db.execute(sql`UPDATE lead_followup_dates SET next_followup_at = now() + interval '300 days' WHERE org_id = ${orgId} AND basis <> 'stopped'`);
       const wa = await person("phoneonlydue", { email: false, phone: "+33 6 12 12 12 12" });
