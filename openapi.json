@@ -9411,10 +9411,20 @@
             "type": "string"
           },
           "payingClients": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Paying clients who are not team members (team wins)."
           },
           "clientsWithHistory": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Paying clients with at least one role held."
+          },
+          "teamMembers": {
+            "type": "integer",
+            "description": "The brand's team: members of the org owning it + relations tagged team (staff only on a staff-only org)."
+          },
+          "teamWithHistory": {
+            "type": "integer",
+            "description": "Team members with at least one role held."
           },
           "companyCount": {
             "type": "integer"
@@ -9427,7 +9437,7 @@
               "no_employment_history",
               null
             ],
-            "description": "Why `companies` is empty; null when it is not."
+            "description": "Why `companies` is empty: `no_paying_clients` = nobody (no paying client and no team member), `no_employment_history` = people, no career held; null when not empty."
           },
           "companies": {
             "type": "array",
@@ -9442,7 +9452,16 @@
               "type": "object",
               "properties": {
                 "leadId": {
-                  "type": "string"
+                  "type": "string",
+                  "nullable": true,
+                  "description": "null only for a team member no lead holds yet (the POST creates one)."
+                },
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "paying_client",
+                    "team"
+                  ]
                 },
                 "name": {
                   "type": "string",
@@ -9450,7 +9469,8 @@
                 },
                 "paidAt": {
                   "type": "string",
-                  "nullable": true
+                  "nullable": true,
+                  "description": "null for a team member."
                 },
                 "history": {
                   "type": "string",
@@ -9492,6 +9512,7 @@
               },
               "required": [
                 "leadId",
+                "role",
                 "name",
                 "paidAt",
                 "history",
@@ -9552,6 +9573,8 @@
           "brandId",
           "payingClients",
           "clientsWithHistory",
+          "teamMembers",
+          "teamWithHistory",
           "companyCount",
           "reason",
           "companies",
@@ -9588,7 +9611,15 @@
           },
           "clientCount": {
             "type": "integer",
-            "description": "Distinct paying clients who worked there (past or current)."
+            "description": "Distinct people who worked there (past or current): paying clients + team members."
+          },
+          "payingClientCount": {
+            "type": "integer",
+            "description": "Of them, paying clients."
+          },
+          "teamCount": {
+            "type": "integer",
+            "description": "Of them, members of the brand's team."
           },
           "currentForSome": {
             "type": "boolean"
@@ -9600,7 +9631,15 @@
               "properties": {
                 "leadId": {
                   "type": "string",
-                  "description": "The paying client's lead (the lead holding the paid evidence)."
+                  "description": "The person's lead: the lead holding the paid evidence (a paying client) or the team member's lead."
+                },
+                "role": {
+                  "type": "string",
+                  "enum": [
+                    "paying_client",
+                    "team"
+                  ],
+                  "description": "A paying client, or a member of the brand's team (TEAM-PAST-EMPLOYERS-1125). A person both is team."
                 },
                 "title": {
                   "type": "string",
@@ -9622,6 +9661,7 @@
               },
               "required": [
                 "leadId",
+                "role",
                 "title",
                 "startDate",
                 "endDate",
@@ -9639,6 +9679,8 @@
           "logoUrl",
           "linkedinUrl",
           "clientCount",
+          "payingClientCount",
+          "teamCount",
           "currentForSome",
           "clients"
         ]
@@ -25301,7 +25343,7 @@
     "/internal/brands/{brandId}/client-past-employers": {
       "get": {
         "summary": "Companies where the brand's paying clients have worked (read, never spends)",
-        "description": "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error.",
+        "description": "The companies where the brand's PAYING CLIENTS and its own TEAM have worked, past or current, each with the people (`role`), roles and dates that justify it. Team (TEAM-PAST-EMPLOYERS-1125) = members of the org owning the brand (client-service) + relations whose decided tags hold `team`; fleet staff are team only on an org whose every member is staff; a person both a payer and team is team. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error.",
         "parameters": [
           {
             "in": "header",
@@ -25357,7 +25399,7 @@
       },
       "post": {
         "summary": "Look up missing careers of the brand's paying clients, then answer the same read",
-        "description": "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error. First, for each paying client with no role on any of their leads: the LinkedIn profile known on a lead of theirs, else treg people.enrich by email to find it, then treg linkedin.user.profile for the experience list, recorded as the lead's employment history. Apollo is never called. Org-billed on the caller's run (x-run-id, x-user-id). A client is looked up once; a lookup that found nothing is asked again after 90 days; a failed call records nothing. At most 40 clients per call, none started past ~100 s: `lookups.remaining` > 0 = call again. Idempotent, safe daily.",
+        "description": "The companies where the brand's PAYING CLIENTS and its own TEAM have worked, past or current, each with the people (`role`), roles and dates that justify it. Team (TEAM-PAST-EMPLOYERS-1125) = members of the org owning the brand (client-service) + relations whose decided tags hold `team`; fleet staff are team only on an org whose every member is staff; a person both a payer and team is team. A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands (succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error. First, for each paying client with no role on any of their leads: the LinkedIn profile known on a lead of theirs, else treg people.enrich by email to find it, then treg linkedin.user.profile for the experience list, recorded as the lead's employment history. Apollo is never called. Org-billed on the caller's run (x-run-id, x-user-id). A client is looked up once; a lookup that found nothing is asked again after 90 days; a failed call records nothing. At most 40 clients per call, none started past ~100 s: `lookups.remaining` > 0 = call again. Idempotent, safe daily.",
         "parameters": [
           {
             "in": "header",

@@ -31,6 +31,7 @@ const { leads, leadContactMethods, conversionEvents, crmFacts, leadsCampaigns, o
 );
 const { PEOPLE_FACTS_FEED } = await import("../../src/lib/crm-fact-feed.js");
 const { loadPayingClients } = await import("../../src/lib/client-past-employers-read.js");
+const { setTestOrgMembers } = await import("../helpers/org-members.js");
 const routes = (await import("../../src/routes/client-past-employers.js")).default;
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
@@ -267,5 +268,122 @@ describe.skipIf(!hasRealDatabase)("client past employers against a real database
     expect((byLead.get(nothing) as { lookup: { status: string } }).lookup.status).toBe("no_identifier");
     expect((byLead.get(phoneOnly) as { lookup: { status: string } }).lookup.status).toBe("no_linkedin");
     expect(res.body.clients.every((c: { history: string }) => c.history !== "not_looked_up")).toBe(true);
+  });
+});
+
+describe.skipIf(!hasRealDatabase)("the brand's own TEAM is a source of past employers (TEAM-PAST-EMPLOYERS-1125)", () => {
+  const tag = randomUUID().slice(0, 8);
+  const app = express();
+  app.use(routes);
+  const get = (orgId: string, brandId: string) =>
+    request(app).get(`/internal/brands/${brandId}/client-past-employers`).set("x-api-key", "test-api-key").set("x-org-id", orgId);
+  const post = (orgId: string, brandId: string) =>
+    request(app).post(`/internal/brands/${brandId}/client-past-employers`)
+      .set("x-api-key", "test-api-key").set("x-org-id", orgId).set("x-run-id", randomUUID()).set("x-user-id", randomUUID());
+
+  async function person(emails: string[], employers: string[], served?: { orgId: string; brandId: string }): Promise<string> {
+    const [row] = await db.insert(leads).values({ firstName: "p" }).returning({ id: leads.id });
+    for (const value of emails) await db.insert(leadContactMethods).values({ leadId: row.id, channel: "email", value, source: "itest" });
+    if (served) await db.insert(leadsCampaigns).values({ leadId: row.id, campaignId: randomUUID(), orgId: served.orgId, brandIds: [served.brandId], status: "served" });
+    for (const name of employers) {
+      const [o] = await db.insert(organizations).values({ name: `${name}-${tag}`, primaryDomain: `${name.toLowerCase()}-${tag}.com` }).returning({ id: organizations.id });
+      await db.insert(leadsOrganizations).values({ leadId: row.id, organizationId: o.id, title: "Consultant", current: false, startDate: "2015-01-01" });
+    }
+    return row.id;
+  }
+  async function sale(orgId: string, brandId: string, leadId: string): Promise<void> {
+    await db.insert(conversionEvents).values({
+      orgId, brandId, event: "sale", matchedLeadId: leadId, matchConfidence: "deterministic", attributionStatus: "attributed",
+      source: "manual", receivedAt: new Date("2026-10-01T00:00:00.000Z"),
+    });
+  }
+
+  beforeEach(async () => {
+    await db.execute(sql`
+      INSERT INTO crm_feed_cursors (feed, cursor, caught_up_at) VALUES (${PEOPLE_FACTS_FEED}, '0', now())
+      ON CONFLICT (feed) DO UPDATE SET caught_up_at = COALESCE(crm_feed_cursors.caught_up_at, now())`);
+  });
+
+  it("our own org (staff only): the founder is team, never a payer, and their past employers come back with role team", async () => {
+    const orgId = randomUUID();
+    const brandId = randomUUID();
+    const founder = `kevin.lourd+founder${tag}@gmail.com`;
+    setTestOrgMembers(orgId, [{ email: founder, firstName: "Kevin", lastName: "Lourd" }, { email: `kevin.lourd+audit${tag}@gmail.com` }, { email: null }]);
+    const lead = await person([founder], ["Bain", "EY"], { orgId, brandId });
+    await sale(orgId, brandId, lead); // a staff test purchase never makes the founder a paying client
+    const res = await get(orgId, brandId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ payingClients: 0, clientsWithHistory: 0, teamMembers: 1, teamWithHistory: 1, reason: null });
+    const bain = res.body.companies.find((c: { name: string }) => c.name === `Bain-${tag}`);
+    expect(bain).toMatchObject({ clientCount: 1, payingClientCount: 0, teamCount: 1, domain: `bain-${tag}.com` });
+    expect(bain.clients).toEqual([expect.objectContaining({ leadId: lead, role: "team", title: "Consultant" })]);
+    expect(res.body.clients).toEqual([expect.objectContaining({ leadId: lead, role: "team", paidAt: null, history: "has_history" })]);
+  });
+
+  it("a client's org: staff invited there are not its team; its own member is; its payers keep their answer", async () => {
+    const orgId = randomUUID();
+    const brandId = randomUUID();
+    setTestOrgMembers(orgId, [{ email: `kevin.lourd+client${tag}@gmail.com` }, { email: `founder-${tag}@client.example` }]);
+    await person([`kevin.lourd+client${tag}@gmail.com`], ["StaffCo"]);
+    const member = await person([`founder-${tag}@client.example`], ["Globex"]); // no lead of the brand: team all the same
+    const payer = await person([`payer-${tag}@example.com`], ["Initech"], { orgId, brandId });
+    await sale(orgId, brandId, payer);
+    const res = await get(orgId, brandId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ payingClients: 1, clientsWithHistory: 1, teamMembers: 1, teamWithHistory: 1 });
+    const names = res.body.companies.map((c: { name: string }) => c.name);
+    expect(names).toContain(`Globex-${tag}`);
+    expect(names).toContain(`Initech-${tag}`);
+    expect(names).not.toContain(`StaffCo-${tag}`);
+    expect(res.body.companies.find((c: { name: string }) => c.name === `Initech-${tag}`).clients).toEqual([
+      expect.objectContaining({ leadId: payer, role: "paying_client" }),
+    ]);
+    expect(res.body.companies.find((c: { name: string }) => c.name === `Globex-${tag}`).clients).toEqual([
+      expect.objectContaining({ leadId: member, role: "team" }),
+    ]);
+  });
+
+  it("a member who also paid is team only (team wins)", async () => {
+    const orgId = randomUUID();
+    const brandId = randomUUID();
+    setTestOrgMembers(orgId, [{ email: `cofounder-${tag}@co.example` }]);
+    const lead = await person([`cofounder-${tag}@co.example`], ["Hooli"], { orgId, brandId });
+    await sale(orgId, brandId, lead);
+    const res = await get(orgId, brandId);
+    expect(res.body).toMatchObject({ payingClients: 0, teamMembers: 1 });
+    expect(res.body.companies[0].clients).toEqual([expect.objectContaining({ leadId: lead, role: "team" })]);
+  });
+
+  it("a member no lead holds: the read lists them without a lead, the fill gives them one (never a lead of any brand) and looks them up", async () => {
+    const orgId = randomUUID();
+    const brandId = randomUUID();
+    const email = `newmember-${tag}@team.example`;
+    setTestOrgMembers(orgId, [{ email, firstName: "New", lastName: "Member" }]);
+    const read = await get(orgId, brandId);
+    expect(read.body).toMatchObject({ payingClients: 0, teamMembers: 1, reason: "no_employment_history", companies: [] });
+    expect(read.body.clients).toEqual([expect.objectContaining({ leadId: null, role: "team", history: "not_looked_up" })]);
+
+    treg.calls.length = 0;
+    treg.answer = () => ({ status: 200, body: { output: { linkedin_url: null }, _treg: { served_by: null, outcome: "miss", tried: [] } }, chargedMicro: 0 });
+    const res = await post(orgId, brandId);
+    expect(res.status).toBe(200);
+    expect(res.body.lookups).toMatchObject({ attempted: 1, noLinkedin: 1, failed: 0 });
+    const held = (await db.execute(sql`
+      SELECT cm.lead_id::text AS lead_id, l.first_name, l.last_name,
+        (SELECT count(*)::int FROM leads_campaigns lc WHERE lc.lead_id = cm.lead_id) AS rows
+      FROM lead_contact_methods cm JOIN leads l ON l.id = cm.lead_id WHERE cm.channel = 'email' AND cm.value = ${email}
+    `)) as unknown as Array<{ lead_id: string; first_name: string | null; last_name: string | null; rows: number }>;
+    expect(held).toEqual([{ lead_id: expect.any(String), first_name: "New", last_name: "Member", rows: 0 }]);
+    expect(res.body.clients).toEqual([expect.objectContaining({ leadId: held[0].lead_id, role: "team", history: "looked_up_none" })]);
+    expect(treg.calls.every((c) => c.routeExclude?.includes("apollo"))).toBe(true);
+  });
+
+  it("a paying-client brand with no team keeps its answer", async () => {
+    const orgId = randomUUID();
+    const brandId = randomUUID();
+    const payer = await person([`solo-${tag}@example.com`], ["Umbrella"], { orgId, brandId });
+    await sale(orgId, brandId, payer);
+    const res = await get(orgId, brandId);
+    expect(res.body).toMatchObject({ payingClients: 1, clientsWithHistory: 1, teamMembers: 0, teamWithHistory: 0, reason: null, companyCount: 1 });
   });
 });
