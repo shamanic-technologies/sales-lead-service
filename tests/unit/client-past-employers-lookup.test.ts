@@ -96,6 +96,44 @@ describe("readCareerOfProfile", () => {
     ]);
   });
 
+  // TEAM-PAST-EMPLOYERS-1125: anyapi's cheap read of a founder's profile answered a logged-out view (one undated role).
+  const teaser = profile("anyapi", { output: { found: true, data: { experience: [
+    { company: "Distribute.you", companyUrl: "https://www.linkedin.com/company/distribute-you", current: null, endDate: "", position: null, startDate: "" },
+  ] } } });
+
+  it("a teaser (no role dated) is not a career: the next provider is asked and its full career recorded", async () => {
+    const { call, reqs } = fakeCall([
+      answer(200, teaser, 1_200),
+      answer(200, profile("fetchinio", { experiences: [
+        { company: { name: "Distribute.you" }, jobTitle: "Founder", current: true, timePeriod: { startDate: { month: 1, year: 2024 }, endDate: null } },
+        { company: { name: "Bain & Company" }, jobTitle: "Consultant", current: false, timePeriod: { startDate: { month: 9, year: 2014 }, endDate: { month: 6, year: 2016 } } },
+      ] }), 1_500),
+    ]);
+    const out = await readCareerOfProfile(url, call, 0);
+    expect(reqs.map((r) => r.routeExclude)).toEqual([["apollo"], ["apollo", "anyapi.linkedin.user.profile", "anyapi"]]);
+    expect(out.servedBy).toBe("fetchinio.linkedin.user.profile");
+    expect(out.roles?.map((r) => r.organizationName)).toEqual(["Distribute.you", "Bain & Company"]);
+    expect(out.charged).toBe(2_700);
+  });
+
+  it("a teaser no other provider beats is kept (the current employer is still a fact)", async () => {
+    const { call } = fakeCall([answer(200, teaser, 1_200), answer(200, miss), answer(200, miss)]);
+    const out = await readCareerOfProfile(url, call, 0);
+    expect(out.roles).toHaveLength(1);
+    expect(out.roles?.[0]).toMatchObject({ organizationName: "Distribute.you", startDate: null, endDate: null });
+    expect(out.servedBy).toBe("anyapi.linkedin.user.profile");
+  });
+
+  it("a dated single-role answer is a career, asked once", async () => {
+    const { call, reqs } = fakeCall([
+      answer(200, profile("fetchinio", { experiences: [
+        { company: { name: "Beyond" }, jobTitle: "CEO", current: true, timePeriod: { startDate: { month: 12, year: 2016 }, endDate: null } },
+      ] }), 1_500),
+    ]);
+    expect((await readCareerOfProfile(url, call, 0)).roles).toHaveLength(1);
+    expect(reqs).toHaveLength(1);
+  });
+
   it("the provider's own « no profile » is final; treg's refusal or an error is no answer", async () => {
     expect((await readCareerOfProfile(url, fakeCall([answer(404, { detail: "profile not found" })]).call, 0)).roles).toBeNull();
     await expect(readCareerOfProfile(url, fakeCall([answer(404, { detail: "no tool for that" })]).call, 0)).rejects.toBeInstanceOf(TransientLookupError);

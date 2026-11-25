@@ -25,7 +25,7 @@ import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
 import { assertCrmCopyCaughtUp } from "./step-reached-read.js";
 import { isStaffEmail } from "./staff-identity.js";
 import {
-  companyPageOf, emptyReasonOf, groupPastEmployers, payingClientsNotTeam, readProfileRoles, teamCandidatesOf,
+  isTeaserCareer, undatedPersonsOf, companyPageOf, emptyReasonOf, groupPastEmployers, payingClientsNotTeam, readProfileRoles, teamCandidatesOf,
   type EmploymentRow, type PastEmployerCompany, type PersonRole, type ProfileRole, type TaggedTeamPerson, type TeamCandidate,
 } from "./client-past-employers.js";
 import { loadOrgMembers, memberAddressKey } from "./org-members.js";
@@ -48,9 +48,16 @@ export const LOOKUP_RETRY_AFTER_DAYS = 90;
  * holds the profile URL). 3 = a profile the cheap providers could not read is asked once more of the dearer ones
  * (`CAREER_PROFILE_DEEP_MAX_MICRO`): a « no experience » / « unreadable » recorded before it is asked again once.
  */
-export const LOOKUP_VERSION = 3;
+export const LOOKUP_VERSION = 4;
 export const PAGES_VERSION = 2;
 export const DEEP_PROFILE_VERSION = 3;
+/**
+ * 4 = a TEASER answer (a logged-out view: roles with no date at all, e.g. only the current employer) is not a career:
+ * the next provider is asked (TEAM-PAST-EMPLOYERS-1125: anyapi's cheap read of a founder's profile answered one undated
+ * role, the full read of the same profile held Bain & Company and EY). A career an older version recorded whose held
+ * roles carry no date is read again once.
+ */
+export const TEASER_VERSION = 4;
 /**
  * One fill call stays inside a caller's 5 minutes: no client is STARTED past this budget, and a started one makes at
  * most two treg calls of 90 s each (treg-client CALL_TIMEOUT_MS), so 100 s + 180 s < 300 s.
@@ -596,12 +603,16 @@ export function clientsToLookUp<T extends PayingClient>(
   withHistory: ReadonlySet<string>,
   lookups: ReadonlyMap<string, StoredLookup>,
   now: Date,
+  /** Persons whose every held role carries no date (a teaser read): their career is read again once. */
+  undated: ReadonlySet<string> = new Set(),
 ): T[] {
   const retryBefore = now.getTime() - LOOKUP_RETRY_AFTER_DAYS * 86_400_000;
   return clients.filter((c) => {
     const l = lookups.get(c.leadId);
     // A career an older version read is read again once, so its employers get what identifies them.
     if (l && l.status === "history_found" && l.version < PAGES_VERSION && (c.linkedinUrl || c.email)) return true;
+    // A career read off a teaser (no role dated) by an older version: read again once, past the teaser.
+    if (l && l.status === "history_found" && l.version < TEASER_VERSION && undated.has(c.leadId) && (c.linkedinUrl || c.email)) return true;
     if (withHistory.has(c.leadId)) return false;
     const identified = Boolean(c.email || c.linkedinUrl || c.phone);
     // Never attempted: looked up now; with nothing to look them up by, the lookup records that (free).
@@ -733,6 +744,7 @@ export interface ProfileLookupAnswer {
 export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, alreadyCharged: number): Promise<ProfileLookupAnswer> {
   let charged = 0;
   let servedBy: string | null = null;
+  let teaser = null as { roles: ProfileRole[]; servedBy: string | null } | null;
   const exclude = [...NEVER_ROUTE_TO];
   const handle = linkedinHandleOf(linkedinUrl);
   const params = { linkedin_url: linkedinUrl, ...(handle ? { linkedin_handle: handle } : {}) };
@@ -747,7 +759,9 @@ export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, a
     if (!isAnswer(p.status)) throw new TransientLookupError(`linkedin.user.profile answered ${p.status}`);
     servedBy = servedByOf(p.body) ?? servedBy;
     const roles = readProfileRoles(p.body);
-    if (roles.length > 0) return { done: { roles, servedBy: servedByOf(p.body), charged }, moreProviders: false };
+    if (roles.length > 0 && !isTeaserCareer(roles)) return { done: { roles, servedBy: servedByOf(p.body), charged }, moreProviders: false };
+    // A teaser (a logged-out view) is kept only if no provider reads more.
+    if (roles.length > 0 && !teaser) teaser = { roles, servedBy: servedByOf(p.body) };
     // Every endpoint that answered (hit or miss) is not asked again; one skipped for its price may be, dearer.
     for (const ep of triedEndpointsOf(p.body)) if (!exclude.includes(ep)) exclude.push(ep);
     const provider = servedProviderOf(p.body);
@@ -761,6 +775,7 @@ export async function readCareerOfProfile(linkedinUrl: string, call: TregCall, a
   }
   const deep = await ask(CAREER_PROFILE_DEEP_MAX_MICRO);
   if (deep.done) return deep.done;
+  if (teaser) return { roles: teaser.roles, servedBy: teaser.servedBy, charged };
   return { roles: [], servedBy, charged };
 }
 
@@ -915,7 +930,7 @@ export async function fillClientHistories(identity: SpendIdentity, brandId: stri
   const clients: CareerPerson[] = [...team, ...paying];
   const ids = clients.map((c) => c.leadId);
   const [rows, lookups] = await Promise.all([loadClientEmployment(clients), loadLookups(ids)]);
-  const owed = clientsToLookUp(clients, new Set(rows.map((r) => r.clientLeadId)), lookups, now);
+  const owed = clientsToLookUp(clients, new Set(rows.map((r) => r.clientLeadId)), lookups, now, undatedPersonsOf(rows));
   const summary: FillSummary = {
     attempted: 0, historyFound: 0, noLinkedin: 0, noExperience: 0, profileUnreadable: 0, noIdentifier: 0, failed: 0, remaining: 0, chargedMicro: 0,
   };
