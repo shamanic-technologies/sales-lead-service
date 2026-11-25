@@ -13,11 +13,21 @@
  *     case-folded; each company lists the clients (lead, role, dates) that justify it;
  *   - a LinkedIn profile answer (treg `linkedin.user.profile`, whichever provider served it) is read for its experience
  *     list by SHAPE, never by provider name.
+ *
+ * THE BRAND'S OWN TEAM IS A SECOND SOURCE (TEAM-PAST-EMPLOYERS-1125): the people behind the brand (members of the org
+ * owning it, plus anyone the brand tags `team`) count beside its paying clients, each trace entry saying which (`role`).
+ * Fleet staff are members of many CLIENT orgs: staff count as team only on an org whose every member is staff (ours).
+ * Team wins: a person who is both is counted as team only.
  */
+import { isStaffEmail } from "./staff-identity.js";
+import { memberAddressKey } from "./org-members.js";
+
+export type PersonRole = "paying_client" | "team";
 
 export interface EmploymentRow {
-  /** The paying client's person key (the lead holding the paid evidence). */
+  /** The person's key: the lead holding the paid evidence, or the team member's lead. */
   clientLeadId: string;
+  role: PersonRole;
   /** The lead row the role is recorded on (the client lead, or another lead of the same human). */
   leadId: string;
   organizationId: string;
@@ -34,6 +44,7 @@ export interface EmploymentRow {
 
 export interface CompanyClient {
   leadId: string;
+  role: PersonRole;
   title: string | null;
   startDate: string | null;
   endDate: string | null;
@@ -48,8 +59,10 @@ export interface PastEmployerCompany {
   domain: string | null;
   logoUrl: string | null;
   linkedinUrl: string | null;
-  /** Distinct paying clients who worked there. */
+  /** Distinct people who worked there, paying clients and team members together. */
   clientCount: number;
+  payingClientCount: number;
+  teamCount: number;
   /** true when at least one of them works there NOW (the logo is a current employer for them). */
   currentForSome: boolean;
   clients: CompanyClient[];
@@ -82,6 +95,8 @@ export function groupPastEmployers(rows: readonly EmploymentRow[]): PastEmployer
         logoUrl: r.logoUrl,
         linkedinUrl: r.linkedinUrl,
         clientCount: 0,
+        payingClientCount: 0,
+        teamCount: 0,
         currentForSome: false,
         clients: [],
         seen: new Map(),
@@ -96,18 +111,141 @@ export function groupPastEmployers(rows: readonly EmploymentRow[]): PastEmployer
     const prior = c.seen.get(r.clientLeadId);
     // A person holding several roles there: the current one, else the latest started, is the role shown.
     if (!prior || (r.current && !prior.current) || (!prior.current && (r.startDate ?? "") > (prior.startDate ?? ""))) {
-      c.seen.set(r.clientLeadId, { leadId: r.clientLeadId, title: r.title, startDate: r.startDate, endDate: r.endDate, current: r.current });
+      c.seen.set(r.clientLeadId, { leadId: r.clientLeadId, role: r.role, title: r.title, startDate: r.startDate, endDate: r.endDate, current: r.current });
     }
   }
   const out: PastEmployerCompany[] = [];
   for (const c of byKey.values()) {
     const clients = [...c.seen.values()].sort((a, b) => a.leadId.localeCompare(b.leadId));
     const { seen: _seen, ...company } = c;
-    out.push({ ...company, clients, clientCount: clients.length, currentForSome: clients.some((x) => x.current) });
+    const teamCount = clients.filter((x) => x.role === "team").length;
+    out.push({
+      ...company, clients, clientCount: clients.length, payingClientCount: clients.length - teamCount, teamCount,
+      currentForSome: clients.some((x) => x.current),
+    });
   }
   return out.sort(
     (a, b) => b.clientCount - a.clientCount || (a.name ?? a.companyKey).localeCompare(b.name ?? b.companyKey) || a.companyKey.localeCompare(b.companyKey),
   );
+}
+
+/** A member of the org owning the brand, as `org-members.ts` `loadOrgMembers` states them. */
+export interface TeamOrgMember {
+  email: string | null;
+  emails?: readonly string[];
+  firstName: string | null;
+  lastName: string | null;
+  phone: string | null;
+}
+
+/** A relation the brand's DECIDED tags call `team` (yes), with what its subject rows hold. */
+export interface TaggedTeamPerson {
+  humanId: string;
+  name: string | null;
+  emails: readonly string[];
+  phones: readonly string[];
+}
+
+export interface TeamCandidate {
+  source: "org_member" | "team_relation";
+  /** The relationship humans tagged team that are this person (none for a plain org member). */
+  humanIds: string[];
+  name: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  /** Lower-cased, in the order stated. */
+  emails: string[];
+  phones: string[];
+}
+
+/**
+ * PURE. Is the org OURS: at least one member has an address and every member address is staff. Fleet staff are invited
+ * into client orgs, so staff are a brand's team only there.
+ */
+export function isStaffOrg(members: readonly TeamOrgMember[]): boolean {
+  const emails = members.flatMap((m) => (m.emails && m.emails.length > 0 ? [...m.emails] : m.email ? [m.email] : []));
+  return emails.length > 0 && emails.every((e) => isStaffEmail(e));
+}
+
+/**
+ * PURE. The brand's team: the org's members plus the relations tagged team, one entry per PERSON (entries sharing an
+ * address, +tag variants folded, or a phone are one). A person any of whose addresses is staff counts only when the
+ * org is ours (`isStaffOrg`).
+ */
+export function teamCandidatesOf(members: readonly TeamOrgMember[], tagged: readonly TaggedTeamPerson[]): TeamCandidate[] {
+  const ours = isStaffOrg(members);
+  const lower = (list: readonly string[]) => Array.from(new Set(list.map((e) => e.trim().toLowerCase()).filter((e) => e !== "")));
+  const raw: TeamCandidate[] = [];
+  for (const m of members) {
+    const emails = lower(m.emails && m.emails.length > 0 ? m.emails : m.email ? [m.email] : []);
+    const phones = m.phone && m.phone.trim() !== "" ? [m.phone.trim()] : [];
+    if (emails.length === 0 && phones.length === 0) continue;
+    const name = [m.firstName, m.lastName].filter((x): x is string => Boolean(x && x.trim())).join(" ").trim() || null;
+    raw.push({ source: "org_member", humanIds: [], name, firstName: m.firstName, lastName: m.lastName, emails, phones });
+  }
+  const byHuman = new Map<string, TeamCandidate>();
+  for (const t of tagged) {
+    const prior = byHuman.get(t.humanId);
+    if (prior) {
+      prior.emails = lower([...prior.emails, ...t.emails]);
+      prior.phones = Array.from(new Set([...prior.phones, ...t.phones]));
+      prior.name = prior.name ?? t.name;
+      continue;
+    }
+    const c: TeamCandidate = {
+      source: "team_relation", humanIds: [t.humanId], name: t.name, firstName: null, lastName: null,
+      emails: lower(t.emails), phones: Array.from(new Set(t.phones)),
+    };
+    byHuman.set(t.humanId, c);
+    raw.push(c);
+  }
+  const out: TeamCandidate[] = [];
+  const owner = new Map<string, TeamCandidate>();
+  for (const c of raw) {
+    if (!ours && c.emails.some((e) => isStaffEmail(e))) continue;
+    const keys = [
+      ...c.emails.map((e) => `email:${memberAddressKey(e) ?? e}`),
+      ...c.phones.map((p) => `phone:${p.replace(/[^\d+]/g, "")}`),
+    ];
+    const into = keys.map((k) => owner.get(k)).find((x): x is TeamCandidate => x !== undefined);
+    if (!into) {
+      const kept = { ...c, humanIds: [...c.humanIds], emails: [...c.emails], phones: [...c.phones] };
+      out.push(kept);
+      for (const k of keys) owner.set(k, kept);
+      continue;
+    }
+    into.humanIds = Array.from(new Set([...into.humanIds, ...c.humanIds]));
+    into.emails = Array.from(new Set([...into.emails, ...c.emails]));
+    into.phones = Array.from(new Set([...into.phones, ...c.phones]));
+    into.name = into.name ?? c.name;
+    into.firstName = into.firstName ?? c.firstName;
+    into.lastName = into.lastName ?? c.lastName;
+    for (const k of keys) if (!owner.has(k)) owner.set(k, into);
+  }
+  return out;
+}
+
+/**
+ * PURE. Team wins over paying client: a paying client sharing a lead, or a human, with a team member is that team
+ * member, counted as team only ("team" wins over every other tag, org-members.ts).
+ */
+export function payingClientsNotTeam<T extends { leadId: string; memberLeadIds: readonly string[] }>(
+  clients: readonly T[],
+  team: ReadonlyArray<{ memberLeadIds: readonly string[]; humanIds: readonly string[] }>,
+  humanOfLead: ReadonlyMap<string, string | null>,
+): T[] {
+  const teamLeads = new Set(team.flatMap((t) => [...t.memberLeadIds]));
+  const teamHumans = new Set(team.flatMap((t) => [...t.humanIds, ...t.memberLeadIds.map((l) => humanOfLead.get(l) ?? null)]).filter((h): h is string => Boolean(h)));
+  return clients.filter((c) => {
+    const leadIds = c.memberLeadIds.length > 0 ? c.memberLeadIds : [c.leadId];
+    return !leadIds.some((l) => teamLeads.has(l) || (humanOfLead.get(l) ? teamHumans.has(humanOfLead.get(l)!) : false));
+  });
+}
+
+/** PURE. Why `companies` is empty: nobody at all, or people with no career held; null when it is not. */
+export function emptyReasonOf(people: number, companies: number): "no_paying_clients" | "no_employment_history" | null {
+  if (companies > 0) return null;
+  return people === 0 ? "no_paying_clients" : "no_employment_history";
 }
 
 /**

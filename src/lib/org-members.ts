@@ -58,13 +58,32 @@ export function anyMemberAddress(emails: readonly (string | null | undefined)[] 
   return emails.some((e) => isMemberAddress(e, members));
 }
 
+/** One member as client-service states them. */
+export interface OrgUser {
+  email: string | null;
+  firstName?: string | null;
+  lastName?: string | null;
+  phone?: string | null;
+}
+
+/** One PERSON of the org's team: every address that folds to the same `memberAddressKey` is theirs. */
+export interface OrgMember {
+  /** Their first address as stated (lower-cased), or null for a member known by phone alone. */
+  email: string | null;
+  /** Every address of theirs (lower-cased, the +tag variants included), in the order stated. */
+  emails: string[];
+  firstName: string | null;
+  lastName: string | null;
+  phone: string | null;
+}
+
 interface UsersPage {
-  users: Array<{ email: string | null }>;
+  users: OrgUser[];
   total: number;
 }
 
-async function fetchMemberEmails(orgId: string): Promise<string[]> {
-  const emails: string[] = [];
+async function fetchMembers(orgId: string): Promise<OrgUser[]> {
+  const users: OrgUser[] = [];
   for (let offset = 0; ; offset += PAGE_SIZE) {
     const url =
       `${CLIENT_SERVICE_URL}/internal/users?orgId=${encodeURIComponent(orgId)}&allMembers=true` + `&limit=${PAGE_SIZE}&offset=${offset}`;
@@ -82,24 +101,72 @@ async function fetchMemberEmails(orgId: string): Promise<string[]> {
     if (!Array.isArray(page?.users) || typeof page.total !== "number") {
       throw new OrgMembersUnavailableError(`client-service answered an unreadable member list for org ${orgId}`);
     }
-    for (const u of page.users) if (u.email) emails.push(u.email);
-    if (page.users.length < PAGE_SIZE || offset + page.users.length >= page.total) return emails;
+    users.push(...page.users);
+    if (page.users.length < PAGE_SIZE || offset + page.users.length >= page.total) return users;
   }
 }
 
-const cache = new Map<string, { keys: Set<string>; at: number }>();
+function text(v: unknown): string | null {
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
+}
+
+/**
+ * PURE. The org's members as PEOPLE: users whose addresses fold to the same key are one person (first name, last name
+ * and phone = the first stated among them); a user with no address is kept only when a phone is stated.
+ */
+export function foldOrgMembers(users: readonly OrgUser[]): OrgMember[] {
+  const byKey = new Map<string, OrgMember>();
+  const out: OrgMember[] = [];
+  for (const u of users) {
+    const key = memberAddressKey(u.email);
+    const email = key ? u.email!.trim().toLowerCase() : null;
+    const phone = text(u.phone);
+    if (!key) {
+      if (phone) out.push({ email: null, emails: [], firstName: text(u.firstName), lastName: text(u.lastName), phone });
+      continue;
+    }
+    const prior = byKey.get(key);
+    if (!prior) {
+      const member: OrgMember = { email, emails: [email!], firstName: text(u.firstName), lastName: text(u.lastName), phone };
+      byKey.set(key, member);
+      out.push(member);
+      continue;
+    }
+    if (!prior.emails.includes(email!)) prior.emails.push(email!);
+    prior.firstName = prior.firstName ?? text(u.firstName);
+    prior.lastName = prior.lastName ?? text(u.lastName);
+    prior.phone = prior.phone ?? phone;
+  }
+  return out;
+}
+
+const cache = new Map<string, { users: OrgUser[]; keys: Set<string>; at: number }>();
+
+async function loadCached(orgId: string): Promise<{ users: OrgUser[]; keys: Set<string> }> {
+  const hit = cache.get(orgId);
+  if (hit && Date.now() - hit.at < ORG_MEMBERS_TTL_MS) return hit;
+  const users = await fetchMembers(orgId);
+  const keys = new Set<string>();
+  for (const u of users) {
+    const k = memberAddressKey(u.email);
+    if (k) keys.add(k);
+  }
+  const entry = { users, keys, at: Date.now() };
+  cache.set(orgId, entry);
+  return entry;
+}
 
 /** Every member address key of the org (cached `ORG_MEMBERS_TTL_MS` per thread). Throws when unreadable. */
 export async function loadOrgMemberKeys(orgId: string): Promise<Set<string>> {
-  const hit = cache.get(orgId);
-  if (hit && Date.now() - hit.at < ORG_MEMBERS_TTL_MS) return hit.keys;
-  const keys = new Set<string>();
-  for (const e of await fetchMemberEmails(orgId)) {
-    const k = memberAddressKey(e);
-    if (k) keys.add(k);
-  }
-  cache.set(orgId, { keys, at: Date.now() });
-  return keys;
+  return (await loadCached(orgId)).keys;
+}
+
+/**
+ * The org's members as people, with what client-service states of each (name, phone): the same read and cache as
+ * `loadOrgMemberKeys` (TEAM-PAST-EMPLOYERS-1125). Throws `OrgMembersUnavailableError` when unreadable.
+ */
+export async function loadOrgMembers(orgId: string): Promise<OrgMember[]> {
+  return foldOrgMembers((await loadCached(orgId)).users);
 }
 
 /** Test seam: forget every cached member list. */

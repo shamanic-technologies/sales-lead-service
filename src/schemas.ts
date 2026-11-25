@@ -8067,7 +8067,8 @@ registry.registerPath({
 // --- The companies where a brand's paying clients have worked (BRAND-PROOF-LOGOS-1121) ---
 
 const ClientPastEmployerClientSchema = z.object({
-  leadId: z.string().openapi({ description: "The paying client's lead (the lead holding the paid evidence)." }),
+  leadId: z.string().openapi({ description: "The person's lead: the lead holding the paid evidence (a paying client) or the team member's lead." }),
+  role: z.enum(["paying_client", "team"]).openapi({ description: "A paying client, or a member of the brand's team (TEAM-PAST-EMPLOYERS-1125). A person both is team." }),
   title: z.string().nullable(),
   startDate: z.string().nullable().openapi({ description: "YYYY-MM-DD; first of the month/year when that is all the source states." }),
   endDate: z.string().nullable(),
@@ -8082,7 +8083,9 @@ const ClientPastEmployerCompanySchema = z
     domain: z.string().nullable(),
     logoUrl: z.string().nullable(),
     linkedinUrl: z.string().nullable(),
-    clientCount: z.number().int().openapi({ description: "Distinct paying clients who worked there (past or current)." }),
+    clientCount: z.number().int().openapi({ description: "Distinct people who worked there (past or current): paying clients + team members." }),
+    payingClientCount: z.number().int().openapi({ description: "Of them, paying clients." }),
+    teamCount: z.number().int().openapi({ description: "Of them, members of the brand's team." }),
     currentForSome: z.boolean(),
     clients: z.array(ClientPastEmployerClientSchema).openapi({ description: "The trace: each client, the role and its dates." }),
   })
@@ -8091,16 +8094,22 @@ const ClientPastEmployerCompanySchema = z
 const ClientPastEmployersResponseSchema = z
   .object({
     brandId: z.string(),
-    payingClients: z.number().int(),
-    clientsWithHistory: z.number().int(),
+    payingClients: z.number().int().openapi({ description: "Paying clients who are not team members (team wins)." }),
+    clientsWithHistory: z.number().int().openapi({ description: "Paying clients with at least one role held." }),
+    teamMembers: z.number().int().openapi({ description: "The brand's team: members of the org owning it + relations tagged team (staff only on a staff-only org)." }),
+    teamWithHistory: z.number().int().openapi({ description: "Team members with at least one role held." }),
     companyCount: z.number().int(),
-    reason: z.enum(["no_paying_clients", "no_employment_history"]).nullable().openapi({ description: "Why `companies` is empty; null when it is not." }),
+    reason: z
+      .enum(["no_paying_clients", "no_employment_history"])
+      .nullable()
+      .openapi({ description: "Why `companies` is empty: `no_paying_clients` = nobody (no paying client and no team member), `no_employment_history` = people, no career held; null when not empty." }),
     companies: z.array(ClientPastEmployerCompanySchema).openapi({ description: "Most clients first, then name." }),
     clients: z.array(
       z.object({
-        leadId: z.string(),
+        leadId: z.string().nullable().openapi({ description: "null only for a team member no lead holds yet (the POST creates one)." }),
+        role: z.enum(["paying_client", "team"]),
         name: z.string().nullable(),
-        paidAt: z.string().nullable(),
+        paidAt: z.string().nullable().openapi({ description: "null for a team member." }),
         history: z.enum(["has_history", "not_looked_up", "looked_up_none"]),
         lookup: z.object({ status: z.enum(["history_found", "no_linkedin", "no_experience", "profile_unreadable", "no_identifier"]), lookedUpAt: z.string() }).nullable(),
         companyKeys: z.array(z.string()),
@@ -8129,7 +8138,8 @@ const clientPastEmployersHeaders = [
 ];
 
 const clientPastEmployersDescription =
-  "The companies where the brand's PAYING CLIENTS have worked, past or current, each with the clients, roles and dates that justify it. " +
+  "The companies where the brand's PAYING CLIENTS and its own TEAM have worked, past or current, each with the people (`role`), roles and dates that justify it. " +
+  "Team (TEAM-PAST-EMPLOYERS-1125) = members of the org owning the brand (client-service) + relations whose decided tags hold `team`; fleet staff are team only on an org whose every member is staff; a person both a payer and team is team. " +
   "A paying client = a lead of the brand holding a live attributed ledger sale/purchase, or the address of a CRM sale / a CRM payment that stands " +
   "(succeeded, not wholly refunded) at (org, brand): the same evidence as step-reached `paid_client`. Staff addresses and leads marked not a person are out. " +
   "One client = the person: roles recorded on any lead of the same human (human-service) count. Empty = 200 with `reason`, never an error.";
