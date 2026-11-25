@@ -180,8 +180,8 @@ describe("payingClientsOf", () => {
       row({ lead_id: "a", emails: ["solo@co.io"], paid_at: null }),
     ]);
     expect(out).toEqual([
-      { leadId: "a", memberLeadIds: ["a"], name: null, email: "solo@co.io", phone: null, linkedinUrl: null, paidAt: null },
-      { leadId: "b", memberLeadIds: ["b", "c"], name: "Ann", email: "x@co.io", phone: null, linkedinUrl: null, paidAt: "2026-02-01T00:00:00.000Z" },
+      { leadId: "a", memberLeadIds: ["a"], name: null, email: "solo@co.io", lookupEmails: ["solo@co.io"], phone: null, linkedinUrl: null, paidAt: null },
+      { leadId: "b", memberLeadIds: ["b", "c"], name: "Ann", email: "x@co.io", lookupEmails: ["x@co.io"], phone: null, linkedinUrl: null, paidAt: "2026-02-01T00:00:00.000Z" },
     ]);
   });
 

@@ -12,6 +12,11 @@
  * (`client_history_lookups`, keyed on the lead: a person's career is the person's, not the org's), a lookup that found
  * nothing is asked again after `LOOKUP_RETRY_AFTER_DAYS`; a call that failed (treg/network) records nothing and is
  * asked again on the next call. Idempotent, safe to call daily.
+ *
+ * THE BRAND'S TEAM (TEAM-PAST-EMPLOYERS-1125) is read and filled the same way (`loadTeam`): members of the org owning
+ * the brand (client-service) plus relations whose DECIDED tags hold `team`, each held by a lead (the one holding their
+ * address, else their human's, else their phone's). The FILL creates a global lead row for a member with none (no
+ * `leads_campaigns` row: never a lead of any brand); the READ never writes and lists such a member with `leadId: null`.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
@@ -19,11 +24,17 @@ import { toIsoTimestamp, type RawTimestamp } from "./basic-leads.js";
 import { STEP_REACHED_EVIDENCE, rowReaches } from "./step-reached.js";
 import { assertCrmCopyCaughtUp } from "./step-reached-read.js";
 import { isStaffEmail } from "./staff-identity.js";
-import { companyPageOf, groupPastEmployers, readProfileRoles, type EmploymentRow, type PastEmployerCompany, type ProfileRole } from "./client-past-employers.js";
+import {
+  companyPageOf, emptyReasonOf, groupPastEmployers, payingClientsNotTeam, readProfileRoles, teamCandidatesOf,
+  type EmploymentRow, type PastEmployerCompany, type PersonRole, type ProfileRole, type TaggedTeamPerson, type TeamCandidate,
+} from "./client-past-employers.js";
+import { loadOrgMembers, memberAddressKey } from "./org-members.js";
+import { loadRelationships } from "./relationship-read.js";
+import { canonicalE164 } from "./e164-phone.js";
 import { InsufficientCreditError, TregMeter, isTregRefusal, type SpendIdentity } from "./treg-client.js";
 import { readEnrichOutput } from "./named-lead-serve.js";
 import { ENRICH_ENDPOINT } from "./relationship-company.js";
-import { recordEmploymentHistory } from "./leads-registry.js";
+import { recordEmploymentHistory, registerServedEmail, registerServedPhone, upsertLeadFromPerson } from "./leads-registry.js";
 import type { Person } from "./people-client.js";
 
 export const PROFILE_ENDPOINT = "treg.linkedin.user.profile";
@@ -56,6 +67,11 @@ export interface PayingClient {
   memberLeadIds: string[];
   name: string | null;
   email: string | null;
+  /**
+   * Every address of the person to ask the email-to-profile step by, in order (`email` first): one provider knows a
+   * person by an address another does not. `+tag` variants of one mailbox are asked once. Absent = `email` alone.
+   */
+  lookupEmails?: string[];
   /** An E.164 phone of the person, looked up only when no email and no profile is held. */
   phone: string | null;
   linkedinUrl: string | null;
@@ -207,6 +223,7 @@ export function payingClientsOf(
       memberLeadIds: sorted.map((r) => r.lead_id).sort(),
       name: holder.name ?? sorted.find((r) => r.name)?.name ?? null,
       email: own[0] ?? others[0] ?? all[0] ?? null,
+      lookupEmails: Array.from(new Set([...own, ...others, ...all])),
       phone: holder.phone ?? sorted.find((r) => r.phone)?.phone ?? null,
       linkedinUrl: holder.linkedin_url ?? sorted.find((r) => r.linkedin_url)?.linkedin_url ?? null,
       paidAt: holder.paid_at,
@@ -217,8 +234,9 @@ export function payingClientsOf(
 
 /** Every role we hold on any lead of each client (every folded member and each member's human). */
 export async function loadClientEmployment(
-  clients: ReadonlyArray<Pick<PayingClient, "leadId" | "memberLeadIds">>,
+  clients: ReadonlyArray<Pick<PayingClient, "leadId" | "memberLeadIds"> & { role?: PersonRole }>,
 ): Promise<EmploymentRow[]> {
+  const roleOf = new Map(clients.map((c) => [c.leadId, c.role ?? "paying_client"] as const));
   const pairs = clients.flatMap((c) => (c.memberLeadIds.length > 0 ? c.memberLeadIds : [c.leadId]).map((m) => [c.leadId, m] as const));
   if (pairs.length === 0) return [];
   const rows = (await db.execute(sql`
@@ -241,6 +259,7 @@ export async function loadClientEmployment(
   }>;
   return rows.map((r) => ({
     clientLeadId: r.client_lead_id,
+    role: roleOf.get(r.client_lead_id) ?? "paying_client",
     leadId: r.lead_id,
     organizationId: r.organization_id,
     companyId: r.company_id,
@@ -253,6 +272,209 @@ export async function loadClientEmployment(
     endDate: r.end_date,
     current: r.current,
   }));
+}
+
+/** A person whose career counts: a paying client or a team member, held by a lead. */
+export type CareerPerson = PayingClient & { role: PersonRole };
+
+export interface TeamMember extends PayingClient {
+  role: "team";
+  /** The relationship humans tagged team that are this person, plus the humans of their leads. */
+  humanIds: string[];
+}
+
+export interface BrandTeam {
+  /** Team members held by a lead, sorted by lead id. */
+  members: TeamMember[];
+  /** Team members no lead holds (a READ never creates one; a member with no address and no E.164 phone cannot be held). */
+  unheld: Array<{ name: string | null }>;
+  /** `leads.human_id` of every team lead. */
+  humanOfLead: Map<string, string | null>;
+}
+
+/** Relations of the brand whose DECIDED tags hold `team` (yes, never unsure), with their subject rows' addresses. */
+async function loadTaggedTeam(orgId: string, brandId: string): Promise<TaggedTeamPerson[]> {
+  const candidates = (await db.execute(sql`
+    SELECT human_id::text AS human_id FROM relationship_statements
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND tag = 'team' AND state = 'yes' AND withdrawn_at IS NULL
+    UNION
+    SELECT human_id::text FROM relationship_evidence WHERE org_id = ${orgId} AND brand_id = ${brandId} AND tag = 'team'
+    UNION
+    SELECT human_id::text FROM relationship_judgments
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND (probabilities->>'team')::float8 >= 0.5
+  `)) as unknown as Array<{ human_id: string }>;
+  if (candidates.length === 0) return [];
+  const blocks = await loadRelationships(orgId, brandId, candidates.map((c) => c.human_id));
+  const humans = candidates.map((c) => c.human_id).filter((h) => blocks.get(h)?.tags.includes("team"));
+  if (humans.length === 0) return [];
+  const subjects = (await db.execute(sql`
+    SELECT s.human_id::text AS human, s.name, s.emails, s.phones FROM relationship_subjects s
+    WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId} AND s.human_id = ANY(${sql.param(humans)}::uuid[])
+    ORDER BY s.human_id, s.company_key
+  `)) as unknown as Array<{ human: string; name: string | null; emails: string[] | null; phones: string[] | null }>;
+  const held = new Set(subjects.map((r) => r.human));
+  return [
+    ...subjects.map((r) => ({ humanId: r.human, name: r.name, emails: r.emails ?? [], phones: r.phones ?? [] })),
+    ...humans.filter((h) => !held.has(h)).map((h) => ({ humanId: h, name: null, emails: [], phones: [] })),
+  ];
+}
+
+/** A global lead row for a team member no lead holds: never a `leads_campaigns` row, so never a lead of any brand. */
+async function createTeamLead(c: TeamCandidate): Promise<string | null> {
+  const email = c.emails[0] ?? null;
+  const phone = c.phones.map((p) => canonicalE164(p)).find((p): p is string => p !== null) ?? null;
+  if (!email && !phone) return null;
+  const [first, ...rest] = (c.name ?? "").trim().split(/\s+/).filter(Boolean);
+  const person = {
+    firstName: c.firstName ?? first ?? null,
+    lastName: c.lastName ?? (rest.length > 0 ? rest.join(" ") : null),
+    name: c.name,
+    email,
+    ...(email ? {} : { phone }),
+  } as unknown as Person;
+  const leadId = await upsertLeadFromPerson(person, { enriched: false });
+  const source = c.source === "org_member" ? "org_member" : "team_relation";
+  return email ? registerServedEmail({ leadId, email, status: null, source }) : registerServedPhone({ leadId, phone: phone!, source });
+}
+
+/**
+ * The brand's team, each member held by a lead: the lead holding one of their addresses, plus their human's leads
+ * (tagged relations), else the lead holding their E.164 phone; `create` (the FILL only) makes a lead for a member with
+ * none. Every lead of the same human as one of those is the member's too. client-service unreadable throws
+ * `OrgMembersUnavailableError`: never "nobody is a member".
+ */
+export async function loadTeam(orgId: string, brandId: string, options: { create: boolean }): Promise<BrandTeam> {
+  const [members, tagged] = await Promise.all([loadOrgMembers(orgId), loadTaggedTeam(orgId, brandId)]);
+  const candidates = teamCandidatesOf(members, tagged);
+  if (candidates.length === 0) return { members: [], unheld: [], humanOfLead: new Map() };
+
+  const emails = Array.from(new Set(candidates.flatMap((c) => c.emails)));
+  const phoneOf = (c: TeamCandidate) => c.phones.map((p) => canonicalE164(p)).filter((p): p is string => p !== null);
+  const phones = Array.from(new Set(candidates.flatMap(phoneOf)));
+  const humans = Array.from(new Set(candidates.flatMap((c) => c.humanIds)));
+  const [byEmail, byPhone, atomics] = await Promise.all([
+    emails.length === 0
+      ? []
+      : (db.execute(sql`
+          SELECT lower(cm.value) AS key, cm.lead_id::text AS lead_id FROM lead_contact_methods cm
+          WHERE cm.channel = 'email' AND lower(cm.value) = ANY(${sql.param(emails)}::text[])
+        `) as unknown as Promise<Array<{ key: string; lead_id: string }>>),
+    phones.length === 0
+      ? []
+      : (db.execute(sql`
+          SELECT cm.value AS key, cm.lead_id::text AS lead_id FROM lead_contact_methods cm
+          WHERE cm.channel = 'phone' AND cm.value = ANY(${sql.param(phones)}::text[])
+        `) as unknown as Promise<Array<{ key: string; lead_id: string }>>),
+    // A relationship human is the ORG's view of a person: the leads of every atomic human folded into it are theirs.
+    humans.length === 0
+      ? []
+      : (db.execute(sql`
+          SELECT h.id::text AS human, h.id::text AS atomic FROM unnest(${sql.param(humans)}::uuid[]) AS h(id)
+          UNION
+          SELECT o.human_id::text, o.atomic_human_id::text FROM org_human_aliases o
+          WHERE o.org_id = ${orgId} AND o.human_id = ANY(${sql.param(humans)}::uuid[])
+          UNION
+          SELECT a.human_id::text, a.atomic_human_id::text FROM human_aliases a WHERE a.human_id = ANY(${sql.param(humans)}::uuid[])
+        `) as unknown as Promise<Array<{ human: string; atomic: string }>>),
+  ]);
+  const humanLeads =
+    atomics.length === 0
+      ? []
+      : ((await db.execute(sql`
+          SELECT l.id::text AS lead_id, l.human_id::text AS atomic FROM leads l
+          WHERE l.human_id = ANY(${sql.param(Array.from(new Set(atomics.map((a) => a.atomic))))}::uuid[])
+        `)) as unknown as Array<{ lead_id: string; atomic: string }>);
+  const leadsOfKey = (rows: ReadonlyArray<{ key: string; lead_id: string }>, keys: readonly string[]) =>
+    rows.filter((r) => keys.includes(r.key)).map((r) => r.lead_id);
+
+  const held: Array<{ candidate: TeamCandidate; leadIds: string[] }> = [];
+  const unheld: BrandTeam["unheld"] = [];
+  for (const c of candidates) {
+    const atomicOfMine = new Set(atomics.filter((a) => c.humanIds.includes(a.human)).map((a) => a.atomic));
+    let leadIds = [...leadsOfKey(byEmail, c.emails), ...humanLeads.filter((l) => atomicOfMine.has(l.atomic)).map((l) => l.lead_id)];
+    if (leadIds.length === 0) leadIds = leadsOfKey(byPhone, phoneOf(c));
+    if (leadIds.length === 0 && options.create) {
+      const created = await createTeamLead(c);
+      if (created) leadIds = [created];
+    }
+    if (leadIds.length === 0) unheld.push({ name: c.name });
+    else held.push({ candidate: c, leadIds: Array.from(new Set(leadIds)) });
+  }
+  if (held.length === 0) return { members: [], unheld, humanOfLead: new Map() };
+
+  // Every lead of the same human as a held lead is the member's too (a job change is a new lead row).
+  const details = (await db.execute(sql`
+    WITH own AS (SELECT l.id, l.human_id FROM leads l WHERE l.id = ANY(${sql.param(held.flatMap((h) => h.leadIds))}::uuid[]))
+    SELECT DISTINCT l.id::text AS lead_id, l.human_id::text AS human_id,
+      NULLIF(trim(concat_ws(' ', l.first_name, l.last_name)), '') AS name, l.linkedin_url,
+      (SELECT lower(cm.value) FROM lead_contact_methods cm
+        WHERE cm.lead_id = l.id AND cm.channel = 'email' ORDER BY cm.created_at, cm.id LIMIT 1) AS email,
+      (SELECT cm.value FROM lead_contact_methods cm
+        WHERE cm.lead_id = l.id AND cm.channel = 'phone' AND cm.value LIKE '+%' ORDER BY cm.created_at, cm.id LIMIT 1) AS phone
+    FROM leads l
+    WHERE l.id IN (SELECT id FROM own)
+       OR l.human_id IN (SELECT human_id FROM own WHERE human_id IS NOT NULL)
+  `)) as unknown as Array<{ lead_id: string; human_id: string | null; name: string | null; linkedin_url: string | null; email: string | null; phone: string | null }>;
+  const detailOf = new Map(details.map((d) => [d.lead_id, d]));
+  const humanOfLead = new Map(details.map((d) => [d.lead_id, d.human_id]));
+
+  // Two candidates one lead (or one human) holds are one person: folded into the first.
+  const people: Array<{ candidate: TeamCandidate; holder: string; leadIds: Set<string>; humanIds: Set<string> }> = [];
+  for (const h of held) {
+    const leadHumans = new Set(h.leadIds.map((l) => humanOfLead.get(l) ?? null).filter((x): x is string => Boolean(x)));
+    const leadIds = new Set([...h.leadIds, ...details.filter((d) => d.human_id && leadHumans.has(d.human_id)).map((d) => d.lead_id)]);
+    const prior = people.find((p) => [...leadIds].some((l) => p.leadIds.has(l)));
+    if (prior) {
+      for (const l of leadIds) prior.leadIds.add(l);
+      for (const x of [...leadHumans, ...h.candidate.humanIds]) prior.humanIds.add(x);
+      continue;
+    }
+    // The holder is stable across calls: the lead of their first address, else their lowest lead id.
+    const holder = h.candidate.emails.map((e) => byEmail.find((r) => r.key === e)?.lead_id).find((x): x is string => Boolean(x)) ?? [...h.leadIds].sort()[0];
+    people.push({ candidate: h.candidate, holder, leadIds, humanIds: new Set([...leadHumans, ...h.candidate.humanIds]) });
+  }
+  const out: TeamMember[] = people.map((p) => {
+    const rows = [...p.leadIds].sort().map((l) => detailOf.get(l)).filter((d): d is NonNullable<typeof d> => d !== undefined);
+    const own = detailOf.get(p.holder);
+    return {
+      role: "team" as const,
+      leadId: p.holder,
+      memberLeadIds: [...p.leadIds].sort(),
+      humanIds: [...p.humanIds].sort(),
+      name: p.candidate.name ?? own?.name ?? rows.find((r) => r.name)?.name ?? null,
+      email: p.candidate.emails[0] ?? own?.email ?? rows.find((r) => r.email)?.email ?? null,
+      lookupEmails: [...p.candidate.emails, ...(own?.email ? [own.email] : []), ...rows.flatMap((r) => (r.email ? [r.email] : []))],
+      phone: phoneOf(p.candidate)[0] ?? own?.phone ?? rows.find((r) => r.phone)?.phone ?? null,
+      linkedinUrl: own?.linkedin_url ?? rows.find((r) => r.linkedin_url)?.linkedin_url ?? null,
+      paidAt: null,
+    };
+  });
+  return { members: out.sort((a, b) => a.leadId.localeCompare(b.leadId)), unheld, humanOfLead };
+}
+
+/**
+ * The people whose careers count for the brand: its team, and its paying clients who are not team (team wins).
+ */
+export async function loadCareerPeople(
+  orgId: string,
+  brandId: string,
+  options: { create: boolean },
+): Promise<{ team: TeamMember[]; unheldTeam: BrandTeam["unheld"]; paying: CareerPerson[] }> {
+  const [clients, team] = await Promise.all([loadPayingClients(orgId, brandId), loadTeam(orgId, brandId, options)]);
+  if (team.members.length === 0) return { team: [], unheldTeam: team.unheld, paying: clients.map((c) => ({ ...c, role: "paying_client" as const })) };
+  const clientLeads = Array.from(new Set(clients.flatMap((c) => c.memberLeadIds)));
+  const humanOfLead = new Map(team.humanOfLead);
+  if (clientLeads.length > 0) {
+    const rows = (await db.execute(sql`
+      SELECT id::text AS lead_id, human_id::text AS human_id FROM leads WHERE id = ANY(${sql.param(clientLeads)}::uuid[])
+    `)) as unknown as Array<{ lead_id: string; human_id: string | null }>;
+    for (const r of rows) humanOfLead.set(r.lead_id, r.human_id);
+  }
+  return {
+    team: team.members,
+    unheldTeam: team.unheld,
+    paying: payingClientsNotTeam(clients, team.members, humanOfLead).map((c) => ({ ...c, role: "paying_client" as const })),
+  };
 }
 
 /** `no_identifier` = nothing to look the person up by (no email, no profile, no phone): recorded, nothing spent. */
@@ -284,15 +506,27 @@ export type ClientHistoryState = "has_history" | "not_looked_up" | "looked_up_no
 
 export interface ClientPastEmployersAnswer {
   brandId: string;
+  /** Paying clients who are not team members (team wins). */
   payingClients: number;
+  /** Paying clients (not team) with at least one role held. */
   clientsWithHistory: number;
+  /** The brand's team: members of the org owning it plus relations tagged team, with or without a lead. */
+  teamMembers: number;
+  teamWithHistory: number;
   companyCount: number;
-  /** Why `companies` is empty: `no_paying_clients` | `no_employment_history`; null when it is not. */
+  /**
+   * Why `companies` is empty: `no_paying_clients` = nobody at all (no paying client AND no team member),
+   * `no_employment_history` = people, none with a career held; null when it is not.
+   */
   reason: "no_paying_clients" | "no_employment_history" | null;
   companies: PastEmployerCompany[];
+  /** Paying clients first, then team members. */
   clients: Array<{
-    leadId: string;
+    /** null only for a team member no lead holds yet (the POST creates it). */
+    leadId: string | null;
+    role: PersonRole;
     name: string | null;
+    /** null for a team member. */
     paidAt: string | null;
     history: ClientHistoryState;
     lookup: { status: LookupStatus; lookedUpAt: string } | null;
@@ -301,32 +535,41 @@ export interface ClientPastEmployersAnswer {
 }
 
 export async function readClientPastEmployers(orgId: string, brandId: string): Promise<ClientPastEmployersAnswer> {
-  const clients = await loadPayingClients(orgId, brandId);
-  const ids = clients.map((c) => c.leadId);
-  const [rows, lookups] = await Promise.all([loadClientEmployment(clients), loadLookups(ids)]);
+  const { team, unheldTeam, paying } = await loadCareerPeople(orgId, brandId, { create: false });
+  const people: CareerPerson[] = [...paying, ...team];
+  const ids = people.map((c) => c.leadId);
+  const [rows, lookups] = await Promise.all([loadClientEmployment(people), loadLookups(ids)]);
   const companies = groupPastEmployers(rows);
   const keysByClient = new Map<string, string[]>();
   for (const c of companies) for (const cl of c.clients) keysByClient.set(cl.leadId, [...(keysByClient.get(cl.leadId) ?? []), c.companyKey]);
   const withHistory = new Set(rows.map((r) => r.clientLeadId));
   return {
     brandId,
-    payingClients: clients.length,
-    clientsWithHistory: withHistory.size,
+    payingClients: paying.length,
+    clientsWithHistory: paying.filter((c) => withHistory.has(c.leadId)).length,
+    teamMembers: team.length + unheldTeam.length,
+    teamWithHistory: team.filter((c) => withHistory.has(c.leadId)).length,
     companyCount: companies.length,
-    reason: clients.length === 0 ? "no_paying_clients" : companies.length === 0 ? "no_employment_history" : null,
+    reason: emptyReasonOf(people.length + unheldTeam.length, companies.length),
     companies,
-    clients: clients.map((c) => {
-      const stored = lookups.get(c.leadId) ?? null;
-      const lookup = stored ? { status: stored.status, lookedUpAt: stored.lookedUpAt } : null;
-      return {
-        leadId: c.leadId,
-        name: c.name,
-        paidAt: c.paidAt,
-        history: withHistory.has(c.leadId) ? "has_history" : lookup ? "looked_up_none" : "not_looked_up",
-        lookup,
-        companyKeys: keysByClient.get(c.leadId) ?? [],
-      };
-    }),
+    clients: [
+      ...people.map((c) => {
+        const stored = lookups.get(c.leadId) ?? null;
+        const lookup = stored ? { status: stored.status, lookedUpAt: stored.lookedUpAt } : null;
+        return {
+          leadId: c.leadId,
+          role: c.role,
+          name: c.name,
+          paidAt: c.paidAt,
+          history: (withHistory.has(c.leadId) ? "has_history" : lookup ? "looked_up_none" : "not_looked_up") as ClientHistoryState,
+          lookup,
+          companyKeys: keysByClient.get(c.leadId) ?? [],
+        };
+      }),
+      ...unheldTeam.map((m) => ({
+        leadId: null, role: "team" as const, name: m.name, paidAt: null, history: "not_looked_up" as const, lookup: null, companyKeys: [],
+      })),
+    ],
   };
 }
 
@@ -348,12 +591,12 @@ export interface FillSummary {
  * PURE. Who is owed a lookup now: no history, and no lookup or a non-finding one older than the retry window; or a
  * career found by an older lookup version.
  */
-export function clientsToLookUp(
-  clients: readonly PayingClient[],
+export function clientsToLookUp<T extends PayingClient>(
+  clients: readonly T[],
   withHistory: ReadonlySet<string>,
   lookups: ReadonlyMap<string, StoredLookup>,
   now: Date,
-): PayingClient[] {
+): T[] {
   const retryBefore = now.getTime() - LOOKUP_RETRY_AFTER_DAYS * 86_400_000;
   return clients.filter((c) => {
     const l = lookups.get(c.leadId);
@@ -450,11 +693,11 @@ export interface EmailLookupAnswer {
  * The employer an enrich hit names is NOT recorded: a provider placeholder (« missing account name ») came back as a
  * company name on 2026-11-21; only a LinkedIn experience list is a career.
  */
-export async function findProfileByEmail(email: string, call: TregCall): Promise<EmailLookupAnswer> {
+export async function findProfileByEmail(email: string, call: TregCall, alreadyCharged = 0): Promise<EmailLookupAnswer> {
   let charged = 0;
   const exclude = [...NEVER_ROUTE_TO];
   for (let round = 0; round < CAREER_ENRICH_ROUNDS; round++) {
-    const maxMicro = Math.min(CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - charged);
+    const maxMicro = Math.min(CAREER_ENRICH_MAX_MICRO, CAREER_LOOKUP_MAX_MICRO - alreadyCharged - charged);
     if (maxMicro <= 0) break;
     const r = await call({ endpointId: ENRICH_ENDPOINT, method: "POST", params: { email }, maxMicro, routeExclude: [...exclude] });
     charged += r.chargedMicro;
@@ -574,6 +817,27 @@ async function attachCompanyPages(leadId: string, roles: readonly ProfileRole[])
   }
 }
 
+/** At most this many distinct addresses of one person are asked for their profile (a miss is free). */
+export const MAX_LOOKUP_ADDRESSES = 3;
+
+/**
+ * PURE. The addresses to ask the email-to-profile step by: `email` first, then the person's other addresses, one per
+ * mailbox (`+tag` variants fold), at most `MAX_LOOKUP_ADDRESSES`.
+ */
+export function addressesToAsk(client: Pick<PayingClient, "email" | "lookupEmails">): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of [client.email, ...(client.lookupEmails ?? [])]) {
+    const e = raw?.trim().toLowerCase();
+    const key = memberAddressKey(e);
+    if (!e || !key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+    if (out.length >= MAX_LOOKUP_ADDRESSES) break;
+  }
+  return out;
+}
+
 /** Look one client up. Throws InsufficientCreditError (stop the pass) or TransientLookupError (nothing recorded). */
 async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendIdentity): Promise<{ status: LookupStatus; charged: number }> {
   let charged = 0;
@@ -591,9 +855,13 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
     }
   }
   if (!linkedinUrl && client.email) {
-    const found = await findProfileByEmail(client.email, call);
-    charged += found.charged;
-    linkedinUrl = found.linkedinUrl;
+    for (const email of addressesToAsk(client)) {
+      if (charged >= CAREER_LOOKUP_MAX_MICRO) break;
+      const found = await findProfileByEmail(email, call, charged);
+      charged += found.charged;
+      linkedinUrl = found.linkedinUrl;
+      if (linkedinUrl) break;
+    }
     if (linkedinUrl) {
       await db.execute(sql`UPDATE leads SET linkedin_url = COALESCE(linkedin_url, ${linkedinUrl}) WHERE id = ${client.leadId}::uuid`);
     }
@@ -638,9 +906,13 @@ async function lookUpOne(client: PayingClient, call: TregCall, identity: SpendId
   return { status: "history_found", charged };
 }
 
-/** Fill missing careers of the brand's paying clients, within one call's budget. */
+/**
+ * Fill missing careers of the brand's team and paying clients, within one call's budget. Team members first (they are
+ * few); a team member no lead holds gets a lead here.
+ */
 export async function fillClientHistories(identity: SpendIdentity, brandId: string, now = new Date()): Promise<FillSummary> {
-  const clients = await loadPayingClients(identity.orgId, brandId);
+  const { team, paying } = await loadCareerPeople(identity.orgId, brandId, { create: true });
+  const clients: CareerPerson[] = [...team, ...paying];
   const ids = clients.map((c) => c.leadId);
   const [rows, lookups] = await Promise.all([loadClientEmployment(clients), loadLookups(ids)]);
   const owed = clientsToLookUp(clients, new Set(rows.map((r) => r.clientLeadId)), lookups, now);

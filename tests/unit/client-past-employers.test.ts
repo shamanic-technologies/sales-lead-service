@@ -4,7 +4,7 @@ import { DEEP_PROFILE_VERSION, LOOKUP_VERSION, clientsToLookUp } from "../../src
 import { companyKeyOf, companyPageOf, companyPageOfId } from "../../src/lib/client-past-employers.js";
 
 const row = (over: Partial<EmploymentRow>): EmploymentRow => ({
-  clientLeadId: "a", leadId: "a", organizationId: "o", companyId: null, name: "Acme", domain: null, logoUrl: null,
+  clientLeadId: "a", role: "paying_client", leadId: "a", organizationId: "o", companyId: null, name: "Acme", domain: null, logoUrl: null,
   linkedinUrl: null, title: null, startDate: null, endDate: null, current: false, ...over,
 });
 

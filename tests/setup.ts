@@ -73,10 +73,12 @@ if (!(expect.getState().testPath ?? "").endsWith("/org-members.test.ts")) {
   vi.doMock("../src/lib/org-members.js", async (importOriginal) => {
     const actual = await importOriginal<typeof import("../src/lib/org-members.js")>();
     const { testOrgMembers } = await import("./helpers/org-members.js");
+    const usersOf = (orgId: string) => (testOrgMembers.get(orgId) ?? []).map((m) => (typeof m === "string" ? { email: m } : m));
     return {
       ...actual,
       loadOrgMemberKeys: async (orgId: string) =>
-        new Set((testOrgMembers.get(orgId) ?? []).map((e) => actual.memberAddressKey(e)).filter((k): k is string => k !== null)),
+        new Set(usersOf(orgId).map((u) => actual.memberAddressKey(u.email)).filter((k): k is string => k !== null)),
+      loadOrgMembers: async (orgId: string) => actual.foldOrgMembers(usersOf(orgId)),
     };
   });
 }
