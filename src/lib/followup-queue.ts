@@ -129,23 +129,44 @@ export function personDueSql(nowIso: string, alias: "lc" | "" = "lc") {
  * (the latest statement wins, earlier or later), stated by the writer. An `acted` statement naming no next date is a
  * send like any other: the person's date moves to now + the send gap (`lead-followup-date.ts`' send rule), so a claim
  * never leaves them due through another row the moment its lease ends. `rows` is a CTE returning `org_id, brand_ids,
- * lead_id, followup_due_at`; otherwise a row with no due date states nothing.
+ * lead_id, followup_due_at, followup_stated_at`; otherwise a row with no due date states nothing.
+ *
+ * A REDELIVERED occurrence is not a new event (FOLLOWUP-HOLD-OVERWRITTEN-1126, prod 2026-11-26: a signup's
+ * "phone given" occurrence of 03:38 failed its runs and was redelivered every hour; at 07:21 its 6th delivery replaced
+ * the founder's date staff had stated at 05:49 ("Owner hold") with "due now"). A statement backed by an occurrence
+ * (`statedEventId`) leaves the person's date alone when that date was stated AFTER the row first named this occurrence
+ * (`followup_stated_at`, kept across redeliveries) by anything other than this same occurrence: a writer, another
+ * occurrence, a worker. A new occurrence, a send (`acted`) or a plain statement keep "latest wins".
  */
-function statePersonDateSql(rows: SQL, actingCampaignId: string | null, reason: string | null, nowIso: string, acted: boolean) {
+function statePersonDateSql(
+  rows: SQL,
+  actingCampaignId: string | null,
+  reason: string | null,
+  nowIso: string,
+  acted: boolean,
+  statedEventId: string | null,
+) {
   const sendGap = sql.raw(`interval '${DEFAULT_GAP_DAYS} days'`);
-  return sql`INSERT INTO lead_followup_dates AS d (org_id, brand_id, lead_id, next_followup_at, basis, reason, stated_by_campaign_id, stated_at)
+  const notStatedSinceOccurrence =
+    statedEventId === null
+      ? sql``
+      : sql`AND NOT EXISTS (SELECT 1 FROM lead_followup_dates x WHERE x.org_id = r.org_id AND x.brand_id = b AND x.lead_id = r.lead_id
+          AND x.stated_event_id IS DISTINCT FROM ${statedEventId} AND x.stated_at > r.followup_stated_at)`;
+  return sql`INSERT INTO lead_followup_dates AS d (org_id, brand_id, lead_id, next_followup_at, basis, reason, stated_by_campaign_id, stated_at, stated_event_id)
       SELECT r.org_id, b, r.lead_id,
              COALESCE(r.followup_due_at, ${nowIso}::timestamptz + ${sendGap}),
              CASE WHEN r.followup_due_at IS NULL THEN 'send' ELSE 'stated' END,
              CASE WHEN r.followup_due_at IS NULL THEN ${`Answered by the follow-up queue + ${DEFAULT_GAP_DAYS} days`}
                   ELSE ${reason ?? "Follow-up scheduled by the follow-up queue"} END,
-             ${actingCampaignId}, ${nowIso}::timestamptz
+             ${actingCampaignId}, ${nowIso}::timestamptz, ${statedEventId}
       FROM ${rows} r CROSS JOIN LATERAL unnest(r.brand_ids) AS b
       WHERE (r.followup_due_at IS NOT NULL OR ${acted}) AND r.org_id IS NOT NULL AND b IS NOT NULL AND b <> ''
+        ${notStatedSinceOccurrence}
       ON CONFLICT (org_id, brand_id, lead_id) DO UPDATE SET
         next_followup_at = EXCLUDED.next_followup_at, basis = EXCLUDED.basis, reason = EXCLUDED.reason,
         stated_by_campaign_id = CASE WHEN EXCLUDED.basis = 'stated' THEN EXCLUDED.stated_by_campaign_id ELSE d.stated_by_campaign_id END,
         stated_at = CASE WHEN EXCLUDED.basis = 'stated' THEN EXCLUDED.stated_at ELSE d.stated_at END,
+        stated_event_id = CASE WHEN EXCLUDED.basis = 'stated' THEN EXCLUDED.stated_event_id ELSE d.stated_event_id END,
         stated_run_id = CASE WHEN EXCLUDED.basis = 'stated' THEN NULL ELSE d.stated_run_id END,
         stopped_at = NULL, updated_at = now()
         -- A person's word stopped them: only a writer's stated date reopens (as on lead-followup-date's send rule).
@@ -1425,7 +1446,13 @@ export async function writeFollowupStatement(params: {
              },
              followup_stated_event_id = ${stated ? sql`${stated.triggerEventId}` : sql`followup_stated_event_id`},
              followup_stated_trigger_id = ${stated ? sql`${stated.triggerId ?? null}` : sql`followup_stated_trigger_id`},
-             followup_stated_at = ${stated ? sql`${now}::timestamptz` : sql`followup_stated_at`},
+             -- When the row FIRST named this occurrence: a redelivery of the same one keeps it (statePersonDateSql).
+             followup_stated_at = ${
+               stated
+                 ? sql`CASE WHEN followup_stated_event_id IS NOT DISTINCT FROM ${stated.triggerEventId} AND followup_stated_at IS NOT NULL
+                            THEN followup_stated_at ELSE ${now}::timestamptz END`
+                 : sql`followup_stated_at`
+             },
              followup_stated_closed_at = ${
                stated
                  ? sql`NULL`
@@ -1458,7 +1485,7 @@ export async function writeFollowupStatement(params: {
       // in the SAME statement: no other row of theirs is due before it.
       setsDue
         ? sql`, person_dated AS (
-      ${statePersonDateSql(sql`updated`, params.actingCampaignId ?? null, params.reason, now, acted)}
+      ${statePersonDateSql(sql`updated`, params.actingCampaignId ?? null, params.reason, now, acted, stated?.triggerEventId ?? null)}
     )`
         : sql``
     }${
