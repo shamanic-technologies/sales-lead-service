@@ -194,6 +194,66 @@ describe("POST /orgs/buffer/next — pre-serve failure handling", () => {
     expect(pullNext).not.toHaveBeenCalled();
   });
 
+  it("frees the campaign when its caller left before the serve took its hold (SERVE-LOCK-STUCK-1126)", async () => {
+    // Prod 2026-11-25 18:25: the caller (a Script run whose process a deploy recreated) left while the runs-service
+    // guard was still being read; the response was already closed when the old `close` listener was attached, so it
+    // never fired and every later serve of the campaign was refused for 14 h.
+    const http = await import("node:http");
+    let releaseGuard!: () => void;
+    let guardAsked!: () => void;
+    const asked = new Promise<void>((r) => (guardAsked = r));
+    checkConcurrentBufferNext.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          guardAsked();
+          releaseGuard = () => resolve({ blocked: false });
+        }),
+    );
+    createRun.mockResolvedValue({ id: "serve-run-1" });
+    updateRun.mockResolvedValue(undefined);
+    let served!: () => void;
+    const pulled = new Promise<void>((r) => (served = r));
+    pullNext.mockImplementationOnce(async () => {
+      served();
+      return { found: false, reason: "source_stock_empty" };
+    });
+
+    const server = app.listen(0);
+    const { port } = server.address() as { port: number };
+    const body = JSON.stringify({});
+    const gone = http.request({
+      host: "127.0.0.1",
+      port,
+      method: "POST",
+      path: "/orgs/buffer/next",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        "x-api-key": "test-api-key",
+        "x-org-id": ORG,
+        "x-run-id": RUN,
+        "x-campaign-id": CAMPAIGN,
+        "x-brand-id": BRAND,
+        "x-feature-slug": "lead-finder-v1",
+      },
+    });
+    gone.on("error", () => {});
+    gone.end(body);
+    await asked;
+    gone.destroy();
+    await new Promise((r) => setTimeout(r, 50));
+    releaseGuard();
+    await pulled;
+    await new Promise((r) => setTimeout(r, 50));
+    server.close();
+
+    pullNext.mockResolvedValueOnce({ found: false, reason: "no_audience" });
+    const res = await post(app);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ found: false, reason: "no_audience" });
+  });
+
   it("still returns 409 when the in-flight guard blocks (early return preserved)", async () => {
     checkConcurrentBufferNext.mockResolvedValueOnce({
       blocked: true,

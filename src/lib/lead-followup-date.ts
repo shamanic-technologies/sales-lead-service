@@ -603,7 +603,7 @@ export async function stateLeadFollowupDate(input: {
   } else if (st.kind === "stop") {
     await db.execute(sql`
       UPDATE lead_followup_dates SET next_followup_at = NULL, basis = 'stopped', reason = ${st.reason}, stopped_at = ${now.toISOString()}::timestamptz,
-        stated_at = ${now.toISOString()}::timestamptz, stated_by_campaign_id = ${input.campaignId}, stated_run_id = ${key}, updated_at = now()
+        stated_at = ${now.toISOString()}::timestamptz, stated_by_campaign_id = ${input.campaignId}, stated_run_id = ${key}, stated_event_id = NULL, updated_at = now()
       WHERE ${where}
     `);
   } else {
@@ -623,7 +623,7 @@ export async function stateLeadFollowupDate(input: {
         sent_count = sent_count + CASE WHEN last_sent_at IS NULL OR ${sentAt}::timestamptz > last_sent_at THEN 1 ELSE 0 END`;
     await db.execute(sql`
       UPDATE lead_followup_dates SET next_followup_at = ${at.toISOString()}::timestamptz, basis = 'stated', reason = ${st.reason},
-        stopped_at = NULL, stated_at = ${now.toISOString()}::timestamptz, stated_by_campaign_id = ${input.campaignId}, stated_run_id = ${key},
+        stopped_at = NULL, stated_at = ${now.toISOString()}::timestamptz, stated_by_campaign_id = ${input.campaignId}, stated_run_id = ${key}, stated_event_id = NULL,
         updated_at = now() ${sent}
       WHERE ${where}
     `);
