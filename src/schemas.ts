@@ -8999,9 +8999,10 @@ registry.registerPath({
 const WrittenBySchema = z
   .object({
     by: z.enum(["workflow", "person", "unknown"]),
-    basis: z.enum(["person", "recorded_act", "holding_run"]).nullable().openapi({
+    basis: z.enum(["person", "sender_record", "recorded_act", "holding_run"]).nullable().openapi({
       description:
-        "person = the copy says a person sent it; recorded_act = the follow-up ledger act a run recorded on this person within 10 min " +
+        "person = the copy says a person sent it; sender_record = the sender's own record (instantly-service reply_sent, crm-service " +
+        "message_out) names the run that asked for the send (MODEL-TAG-EVERY-AI-MESSAGE-1126); recorded_act = the follow-up ledger act a run recorded on this person within 10 min " +
         "(of the message's own campaign when it names one); holding_run = the run holding the person's row of the campaign when the email went out.",
     }),
     runId: z.string().nullable().openapi({ description: "The writing run (resolvable at runs-service); null when unknown." }),

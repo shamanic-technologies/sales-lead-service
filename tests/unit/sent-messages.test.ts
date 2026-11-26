@@ -18,6 +18,7 @@ function rec(over: Partial<Records[number]>): Records[number] {
     brandIds: [B],
     sentAt: "2026-10-19T10:00:00.000Z",
     sentBy: null,
+    sendingRunId: null,
     holding: null,
     ...over,
   };
@@ -119,5 +120,61 @@ describe("attributeSentMessages (WRITTEN-BY-1019-SENDER)", () => {
   it("an unknown writer carries no LLM, with the reason", () => {
     const [m] = attributeSentMessages([rec({ campaignId: "c-x" })], []);
     expect(m.writtenBy).toMatchObject({ by: "unknown", llmAlias: null, llmAliasReason: "no_recorded_act" });
+  });
+
+  describe("the sender's record names the run (MODEL-TAG-EVERY-AI-MESSAGE-1126-LEADS)", () => {
+    it("credits an automation reply_sent to the run its copy names, with no ledger act anywhere near", () => {
+      const [m] = attributeSentMessages(
+        [rec({ kind: "reply_sent", sentBy: "automation", sendingRunId: "run-answer", campaignId: "c-ans" })],
+        [],
+      );
+      expect(m.writtenBy).toEqual({
+        by: "workflow",
+        basis: "sender_record",
+        runId: "run-answer",
+        workflowSlug: null,
+        campaignId: "c-ans",
+        workflowSource: null,
+        reason: null,
+        llmAlias: null,
+        llmAliasReason: "no_recorded_act",
+      });
+    });
+
+    it("credits a crm message_out (any channel) to the run its fact names, beats a nearer act of another run", () => {
+      const out = attributeSentMessages(
+        [rec({ kind: "message_out", source: "crm", channel: "whatsapp", campaignId: null, sendingRunId: "run-wa" })],
+        [act({ id: "a-other", runId: "run-other", occurredAt: "2026-10-19T10:00:00.000Z" })],
+      );
+      expect(out.find((x) => x.id === "m1")?.writtenBy).toMatchObject({ by: "workflow", basis: "sender_record", runId: "run-wa" });
+      // the other run's act is not this message: it stays listed on its own
+      expect(out.find((x) => x.id === "a-other")?.kind).toBe("followup_act");
+    });
+
+    it("pairs a ledger act of the SAME run by identity, whatever its time, carrying its slug and LLM alias", () => {
+      const out = attributeSentMessages(
+        [rec({ kind: "reply_sent", sentBy: "automation", sendingRunId: "run-fu", campaignId: null })],
+        [act({ occurredAt: "2026-10-19T13:00:00.000Z", llmAlias: "claude-opus-5-5" })],
+      );
+      expect(out).toHaveLength(1);
+      expect(out[0].writtenBy).toMatchObject({
+        basis: "sender_record",
+        runId: "run-fu",
+        workflowSlug: "ai-follow-up-email-algenib-v11",
+        campaignId: "c-fu",
+        llmAlias: "claude-opus-5-5",
+        llmAliasReason: null,
+      });
+    });
+
+    it("a person's reply stays a person's even if a run is named", () => {
+      const [m] = attributeSentMessages([rec({ kind: "reply_sent", sentBy: "human", sendingRunId: "run-x" })], []);
+      expect(m.writtenBy).toMatchObject({ by: "person", basis: "person", runId: null });
+    });
+
+    it("a record naming no run keeps today's answer", () => {
+      const [m] = attributeSentMessages([rec({ kind: "reply_sent", sentBy: "automation" })], []);
+      expect(m.writtenBy).toMatchObject({ by: "unknown", reason: "no_recorded_run" });
+    });
   });
 });
