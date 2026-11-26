@@ -192,6 +192,70 @@ export async function pullOutreachFacts(
   }
 }
 
+/**
+ * One walk of the whole feed from the start that copies instantly-service's `callerRunId` onto facts copied before it
+ * served it (MODEL-TAG-EVERY-AI-MESSAGE-1126, instantly-service v0.84.52: derived AT READ from its own records, so
+ * past `email_sent`/`reply_sent` facts carry it too). The run that asked for the send is the sender's word, read off
+ * its record, never a time match here. Its own cursor; finished once it reached the end (`caught_up_at`), never run
+ * again. Writes only `raw.callerRunId`, only where the copy has none.
+ */
+export const CALLER_RUN_REWALK_FEED = "outreach_facts_caller_runs" as const;
+
+/** `{seq, callerRunId}` of every fact on the page stating a run (pure). */
+export function callerRunsOf(facts: readonly unknown[]): Array<{ seq: string; run: string }> {
+  const out: Array<{ seq: string; run: string }> = [];
+  for (const f of facts) {
+    if (typeof f !== "object" || f === null) continue;
+    const r = f as Record<string, unknown>;
+    if (typeof r.seq === "string" && typeof r.callerRunId === "string" && r.callerRunId.length > 0) {
+      out.push({ seq: r.seq, run: r.callerRunId });
+    }
+  }
+  return out;
+}
+
+export async function rewalkCallerRuns(
+  maxPages: number = OUTREACH_FACTS_MAX_PAGES_PER_TICK,
+): Promise<{ pages: number; updated: number; done: boolean }> {
+  const state = (await sql`
+    SELECT cursor, caught_up_at FROM crm_feed_cursors WHERE feed = ${CALLER_RUN_REWALK_FEED}
+  `) as unknown as Array<{ cursor: string; caught_up_at: Date | string | null }>;
+  if (state[0]?.caught_up_at != null) return { pages: 0, updated: 0, done: true };
+  let cursor = state[0]?.cursor ?? null;
+  let pages = 0;
+  let updated = 0;
+  while (pages < maxPages) {
+    const page = await fetchOutreachFactsPage(cursor, OUTREACH_FACTS_PAGE_SIZE);
+    pages++;
+    const runs = callerRunsOf(page.facts);
+    await sql.begin(async (txn) => {
+      const tx = txn as unknown as typeof sql;
+      if (runs.length > 0) {
+        const r = await tx`
+          UPDATE outreach_facts o SET raw = o.raw || jsonb_build_object('callerRunId', v.run)
+          FROM jsonb_to_recordset(${JSON.stringify(runs)}::jsonb) AS v(seq text, run text)
+          WHERE o.seq = v.seq::bigint AND (o.raw->>'callerRunId') IS NULL
+        `;
+        updated += r.count;
+      }
+      if (page.nextCursor !== null) {
+        await tx`
+          INSERT INTO crm_feed_cursors (feed, cursor, caught_up_at)
+          VALUES (${CALLER_RUN_REWALK_FEED}, ${page.nextCursor}, ${page.hasMore ? null : new Date().toISOString()}::timestamptz)
+          ON CONFLICT (feed) DO UPDATE SET cursor = EXCLUDED.cursor, updated_at = now(),
+            caught_up_at = COALESCE(EXCLUDED.caught_up_at, crm_feed_cursors.caught_up_at)
+        `;
+      }
+    });
+    if (!page.hasMore) return { pages, updated, done: true };
+    if (page.nextCursor === null || page.nextCursor === cursor) {
+      throw new Error("[outreach-fact-feed] caller run re-walk: the feed did not move its cursor");
+    }
+    cursor = page.nextCursor;
+  }
+  return { pages, updated, done: false };
+}
+
 let pulling = false;
 
 export async function tickOutreachFactFeed(): Promise<void> {
@@ -205,6 +269,8 @@ export async function tickOutreachFactFeed(): Promise<void> {
           (r.budgetReached ? " (page budget reached, continuing next tick)" : ""),
       );
     }
+    const w = await rewalkCallerRuns();
+    if (w.pages > 0) console.log(`[lead-service] outreach caller run re-walk: pages=${w.pages} updated=${w.updated} done=${w.done}`);
   } finally {
     pulling = false;
   }
