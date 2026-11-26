@@ -21,6 +21,7 @@ const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, followupResponders } = await import("../../src/db/schema.js");
 const { claimFollowup, pickFollowupCandidate, writeFollowupStatement } = await import("../../src/lib/followup-queue.js");
 const { readFollowupOwed } = await import("../../src/lib/followup-owed.js");
+const { stateLeadFollowupDate } = await import("../../src/lib/lead-followup-date.js");
 
 const PLACEHOLDER_DSN = "postgresql://test:test@localhost:5432/test";
 const hasRealDatabase = process.env.LEAD_SERVICE_DATABASE_URL !== PLACEHOLDER_DSN;
@@ -132,5 +133,44 @@ describe.skipIf(!hasRealDatabase)("one next follow-up date per lead, whatever ro
     const replyAt = t0 + 60 * 60_000;
     await writeFollowupStatement({ orgId, id: rowB, kind: "scheduled", dueAtIso: new Date(replyAt).toISOString(), reason: "replied again", nowMs: replyAt });
     expect((await pick(cold, replyAt + 1_000)).claimed?.id).toBe(rowB);
+  });
+
+  // FOLLOWUP-HOLD-OVERWRITTEN-1126, prod 2026-11-26: a "phone given" occurrence of 03:38 failed its runs and was
+  // redelivered hourly; its 07:21 delivery replaced the founder's date staff had stated at 05:49 with "due now".
+  it("a redelivered occurrence never replaces a date stated after it first arrived; a new occurrence does", async () => {
+    const { rowA } = await seedPerson();
+    const t0 = Date.now();
+    const occurrence = { triggerEventId: randomUUID(), triggerId: "whatsapp_number_given" };
+    const firstSeen = t0 - 2 * 60 * 60_000;
+    await writeFollowupStatement({ orgId, id: rowA, kind: "scheduled", dueAtIso: new Date(firstSeen).toISOString(), reason: null, nowMs: firstSeen, statedBy: occurrence });
+
+    // Staff holds him: next follow-up tomorrow.
+    const hold = new Date(t0 + 86_400_000).toISOString();
+    await stateLeadFollowupDate({ orgId, brandId, leadId, statement: { kind: "date", nextFollowupAt: hold, reason: "Owner hold" }, campaignId: null, runId: null, now: new Date(t0) });
+
+    // The same occurrence is redelivered a minute later: the hold stands, the row's grant is restated.
+    const redelivery = t0 + 60_000;
+    const state = await writeFollowupStatement({ orgId, id: rowA, kind: "scheduled", dueAtIso: new Date(redelivery).toISOString(), reason: null, nowMs: redelivery, statedBy: occurrence });
+    expect(state?.dueAt).toBe(new Date(redelivery).toISOString());
+    expect((await personDate()).nextFollowupAt?.toISOString()).toBe(hold);
+    expect((await pick(responder, redelivery + 1_000)).claimed).toBeNull();
+
+    // A NEW occurrence (something else they did) is a new event: latest wins.
+    const later = t0 + 2 * 60_000;
+    await writeFollowupStatement({ orgId, id: rowA, kind: "scheduled", dueAtIso: new Date(later).toISOString(), reason: null, nowMs: later, statedBy: { triggerEventId: randomUUID(), triggerId: "account_event" } });
+    expect((await personDate()).nextFollowupAt?.toISOString()).toBe(new Date(later).toISOString());
+  });
+
+  it("a redelivered occurrence after a failed run makes the person due again when nothing else stated the date", async () => {
+    const { rowA } = await seedPerson();
+    const t0 = Date.now();
+    const occurrence = { triggerEventId: randomUUID(), triggerId: "whatsapp_number_given" };
+    await writeFollowupStatement({ orgId, id: rowA, kind: "scheduled", dueAtIso: new Date(t0).toISOString(), reason: null, nowMs: t0, statedBy: occurrence });
+    expect((await pick(responder, t0 + 1_000)).claimed?.id).toBe(rowA);
+    // The run fails; the occurrence comes back an hour later, the lease still running.
+    const redelivery = t0 + 30 * 60_000;
+    await writeFollowupStatement({ orgId, id: rowA, kind: "scheduled", dueAtIso: new Date(redelivery).toISOString(), reason: null, nowMs: redelivery, statedBy: occurrence });
+    expect((await personDate()).nextFollowupAt?.toISOString()).toBe(new Date(redelivery).toISOString());
+    expect((await pick(responder, redelivery + 1_000)).claimed?.id).toBe(rowA);
   });
 });
