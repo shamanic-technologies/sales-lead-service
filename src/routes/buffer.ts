@@ -1,6 +1,6 @@
 import { statedSourceOf, type StatedSource } from "../lib/stated-source.js";
 import { errorMessage, errorString, messageOf } from "../lib/db-error.js";
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { eq, lt, sql } from "drizzle-orm";
 import { type AuthenticatedRequest, apiKeyAuth, requireOrgId, requireRunId } from "../middleware/auth.js";
 import { pullNext, type PullNextMode } from "../lib/buffer.js";
@@ -14,6 +14,7 @@ import type { FullLead } from "../lib/lead-shape.js";
 import { db } from "../db/index.js";
 import { idempotencyCache } from "../db/schema.js";
 import { PULL_NEXT_TIMEOUT_MS } from "../config.js";
+import { createInFlightHolds } from "../lib/in-flight-holds.js";
 import { checkConcurrentBufferNext } from "../lib/inflight-guard.js";
 import { CREDIT_INSUFFICIENT_REASON, fundingCapOf, isCreditInsufficientError } from "../lib/credit-errors.js";
 import { AUDIENCE_NOT_SERVEABLE_REASON, isAudienceNotServeableError, isStepFilterRefusal } from "../lib/people-client.js";
@@ -38,9 +39,10 @@ const router = Router();
  * Outreach campaigns with a buffer/next in flight IN THIS PROCESS. The runs-service guard below finds
  * a concurrent serve by its run's campaign, and a serve filed under a SOURCE campaign
  * (src/lib/source-campaign.ts) no longer carries the outreach campaign's id on its run, so the same
- * serial invariant is also held here, keyed on the outreach campaign.
+ * serial invariant is also held here, keyed on the outreach campaign. Released when the request ends
+ * (src/lib/in-flight-holds.ts); an orphan past the serve's own abort window refuses nobody.
  */
-const inFlightOutreach = new Set<string>();
+const inFlightOutreach = createInFlightHolds(PULL_NEXT_TIMEOUT_MS + 60_000);
 
 const IDEMPOTENCY_TTL_DAYS = 60;
 
@@ -59,6 +61,17 @@ function pruneExpiredIdempotencyCache(): void {
 }
 
 router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (req: AuthenticatedRequest, res) => {
+  // The campaign's in-flight hold ends with THIS request, whichever way it ends (SERVE-LOCK-STUCK-1126): a `close`
+  // listener alone never fired for a caller who left before it was attached.
+  const held: Array<() => void> = [];
+  try {
+    return await serveBufferNext(req, res, held);
+  } finally {
+    for (const release of held) release();
+  }
+});
+
+async function serveBufferNext(req: AuthenticatedRequest, res: Response, held: Array<() => void>) {
   const parsed = BufferNextRequestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
@@ -216,14 +229,14 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail: concurrentCheck.detail }, req.headers).catch(() => {});
       return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail: concurrentCheck.detail });
     }
-    if (inFlightOutreach.has(campaignId)) {
-      const detail = `Concurrent buffer/next call for orgId=${req.orgId} campaignId=${campaignId} (in flight in this process). campaign-service is supposed to serialize workflow runs per campaign — this is an upstream serial-invariant violation. Rejected: parentRunId=${runId}.`;
+    const hold = inFlightOutreach.tryHold(campaignId);
+    if (!hold.held) {
+      const detail = `Concurrent buffer/next call for orgId=${req.orgId} campaignId=${campaignId} (in flight in this process since ${new Date(hold.heldSinceMs).toISOString()}). campaign-service is supposed to serialize workflow runs per campaign — this is an upstream serial-invariant violation. Rejected: parentRunId=${runId}.`;
       console.error(`[lead-service] ${detail}`);
       traceEvent(runId, { service: "lead-service", event: "buffer-next-concurrent-rejected", level: "error", detail }, req.headers).catch(() => {});
       return res.status(409).json({ error: "Concurrent buffer/next call for same campaign", detail });
     }
-    inFlightOutreach.add(campaignId);
-    res.on("close", () => inFlightOutreach.delete(campaignId));
+    held.push(hold.release);
 
     // The channel's own requirement plus WHO the workflow's lead strategy states it finds (owner 2026-10-14): both
     // required, on every serve and every pool.
@@ -238,7 +251,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     if (!named && featureSlug) {
       const sourceMode = await decideSourceMode({ orgId: req.orgId!, campaignId, featureSlug });
       if (dueOnly && sourceMode.kind === "own_run") {
-        inFlightOutreach.delete(campaignId);
         return res.status(400).json({
           error: "due_followup_only_needs_outreach_campaign",
           detail: `dueFollowupOnly is a campaign's own proactive tick: x-campaign-id ${campaignId} (${featureSlug}) is a lead source campaign (leg start_to_lead_found), whose population option is lead_followup_due`,
@@ -246,7 +258,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
       }
       if (population && sourceMode.kind !== "own_run") {
         // Who a source finds is ITS pipe's lead strategy: only a source unit's own run may state a population.
-        inFlightOutreach.delete(campaignId);
         return res.status(400).json({
           error: "population_needs_source_unit",
           detail: `population "${population}" is a source pipe's lead strategy: x-campaign-id ${campaignId} (${featureSlug}) is not a lead source campaign (leg start_to_lead_found) running on its own`,
@@ -255,7 +266,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
 
       if (statedSource && (sourceMode.kind === "stock" || (sourceMode.kind === "own_run" && sourceMode.unit.featureSlug !== statedSource.slug))) {
         // A source campaign finds in its own source; a campaign serving its sources' stock finds in no stated one.
-        inFlightOutreach.delete(campaignId);
         return res.status(400).json({
           error: "find_people_in_disagrees",
           detail:
@@ -365,7 +375,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
         !freshServeRefused &&
         (audienceOrigin === statedSource.slug || (serveSource.kind === "source" && serveSource.sourceSlug === statedSource.slug));
       if (!agrees) {
-        inFlightOutreach.delete(campaignId);
         return res.status(400).json({
           error: "find_people_in_disagrees",
           detail: `findPeopleIn "${statedSource.findPeopleIn}" (${statedSource.slug}) is not where x-campaign-id ${campaignId} (${featureSlug}) finds people for audience ${req.audienceId ?? "(none named)"}: it finds in ${stockSourceIds ? "its source campaigns' stock" : audienceOrigin ?? "no source"}`,
@@ -702,6 +711,6 @@ router.post("/orgs/buffer/next", apiKeyAuth, requireOrgId, requireRunId, async (
     }
     res.status(500).json({ error: "Internal server error" });
   }
-});
+}
 
 export default router;
