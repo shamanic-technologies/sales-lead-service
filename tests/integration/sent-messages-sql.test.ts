@@ -101,4 +101,34 @@ describe.skipIf(!hasRealDatabase)("sent messages read against a real database", 
       ["claude-sonnet-5", null],
     ]);
   });
+
+  it("credits a message to the run the SENDER's own record names, any channel (MODEL-TAG-EVERY-AI-MESSAGE-1126)", async () => {
+    const email = `s-${tag}@example.test`;
+    const [lead] = (await sql`INSERT INTO leads (first_name, last_name) VALUES ('Sam', 'Roe') RETURNING id::text AS id`) as unknown as Array<{ id: string }>;
+    await sql`INSERT INTO lead_contact_methods (lead_id, channel, value, source) VALUES (${lead.id}::uuid, 'email', ${email}, 'itest')`;
+    await sql`
+      INSERT INTO leads_campaigns (lead_id, campaign_id, org_id, brand_ids, status, run_id, served_at)
+      VALUES (${lead.id}::uuid, ${cCold}, ${orgId}, ARRAY[${brandId}]::text[], 'served', 'run-serve-s', '2026-11-01T00:00:00Z')
+    `;
+    // instantly-service: our AI's answer names the run that asked for the send; a person's answer names none.
+    await outreach(`rsent:a-${tag}`, "reply_sent", email, cCold, "2026-11-24T06:09:00Z", { replySent: { sentBy: "automation" }, callerRunId: `run-answer-${tag}` });
+    await outreach(`rsent:p-${tag}`, "reply_sent", email, cCold, "2026-11-24T07:00:00Z", { replySent: { sentBy: "human" } });
+    await outreach(`rsent:n-${tag}`, "reply_sent", email, cCold, "2026-11-24T08:00:00Z", { replySent: { sentBy: "automation" } });
+    // crm-service: a message our run sent through a Unibox channel names its run.
+    const tgFact = randomUUID();
+    await sql`
+      INSERT INTO crm_facts (fact_id, seq, org_id, brand_id, person_key, emails, phones, type, occurred_at, date_basis, source, source_ref, payload, raw)
+      VALUES (${tgFact}, ${nextSeq()}::bigint, ${orgId}, ${brandId}, 'pk', ARRAY[${email}]::text[], ARRAY[]::text[], 'message_out',
+              '2026-11-25T10:00:00Z', 'sent_at', 'matrix', ${`ref-s-${tag}`},
+              ${JSON.stringify({ channel: "telegram", requestedByRunId: `run-tg-${tag}` })}::jsonb, '{}'::jsonb)
+    `;
+
+    const messages = await readSentMessages(orgId, lead.id);
+    expect(messages.map((m) => [m.id, m.writtenBy.by, m.writtenBy.basis, m.writtenBy.runId, m.writtenBy.reason])).toEqual([
+      [`rsent:a-${tag}`, "workflow", "sender_record", `run-answer-${tag}`, null],
+      [`rsent:p-${tag}`, "person", "person", null, null],
+      [`rsent:n-${tag}`, "unknown", null, null, "no_recorded_run"],
+      [tgFact, "workflow", "sender_record", `run-tg-${tag}`, null],
+    ]);
+  });
 });

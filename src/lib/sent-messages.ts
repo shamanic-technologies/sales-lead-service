@@ -19,13 +19,19 @@ import { SAME_ACT_WINDOW_MS } from "./meeting-attribution.js";
  *
  * Who wrote it, strongest evidence first, never guessed:
  *   1. the copy says a PERSON sent it (`reply_sent` `sentBy: human`) -> `person`;
- *   2. a run RECORDED the act: the nearest ledger `acted` row of the same person within SAME_ACT_WINDOW_MS
+ *   2. the SENDER's own record names the run that asked for the send (MODEL-TAG-EVERY-AI-MESSAGE-1126-LEADS,
+ *      owner 2026-11-26: every message our AI wrote shows the model that wrote it): instantly-service's top-level
+ *      `callerRunId` on its `email_sent`/`reply_sent` facts, crm-service's `payload.requestedByRunId` on a
+ *      `message_out` our run sent -> that run (`sender_record`). One rule for
+ *      every channel, no time pairing: the run is the sender's word. A ledger `acted` row of the SAME run is paired
+ *      with it by identity (its slug, acting campaign and LLM alias ride along);
+ *   3. a run RECORDED the act: the nearest ledger `acted` row of the same person within SAME_ACT_WINDOW_MS
  *      (10 min, the window meeting attribution pairs a mailbox copy with its act on), of the message's own
  *      campaign when the message names one, of a brand the message names -> that run (`recorded_act`);
- *   3. an email sent by a sequence -> the run HOLDING the person's `leads_campaigns` row of that campaign when it
+ *   4. an email sent by a sequence -> the run HOLDING the person's `leads_campaigns` row of that campaign when it
  *      went out (latest re-point at or before the send, else the row's serve: the same rule as `emailSends` on
  *      timeline-journeys; never `workflow_slug` alone) -> `holding_run`;
- *   4. else `unknown` with the reason. An undated message is never paired.
+ *   5. else `unknown` with the reason. An undated message is never paired.
  * `workflowSlug` is the run's x-workflow-slug as recorded (the versioned slug); null when the record predates
  * it (ledger rows before migration 0114): `runId` still names the run, resolvable at runs-service.
  *
@@ -40,7 +46,7 @@ import { SAME_ACT_WINDOW_MS } from "./meeting-attribution.js";
 
 export type SentMessageKind = "email_sent" | "reply_sent" | "message_out" | "followup_act";
 
-export type WrittenByBasis = "person" | "recorded_act" | "holding_run";
+export type WrittenByBasis = "person" | "sender_record" | "recorded_act" | "holding_run";
 
 export type WrittenByUnknownReason = "no_recorded_run" | "undated";
 
@@ -85,6 +91,8 @@ export interface MessageRecord {
   sentAt: string | null;
   /** reply_sent only: the copy's `sentBy` (human | automation), null when it states none. */
   sentBy: string | null;
+  /** The run that asked for the send, as the SENDER's own record states it; null = it names none. */
+  sendingRunId: string | null;
   /** email_sent only: the run holding the person's row of the campaign at the send; null = no row. */
   holding: { runId: string | null; workflowSlug: string | null; workflowSource: string } | null;
 }
@@ -153,6 +161,20 @@ export function attributeSentMessages(records: readonly MessageRecord[], acts: r
     let writtenBy: WrittenBy;
     if (m.kind === "reply_sent" && m.sentBy === "human") {
       writtenBy = { ...UNKNOWN("no_recorded_run"), by: "person", basis: "person", reason: null };
+    } else if (m.sendingRunId !== null) {
+      const same = acts.find((a) => a.runId === m.sendingRunId) ?? null;
+      if (same) pairedActs.add(same.id);
+      writtenBy = {
+        by: "workflow",
+        basis: "sender_record",
+        runId: m.sendingRunId,
+        workflowSlug: same?.workflowSlug ?? null,
+        campaignId: same?.actingCampaignId ?? m.campaignId,
+        workflowSource: null,
+        reason: null,
+        llmAlias: same?.llmAlias ?? null,
+        llmAliasReason: same ? (same.llmAlias === null ? "not_stated" : null) : "no_recorded_act",
+      };
     } else {
       const act = nearestAct(m, acts);
       if (act) {
@@ -212,6 +234,7 @@ interface RawOutreach {
   campaign_id: string | null;
   brand_ids: string[];
   sent_by: string | null;
+  sending_run_id: string | null;
   holding_run_id: string | null;
   holding_workflow_slug: string | null;
   holding_source: string | null;
@@ -222,6 +245,7 @@ interface RawCrm {
   occurred_at: RawTimestamp;
   brand_id: string;
   channel: string | null;
+  sending_run_id: string | null;
 }
 
 interface RawAct {
@@ -257,6 +281,7 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
       )
       SELECT c.subject_key, c.type, c.occurred_at, c.campaign_id, c.brand_ids,
         c.raw->'replySent'->>'sentBy' AS sent_by,
+        NULLIF(c.raw->>'callerRunId', '') AS sending_run_id,
         CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.run_id ELSE lc.run_id END AS holding_run_id,
         CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.workflow_slug ELSE lc.workflow_slug END AS holding_workflow_slug,
         CASE WHEN lc.id IS NULL THEN NULL WHEN rp.cause IS NOT NULL THEN rp.cause ELSE 'serve' END AS holding_source
@@ -278,7 +303,8 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
         SELECT DISTINCT regexp_replace(value, '[[:space:]()./-]', '', 'g') AS v
         FROM lead_contact_methods WHERE lead_id = ${leadId}::uuid AND channel = 'phone'
       )
-      SELECT f.fact_id, f.occurred_at, f.brand_id, f.payload->>'channel' AS channel
+      SELECT f.fact_id, f.occurred_at, f.brand_id, f.payload->>'channel' AS channel,
+        NULLIF(f.payload->>'requestedByRunId', '') AS sending_run_id
       FROM crm_facts f
       WHERE f.org_id = ${orgId} AND f.type = 'message_out'
         AND (
@@ -306,6 +332,7 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
       brandIds: r.brand_ids ?? [],
       sentAt: toIsoTimestamp(r.occurred_at),
       sentBy: r.type === "reply_sent" ? r.sent_by : null,
+      sendingRunId: r.sending_run_id,
       holding:
         r.holding_source === null
           ? null
@@ -320,6 +347,7 @@ export async function readSentMessages(orgId: string, leadId: string): Promise<S
       brandIds: [r.brand_id],
       sentAt: toIsoTimestamp(r.occurred_at),
       sentBy: null,
+      sendingRunId: r.sending_run_id,
       holding: null,
     })),
   ];

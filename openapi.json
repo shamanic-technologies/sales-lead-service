@@ -10849,11 +10849,12 @@
             "nullable": true,
             "enum": [
               "person",
+              "sender_record",
               "recorded_act",
               "holding_run",
               null
             ],
-            "description": "person = the copy says a person sent it; recorded_act = the follow-up ledger act a run recorded on this person within 10 min (of the message's own campaign when it names one); holding_run = the run holding the person's row of the campaign when the email went out."
+            "description": "person = the copy says a person sent it; sender_record = the sender's own record (instantly-service reply_sent, crm-service message_out) names the run that asked for the send (MODEL-TAG-EVERY-AI-MESSAGE-1126); recorded_act = the follow-up ledger act a run recorded on this person within 10 min (of the message's own campaign when it names one); holding_run = the run holding the person's row of the campaign when the email went out."
           },
           "runId": {
             "type": "string",
