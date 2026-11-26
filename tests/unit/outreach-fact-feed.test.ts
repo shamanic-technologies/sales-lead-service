@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OutreachFactParseError, parseOutreachFact } from "../../src/lib/outreach-fact-feed.js";
+import { OutreachFactParseError, callerRunsOf, parseOutreachFact } from "../../src/lib/outreach-fact-feed.js";
 
 const FACT = {
   seq: "42", subjectKey: "ievt:9", supersedesSeq: null, type: "email_sent", occurredAt: "2026-10-07T10:00:00.000Z",
@@ -31,5 +31,19 @@ describe("an outreach fact off the wire", () => {
     const raw = { ...FACT, ...over } as Record<string, unknown>;
     for (const [k, v] of Object.entries(over)) if (v === undefined) delete raw[k];
     expect(() => parseOutreachFact(raw)).toThrow(OutreachFactParseError);
+  });
+});
+
+describe("callerRunsOf (MODEL-TAG-EVERY-AI-MESSAGE-1126)", () => {
+  it("keeps only facts stating a run, as the sender stated it", () => {
+    expect(
+      callerRunsOf([
+        { seq: "1", type: "reply_sent", callerRunId: "run-a" },
+        { seq: "2", type: "reply_sent", callerRunId: null },
+        { seq: "3", type: "email_opened" },
+        { seq: "4", type: "email_sent", callerRunId: "" },
+        null,
+      ]),
+    ).toEqual([{ seq: "1", run: "run-a" }]);
   });
 });
