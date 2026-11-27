@@ -326,6 +326,10 @@ export const leadsCampaigns = pgTable(
     // A found lead that no longer fits its audience at handover (human-service's verdict, migration 0072): never handed.
     sourceSetAsideAt: timestamp("source_set_aside_at", { withTimezone: true }),
     sourceSetAsideReason: text("source_set_aside_reason"),
+    // Set aside because the audience COULD NOT judge the person (human-service's 422 code, migration 0157): re-judged by
+    // src/lib/source-stock-rejudge.ts; NULL = a real verdict (no longer fits, not this source's), never re-opened.
+    sourceSetAsideCannotJudge: text("source_set_aside_cannot_judge"),
+    sourceSetAsideRejudgedAt: timestamp("source_set_aside_rejudged_at", { withTimezone: true }),
     // --- Channel release (src/lib/released-pool.ts, migration 0069) ---
     // A sender refused this person for a reason about its CHANNEL (no phone known, not on WhatsApp...): released to
     // the brand's other pipes. channel_released_* on the refusing row; released_taken_* = the one hand-off claim.

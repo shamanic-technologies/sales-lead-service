@@ -68,14 +68,22 @@ export function readVerdict(body: unknown, status: number): AudienceFitVerdict {
   return { fits: false, reason: b.reason.trim() };
 }
 
-/** human-service cannot judge the person: not shown to fit, set aside in its own words. */
+/**
+ * human-service cannot judge the person: not shown to fit, set aside in its own words, and MARKED as a cannot-judge
+ * (`cannotJudge` = its code) so the find is judged again once the audience can answer (src/lib/source-stock-rejudge.ts,
+ * GMAPS-SET-ASIDE-1127-REOPEN). A real "no longer fits" carries no such mark and is never re-opened.
+ */
 function cannotJudge(text: string): AudienceFitVerdict {
-  let body: { error?: unknown } | null = null;
+  let body: { error?: unknown; code?: unknown } | null = null;
   try {
-    body = JSON.parse(text) as { error?: unknown };
+    body = JSON.parse(text) as { error?: unknown; code?: unknown };
   } catch {
     throw new AudienceFitError(422, `cannot-judge answer unreadable: ${text.slice(0, 300)}`);
   }
   if (typeof body?.error !== "string" || body.error.trim() === "") throw new AudienceFitError(422, "cannot-judge answer without words");
-  return { fits: false, reason: body.error.trim() };
+  const code = typeof body.code === "string" && body.code.trim() !== "" ? body.code.trim() : CANNOT_JUDGE_UNCODED;
+  return { fits: false, reason: body.error.trim(), cannotJudge: code };
 }
+
+/** A cannot-judge answer that named no code: still a cannot-judge (the 422 says so), re-judged like any other. */
+export const CANNOT_JUDGE_UNCODED = "cannot_judge";

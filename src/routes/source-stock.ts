@@ -10,12 +10,14 @@ import { fetchSourceUnit } from "../lib/source-mode.js";
 import { createSourceAudienceJudge } from "../lib/source-stock-belongs.js";
 import { adoptSetAsideFinds, recheckSourceStock } from "../lib/source-stock-recheck.js";
 import { SourcingOriginUnresolvedError } from "../lib/sourcing-origin.js";
-import { SourceStockAdoptBodySchema, SourceStockRecheckBodySchema } from "../schemas.js";
+import { AudienceFitError } from "../lib/audience-fit-client.js";
+import { rejudgeCannotJudgeFinds } from "../lib/source-stock-rejudge.js";
+import { SourceStockAdoptBodySchema, SourceStockRecheckBodySchema, SourceStockRejudgeBodySchema } from "../schemas.js";
 
 const router = Router();
 
 function siblingDown(error: unknown): boolean {
-  return error instanceof SourceCampaignUnresolvedError || error instanceof SourcingOriginUnresolvedError;
+  return error instanceof SourceCampaignUnresolvedError || error instanceof SourcingOriginUnresolvedError || error instanceof AudienceFitError;
 }
 
 async function answer(res: Response, label: string, work: () => Promise<unknown>): Promise<void> {
@@ -76,6 +78,28 @@ router.post("/internal/source-campaigns/:campaignId/stock/adopt", apiKeyAuth, re
       dryRun: parsed.data.dryRun,
       judge,
     });
+  });
+});
+
+/**
+ * GMAPS-SET-ASIDE-1127-REOPEN: every find of this source set aside because its audience COULD NOT judge it is asked
+ * again now (src/lib/source-stock-rejudge.ts); fits = back in stock, a real no-fit stays set aside. `dryRun` writes nothing.
+ */
+router.post("/internal/source-campaigns/:campaignId/stock/rejudge", apiKeyAuth, requireOrgId, async (req: AuthenticatedRequest, res) => {
+  const campaignId = req.params.campaignId;
+  const parsed = SourceStockRejudgeBodySchema.safeParse(req.body);
+  if (!campaignId || !parsed.success) {
+    res.status(400).json({ error: "Invalid request", details: parsed.success ? undefined : parsed.error.flatten() });
+    return;
+  }
+  const orgId = req.orgId as string;
+  await answer(res, `source stock rejudge campaign=${campaignId}`, async () => {
+    if (!(await isSource(campaignId, orgId))) {
+      res.status(404);
+      return { error: "Not a source campaign of this org", code: "not_a_source_campaign" };
+    }
+    const outcome = await rejudgeCannotJudgeFinds({ dryRun: parsed.data.dryRun, orgId, sourceCampaignId: campaignId });
+    return { sourceCampaignId: campaignId, ...outcome };
   });
 });
 
