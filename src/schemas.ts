@@ -9395,6 +9395,53 @@ registry.registerPath({
   },
 });
 
+export const SourceStockRejudgeBodySchema = z
+  .object({
+    dryRun: z.boolean().openapi({ description: "true = ask human-service and report what would move, write nothing." }),
+  })
+  .openapi("SourceStockRejudgeBody");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/source-campaigns/{campaignId}/stock/rejudge",
+  summary: "Judge again the finds set aside because their audience could not judge them (internal, service-auth)",
+  description:
+    "A find set aside at handover because human-service could not judge it (still-fits 422) is not a verdict. Each such " +
+    "find of this source is asked still-fits again: fits = back in the source's stock (handed on as any find, the handover " +
+    "asks again), no longer fits = stays set aside with the new reason and is never re-opened, still cannot judge = stays " +
+    "set aside, asked again later (the background sweep re-asks each at most once a day). A find set aside for a real " +
+    "reason is never touched. Idempotent. 404 = not a source campaign of this org; 502 = a sibling could not answer.",
+  request: {
+    params: z.object({ campaignId: z.string().openapi({ param: { name: "campaignId", in: "path" }, description: "The source campaign." }) }),
+    body: { content: { "application/json": { schema: SourceStockRejudgeBodySchema } } },
+  },
+  parameters: FollowupOrgHeaders,
+  responses: {
+    200: {
+      description: "Re-judged",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              sourceCampaignId: z.string(),
+              dryRun: z.boolean(),
+              asked: z.number().int(),
+              reopened: z.number().int(),
+              noLongerFits: z.array(z.object({ reason: z.string(), rows: z.number().int() })),
+              stillCannotJudge: z.array(z.object({ code: z.string(), rows: z.number().int() })),
+              noContact: z.number().int(),
+            })
+            .openapi("SourceStockRejudgeResponse"),
+        },
+      },
+    },
+    400: { description: "x-org-id or dryRun missing" },
+    401: { description: "Unauthorized" },
+    404: { description: "Not a source campaign of this org" },
+    502: { description: "A sibling service could not answer" },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/internal/lead-identity/status",

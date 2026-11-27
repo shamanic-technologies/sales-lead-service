@@ -22,7 +22,7 @@ describe("audience fit client", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ error: words, code: "person_unknown_to_crm" }), { status: 422 })));
     await expect(
       askAudienceFit({ audienceId: "a", brandId: "b", email: "x@y.z", personId: null }, { orgId: "o" }),
-    ).resolves.toEqual({ fits: false, reason: words });
+    ).resolves.toEqual({ fits: false, reason: words, cannotJudge: "person_unknown_to_crm" });
   });
 
   it("a non-2xx from human-service throws, never fits", async () => {

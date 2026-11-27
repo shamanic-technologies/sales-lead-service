@@ -61,7 +61,10 @@ export interface StockedLead {
 }
 
 /** human-service's verdict on one found person, at handover (src/lib/audience-fit-client.ts). */
-export type AudienceFitVerdict = { fits: true } | { fits: false; reason: string };
+export type AudienceFitVerdict =
+  | { fits: true }
+  /** `cannotJudge` = human-service's code when it COULD NOT judge (422): the find is re-judged later (source-stock-rejudge.ts). */
+  | { fits: false; reason: string; cannotJudge?: string };
 
 /**
  * A contacted pure prospect at handover: owed (hand), stopped (set aside for good), or NOT YET (`release`: the find
@@ -223,7 +226,9 @@ async function claimOne(params: Parameters<typeof claimStockedLead>[0]): Promise
     if (!verdict.fits) {
       await tx.execute(sql`
         UPDATE leads_campaigns
-           SET source_set_aside_at = now(), source_set_aside_reason = ${verdict.reason}, updated_at = now()
+           SET source_set_aside_at = now(), source_set_aside_reason = ${verdict.reason},
+               source_set_aside_cannot_judge = ${"cannotJudge" in verdict ? (verdict.cannotJudge ?? null) : null},
+               source_set_aside_rejudged_at = NULL, updated_at = now()
          WHERE id = ${row.id}
       `);
       return {
