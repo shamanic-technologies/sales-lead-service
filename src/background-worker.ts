@@ -13,6 +13,7 @@
  * thread logs it loudly and starts a new one.
  */
 import { startClientDateWakeWorker } from "./lib/client-date-wake.js";
+import { startSourceStockRejudgeWorker } from "./lib/source-stock-rejudge.js";
 import { enableCrossThreadLocks } from "./lib/scope-lock.js";
 import { startCrmEvidenceWorker, syncBrandOnce } from "./lib/crm-evidence-worker.js";
 import { startBrandSignupsWorker } from "./lib/brand-signups.js";
@@ -125,6 +126,8 @@ startServeWalkPruneWorker();
 startLeadSubjectEquivalencesWorker();
 // A client's date stated by a campaign wakes that campaign's row at the date (client-date-wake.ts, CLIENT-DATE-WAKE-1030).
 startClientDateWakeWorker();
+// A find set aside because its audience could not judge it is judged again (source-stock-rejudge.ts, GMAPS-SET-ASIDE-1127-REOPEN).
+startSourceStockRejudgeWorker();
 // Every lead of every brand carries a next follow-up date, moved by every send we observe on any channel; the brand's
 // Unibox prospects are filed as its leads first (lead-followup-date.ts, unibox-leads.ts, LEAD-FOLLOWUP-DATE-1016).
 let uniboxTicks = 0;
