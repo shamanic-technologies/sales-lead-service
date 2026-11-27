@@ -9,6 +9,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { canonicalE164 } from "../lib/e164-phone.js";
+import { canonicalMessagingHandle } from "../lib/messaging-handle.js";
 import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/auth.js";
 import {
   FOLLOWUP_DUE_MAX_HORIZON_MS,
@@ -18,6 +19,7 @@ import {
   dueDateBounds,
   lookupFollowupRowByEmail,
   lookupFollowupRowByPhone,
+  lookupFollowupRowByHandle,
   parseDueDate,
   claimPersonKeys,
   pickFollowupCandidate,
@@ -91,6 +93,8 @@ const ScheduleByEmailBodySchema = z
   .object({
   email: z.string().trim().min(3).max(320).nullish(),
   phone: z.string().trim().min(3).max(50).nullish(),
+  // LEAD-REPLY-CHANNEL-1127-LS: with neither email nor phone, `handle` (`msg:<network>:<id>`) identifies the person.
+  handle: z.string().trim().min(1).max(300).nullish(),
   dueAt: z.string(),
   // The trigger occurrence through which the BRAND names this person (campaign-service, same object as on
   // the filing): opens a grant the holding campaign may claim once, even on a handed row.
@@ -104,7 +108,15 @@ const ScheduleByEmailBodySchema = z
   .superRefine((body, ctx) => {
     if (body.email) return;
     if (!body.phone) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email or phone (E.164) is required" });
+      if (!body.handle) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email, phone (E.164) or handle is required" });
+      } else if (!canonicalMessagingHandle(body.handle)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["handle"],
+          message: "with no email and no phone, handle identifies the person and must be msg:<network>:<id> (e.g. msg:telegram:123456789)",
+        });
+      }
     } else if (!canonicalE164(body.phone)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -204,7 +216,7 @@ router.post(
     // The person the run's trigger occurrence names (CLAIM-OCCURRENCE-PERSON-1025): only their row is claimed.
     const rawPerson: unknown = req.body?.person;
     if (rawPerson !== undefined && rawPerson !== null && typeof rawPerson !== "object") {
-      res.status(400).json({ error: "person must be an object {email?, phone?, leadId?}", code: "invalid_person" });
+      res.status(400).json({ error: "person must be an object {email?, phone?, leadId?, handle?}", code: "invalid_person" });
       return;
     }
     const person = claimPersonKeys(rawPerson);
@@ -274,6 +286,7 @@ router.post(
           brandId: candidate.brandId,
           email: candidate.email,
           phone: candidate.phone,
+          ...(candidate.handle ? { handle: candidate.handle } : {}),
           audienceId: candidate.audienceId,
           dueAt: candidate.dueAt instanceof Date ? candidate.dueAt.toISOString() : candidate.dueAt,
           followupCount: candidate.followupCount,
@@ -369,10 +382,21 @@ router.post(
       return;
     }
 
-    const byPhone = !parsed.data.email;
-    const notFound = byPhone ? "No lead on this campaign holds that phone" : "No lead on this campaign holds that email address";
-    const lookup: { ok: true; id: string; leadId: string; email: string | null; phone?: string } | FailedLookup =
-      byPhone
+    const byHandle = !parsed.data.email && !parsed.data.phone;
+    const byPhone = !parsed.data.email && !byHandle;
+    const notFound = byHandle
+      ? "No lead on this campaign holds that messaging handle"
+      : byPhone
+        ? "No lead on this campaign holds that phone"
+        : "No lead on this campaign holds that email address";
+    const lookup: { ok: true; id: string; leadId: string; email: string | null; phone?: string; handle?: string } | FailedLookup =
+      byHandle
+        ? await lookupFollowupRowByHandle({
+            orgId: req.orgId as string,
+            campaignId,
+            handle: canonicalMessagingHandle(parsed.data.handle) as string,
+          }).then((l) => (l.ok ? { ok: true as const, id: l.id, leadId: l.leadId, email: null, handle: l.handle } : l))
+        : byPhone
         ? await lookupFollowupRowByPhone({
             orgId: req.orgId as string,
             campaignId,
@@ -387,7 +411,9 @@ router.post(
     if (!lookup.ok) {
       if (lookup.code === "ambiguous_lead") {
         res.status(409).json({
-          error: byPhone
+          error: byHandle
+            ? "That messaging handle matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here"
+            : byPhone
             ? "That phone matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here"
             : "That address matches more than one lead row on this campaign, so which person is owed an answer cannot be decided here",
           code: "ambiguous_lead",
@@ -429,7 +455,7 @@ router.post(
 
     const notMadeDue = notMadeDueOf(state);
     console.log(
-      `[lead-service] followup scheduled by ${byPhone ? "phone" : "email"} campaign=${campaignId} leadCampaignId=${lookup.id} due=${state.dueAt ?? "NOT_DUE"} setBy=${req.campaignId ?? "observer"} statedBy=${parsed.data.statedBy?.triggerEventId ?? "-"}${notMadeDue ? ` notMadeDue=${notMadeDue.code}` : ""}`,
+      `[lead-service] followup scheduled by ${byHandle ? "handle" : byPhone ? "phone" : "email"} campaign=${campaignId} leadCampaignId=${lookup.id} due=${state.dueAt ?? "NOT_DUE"} setBy=${req.campaignId ?? "observer"} statedBy=${parsed.data.statedBy?.triggerEventId ?? "-"}${notMadeDue ? ` notMadeDue=${notMadeDue.code}` : ""}`,
     );
 
     // 200 either way (the statement was recorded), but never one that reads as success when nobody was made
@@ -439,6 +465,7 @@ router.post(
       leadId: lookup.leadId,
       email: lookup.email,
       ...(byPhone ? { phone: lookup.phone } : {}),
+      ...(byHandle ? { handle: lookup.handle } : {}),
       madeDue: notMadeDue === null,
       notMadeDue,
     });
