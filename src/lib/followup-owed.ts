@@ -112,7 +112,7 @@ export async function readFollowupOwed(params: {
         AND cardinality(lc.brand_ids) > 0
         AND EXISTS (
           SELECT 1 FROM lead_contact_methods cm
-          WHERE cm.lead_id = lc.lead_id AND cm.channel IN ('email', 'phone')
+          WHERE cm.lead_id = lc.lead_id AND cm.channel IN ('email', 'phone', 'messaging_handle')
         )
         -- A row a trigger occurrence named (open grant) is owed whatever the booked stop says: a claim
         -- stating a policy takes it (OCCURRENCE-POLICY-ADMITS-1019, a client check-in CLIENT-CHECKIN-LEAD-1024),

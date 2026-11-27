@@ -84,6 +84,7 @@ import { loadOrgMemberKeys } from "./org-members.js";
 import { DEFAULT_GAP_DAYS } from "./lead-followup-date.js";
 import { loadHumanFacts } from "./human-opt-out-read.js";
 import { canonicalE164, phoneValueSql } from "./e164-phone.js";
+import { MESSAGING_HANDLE_CHANNEL, canonicalMessagingHandle } from "./messaging-handle.js";
 
 /**
  * May the ACTING campaign take this row's current debt? See the module header: own-set = holder only,
@@ -268,14 +269,18 @@ export interface ClaimPerson {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** The usable identities of a claim's person, or null when it names nobody (then the claim is unchanged). */
-export function claimPersonKeys(p: unknown): { email: string | null; phone: string | null; leadId: string | null } | null {
+export function claimPersonKeys(
+  p: unknown,
+): { email: string | null; phone: string | null; leadId: string | null; handle?: string } | null {
   if (p === undefined || p === null || typeof p !== "object") return null;
   const o = p as Record<string, unknown>;
   const email = typeof o.email === "string" && o.email.trim().includes("@") ? o.email.trim().toLowerCase() : null;
   const phone = typeof o.phone === "string" ? canonicalE164(o.phone) : null;
   const leadId = typeof o.leadId === "string" && UUID_RE.test(o.leadId.trim()) ? o.leadId.trim() : null;
-  if (!email && !phone && !leadId) return null;
-  return { email, phone, leadId };
+  // LEAD-REPLY-CHANNEL-1127-LS: a person named by messaging handle only.
+  const handle = typeof o.handle === "string" ? canonicalMessagingHandle(o.handle) : null;
+  if (!email && !phone && !leadId && !handle) return null;
+  return handle ? { email, phone, leadId, handle } : { email, phone, leadId };
 }
 
 function claimPersonSql(k: NonNullable<ReturnType<typeof claimPersonKeys>>) {
@@ -286,6 +291,9 @@ function claimPersonSql(k: NonNullable<ReturnType<typeof claimPersonKeys>>) {
   }
   if (k.phone) {
     parts.push(sql`EXISTS (SELECT 1 FROM lead_contact_methods pcp WHERE pcp.lead_id = lc.lead_id AND pcp.channel = 'phone' AND ${phoneValueSql(sql`pcp.value`)} = ${k.phone})`);
+  }
+  if (k.handle) {
+    parts.push(sql`EXISTS (SELECT 1 FROM lead_contact_methods pch WHERE pch.lead_id = lc.lead_id AND pch.channel = ${MESSAGING_HANDLE_CHANNEL} AND pch.value = ${k.handle})`);
   }
   return sql`AND (${sql.join(parts, sql` OR `)})`;
 }
@@ -346,6 +354,11 @@ export interface FollowupCandidate {
   email: string | null;
   /** The lead's first phone contact method (E.164 as stored), null when none. */
   phone: string | null;
+  /**
+   * The lead's messaging handle (`msg:<network>:<id>`), read only for a person with neither an email nor a phone
+   * (LEAD-REPLY-CHANNEL-1127-LS: a Telegram / LinkedIn writer); absent otherwise.
+   */
+  handle?: string | null;
   /** Which brand the delivery evidence is asked for. */
   brandId: string;
   /** Raw `timestamptz`: postgres.js hands these back as `Date` OR `string`. */
@@ -423,6 +436,7 @@ interface RawCandidateRow {
   brand_ids: string[];
   email: string | null;
   phone: string | null;
+  handle: string | null;
   followup_due_at: Date | string | null;
   followup_count: number | string | null;
   followup_last_action_at: Date | string | null;
@@ -481,7 +495,8 @@ export async function loadFollowupCandidates(params: {
           AND (cw.lead_campaign_id = lc.id OR cw.matched_lead_id = lc.lead_id)
       ) AS won_on_ledger,
       lower(em.value) AS email,
-      ph.value AS phone
+      ph.value AS phone,
+      hd.value AS handle
     FROM leads_campaigns lc
     LEFT JOIN LATERAL (
       SELECT cm.value
@@ -497,6 +512,13 @@ export async function loadFollowupCandidates(params: {
       ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
       LIMIT 1
     ) ph ON true
+    LEFT JOIN LATERAL (
+      SELECT cm.value
+      FROM lead_contact_methods cm
+      WHERE cm.lead_id = lc.lead_id AND cm.channel = ${MESSAGING_HANDLE_CHANNEL}
+      ORDER BY cm.created_at ASC NULLS LAST, cm.value ASC
+      LIMIT 1
+    ) hd ON true
     WHERE lc.org_id = ${params.orgId}
       AND lc.campaign_id = ${params.campaignId}
       AND lc.followup_due_at IS NOT NULL
@@ -513,15 +535,16 @@ export async function loadFollowupCandidates(params: {
     LIMIT ${limit}
   `)) as unknown as RawCandidateRow[];
 
-  // A person with neither an email nor a phone cannot be written to by anyone: never handed out.
+  // A person with no email, no phone and no messaging handle cannot be written to by anyone: never handed out.
   return rows
-    .filter((r) => Boolean(r.email) || Boolean(r.phone))
+    .filter((r) => Boolean(r.email) || Boolean(r.phone) || Boolean(r.handle))
     .map((r) => ({
       id: r.id,
       leadId: r.lead_id,
       campaignId: r.campaign_id,
       email: r.email ?? null,
       phone: r.phone ?? null,
+      ...(!r.email && !r.phone ? { handle: r.handle } : {}),
       brandId: r.brand_ids[0] ?? "",
       dueAt: r.followup_due_at,
       followupCount: Number(r.followup_count ?? 0),
@@ -1627,6 +1650,42 @@ export async function lookupFollowupRowByPhone(params: {
     return { ok: false, code: "ambiguous_lead", matches: rows.map((r) => ({ id: r.id, leadId: r.lead_id, phone: r.phone })) };
   }
   return { ok: true, id: rows[0].id, leadId: rows[0].lead_id, phone: rows[0].phone };
+}
+
+/**
+ * From a MESSAGING HANDLE (`msg:<network>:<id>`) to the row that carries the debt (LEAD-REPLY-CHANNEL-1127-LS): a
+ * Telegram / LinkedIn writer known by neither an email nor a phone. Same exactness as the phone lookup: equality on
+ * the registered `messaging_handle` contact method, scoped to org + the campaign named; several = `ambiguous_lead`.
+ */
+export type FollowupLeadHandleLookup =
+  | { ok: true; id: string; leadId: string; handle: string }
+  | { ok: false; code: "lead_not_found" }
+  | { ok: false; code: "ambiguous_lead"; matches: Array<{ id: string; leadId: string; handle: string }> };
+
+export async function lookupFollowupRowByHandle(params: {
+  orgId: string;
+  campaignId: string;
+  /** Canonical (`canonicalMessagingHandle`). */
+  handle: string;
+}): Promise<FollowupLeadHandleLookup> {
+  const rows = (await db.execute(sql`
+    SELECT DISTINCT ON (lc.id) lc.id, lc.lead_id, cm.value AS handle
+    FROM leads_campaigns lc
+    JOIN lead_contact_methods cm
+      ON cm.lead_id = lc.lead_id
+     AND cm.channel = ${MESSAGING_HANDLE_CHANNEL}
+     AND cm.value = ${params.handle}
+    WHERE lc.org_id = ${params.orgId}
+      AND lc.campaign_id = ${params.campaignId}
+    ORDER BY lc.id ASC, cm.value ASC
+    LIMIT 5
+  `)) as unknown as Array<{ id: string; lead_id: string; handle: string }>;
+
+  if (rows.length === 0) return { ok: false, code: "lead_not_found" };
+  if (rows.length > 1) {
+    return { ok: false, code: "ambiguous_lead", matches: rows.map((r) => ({ id: r.id, leadId: r.lead_id, handle: r.handle })) };
+  }
+  return { ok: true, id: rows[0].id, leadId: rows[0].lead_id, handle: rows[0].handle };
 }
 
 export async function lookupFollowupRowByEmail(params: {
