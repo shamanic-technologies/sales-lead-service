@@ -6270,6 +6270,10 @@ const FollowupClaimSchema = z
           campaignId: z.string().openapi({ description: "The held campaign whose row it is." }),
           email: z.string().nullable().openapi({ description: "The person's canonical email; null for a person known by phone only." }),
           phone: z.string().nullable().openapi({ description: "The person's first registered phone (E.164 as stored), null when none." }),
+        handle: z.string().optional().openapi({
+          description:
+            "Present only for a person with neither an email nor a phone: their messaging handle `msg:<network>:<id>` (a Telegram / LinkedIn writer, LEAD-REPLY-CHANNEL-1127-LS); their opt-out is their human's live opt_out / do_not_contact fact.",
+        }),
           reason: z.enum(["booked_outcome", "journalist", "opted_out"]).openapi({
             description:
               "Why this due person was NOT handed out. Every value is final for this queue; forward `message` verbatim. booked_outcome: a booked meeting, an attended meeting or a sale (a payment) is on record for the row or the lead, which ends the follow-ups on this queue (`outcome` names the strongest). journalist: the brand knows this person as a journalist, never a sales follow-up. opted_out: they unsubscribed or asked us to stop; their row was stopped during this call. New values may be added: treat an unknown one as final and forward `message`.",
@@ -6490,6 +6494,12 @@ const ScheduleFollowupByEmailRequestSchema = z
       description: "Identifies the person ONLY when `email` is absent (REPLY-PHONE-ONLY-1015: a WhatsApp writer known by phone + name). Must then be E.164 (separators accepted: \"+33 6 12-34-56-78\" reads +33612345678; a national number with no country code is a 400). Matched EXACTLY on the registered phone contact method (separators ignored), never fuzzily.",
       example: "+33612345678",
     }),
+    handle: z.string().nullish().openapi({
+      description:
+        "Identifies the person ONLY when neither `email` nor `phone` is given (LEAD-REPLY-CHANNEL-1127-LS: a Telegram / LinkedIn writer). " +
+        "Must be `msg:<network>:<id>` (400 otherwise). Matched EXACTLY on the registered messaging-handle contact method.",
+      example: "msg:telegram:123456789",
+    }),
     dueAt: z.string().openapi({
       description:
         "ISO-8601 timestamp: when the answer is owed. \"Now\" is the ordinary case (a reply just landed). Bounded, never clamped — a date in the past beyond a few minutes of clock skew, or further out than a year, is a 400 carrying the accepted range.",
@@ -6556,6 +6566,7 @@ registry.registerPath({
             leadId: z.string().openapi({ description: "The person the address (or phone) resolved to." }),
             email: z.string().nullable().openapi({ description: "The registered address, as stored; null when the person was identified by phone." }),
             phone: z.string().optional().openapi({ description: "Present only when identified by phone: the registered phone, as stored." }),
+            handle: z.string().optional().openapi({ description: "Present only when identified by messaging handle: the registered handle." }),
             madeDue: z.boolean().openapi({
               description: "Whether the person is due now as stated (followup.dueAt not null). false = nobody will claim them on this statement.",
             }),
@@ -8233,6 +8244,21 @@ const NamedPersonRequestSchema = z
         "live opt_out / do_not_contact (409 person_suppressed). REPLY-PHONE-ONLY-1015.",
       example: "+447700900123",
     }),
+    handle: z.string().min(1).max(300).nullish().openapi({
+      description:
+        "The person's MESSAGING HANDLE `msg:<network>:<id>` (network = lowercase token, id non-empty), as crm-service states it " +
+        "to human-service. Read ONLY when neither `email` nor `phone` is given (a Telegram / LinkedIn writer, LEAD-REPLY-CHANNEL-1127-LS); " +
+        "then it IDENTIFIES the person (400 when malformed), same semantics as a phone: known to the brand = a lead of the brand " +
+        "carrying the handle or `statedBy`; the lead is the one whose messaging-handle contact method it is (several = 409 " +
+        "ambiguous_lead), else a new lead carrying the handle; suppression = the human's live opt_out / do_not_contact (409 " +
+        "person_suppressed). Never turned into an email or a phone.",
+      example: "msg:telegram:123456789",
+    }),
+    humanId: z.string().uuid().nullish().openapi({
+      description:
+        "With `handle` only: the human-service human the caller resolved for the person. Its opt_out / do_not_contact facts are read " +
+        "when no lead holds the handle yet, and a lead created here carries it. Ignored with an email or a phone.",
+    }),
     timezone: z.string().max(64).nullish().openapi({
       description:
         "The person's IANA timezone, when the client knows it (400 when not an IANA zone). A stated zone always wins: it " +
@@ -8255,6 +8281,7 @@ const NamedPersonResponseSchema = z
     brandId: z.string(),
     email: z.string().nullable().openapi({ description: "The canonical address; null when the person was identified by phone." }),
     phone: z.string().optional().openapi({ description: "Present only when the person was identified by phone (E.164)." }),
+    handle: z.string().optional().openapi({ description: "Present only when the person was identified by messaging handle (`msg:<network>:<id>`)." }),
     servedAt: z.string().openapi({ description: "When the person became a lead of the brand on this campaign (ISO 8601)." }),
     knownBy: z.enum(["crm_fact", "brand_lead", "statement"]).openapi({
       description:

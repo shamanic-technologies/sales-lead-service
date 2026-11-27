@@ -43,7 +43,8 @@ const { db } = await import("../../src/db/index.js");
 const { leads, leadContactMethods, leadsCampaigns, crmFacts, brandPersonStatements } = await import("../../src/db/schema.js");
 const { sql } = await import("drizzle-orm");
 const namedPeopleRoutes = (await import("../../src/routes/named-people.js")).default;
-const { lookupFollowupRowByEmail, lookupFollowupRowByPhone, writeFollowupStatement, pickFollowupCandidate } = await import(
+const followupRoutes = (await import("../../src/routes/followups.js")).default;
+const { lookupFollowupRowByEmail, lookupFollowupRowByPhone, lookupFollowupRowByHandle, writeFollowupStatement, pickFollowupCandidate } = await import(
   "../../src/lib/followup-queue.js"
 );
 
@@ -69,6 +70,7 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
   const app = express();
   app.use(express.json());
   app.use(namedPeopleRoutes);
+  app.use(followupRoutes);
 
   const file = (campaign: string, email: string, extra: Record<string, unknown> = {}) =>
     request(app)
@@ -464,6 +466,117 @@ describe.skipIf(!hasRealDatabase)("named person filing against a real database",
         nowMs: nowMs + 1_000,
       });
       expect(claim.claimed).toMatchObject({ id: filed.body.leadCampaignId, email: null, phone });
+    });
+  });
+  describe("a person known by MESSAGING HANDLE only, no email, no phone (LEAD-REPLY-CHANNEL-1127-LS)", () => {
+    const handleOf = () => `msg:telegram:${Math.floor(1e8 + Math.random() * 9e8)}`;
+    const fileByHandle = (campaign: string, body: Record<string, unknown>) =>
+      request(app)
+        .post(`/orgs/campaigns/${campaign}/leads/by-email`)
+        .set("x-api-key", "test-api-key")
+        .set("x-org-id", orgId)
+        .set("x-run-id", randomUUID())
+        .send(body);
+    const scheduleByHandle = (campaign: string, body: Record<string, unknown>) =>
+      request(app)
+        .post(`/orgs/campaigns/${campaign}/followups/schedule-by-email`)
+        .set("x-api-key", "test-api-key")
+        .set("x-org-id", orgId)
+        .send(body);
+
+    it("files a STATED handle person: a new lead holding the handle, the statement recorded, then the same row again", async () => {
+      const handle = handleOf();
+      const humanId = randomUUID();
+      humanIds.push(humanId);
+      const eventId = randomUUID();
+      const res = await fileByHandle(campaignId, { handle, humanId, name: "Tele Gram", ...stated(eventId) });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect(res.body).toMatchObject({ status: "filed", campaignId, brandId, email: null, handle, knownBy: "statement" });
+      expect("phone" in res.body).toBe(false);
+
+      const methods = await db.select().from(leadContactMethods).where(eq(leadContactMethods.leadId, res.body.leadId));
+      expect(methods.map((m) => `${m.channel}:${m.value}`)).toEqual([`messaging_handle:${handle}`]);
+      const [lead] = await db.select().from(leads).where(eq(leads.id, res.body.leadId));
+      expect(lead).toMatchObject({ firstName: "Tele", lastName: "Gram", humanId });
+      const statements = await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.handle, handle));
+      expect(statements).toHaveLength(1);
+      expect(statements[0]).toMatchObject({ email: null, phone: null, humanId, sourceRef: eventId });
+
+      const again = await fileByHandle(campaignId, { handle, ...stated(eventId) });
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ status: "already_filed", leadId: res.body.leadId, leadCampaignId: res.body.leadCampaignId });
+      expect(await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.handle, handle))).toHaveLength(1);
+
+      // Known to the brand from then on, with no statement.
+      const later = await fileByHandle(secondCampaignId, { handle });
+      expect(later.status).toBe(201);
+      expect(later.body.leadId).toBe(res.body.leadId);
+    });
+
+    it("schedule-by-email by handle makes that row due, and the claim hands the person out by handle", async () => {
+      const handle = handleOf();
+      const filed = await fileByHandle(campaignId, { handle, ...stated() });
+      expect(filed.status).toBe(201);
+      createdLeadIds.push(filed.body.leadId);
+
+      const res = await scheduleByHandle(campaignId, { handle, dueAt: new Date().toISOString(), ...stated() });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ leadId: filed.body.leadId, email: null, handle, madeDue: true });
+      expect(res.body.followup.dueAt).not.toBeNull();
+      expect("phone" in res.body).toBe(false);
+
+      expect(await lookupFollowupRowByHandle({ orgId, campaignId, handle: handleOf() })).toEqual({ ok: false, code: "lead_not_found" });
+      expect((await scheduleByHandle(campaignId, { handle: handleOf(), dueAt: new Date().toISOString() })).status).toBe(404);
+
+      const claim = await pickFollowupCandidate({
+        orgId,
+        campaignId,
+        runId: randomUUID(),
+        actingCampaignId: campaignId,
+        context: { orgId },
+        nowMs: Date.now() + 1_000,
+        person: { email: null, phone: null, leadId: null, handle },
+      });
+      expect(claim.claimed).toMatchObject({ id: filed.body.leadCampaignId, email: null, phone: null, handle });
+    });
+
+    it("refuses an unstated handle nobody of the brand knows, a malformed handle, and a body with no identity", async () => {
+      expect((await fileByHandle(campaignId, { handle: handleOf() })).body.code).toBe("person_not_known");
+      expect((await fileByHandle(campaignId, { handle: "telegram:123", ...stated() })).status).toBe(400);
+      expect((await fileByHandle(campaignId, { handle: "msg:Telegram:123", ...stated() })).status).toBe(400);
+      expect((await fileByHandle(campaignId, { handle: "msg:telegram:", ...stated() })).status).toBe(400);
+      expect((await fileByHandle(campaignId, { ...stated() })).status).toBe(400);
+      expect((await scheduleByHandle(campaignId, { handle: "msg::1", dueAt: new Date().toISOString() })).status).toBe(400);
+    });
+
+    it("reuses the lead already owning the handle; a stated human with a live opt_out = person_suppressed", async () => {
+      const handle = handleOf();
+      const [owner] = await db.insert(leads).values({ name: "Owner" }).returning({ id: leads.id });
+      createdLeadIds.push(owner.id);
+      await db.insert(leadContactMethods).values({ leadId: owner.id, channel: "messaging_handle", value: handle, source: "itest" });
+      const owned = await fileByHandle(campaignId, { handle, ...stated() });
+      expect(owned.status).toBe(201);
+      expect(owned.body.leadId).toBe(owner.id);
+
+      const out = handleOf();
+      const humanId = randomUUID();
+      humanIds.push(humanId);
+      await db.execute(sql`INSERT INTO human_fact_copies (fact_id, human_id, kind, event_id) VALUES (${randomUUID()}, ${humanId}, 'opt_out', 1)`);
+      const res = await fileByHandle(campaignId, { handle: out, humanId, ...stated() });
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: "person_suppressed", reason: "opted_out" });
+      expect(await db.select().from(brandPersonStatements).where(eq(brandPersonStatements.handle, out))).toHaveLength(0);
+    });
+
+    it("an email or a phone given keeps its own door: the handle is ignored", async () => {
+      await crmFact(addr("handleboth"));
+      const res = await fileByHandle(campaignId, { email: addr("handleboth"), handle: handleOf() });
+      expect(res.status).toBe(201);
+      createdLeadIds.push(res.body.leadId);
+      expect("handle" in res.body).toBe(false);
+      const methods = await db.select().from(leadContactMethods).where(eq(leadContactMethods.leadId, res.body.leadId));
+      expect(methods.some((m) => m.channel === "messaging_handle")).toBe(false);
     });
   });
 });

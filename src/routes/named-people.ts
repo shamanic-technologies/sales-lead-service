@@ -8,6 +8,7 @@ import { apiKeyAuth, requireOrgId, AuthenticatedRequest } from "../middleware/au
 import { fileNamedPerson } from "../lib/named-person.js";
 import { isIanaTimezone } from "../lib/timezone-inference.js";
 import { canonicalE164 } from "../lib/e164-phone.js";
+import { canonicalMessagingHandle } from "../lib/messaging-handle.js";
 
 const router = Router();
 
@@ -33,13 +34,24 @@ export const NamedPersonBodySchema = z
     .nullish(),
   name: z.string().trim().max(300).nullish(),
   phone: z.string().trim().min(3).max(50).nullish(),
+  // LEAD-REPLY-CHANNEL-1127-LS: with neither email nor phone, `handle` (`msg:<network>:<id>`) identifies the person.
+  handle: z.string().trim().min(1).max(300).nullish(),
+  humanId: z.string().trim().uuid().nullish(),
   // An IANA zone the client states for the person (src/lib/lead-timezone.ts); never an offset.
   timezone: z.string().trim().max(64).refine(isIanaTimezone, "not an IANA timezone (e.g. Europe/London)").nullish(),
   })
   .superRefine((body, ctx) => {
     if (body.email) return;
     if (!body.phone) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email or phone (E.164) is required" });
+      if (!body.handle) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["email"], message: "email, phone (E.164) or handle is required" });
+      } else if (!canonicalMessagingHandle(body.handle)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["handle"],
+          message: "with no email and no phone, handle identifies the person and must be msg:<network>:<id> (e.g. msg:telegram:123456789)",
+        });
+      }
     } else if (!canonicalE164(body.phone)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -75,6 +87,8 @@ router.post(
         statedBy: parsed.data.statedBy ?? null,
         fullName: parsed.data.name ?? null,
         phone: parsed.data.phone ?? null,
+        handle: parsed.data.handle ?? null,
+        humanId: parsed.data.humanId ?? null,
         timezone: parsed.data.timezone ?? null,
       });
     } catch (err) {
@@ -95,7 +109,9 @@ router.post(
         res.status(404).json({
           error: parsed.data.email
             ? "The brand does not know this address (no live CRM fact of the brand, no lead of the brand carries it); nothing was filed"
-            : "The brand does not know this phone (no live CRM fact of the brand, no lead of the brand carries it, no statement names it); nothing was filed",
+            : !parsed.data.phone
+              ? "The brand does not know this messaging handle (no lead of the brand carries it, no statement names it); nothing was filed"
+              : "The brand does not know this phone (no live CRM fact of the brand, no lead of the brand carries it, no statement names it); nothing was filed",
           code: result.code,
         });
         return;
@@ -119,7 +135,9 @@ router.post(
       res.status(409).json({
         error: parsed.data.email
           ? "That address is registered on more than one lead; nothing was filed"
-          : "That phone is registered on more than one lead; nothing was filed",
+          : !parsed.data.phone
+            ? "That messaging handle is registered on more than one lead; nothing was filed"
+            : "That phone is registered on more than one lead; nothing was filed",
         code: result.code,
         leadIds: result.leadIds,
       });

@@ -1363,6 +1363,10 @@ export const brandPersonStatements = pgTable(
     email: text("email"),
     /** E.164, set for a person stated by phone only (REPLY-PHONE-ONLY-1015). */
     phone: text("phone"),
+    /** `msg:<network>:<id>`, set for a person stated by messaging handle only (LEAD-REPLY-CHANNEL-1127-LS, 0158). */
+    handle: text("handle"),
+    /** The human-service human the caller resolved, when it stated one (0158). */
+    humanId: uuid("human_id"),
     source: text("source").notNull(),
     sourceRef: text("source_ref").notNull(),
     triggerId: text("trigger_id"),
@@ -1377,5 +1381,9 @@ export const brandPersonStatements = pgTable(
       .on(table.orgId, table.brandId, table.phone, table.source, table.sourceRef)
       .where(sql`email IS NULL`),
     index("idx_bps_brand_phone").on(table.orgId, table.brandId, table.phone).where(sql`phone IS NOT NULL`),
+    uniqueIndex("idx_bps_handle_key")
+      .on(table.orgId, table.brandId, table.handle, table.source, table.sourceRef)
+      .where(sql`email IS NULL AND phone IS NULL`),
+    index("idx_bps_brand_handle").on(table.orgId, table.brandId, table.handle).where(sql`handle IS NOT NULL`),
   ],
 );
